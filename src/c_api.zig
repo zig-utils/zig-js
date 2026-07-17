@@ -8739,6 +8739,23 @@ const PrivateTypedArrayType = enum(u8) {
     }
 };
 
+const PrivateBunArrayBuffer = extern struct {
+    ptr: ?[*]u8 = null,
+    len: usize = 0,
+    byte_len: usize = 0,
+    encoded_value: EncodedValue = .empty,
+    cell_type: u8 = 0,
+    shared: bool = false,
+    resizable: bool = false,
+};
+
+comptime {
+    if (@sizeOf(PrivateBunArrayBuffer) != 40 or @alignOf(PrivateBunArrayBuffer) != 8 or
+        @offsetOf(PrivateBunArrayBuffer, "encoded_value") != 24 or
+        @offsetOf(PrivateBunArrayBuffer, "cell_type") != 32)
+        @compileError("private Bun__ArrayBuffer layout drifted");
+}
+
 fn privateReleaseTransferredInput(
     bytes: ?*anyopaque,
     deallocator: JSTypedArrayBytesDeallocator,
@@ -8835,6 +8852,66 @@ export fn Bun__makeTypedArrayWithBytesNoCopy(
         return privateRejectUint8Array(context, "TypeError", "invalid external TypedArray type");
     };
     return privateMakeExternalBufferValue(context, bytes, byte_length, deallocator, deallocator_context, kind);
+}
+
+export fn JSC__JSValue__asArrayBuffer(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    out: ?*PrivateBunArrayBuffer,
+) callconv(.c) bool {
+    const output = out orelse return false;
+    const context = ctxForHandleInspection(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return false;
+    const internal = privateValueFrom(global, encoded) orelse return false;
+    if (!internal.isObject()) return false;
+    const object = internal.asObj();
+
+    var result = PrivateBunArrayBuffer{ .encoded_value = encoded };
+    if (object.typedArray()) |typed| {
+        const backing = typed.buffer.arrayBuffer() orelse return false;
+        result.cell_type = private_jstype.selectedTag(privateObjectJSType(object));
+        result.shared = backing.is_shared;
+        result.resizable = backing.max_byte_length != null;
+        const length = typed.currentLength() orelse {
+            output.* = result;
+            return true;
+        };
+        const byte_length = std.math.mul(usize, length, typed.kind.byteSize()) catch return false;
+        const bytes = backing.bytes();
+        if (typed.byte_offset > bytes.len or byte_length > bytes.len - typed.byte_offset) return false;
+        result.ptr = bytes.ptr + typed.byte_offset;
+        result.len = length;
+        result.byte_len = byte_length;
+    } else if (object.dataView()) |view| {
+        const backing = view.buffer.arrayBuffer() orelse return false;
+        result.cell_type = private_jstype.selectedTag(.DataView);
+        result.shared = backing.is_shared;
+        result.resizable = backing.max_byte_length != null;
+        const byte_length = view.currentByteLength() orelse {
+            output.* = result;
+            return true;
+        };
+        const bytes = backing.bytes();
+        if (view.byte_offset > bytes.len or byte_length > bytes.len - view.byte_offset) return false;
+        result.ptr = bytes.ptr + view.byte_offset;
+        result.len = byte_length;
+        result.byte_len = byte_length;
+    } else if (object.arrayBuffer()) |buffer| {
+        result.cell_type = private_jstype.selectedTag(.ArrayBuffer);
+        result.shared = buffer.is_shared;
+        result.resizable = buffer.max_byte_length != null;
+        if (!buffer.isDetached()) {
+            const bytes = buffer.bytes();
+            result.ptr = bytes.ptr;
+            result.len = bytes.len;
+            result.byte_len = bytes.len;
+        }
+    } else return false;
+
+    output.* = result;
+    return true;
 }
 
 fn makeExternalArrayBuffer(
@@ -15050,6 +15127,88 @@ test "private generic no-copy buffers preserve every typed tag trailing bytes an
 
     JSGlobalContextRelease(context);
     try std.testing.expectEqual(cases.len + 4, state.calls);
+}
+
+test "private JSValue ArrayBuffer projection preserves views offsets metadata and tags" {
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const internal = ctxForEvaluation(context) orelse return error.JSCInitFailed;
+    const cases = [_]struct { []const u8, private_jstype.Kind, usize }{
+        .{ "new Int8Array(8)", .Int8Array, 8 },
+        .{ "new Uint8Array(8)", .Uint8Array, 8 },
+        .{ "new Uint8ClampedArray(8)", .Uint8ClampedArray, 8 },
+        .{ "new Int16Array(8)", .Int16Array, 16 },
+        .{ "new Uint16Array(8)", .Uint16Array, 16 },
+        .{ "new Int32Array(8)", .Int32Array, 32 },
+        .{ "new Uint32Array(8)", .Uint32Array, 32 },
+        .{ "new Float16Array(8)", .Float16Array, 16 },
+        .{ "new Float32Array(8)", .Float32Array, 32 },
+        .{ "new Float64Array(8)", .Float64Array, 64 },
+        .{ "new BigInt64Array(8)", .BigInt64Array, 64 },
+        .{ "new BigUint64Array(8)", .BigUint64Array, 64 },
+    };
+    for (cases) |case| {
+        const value_ = try internal.evaluate(case[0]);
+        const encoded = privateEncodedFromValue(internal, value_);
+        var projected = PrivateBunArrayBuffer{};
+        try std.testing.expect(JSC__JSValue__asArrayBuffer(encoded, context, &projected));
+        try std.testing.expect(projected.ptr != null);
+        try std.testing.expectEqual(@as(usize, 8), projected.len);
+        try std.testing.expectEqual(case[2], projected.byte_len);
+        try std.testing.expectEqual(encoded, projected.encoded_value);
+        try std.testing.expectEqual(private_jstype.selectedTag(case[1]), projected.cell_type);
+        try std.testing.expect(!projected.shared and !projected.resizable);
+    }
+
+    const offset_value = try internal.evaluate("new Uint16Array(new ArrayBuffer(12), 2, 3)");
+    const offset_encoded = privateEncodedFromValue(internal, offset_value);
+    var offset_projection = PrivateBunArrayBuffer{};
+    try std.testing.expect(JSC__JSValue__asArrayBuffer(offset_encoded, context, &offset_projection));
+    const offset_typed = offset_value.asObj().typedArray().?;
+    try std.testing.expectEqual(@intFromPtr(offset_typed.buffer.arrayBuffer().?.bytes().ptr) + 2, @intFromPtr(offset_projection.ptr.?));
+    try std.testing.expectEqual(@as(usize, 3), offset_projection.len);
+    try std.testing.expectEqual(@as(usize, 6), offset_projection.byte_len);
+
+    const view_value = try internal.evaluate("new DataView(new ArrayBuffer(12), 3, 5)");
+    const view_encoded = privateEncodedFromValue(internal, view_value);
+    var view_projection = PrivateBunArrayBuffer{};
+    try std.testing.expect(JSC__JSValue__asArrayBuffer(view_encoded, context, &view_projection));
+    try std.testing.expectEqual(@as(usize, 5), view_projection.len);
+    try std.testing.expectEqual(@as(usize, 5), view_projection.byte_len);
+    try std.testing.expectEqual(private_jstype.selectedTag(.DataView), view_projection.cell_type);
+
+    const resizable_value = try internal.evaluate("new ArrayBuffer(8, { maxByteLength: 16 })");
+    const resizable_encoded = privateEncodedFromValue(internal, resizable_value);
+    var resizable_projection = PrivateBunArrayBuffer{};
+    try std.testing.expect(JSC__JSValue__asArrayBuffer(resizable_encoded, context, &resizable_projection));
+    try std.testing.expect(resizable_projection.resizable);
+    try std.testing.expectEqual(private_jstype.selectedTag(.ArrayBuffer), resizable_projection.cell_type);
+
+    const shared_value = try internal.evaluate("new SharedArrayBuffer(8)");
+    var shared_projection = PrivateBunArrayBuffer{};
+    try std.testing.expect(JSC__JSValue__asArrayBuffer(privateEncodedFromValue(internal, shared_value), context, &shared_projection));
+    try std.testing.expect(shared_projection.shared);
+
+    const detached_value = try internal.evaluate("new Uint8Array(4)");
+    detached_value.asObj().typedArray().?.buffer.arrayBuffer().?.setDetached(true);
+    var detached_projection = PrivateBunArrayBuffer{ .len = 99, .byte_len = 99 };
+    try std.testing.expect(JSC__JSValue__asArrayBuffer(privateEncodedFromValue(internal, detached_value), context, &detached_projection));
+    try std.testing.expect(detached_projection.ptr == null);
+    try std.testing.expectEqual(@as(usize, 0), detached_projection.len);
+    try std.testing.expectEqual(@as(usize, 0), detached_projection.byte_len);
+
+    var untouched = PrivateBunArrayBuffer{ .len = 77, .byte_len = 88 };
+    try std.testing.expect(!JSC__JSValue__asArrayBuffer(EncodedValue.fromInt32(1), context, &untouched));
+    try std.testing.expectEqual(@as(usize, 77), untouched.len);
+    try std.testing.expectEqual(@as(usize, 88), untouched.byte_len);
+    const plain = privateEncodedFromValue(internal, try internal.evaluate("({})"));
+    try std.testing.expect(!JSC__JSValue__asArrayBuffer(plain, context, &untouched));
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(219));
+    try std.testing.expect(!JSC__JSValue__asArrayBuffer(resizable_encoded, context, &untouched));
+    const preserved = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(219), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+
+    JSGlobalContextRelease(context);
 }
 
 test "private rooted native value containers retain and release exact cells" {

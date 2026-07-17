@@ -86,6 +86,16 @@ const StringBuilder = extern struct {
     bytes: [24]u8 align(8),
 };
 
+const PrivateBunArrayBuffer = extern struct {
+    ptr: ?[*]u8 = null,
+    len: usize = 0,
+    byte_len: usize = 0,
+    encoded_value: EncodedValue = .empty,
+    cell_type: u8 = 0,
+    shared: bool = false,
+    resizable: bool = false,
+};
+
 comptime {
     if (@sizeOf(BunString) != 24 or @alignOf(BunString) != 8 or
         @offsetOf(BunString, "value") != 8)
@@ -95,6 +105,8 @@ comptime {
         @compileError("WTFStringImpl fixture prefix drifted");
     if (@sizeOf(StringBuilder) != 24 or @alignOf(StringBuilder) != 8)
         @compileError("StringBuilder fixture layout drifted");
+    if (@sizeOf(PrivateBunArrayBuffer) != 40 or @offsetOf(PrivateBunArrayBuffer, "cell_type") != 32)
+        @compileError("Bun ArrayBuffer fixture layout drifted");
 }
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
@@ -174,6 +186,7 @@ extern "c" fn JSBuffer__fromMmap(JSContextRef, *anyopaque, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createUninitializedUint8Array(JSContextRef, usize) EncodedValue;
 extern "c" fn Bun__makeArrayBufferWithBytesNoCopy(JSContextRef, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
 extern "c" fn Bun__makeTypedArrayWithBytesNoCopy(JSContextRef, PrivateTypedArrayType, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
+extern "c" fn JSC__JSValue__asArrayBuffer(EncodedValue, JSContextRef, *PrivateBunArrayBuffer) bool;
 extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
 extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn JSObjectGetTypedArrayBuffer(JSContextRef, JSObjectRef, [*c]JSValueRef) JSObjectRef;
@@ -962,6 +975,29 @@ pub fn main() void {
         !JSGlobalObject__hasException(context))
         fail("oversized uninitialized Uint8Array did not throw");
     JSGlobalObject__clearException(context);
+
+    var projected_uint8 = PrivateBunArrayBuffer{};
+    if (!JSC__JSValue__asArrayBuffer(copied_uint8, context, &projected_uint8) or
+        projected_uint8.ptr == null or projected_uint8.len != 4 or projected_uint8.byte_len != 4 or
+        projected_uint8.encoded_value != copied_uint8 or projected_uint8.cell_type != 50 or
+        projected_uint8.shared or projected_uint8.resizable)
+        fail("Uint8Array projection mismatch");
+    const projected_uint8_buffer = JSObjectGetTypedArrayBuffer(context, copied_uint8.cellPointer(), &typed_exception) orelse
+        fail("projected Uint8Array buffer lookup failed");
+    var projected_buffer = PrivateBunArrayBuffer{};
+    const projected_buffer_encoded = EncodedValue.fromRef(projected_uint8_buffer);
+    if (!JSC__JSValue__asArrayBuffer(projected_buffer_encoded, context, &projected_buffer) or
+        projected_buffer.len != 4 or projected_buffer.byte_len != 4 or projected_buffer.cell_type != 48)
+        fail("ArrayBuffer projection mismatch");
+    const projected_view = evaluate(context, "new DataView(new ArrayBuffer(9), 2, 5)");
+    var projected_data_view = PrivateBunArrayBuffer{};
+    if (!JSC__JSValue__asArrayBuffer(projected_view, context, &projected_data_view) or
+        projected_data_view.len != 5 or projected_data_view.byte_len != 5 or projected_data_view.cell_type != 61)
+        fail("DataView projection mismatch");
+    var untouched_projection = PrivateBunArrayBuffer{ .len = 77, .byte_len = 88 };
+    if (JSC__JSValue__asArrayBuffer(.undefined, context, &untouched_projection) or
+        untouched_projection.len != 77 or untouched_projection.byte_len != 88)
+        fail("invalid ArrayBuffer projection modified output");
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3007,5 +3043,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 198/198 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 199/199 symbols linked; runtime matrix passed\n", .{});
 }
