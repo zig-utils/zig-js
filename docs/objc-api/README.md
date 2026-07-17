@@ -9,7 +9,7 @@ method, property, typedef, data symbol, macro, signature, and availability
 annotation parsed from those headers.
 
 The inventory contains 11 containers and 108 declarations. It currently records
-**32 implemented / 76 pending** under issues #158–#160. An `implemented` entry
+**51 implemented / 57 pending** under issues #158–#160. An `implemented` entry
 has runtime behavior exercised by the compile-link-runtime host; a `pending`
 entry may be declared in the headers but must not be treated as usable.
 
@@ -33,8 +33,9 @@ zig build test-objc-api
 
 That host exercises VM/context construction and identity, evaluation and
 exception capture, context naming/inspectability, C-ref round trips, primitive
-`JSValue` factories, every published type predicate, and boolean/string
-conversion. Collection/object conversion, callbacks, property helpers, managed
+and native object `JSValue` factories, every published type predicate,
+exception-aware numeric/string conversion, and exact comparisons.
+Collection/object conversion, callbacks, property helpers, managed
 references, and JSExport remain pending until their corresponding runtime and
 evidence land.
 

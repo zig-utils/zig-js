@@ -362,7 +362,7 @@
       "kind": "class_method",
       "name": "valueWithNewArrayInContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewArrayInContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -371,7 +371,7 @@
       "kind": "class_method",
       "name": "valueWithNewBigIntFromDouble:inContext:",
       "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromDouble:(double)value inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -380,7 +380,7 @@
       "kind": "class_method",
       "name": "valueWithNewBigIntFromInt64:inContext:",
       "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromInt64:(int64_t)int64 inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -389,7 +389,7 @@
       "kind": "class_method",
       "name": "valueWithNewBigIntFromString:inContext:",
       "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromString:(nonnull NSString *)string inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -398,7 +398,7 @@
       "kind": "class_method",
       "name": "valueWithNewBigIntFromUInt64:inContext:",
       "declaration": "+ (nullable JSValue *) valueWithNewBigIntFromUInt64:(uint64_t)uint64 inContext:(nonnull JSContext *)context API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -407,7 +407,7 @@
       "kind": "class_method",
       "name": "valueWithNewErrorFromMessage:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewErrorFromMessage:(NSString * _Null_unspecified)message inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -416,7 +416,7 @@
       "kind": "class_method",
       "name": "valueWithNewObjectInContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewObjectInContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -452,7 +452,7 @@
       "kind": "class_method",
       "name": "valueWithNewRegularExpressionFromPattern:flags:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewRegularExpressionFromPattern:(NSString * _Null_unspecified)pattern flags:(NSString * _Null_unspecified)flags inContext:(JSContext * _Null_unspecified)context",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -461,7 +461,7 @@
       "kind": "class_method",
       "name": "valueWithNewSymbolFromDescription:inContext:",
       "declaration": "+ (JSValue * _Null_unspecified) valueWithNewSymbolFromDescription:(NSString * _Null_unspecified)description inContext:(JSContext * _Null_unspecified)context API_AVAILABLE(macos(10.15), ios(13.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -515,7 +515,7 @@
       "kind": "instance_method",
       "name": "compareDouble:",
       "declaration": "- (JSRelationCondition) compareDouble:(double)other API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -524,7 +524,7 @@
       "kind": "instance_method",
       "name": "compareInt64:",
       "declaration": "- (JSRelationCondition) compareInt64:(int64_t)other API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -533,7 +533,7 @@
       "kind": "instance_method",
       "name": "compareJSValue:",
       "declaration": "- (JSRelationCondition) compareJSValue:(nonnull JSValue *)other API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -542,7 +542,7 @@
       "kind": "instance_method",
       "name": "compareUInt64:",
       "declaration": "- (JSRelationCondition) compareUInt64:(uint64_t)other API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -632,7 +632,7 @@
       "kind": "instance_method",
       "name": "toDouble",
       "declaration": "- (double) toDouble",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -641,7 +641,7 @@
       "kind": "instance_method",
       "name": "toInt32",
       "declaration": "- (int32_t) toInt32",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -650,7 +650,7 @@
       "kind": "instance_method",
       "name": "toInt64",
       "declaration": "- (int64_t) toInt64 API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -659,7 +659,7 @@
       "kind": "instance_method",
       "name": "toNumber",
       "declaration": "- (NSNumber * _Null_unspecified) toNumber",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -695,7 +695,7 @@
       "kind": "instance_method",
       "name": "toUInt32",
       "declaration": "- (uint32_t) toUInt32",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
@@ -704,7 +704,7 @@
       "kind": "instance_method",
       "name": "toUInt64",
       "declaration": "- (uint64_t) toUInt64 API_AVAILABLE(macos(15.0), ios(18.0))",
-      "status": "pending",
+      "status": "implemented",
       "issue": 158
     },
     {
