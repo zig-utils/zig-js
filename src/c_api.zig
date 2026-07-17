@@ -1903,6 +1903,13 @@ fn beginInspectorScript(
     return script;
 }
 
+fn inspectorScriptRegistered(ctx: *anyopaque, script: Context.DebugScript) bool {
+    const state: *CInspectorState = @ptrCast(@alignCast(ctx));
+    state.operation_depth += 1;
+    defer finishInspectorOperation(state);
+    return beginInspectorScript(state, script) != null;
+}
+
 fn inspectorStatementBoundary(
     hook_context: *anyopaque,
     machine: *interp.Interpreter,
@@ -2201,12 +2208,16 @@ export fn ZJSInspectorSessionCreate(
             gpa.destroy(new_state);
             return null;
         };
+        c.debug_script_notify_ctx = new_state;
+        c.debug_script_notify_hook = inspectorScriptRegistered;
         c.c_api_inspector_state = @ptrCast(new_state);
         state = new_state;
         created_state = true;
     }
     errdefer if (created_state) {
         c.c_api_inspector_state = null;
+        c.debug_script_notify_ctx = null;
+        c.debug_script_notify_hook = null;
         state.?.scripts.deinit(gpa);
         gpa.destroy(state.?);
     };
@@ -2235,6 +2246,8 @@ fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
     refreshInspectorDebuggerHook(state);
     if (state.sessions.items.len == 0) {
         state.context.c_api_inspector_state = null;
+        state.context.debug_script_notify_ctx = null;
+        state.context.debug_script_notify_hook = null;
         state.sessions.deinit(gpa);
         state.scripts.deinit(gpa);
         state.breakpoints.deinit(gpa);
@@ -2668,7 +2681,6 @@ export fn JSEvaluateScript(
     };
     c.debug_script_id = registered_script.id;
     c.debug_script_start_line = registered_script.start_line;
-    if (inspectorState(c)) |state| _ = beginInspectorScript(state, registered_script);
     const result = c.evaluateWithThis(s.bytes, this_value) catch |err| {
         // A JS `throw` surfaces the actual thrown value; host failures (parse
         // errors, OOM) surface their error name as a string.
@@ -5229,6 +5241,72 @@ test "C-API: debugger enters warmed functions compiled before attachment" {
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"step\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, transcript, "\"lineNumber\":3") != null);
+}
+
+test "C-API: debugger registers direct and indirect eval sources independently" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        pauses: usize = 0,
+        bytes: [32768]u8 = undefined,
+        len: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "Debugger.paused") == null) return;
+            self.pauses += 1;
+            const resume_request = "{\"id\":90,\"method\":\"Debugger.resume\"}";
+            std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+        }
+    };
+
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    JSGlobalContextSetInspectable(ctx, true);
+    var state: State = .{};
+    state.session = ZJSInspectorSessionCreate(ctx, State.receive, &state) orelse return error.SessionCreateFailed;
+    defer ZJSInspectorSessionRelease(state.session);
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, enable, enable.len));
+    const breakpoint =
+        "{\"id\":2,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"eval-source.js\",\"lineNumber\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, breakpoint, breakpoint.len));
+
+    const outer_source = JSStringCreateWithUTF8CString(
+        "eval(\"var evalLocal = 40;\\nevalLocal += 2;\\nevalLocal;\\n//# sourceURL=eval-source.js\");",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(outer_source);
+    var exception: JSValueRef = null;
+    const first = JSEvaluateScript(ctx, outer_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, first, &exception));
+    const second = JSEvaluateScript(ctx, outer_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 42), JSValueToNumber(ctx, second, &exception));
+    const indirect_breakpoint =
+        "{\"id\":4,\"method\":\"Debugger.setBreakpointByUrl\",\"params\":{\"url\":\"indirect-eval.js\",\"lineNumber\":1}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, indirect_breakpoint, indirect_breakpoint.len));
+    const indirect_source = JSStringCreateWithUTF8CString(
+        "(0, eval)(\"var indirectLocal = 5;\\nindirectLocal += 2;\\nindirectLocal;\\n//# sourceURL=indirect-eval.js\");",
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(indirect_source);
+    const indirect = JSEvaluateScript(ctx, indirect_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expectEqual(@as(f64, 7), JSValueToNumber(ctx, indirect, &exception));
+    try std.testing.expectEqual(@as(usize, 3), state.pauses);
+
+    const get_source = "{\"id\":3,\"method\":\"Debugger.getScriptSource\",\"params\":{\"scriptId\":2}}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(state.session, get_source, get_source.len));
+    const transcript = state.bytes[0..state.len];
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "eval-source.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"scriptId\":6") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "var evalLocal = 40") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "indirect-eval.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "Debugger.breakpointResolved") != null);
+    try std.testing.expect(std.mem.indexOf(u8, transcript, "\"reason\":\"breakpoint\"") != null);
 }
 
 test "C-API: paused frames expose scopes and live frame evaluation" {

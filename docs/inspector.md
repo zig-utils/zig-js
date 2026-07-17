@@ -65,6 +65,13 @@ Debugger.enable. Debugger.enable publishes that retained history in evaluation
 order with exact source, URL, zero-based starting line, and source length.
 Destroying the last session does not renumber scripts; a later session sees the
 same IDs and sources.
+Successful direct and indirect eval parses receive their own script identity at
+parse time rather than inheriting the caller's ID. A trailing
+`//# sourceURL=` or `//@ sourceURL=` directive supplies the URL; otherwise the
+protocol uses `direct-eval` or `indirect-eval`. Repeated evaluation of the
+same bytes intentionally creates a fresh monotonically increasing scriptId, so
+each execution has an unambiguous breakpoint/location history. URL breakpoints
+apply to every matching eval instance.
 Statement locations retain byte offsets plus adjusted line/column coordinates;
 a debugger statement pauses with reason debuggerStatement. An explicit
 Debugger.pause request pauses at the next statement boundary. Debug-enabled
@@ -173,5 +180,5 @@ lexical/global scope chains, frame evaluation, and expandable remote objects
 with deterministic GC-safe lifetime. Worker targets remain tracked by
 [issue #156](https://github.com/zig-utils/zig-js/issues/156). Unsupported
 commands return -32601; there are no silently accepted debugger stubs.
-Eval/module/generated-function origins remain explicit work in
+Module and generated-function origins remain explicit work in
 [issue #155](https://github.com/zig-utils/zig-js/issues/155).

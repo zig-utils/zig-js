@@ -248,7 +248,9 @@ history is now context-owned, so late attach and detach/reattach publish the sam
 pre-existing scripts. Historical bytecode carries latent checkpoints; attachment
 disables native entry and exposes live named VM slots, so breakpoints, stepping,
 and frame evaluation work inside warmed functions without recompilation.
-Eval/module/generated origins remain tracked by
+Direct and indirect eval now publish independent sourceURL-aware scripts on
+every successful parse, including repeated identical evaluations. Module and
+generated-function origins remain tracked by
 [#155](https://github.com/zig-utils/zig-js/issues/155).
 
 See [docs/api.md](docs/api.md) and [docs/HOME_INTEGRATION.md](docs/HOME_INTEGRATION.md) for the fuller embedding story and the important warning that zig-js is not a drop-in replacement for Bun/Home's private JSC internals.

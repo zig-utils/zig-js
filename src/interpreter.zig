@@ -373,6 +373,18 @@ pub const DebugStatementLocation = struct {
     debugger_statement: bool = false,
 };
 
+pub const DebugScriptRegistration = struct {
+    id: u64,
+    start_line: usize,
+};
+
+pub const DebugScriptHook = *const fn (
+    ctx: *anyopaque,
+    source: []const u8,
+    url: []const u8,
+    start_line: usize,
+) EvalError!DebugScriptRegistration;
+
 pub const DebugStatementHook = *const fn (
     ctx: *anyopaque,
     interpreter: *Interpreter,
@@ -992,7 +1004,9 @@ pub const Interpreter = struct {
     /// the same source locations and pause semantics.
     debug_statement_ctx: ?*anyopaque = null,
     debug_statement_hook: ?DebugStatementHook = null,
-    debug_statement_locations: ?*const std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
+    debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
+    debug_script_ctx: ?*anyopaque = null,
+    debug_script_hook: ?DebugScriptHook = null,
     debug_exception_ctx: ?*anyopaque = null,
     debug_exception_hook: ?DebugExceptionHook = null,
     debug_current_location: ?DebugStatementLocation = null,
@@ -3224,6 +3238,21 @@ pub const Interpreter = struct {
                 }
             }
         }
+    }
+
+    fn registerParsedDebugScript(self: *Interpreter, source: []const u8, url: []const u8, parser: *const Parser) EvalError!void {
+        const hook = self.debug_script_hook orelse return;
+        const registration = try hook(self.debug_script_ctx.?, source, url, 1);
+        const locations = self.debug_statement_locations orelse return;
+        for (parser.statement_locations.items) |entry| try locations.put(self.arena, entry.node, .{
+            .script_id = registration.id,
+            .location = .{
+                .byte_offset = entry.location.byte_offset,
+                .line = entry.location.line + registration.start_line - 1,
+                .column = entry.location.column,
+            },
+            .debugger_statement = entry.debugger_statement,
+        });
     }
 
     /// Evaluate debugger-authored source in a paused frame's live lexical
@@ -15066,6 +15095,23 @@ fn functionHasInstanceFn(ctx: *anyopaque, this: Value, args: []const Value) valu
 /// The global `eval`. Direct eval runs in the caller's lexical environment;
 /// member/indirect eval runs as global eval in the realm captured by the eval
 /// function object.
+fn dynamicDebugSourceUrl(source: []const u8, fallback: []const u8) []const u8 {
+    const markers = [_][]const u8{ "//# sourceURL=", "//@ sourceURL=" };
+    var best_offset: usize = 0;
+    var best_value: ?[]const u8 = null;
+    for (markers) |marker| {
+        const offset = std.mem.lastIndexOf(u8, source, marker) orelse continue;
+        const value_start = offset + marker.len;
+        const line_end = std.mem.indexOfScalarPos(u8, source, value_start, '\n') orelse source.len;
+        const candidate = std.mem.trim(u8, source[value_start..line_end], " \t\r");
+        if (candidate.len != 0 and (best_value == null or offset >= best_offset)) {
+            best_offset = offset;
+            best_value = candidate;
+        }
+    }
+    return best_value orelse fallback;
+}
+
 fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -15088,6 +15134,11 @@ fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
         parser.eval_private_allowed = true;
     }
     const prog = parser.parseProgram() catch |err| return self.throwParserSyntaxError("eval", src, &parser, err);
+    try self.registerParsedDebugScript(
+        src,
+        dynamicDebugSourceUrl(src, if (self.direct_eval_call) "direct-eval" else "indirect-eval"),
+        &parser,
+    );
     if (self.direct_eval_call) if (self.current_private_map) |pm|
         try self.rewritePrivateNamesInNode(prog, @constCast(pm));
 

@@ -2208,6 +2208,7 @@ pub const Context = struct {
         source: []const u8,
         start_line: usize,
     };
+    pub const DebugScriptNotifyHook = *const fn (ctx: *anyopaque, script: DebugScript) bool;
 
     pub const c_api_handle_reserve_granularity = 16;
     pub const js_thread_reserve_granularity = 16;
@@ -2267,6 +2268,8 @@ pub const Context = struct {
     /// stable identities/source for scripts parsed before attachment and across
     /// detach/reattach without making the engine core depend on the C protocol.
     debug_scripts: std.ArrayListUnmanaged(DebugScript) = .empty,
+    debug_script_notify_ctx: ?*anyopaque = null,
+    debug_script_notify_hook: ?DebugScriptNotifyHook = null,
     next_debug_script_id: u64 = 1,
     debug_script_id: u64 = 0,
     debug_script_start_line: usize = 1,
@@ -2995,7 +2998,9 @@ pub const Context = struct {
             .jit_owner = if (self.enable_jit and self.debug_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
-            .debug_statement_locations = if (self.debug_statement_hook != null) &self.debug_statement_locations else null,
+            .debug_statement_locations = &self.debug_statement_locations,
+            .debug_script_ctx = self,
+            .debug_script_hook = registerInterpreterDebugScript,
             .debug_exception_ctx = self.debug_statement_ctx,
             .debug_exception_hook = self.debug_exception_hook,
             .global_object = self.global_object,
@@ -3046,7 +3051,16 @@ pub const Context = struct {
         };
         try self.debug_scripts.append(allocator, script);
         self.next_debug_script_id += 1;
+        if (self.debug_script_notify_hook) |hook| {
+            if (!hook(self.debug_script_notify_ctx.?, script)) return error.OutOfMemory;
+        }
         return script;
+    }
+
+    fn registerInterpreterDebugScript(ctx: *anyopaque, source: []const u8, url: []const u8, start_line: usize) interp.EvalError!interp.DebugScriptRegistration {
+        const self: *Context = @ptrCast(@alignCast(ctx));
+        const script = self.registerDebugScript(source, url, start_line) catch return error.OutOfMemory;
+        return .{ .id = script.id, .start_line = script.start_line };
     }
 
     /// Request cooperative termination of the current evaluation and any
