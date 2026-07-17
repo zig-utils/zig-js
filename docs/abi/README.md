@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 432 (31 implemented, 401 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 432 (33 implemented, 399 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | **Total** | **448** |
@@ -60,7 +60,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first thirty-one private entries are implemented; the other 401 remain pending
+The first thirty-three private entries are implemented; the other 399 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167` and
@@ -129,7 +129,7 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these thirty-one symbols are reported only as private profile
+and 19 extensions; these thirty-three symbols are reported only as private profile
 exports.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
@@ -172,6 +172,15 @@ and null/undefined fail through the private empty boundary. Prototype queries
 return exact ordinary, wrapper, function, null, and proxy-observed prototypes,
 while invalid and foreign-context values are rejected.
 
+The numeric DateInstance slice exports
+`JSC__JSValue__dateInstanceFromNumber` and
+`JSC__JSValue__getUnixTimestamp`. The constructor creates a fresh selected-realm
+Date cell around an already-computed internal double, deliberately bypassing
+JavaScript constructor TimeClip. Fractional values, negative zero, NaN,
+infinities, and values outside ±8.64e15 are preserved; the getter returns NaN
+for non-Date cells. String parsing, local/UTC conversion, and buffer-based ISO
+formatting remain pending as separate contracts.
+
 ## Profile-selectable JSType layout
 
 [`private-jstype-layouts.json`](private-jstype-layouts.json) pins the complete
@@ -211,7 +220,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 422 (31 implemented, 391 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 422 (33 implemented, 389 pending) |
 | Public-C overlap | 15 |
 | **Total** | **437** |
 
@@ -227,5 +236,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 391
+not claim complete Bun runtime compatibility; #164 remains open for the 389
 pending core entries and later wider/generated profiles.

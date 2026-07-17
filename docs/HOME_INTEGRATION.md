@@ -41,7 +41,7 @@ libc import. See [the exact declaration inventory](abi/home-private-7ed99c02-inv
 and run `zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"`
 to verify the live revision, every source hash, signature, classification, and
 calling convention. This replaces a vague source-level estimate, but the 432
-private entries are now 31 implemented / 401 pending under #163. The implemented
+private entries are now 33 implemented / 399 pending under #163. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
 exact signed/unsigned 64-bit BigInt construction, and modulo-2^64 BigInt
 extraction with the pinned number fallbacks, plus exact strict and SameValue
@@ -59,8 +59,11 @@ Home's exact 97-member JSType layout by default; Bun's distinct 98-member layout
 requires `-Dprivate-abi-consumer=bun`. Two ToObject/prototype shims preserve
 ordinary-object identity, box all five object-capable primitive kinds in the
 selected realm, observe proxy/null prototypes, and reject nullish or foreign
-values. These slices do not yet create a usable
-Home private runtime.
+values. Two numeric DateInstance shims create fresh selected-realm
+Date cells without TimeClip and preserve/read raw fractional, signed-zero, NaN,
+infinite, and out-of-range internal doubles; timezone parsing and formatting
+remain deliberately separate. These slices do not yet create a usable Home
+private runtime.
 
 The newer Home revisions `5e829ad4` and `38702f9e` changed no files in
 `packages/runtime/src/jsc` relative to `7ed99c02`. Their separate alias
