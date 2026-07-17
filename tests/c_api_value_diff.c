@@ -79,6 +79,50 @@ static bool parent_class_delete(JSContextRef context, JSObjectRef object,
     return JSStringIsEqualToUTF8CString(property_name, "parent");
 }
 
+static int has_callback_calls;
+static int get_callback_calls;
+static int set_callback_calls;
+static double dynamic_set_storage;
+static bool class_has(JSContextRef context, JSObjectRef object, JSStringRef property_name)
+{
+    (void)context; (void)object;
+    ++has_callback_calls;
+    return JSStringIsEqualToUTF8CString(property_name, "present") ||
+        JSStringIsEqualToUTF8CString(property_name, "throwGet");
+}
+static JSValueRef class_get(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef* exception)
+{
+    (void)object; (void)exception;
+    ++get_callback_calls;
+    if (JSStringIsEqualToUTF8CString(property_name, "throwGet")) {
+        *exception = JSValueMakeNumber(context, 91);
+        return NULL;
+    }
+    if (JSStringIsEqualToUTF8CString(property_name, "present"))
+        return JSValueMakeNumber(context, 31);
+    if (JSStringIsEqualToUTF8CString(property_name, "getOnly"))
+        return JSValueMakeNumber(context, 32);
+    if (JSStringIsEqualToUTF8CString(property_name, "handledSet"))
+        return JSValueMakeNumber(context, dynamic_set_storage);
+    return NULL;
+}
+static bool class_set(JSContextRef context, JSObjectRef object,
+    JSStringRef property_name, JSValueRef value, JSValueRef* exception)
+{
+    (void)object;
+    ++set_callback_calls;
+    if (JSStringIsEqualToUTF8CString(property_name, "throwSet")) {
+        *exception = JSValueMakeNumber(context, 92);
+        return false;
+    }
+    if (JSStringIsEqualToUTF8CString(property_name, "handledSet")) {
+        dynamic_set_storage = JSValueToNumber(context, value, exception);
+        return true;
+    }
+    return false;
+}
+
 static int print_json_string(JSStringRef string)
 {
     char bytes[512];
@@ -202,6 +246,8 @@ int main(void)
     };
     JSClassDefinition value_definition = kJSClassDefinitionEmpty;
     value_definition.staticValues = static_values;
+    value_definition.hasProperty = class_has;
+    value_definition.setProperty = class_set;
     value_definition.deleteProperty = class_delete;
     JSClassRef value_class = JSClassCreate(&value_definition);
     JSObjectRef value_object = JSObjectMake(context, value_class, NULL);
@@ -258,6 +304,8 @@ int main(void)
     fputc('\n', stdout);
     JSStringRelease(js_static_delete_string);
     printf("static-delete-callbacks %d\n", delete_callback_calls);
+    printf("static-property-callbacks %d\n", has_callback_calls);
+    printf("static-set-callbacks %d\n", set_callback_calls);
     JSStringRelease(x_name); JSStringRelease(y_name); JSStringRelease(z_name);
     JSClassRelease(value_class);
 
@@ -301,6 +349,91 @@ int main(void)
     JSStringRelease(handled_name); JSStringRelease(fallback_name);
     JSStringRelease(parent_name); JSStringRelease(throw_name);
     JSClassRelease(delete_class);
+
+    JSClassDefinition property_definition = kJSClassDefinitionEmpty;
+    has_callback_calls = 0;
+    get_callback_calls = 0;
+    set_callback_calls = 0;
+    property_definition.hasProperty = class_has;
+    property_definition.getProperty = class_get;
+    property_definition.setProperty = class_set;
+    JSClassRef property_class = JSClassCreate(&property_definition);
+    JSObjectRef property_object = JSObjectMake(context, property_class, NULL);
+    JSStringRef property_object_name = JSStringCreateWithUTF8CString("propertyObject");
+    JSObjectSetProperty(context, JSContextGetGlobalObject(context), property_object_name,
+        property_object, kJSPropertyAttributeNone, &exception);
+    JSStringRelease(property_object_name);
+    JSStringRef present_name = JSStringCreateWithUTF8CString("present");
+    JSStringRef get_only_name = JSStringCreateWithUTF8CString("getOnly");
+    JSStringRef has_only_name = JSStringCreateWithUTF8CString("hasOnly");
+    JSStringRef handled_set_name = JSStringCreateWithUTF8CString("handledSet");
+    JSStringRef fallback_set_name = JSStringCreateWithUTF8CString("fallbackSet");
+    int has_present = JSObjectHasProperty(context, property_object, present_name);
+    int has_get_only = JSObjectHasProperty(context, property_object, get_only_name);
+    JSValueRef present_value = JSObjectGetProperty(context, property_object, present_name, &exception);
+    JSValueRef has_only_value = JSObjectGetProperty(context, property_object, has_only_name, &exception);
+    JSObjectSetProperty(context, property_object, handled_set_name,
+        JSValueMakeNumber(context, 51), kJSPropertyAttributeNone, &exception);
+    JSObjectSetProperty(context, property_object, fallback_set_name,
+        JSValueMakeNumber(context, 52), kJSPropertyAttributeNone, &exception);
+    JSValueRef handled_set_value = JSObjectGetProperty(context, property_object, handled_set_name, &exception);
+    JSValueRef fallback_set_value = JSObjectGetProperty(context, property_object, fallback_set_name, &exception);
+    printf("class-properties %d %d %.0f %d %.0f %.0f %d %d %d %d\n",
+        has_present, has_get_only, JSValueToNumber(context, present_value, &exception),
+        JSValueIsUndefined(context, has_only_value),
+        JSValueToNumber(context, handled_set_value, &exception),
+        JSValueToNumber(context, fallback_set_value, &exception),
+        JSObjectHasProperty(context, property_object, fallback_set_name),
+        has_callback_calls, get_callback_calls, set_callback_calls);
+    JSStringRef throw_get_name = JSStringCreateWithUTF8CString("throwGet");
+    JSStringRef throw_set_name = JSStringCreateWithUTF8CString("throwSet");
+    exception = NULL;
+    JSValueRef throw_get_value = JSObjectGetProperty(context, property_object, throw_get_name, &exception);
+    double get_exception = JSValueToNumber(context, exception, NULL);
+    exception = NULL;
+    JSObjectSetProperty(context, property_object, throw_set_name,
+        JSValueMakeNumber(context, 1), kJSPropertyAttributeNone, &exception);
+    double set_exception = JSValueToNumber(context, exception, NULL);
+    printf("class-property-throws %d %.0f %.0f\n",
+        throw_get_value == NULL, get_exception, set_exception);
+    exception = NULL;
+    JSValueRef property_reflection = evaluate(context,
+        "JSON.stringify([Object.hasOwn(propertyObject,'present'),Object.getOwnPropertyDescriptor(propertyObject,'present')??null,propertyObject.propertyIsEnumerable('present'),Object.keys(propertyObject),Reflect.ownKeys(propertyObject).sort()])");
+    JSStringRef property_reflection_string = JSValueToStringCopy(context, property_reflection, &exception);
+    fputs("class-property-reflection ", stdout);
+    if (!property_reflection_string || !print_json_string(property_reflection_string))
+        return 8;
+    fputc('\n', stdout);
+    JSStringRelease(property_reflection_string);
+    JSStringRelease(present_name); JSStringRelease(get_only_name);
+    JSStringRelease(has_only_name); JSStringRelease(handled_set_name);
+    JSStringRelease(fallback_set_name);
+    JSStringRelease(throw_get_name); JSStringRelease(throw_set_name);
+    JSClassRelease(property_class);
+
+    property_definition.hasProperty = NULL;
+    has_callback_calls = 0;
+    get_callback_calls = 0;
+    set_callback_calls = 0;
+    JSClassRef get_only_class = JSClassCreate(&property_definition);
+    JSObjectRef get_only_object = JSObjectMake(context, get_only_class, NULL);
+    get_only_name = JSStringCreateWithUTF8CString("getOnly");
+    handled_set_name = JSStringCreateWithUTF8CString("handledSet");
+    JSStringRef missing_name = JSStringCreateWithUTF8CString("missing");
+    int get_only_has = JSObjectHasProperty(context, get_only_object, get_only_name);
+    int missing_has = JSObjectHasProperty(context, get_only_object, missing_name);
+    JSValueRef get_only_value = JSObjectGetProperty(context, get_only_object, get_only_name, &exception);
+    JSObjectSetProperty(context, get_only_object, handled_set_name,
+        JSValueMakeNumber(context, 61), kJSPropertyAttributeNone, &exception);
+    handled_set_value = JSObjectGetProperty(context, get_only_object, handled_set_name, &exception);
+    printf("class-get-fallback %d %d %.0f %.0f %d %d\n",
+        get_only_has, missing_has,
+        JSValueToNumber(context, get_only_value, &exception),
+        JSValueToNumber(context, handled_set_value, &exception),
+        get_callback_calls, set_callback_calls);
+    JSStringRelease(get_only_name); JSStringRelease(handled_set_name);
+    JSStringRelease(missing_name);
+    JSClassRelease(get_only_class);
 
     JSObjectRef prototype = JSObjectMake(context, NULL, NULL);
     JSObjectRef object = JSObjectMake(context, NULL, NULL);

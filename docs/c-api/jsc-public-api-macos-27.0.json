@@ -36,7 +36,7 @@
     {"name":"JSClassCreate","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRetain","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSClassRelease","header":"JSObjectRef.h","status":"implemented"},
-    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"Class ownership, identity, initialize/finalize, shared prototypes, static functions, static value reflection/deletion, and inherited deleteProperty callbacks are implemented; remaining callbacks are pending."},
+    {"name":"JSObjectMake","header":"JSObjectRef.h","status":"pending","issue":137,"note":"Class ownership, identity, initialize/finalize, shared prototypes, static functions, static value reflection/deletion, and inherited dynamic has/get/set/delete callbacks are implemented; property-name, call/constructor, hasInstance, and conversion callbacks remain pending."},
     {"name":"JSObjectMakeFunctionWithCallback","header":"JSObjectRef.h","status":"implemented"},
     {"name":"JSObjectMakeConstructor","header":"JSObjectRef.h","status":"pending","issue":137},
     {"name":"JSObjectMakeArray","header":"JSObjectRef.h","status":"implemented"},

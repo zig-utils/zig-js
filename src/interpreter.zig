@@ -11873,6 +11873,9 @@ pub const Interpreter = struct {
         if (o.boxedPrimitive()) |p| {
             if (p.isString() and std.mem.eql(u8, key, "length")) return false;
         }
+        if (!objectHasOwn(o, key)) if (o.hostClassHooks()) |hooks| if (hooks.has) |has| {
+            _ = try has(@ptrCast(self), o, key);
+        };
         return objectHasOwn(o, key) and o.getAttr(key).enumerable and
             !(o.is_array and std.mem.eql(u8, key, "length"));
     }

@@ -339,7 +339,57 @@ fn applyCallbackException(
     return error.Throw;
 }
 
-fn staticValueGet(
+fn callHasPropertyCallback(
+    target: ClassCallbackTarget,
+    key: []const u8,
+    callback: *const fn (JSContextRef, JSObjectRef, JSStringRef) callconv(.c) bool,
+) value.HostError!bool {
+    const property_name = try callbackPropertyName(key);
+    defer JSStringRelease(property_name);
+    return callback(@ptrCast(target.context), target.object_ref, property_name);
+}
+
+fn callGetPropertyCallback(
+    machine: *interp.Interpreter,
+    target: ClassCallbackTarget,
+    key: []const u8,
+    callback: *const fn (JSContextRef, JSObjectRef, JSStringRef, ExceptionRef) callconv(.c) JSValueRef,
+) value.HostError!?Value {
+    const property_name = try callbackPropertyName(key);
+    defer JSStringRelease(property_name);
+    var exception: JSValueRef = null;
+    const result = callback(@ptrCast(target.context), target.object_ref, property_name, &exception);
+    try applyCallbackException(machine, target.context, exception);
+    const result_ref = result orelse return null;
+    return valueFromContext(target.context, result_ref) orelse {
+        machine.exception = Value.str("TypeError: class getter returned an invalid value");
+        return error.Throw;
+    };
+}
+
+fn callSetPropertyCallback(
+    machine: *interp.Interpreter,
+    target: ClassCallbackTarget,
+    key: []const u8,
+    new_value: Value,
+    callback: *const fn (JSContextRef, JSObjectRef, JSStringRef, JSValueRef, ExceptionRef) callconv(.c) bool,
+) value.HostError!bool {
+    const property_name = try callbackPropertyName(key);
+    defer JSStringRelease(property_name);
+    var exception: JSValueRef = null;
+    const value_ref = box(target.context, new_value) orelse return error.OutOfMemory;
+    const handled = callback(
+        @ptrCast(target.context),
+        target.object_ref,
+        property_name,
+        value_ref,
+        &exception,
+    );
+    try applyCallbackException(machine, target.context, exception);
+    return handled;
+}
+
+fn classGet(
     raw_machine: *anyopaque,
     object: *Object,
     key: []const u8,
@@ -348,27 +398,29 @@ fn staticValueGet(
     const target = try classCallbackTarget(machine, object);
     var class: ?*CClass = target.class;
     while (class) |item| : (class = item.parent) {
+        if (item.definition.has_property) |has| {
+            if (try callHasPropertyCallback(target, key, has)) {
+                if (item.definition.get_property) |get| {
+                    if (try callGetPropertyCallback(machine, target, key, get)) |result|
+                        return .{ .value = result };
+                }
+            }
+        } else if (item.definition.get_property) |get| {
+            if (try callGetPropertyCallback(machine, target, key, get)) |result|
+                return .{ .value = result };
+        }
         for (item.static_values) |entry| {
             const name = entry.name orelse continue;
             if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
             const getter = entry.get_property orelse return .unhandled;
-            const property_name = try callbackPropertyName(key);
-            defer JSStringRelease(property_name);
-            var exception: JSValueRef = null;
-            const result = getter(@ptrCast(target.context), target.object_ref, property_name, &exception);
-            try applyCallbackException(machine, target.context, exception);
-            const result_ref = result orelse continue;
-            const result_value = valueFromContext(target.context, result_ref) orelse {
-                machine.exception = Value.str("TypeError: class getter returned an invalid value");
-                return error.Throw;
-            };
-            return .{ .value = result_value };
+            if (try callGetPropertyCallback(machine, target, key, getter)) |result|
+                return .{ .value = result };
         }
     }
     return .unhandled;
 }
 
-fn staticValueSet(
+fn classSet(
     raw_machine: *anyopaque,
     object: *Object,
     key: []const u8,
@@ -378,6 +430,22 @@ fn staticValueSet(
     const target = try classCallbackTarget(machine, object);
     var class: ?*CClass = target.class;
     while (class) |item| : (class = item.parent) {
+        var has_static_value = false;
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (std.mem.eql(u8, std.mem.span(name), key)) {
+                has_static_value = true;
+                break;
+            }
+        }
+        if (!has_static_value) {
+            if (item.definition.has_property) |has|
+                _ = try callHasPropertyCallback(target, key, has);
+        }
+        if (item.definition.set_property) |set| {
+            if (try callSetPropertyCallback(machine, target, key, new_value, set))
+                return .{ .accepted = true };
+        }
         for (item.static_values) |entry| {
             const name = entry.name orelse continue;
             if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
@@ -385,33 +453,35 @@ fn staticValueSet(
                 .{ .accepted = false }
             else
                 .unhandled;
-            const property_name = try callbackPropertyName(key);
-            defer JSStringRelease(property_name);
-            var exception: JSValueRef = null;
-            const value_ref = box(target.context, new_value) orelse return error.OutOfMemory;
-            const handled = setter(
-                @ptrCast(target.context),
-                target.object_ref,
-                property_name,
-                value_ref,
-                &exception,
-            );
-            try applyCallbackException(machine, target.context, exception);
+            const handled = try callSetPropertyCallback(machine, target, key, new_value, setter);
             return if (handled) .{ .accepted = true } else .declined;
         }
     }
     return .unhandled;
 }
 
-fn staticValueHas(
+fn classHas(
     raw_machine: *anyopaque,
     object: *Object,
     key: []const u8,
 ) value.HostError!bool {
-    return switch (try staticValueGet(raw_machine, object, key)) {
-        .unhandled => false,
-        .value => true,
-    };
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+    const target = try classCallbackTarget(machine, object);
+    var class: ?*CClass = target.class;
+    while (class) |item| : (class = item.parent) {
+        if (item.definition.has_property) |has| {
+            if (try callHasPropertyCallback(target, key, has)) return true;
+        } else if (item.definition.get_property) |get| {
+            if (try callGetPropertyCallback(machine, target, key, get) != null) return true;
+        }
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
+            const getter = entry.get_property orelse continue;
+            if (try callGetPropertyCallback(machine, target, key, getter) != null) return true;
+        }
+    }
+    return false;
 }
 
 fn classDelete(
@@ -484,9 +554,9 @@ fn staticValueOwnKeys(
 }
 
 const c_api_class_hooks: value.HostClassHooks = .{
-    .get = staticValueGet,
-    .set = staticValueSet,
-    .has = staticValueHas,
+    .get = classGet,
+    .set = classSet,
+    .has = classHas,
     .delete = classDelete,
     .attributes = staticValueAttributes,
     .own_keys = staticValueOwnKeys,
@@ -2111,21 +2181,6 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     };
     defer c.popActiveInterpreter(&machine);
     const had_own = interp.objectHasOwn(obj, key.bytes);
-    if (!had_own) if (obj.hostClassHooks()) |hooks| if (hooks.set) |set| {
-        switch (set(@ptrCast(&machine), obj, key.bytes, property_value) catch |err| {
-            if (err == error.Throw) {
-                if (exception != null) exception[0] = box(c, machine.exception);
-            } else setException(c, exception, @errorName(err));
-            return;
-        }) {
-            .unhandled => {},
-            .declined => return,
-            .accepted => |accepted| {
-                if (!accepted) setException(c, exception, "TypeError: property assignment was rejected");
-                return;
-            },
-        }
-    };
     const accepted = machine.setMemberResult(Value.obj(obj), key.bytes, property_value, Value.obj(obj)) catch |err| {
         if (err == error.Throw) {
             if (exception != null) exception[0] = box(c, machine.exception);
