@@ -2208,7 +2208,11 @@ export fn JSC__JSBigInt__toInt64(cell: ?*anyopaque) callconv(.c) i64 {
 
 fn privateDestroyWTFStringImpl(impl: *PrivateWTFStringImpl) void {
     if (impl.private_magic != private_wtf_magic) return;
-    const bytes = @constCast(impl.m_ptr[0..impl.m_length]);
+    const byte_length: usize = if (impl.m_hash_and_flags & private_wtf_flag_8_bit_buffer != 0)
+        impl.m_length
+    else
+        @as(usize, impl.m_length) * @sizeOf(u16);
+    const bytes = @constCast(impl.m_ptr[0..byte_length]);
     impl.private_magic = 0;
     private_string_allocator.free(bytes);
     private_string_allocator.destroy(impl);
@@ -2245,6 +2249,44 @@ fn privateOwnedLatin1String(bytes: []const u8) error{OutOfMemory}!PrivateBunStri
         .m_length = @intCast(owned.len),
         .m_ptr = owned.ptr,
         .m_hash_and_flags = private_wtf_flag_8_bit_buffer,
+        .private_magic = private_wtf_magic,
+    };
+    return .{ .tag = .wtf_string_impl, .value = .{ .wtf_string_impl = impl } };
+}
+
+fn privateOwnedWTF8String(bytes: []const u8) PrivateBunStringError!PrivateBunString {
+    if (bytes.len == 0) return PrivateBunString.empty();
+    const units = try privateWTF8ToUTF16(private_string_allocator, bytes);
+    if (interp.Interpreter.jsStringIs8Bit(bytes)) {
+        const latin1 = private_string_allocator.alloc(u8, units.len) catch {
+            private_string_allocator.free(units);
+            return error.OutOfMemory;
+        };
+        defer private_string_allocator.free(latin1);
+        for (units, latin1) |unit, *byte| byte.* = @intCast(unit);
+        private_string_allocator.free(units);
+        return privateOwnedLatin1String(latin1);
+    }
+
+    const byte_length = std.math.mul(usize, units.len, @sizeOf(u16)) catch {
+        private_string_allocator.free(units);
+        return error.OutOfMemory;
+    };
+    const owned = private_string_allocator.alloc(u8, byte_length) catch {
+        private_string_allocator.free(units);
+        return error.OutOfMemory;
+    };
+    @memcpy(owned, std.mem.sliceAsBytes(units));
+    private_string_allocator.free(units);
+    const impl = private_string_allocator.create(PrivateWTFStringImpl) catch {
+        private_string_allocator.free(owned);
+        return error.OutOfMemory;
+    };
+    impl.* = .{
+        .m_ref_count = private_wtf_ref_increment,
+        .m_length = @intCast(byte_length / @sizeOf(u16)),
+        .m_ptr = owned.ptr,
+        .m_hash_and_flags = 0,
         .private_magic = private_wtf_magic,
     };
     return .{ .tag = .wtf_string_impl, .value = .{ .wtf_string_impl = impl } };
@@ -4663,6 +4705,275 @@ export fn JSC__JSValue__getIfPropertyExistsFromPath(
     else
         null;
     return privateEncodeResult(context, &machine, result orelse return .empty);
+}
+
+fn privateTypedArrayClassInfoName(kind: value.TAKind) [:0]const u8 {
+    return switch (kind) {
+        .i8 => "Int8Array",
+        .u8 => "Uint8Array",
+        .u8c => "Uint8ClampedArray",
+        .i16 => "Int16Array",
+        .u16 => "Uint16Array",
+        .i32 => "Int32Array",
+        .u32 => "Uint32Array",
+        .f16 => "Float16Array",
+        .f32 => "Float32Array",
+        .f64 => "Float64Array",
+        .i64 => "BigInt64Array",
+        .u64 => "BigUint64Array",
+    };
+}
+
+fn privateCApiClassName(object: *Object) ?[:0]const u8 {
+    const owner = object.cApiObjectOwner() orelse return null;
+    const class = classFrom(owner.class_ref) orelse return null;
+    return class.class_name;
+}
+
+fn privateStaticClassInfoName(internal: Value) ?[:0]const u8 {
+    if (internal.isString()) return "String";
+    if (!internal.isObject()) return null;
+    const object = internal.asObj();
+    if (object.is_symbol) return "Symbol";
+    if (object.is_bigint) return "BigInt";
+    if (privateCApiClassName(object)) |name| return name;
+    if (object.is_array and !object.is_arguments) return "Array";
+    if (object.is_arguments) return "Arguments";
+    if (object.typedArray()) |typed| return privateTypedArrayClassInfoName(typed.kind);
+    if (object.dataView() != null) return "DataView";
+    if (object.arrayBuffer()) |buffer| return if (buffer.is_shared) "SharedArrayBuffer" else "ArrayBuffer";
+    if (object.is_map) return if (object.is_weak) "WeakMap" else "Map";
+    if (object.is_set) return if (object.is_weak) "WeakSet" else "Set";
+    if (object.behavior.is_date) return "Date";
+    if (object.behavior.is_regex) return "RegExp";
+    if (object.behavior.is_error) return "Error";
+    if (promise.promiseOf(internal) != null) return "Promise";
+    if (object.generator() != null) return "Generator";
+    if (object.moduleNs() != null) return "Module";
+    if (object.isCallableObject()) return "Function";
+    return "Object";
+}
+
+fn privateDirectDataProperty(object: *Object, property: []const u8) ?Value {
+    if (object.proxyHandler() != null or object.proxy_revoked) return null;
+    if (object.getAccessor(property) != null) return null;
+    return object.getOwn(property);
+}
+
+fn privateDirectDataPropertyInChain(object: *Object, property: []const u8) ?Value {
+    var current: ?*Object = object;
+    var guard: usize = 0;
+    while (current) |candidate| : (current = candidate.protoAtomic()) {
+        guard += 1;
+        if (guard > 10_000) return null;
+        if (candidate.proxyHandler() != null or candidate.proxy_revoked) return null;
+        if (candidate.getAccessor(property) != null) return null;
+        if (candidate.getOwn(property)) |found| return found;
+    }
+    return null;
+}
+
+fn privateCalculatedDisplayName(object: *Object) []const u8 {
+    const callable = object.jsFunction() != null or object.native != null or object.hostCallback() != null or
+        object.errorCtor() != null;
+    if (!callable) return "";
+    if (privateDirectDataProperty(object, "displayName")) |display_name|
+        if (display_name.isString()) return display_name.asStr();
+    if (interp.Interpreter.funcOf(Value.obj(object))) |function| return function.name;
+    if (privateDirectDataProperty(object, "name")) |name|
+        if (name.isString()) return name.asStr();
+    return "";
+}
+
+fn privateCalculatedClassName(machine: *interp.Interpreter, object: *Object, raw_name: []const u8) []const u8 {
+    var constructor_name: ?[]const u8 = null;
+    if (privateDirectDataProperty(object, "constructor")) |constructor|
+        if (constructor.isObject()) {
+            const name = privateCalculatedDisplayName(constructor.asObj());
+            if (name.len > 0) constructor_name = name;
+        };
+
+    if (constructor_name == null) {
+        if (object.protoAtomic()) |prototype| {
+            if (privateDirectDataPropertyInChain(prototype, "constructor")) |constructor|
+                if (constructor.isObject()) {
+                    const name = privateCalculatedDisplayName(constructor.asObj());
+                    if (name.len > 0) constructor_name = name;
+                };
+        }
+    }
+
+    if (constructor_name == null or std.mem.eql(u8, constructor_name.?, "Object")) {
+        if (interp.objectToStringTagKey(machine)) |tag_key| {
+            if (privateDirectDataPropertyInChain(object, tag_key)) |tag|
+                if (tag.isString()) return tag.asStr();
+        }
+        if (raw_name.len > 0) return raw_name;
+        if (constructor_name == null) return "Object";
+    }
+    return constructor_name.?;
+}
+
+fn privateWriteBorrowedName(context: *Context, bytes: []const u8, output: *PrivateZigString) bool {
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    output.* = privateBorrowedZigStringView(group, bytes) catch |err| {
+        privatePublishBunStringError(context, err);
+        return false;
+    };
+    return true;
+}
+
+fn privateNameProperty(
+    context: *Context,
+    machine: *interp.Interpreter,
+    object: *Object,
+    output: *PrivateZigString,
+) bool {
+    if (interp.objectToStringTagKey(machine)) |tag_key| {
+        const tag = machine.getPropertyIfExists(Value.obj(object), tag_key) catch |err| {
+            privateSetPendingAbrupt(context, machine, err);
+            return false;
+        };
+        if (tag) |candidate| {
+            if (candidate.isString() and candidate.asStr().len > 0)
+                return privateWriteBorrowedName(context, candidate.asStr(), output);
+        }
+    }
+
+    const is_named_function = object.jsFunction() != null or object.native != null or
+        object.hostCallback() != null or object.errorCtor() != null;
+    if (is_named_function)
+        return privateWriteBorrowedName(context, privateCalculatedDisplayName(object), output);
+    output.len = 0;
+    return true;
+}
+
+export fn JSC__JSValue__getClassInfoName(
+    encoded: EncodedValue,
+    output: *[*:0]const u8,
+    output_len: *usize,
+) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    if (boxed.private_kind != .value) return false;
+    const name = privateStaticClassInfoName(boxed.value) orelse return false;
+    output.* = name.ptr;
+    output_len.* = name.len;
+    return true;
+}
+
+export fn JSC__JSValue__getNameProperty(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateZigString,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Name target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!internal.isObject() or internal.asObj().is_symbol or internal.asObj().is_bigint) {
+        output.len = 0;
+        return;
+    }
+    _ = privateNameProperty(context, &machine, internal.asObj(), output);
+}
+
+export fn JSC__JSValue__getClassName(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateZigString,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Class-name target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!internal.isObject() or internal.asObj().is_symbol or internal.asObj().is_bigint) {
+        output.len = 0;
+        return;
+    }
+    const raw_name = privateStaticClassInfoName(internal) orelse {
+        output.len = 0;
+        return;
+    };
+    if (raw_name.len == 0 or std.mem.eql(u8, raw_name, "Function")) {
+        _ = privateNameProperty(context, &machine, internal.asObj(), output);
+        return;
+    }
+    _ = privateWriteBorrowedName(context, privateCalculatedClassName(&machine, internal.asObj(), raw_name), output);
+}
+
+export fn JSC__JSValue__getName(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: *PrivateBunString,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "Display-name target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    if (!internal.isObject() or internal.asObj().is_symbol or internal.asObj().is_bigint) {
+        output.* = PrivateBunString.empty();
+        return;
+    }
+
+    var name = privateCalculatedDisplayName(internal.asObj());
+    if (name.len == 0) {
+        if (interp.objectToStringTagKey(&machine)) |tag_key| {
+            const tag = machine.getPropertyIfExists(internal, tag_key) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return;
+            };
+            if (tag) |candidate| {
+                if (candidate.isString()) name = candidate.asStr();
+            }
+        }
+    }
+    output.* = privateOwnedWTF8String(name) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
 }
 
 export fn JSC__JSString__eql(
@@ -15749,6 +16060,124 @@ test "private property path traversal preserves pinned string and array semantic
     try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(blocked_target, context, blocked_path));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(224), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private class and display names preserve metadata and observable tag rules" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn zigName(context_: *Context, global: JSContextRef, value_encoded: EncodedValue, class_name: bool) ![]const u8 {
+            var output = PrivateZigString{ .tagged_ptr = 0x225, .len = 225 };
+            if (class_name)
+                JSC__JSValue__getClassName(value_encoded, global, &output)
+            else
+                JSC__JSValue__getNameProperty(value_encoded, global, &output);
+            const result = try privateZigStringValue(context_, &output);
+            return result.asStr();
+        }
+
+        fn bunName(context_: *Context, global: JSContextRef, value_encoded: EncodedValue) ![]const u8 {
+            var output = PrivateBunString.dead();
+            JSC__JSValue__getName(value_encoded, global, &output);
+            defer if (output.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(output.value.wtf_string_impl);
+            const result = try privateBunStringValue(context_, &output, null);
+            return context_.arena().dupe(u8, result.asStr());
+        }
+    };
+
+    const class_info_cases = [_]struct { []const u8, []const u8 }{
+        .{ "'value'", "String" },
+        .{ "Symbol('value')", "Symbol" },
+        .{ "1n", "BigInt" },
+        .{ "({})", "Object" },
+        .{ "[]", "Array" },
+        .{ "new Uint16Array(1)", "Uint16Array" },
+        .{ "new DataView(new ArrayBuffer(1))", "DataView" },
+        .{ "new Map()", "Map" },
+        .{ "new WeakSet()", "WeakSet" },
+        .{ "new Date(0)", "Date" },
+        .{ "/x/", "RegExp" },
+        .{ "Promise.resolve(1)", "Promise" },
+        .{ "(function named() {})", "Function" },
+    };
+    for (class_info_cases) |case| {
+        var pointer: [*:0]const u8 = "untouched";
+        var length: usize = 225;
+        try std.testing.expect(JSC__JSValue__getClassInfoName(try Probe.encoded(internal, case[0]), &pointer, &length));
+        try std.testing.expectEqualStrings(case[1], pointer[0..length]);
+    }
+    var untouched_pointer: [*:0]const u8 = "untouched";
+    var untouched_length: usize = 225;
+    try std.testing.expect(!JSC__JSValue__getClassInfoName(EncodedValue.fromInt32(1), &untouched_pointer, &untouched_length));
+    try std.testing.expectEqualStrings("untouched", std.mem.span(untouched_pointer));
+    try std.testing.expectEqual(@as(usize, 225), untouched_length);
+
+    try std.testing.expectEqualStrings("Tagged", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: 'Tagged' })"), false));
+    try std.testing.expectEqualStrings("named", try Probe.zigName(internal, context, try Probe.encoded(internal, "(function named() {})"), false));
+    try std.testing.expectEqualStrings("max", try Probe.zigName(internal, context, try Probe.encoded(internal, "Math.max"), false));
+    try std.testing.expectEqualStrings("fallback", try Probe.zigName(internal, context, try Probe.encoded(internal, "(() => { function fallback() {} fallback[Symbol.toStringTag] = 1; return fallback; })()"), false));
+    try std.testing.expectEqualStrings("", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ name: 'spoofed' })"), false));
+
+    const tagged_getter = try Probe.encoded(internal, "globalThis.__name_tag_gets_225 = 0; ({ get [Symbol.toStringTag]() { __name_tag_gets_225++; return 'GetterTag'; } })");
+    try std.testing.expectEqualStrings("GetterTag", try Probe.zigName(internal, context, tagged_getter, false));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__name_tag_gets_225")).asNum());
+
+    try std.testing.expectEqualStrings("Array", try Probe.zigName(internal, context, try Probe.encoded(internal, "[]"), true));
+    try std.testing.expectEqualStrings("Widget", try Probe.zigName(internal, context, try Probe.encoded(internal, "new (class Widget {})"), true));
+    try std.testing.expectEqualStrings("named", try Probe.zigName(internal, context, try Probe.encoded(internal, "(function named() {})"), true));
+    try std.testing.expectEqualStrings("DirectTag", try Probe.zigName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: 'DirectTag' })"), true));
+    const pure_tag = try Probe.encoded(internal, "globalThis.__class_tag_gets_225 = 0; Object.defineProperty({}, Symbol.toStringTag, { get() { __class_tag_gets_225++; return 'Wrong'; } })");
+    try std.testing.expectEqualStrings("Object", try Probe.zigName(internal, context, pure_tag, true));
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__class_tag_gets_225")).asNum());
+
+    try std.testing.expectEqualStrings("Shown", try Probe.bunName(internal, context, try Probe.encoded(internal, "(() => { function original() {} original.displayName = 'Shown'; return original; })()")));
+    try std.testing.expectEqualStrings("名字😀", try Probe.bunName(internal, context, try Probe.encoded(internal, "({ [Symbol.toStringTag]: '名字😀' })")));
+    try std.testing.expectEqualStrings("", try Probe.bunName(internal, context, try Probe.encoded(internal, "({ name: 'spoofed' })")));
+
+    const shared_function = try Probe.encoded(internal, "(function sharedName() {})");
+    try std.testing.expectEqualStrings("sharedName", try Probe.zigName(internal, sibling, shared_function, false));
+    try std.testing.expectEqualStrings("sharedName", try Probe.bunName(internal, sibling, shared_function));
+
+    var abrupt_output = PrivateZigString{ .tagged_ptr = 0x225, .len = 225 };
+    JSC__JSValue__getNameProperty(try Probe.encoded(internal, "({ get [Symbol.toStringTag]() { throw 2251; } })"), context, &abrupt_output);
+    try std.testing.expectEqual(@as(usize, 0x225), abrupt_output.tagged_ptr);
+    try std.testing.expectEqual(@as(usize, 225), abrupt_output.len);
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2251), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    var abrupt_bun = PrivateBunString.dead();
+    JSC__JSValue__getName(try Probe.encoded(internal, "({ get [Symbol.toStringTag]() { throw 2252; } })"), context, &abrupt_bun);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt_bun.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(2252), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    var foreign_output = PrivateZigString{ .tagged_ptr = 0x225, .len = 225 };
+    JSC__JSValue__getClassName(privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({})")), context, &foreign_output);
+    try std.testing.expectEqual(@as(usize, 0x225), foreign_output.tagged_ptr);
+    try std.testing.expectEqual(@as(usize, 225), foreign_output.len);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const blocked = try Probe.encoded(internal, "(function blocked() {})");
+    var blocked_output = PrivateZigString{ .tagged_ptr = 0x225, .len = 225 };
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(225));
+    JSC__JSValue__getNameProperty(blocked, context, &blocked_output);
+    try std.testing.expectEqual(@as(usize, 0x225), blocked_output.tagged_ptr);
+    try std.testing.expectEqual(@as(usize, 225), blocked_output.len);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(225), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private VM entry-state query tracks nested and sibling interpreters" {

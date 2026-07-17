@@ -231,6 +231,10 @@ extern "c" fn JSC__JSFunction__getSourceCode(EncodedValue, *ZigString) bool;
 extern "c" fn JSC__JSFunction__optimizeSoon(EncodedValue) void;
 extern "c" fn JSC__JSValue__getLengthIfPropertyExistsInternal(EncodedValue, JSContextRef) f64;
 extern "c" fn JSC__JSValue__getIfPropertyExistsFromPath(EncodedValue, JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__getClassInfoName(EncodedValue, *[*:0]const u8, *usize) bool;
+extern "c" fn JSC__JSValue__getClassName(EncodedValue, JSContextRef, *ZigString) void;
+extern "c" fn JSC__JSValue__getNameProperty(EncodedValue, JSContextRef, *ZigString) void;
+extern "c" fn JSC__JSValue__getName(EncodedValue, JSContextRef, *BunString) void;
 extern "c" fn JSC__jsTypeStringForValue(JSContextRef, EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSString__eql(?*anyopaque, JSContextRef, ?*anyopaque) bool;
 extern "c" fn JSC__JSString__is8Bit(?*anyopaque) bool;
@@ -1106,6 +1110,29 @@ pub fn main() void {
     const path_exception = JSGlobalObject__tryTakeException(context);
     if (JSC__Exception__asJSValue(path_exception.cellPointer()) != EncodedValue.fromInt32(224))
         fail("private property-path traversal changed thrown identity");
+
+    var class_info_pointer: [*:0]const u8 = "untouched";
+    var class_info_length: usize = 225;
+    if (!JSC__JSValue__getClassInfoName(evaluate(context, "new Uint16Array(1)"), &class_info_pointer, &class_info_length) or
+        !std.mem.eql(u8, class_info_pointer[0..class_info_length], "Uint16Array") or
+        JSC__JSValue__getClassInfoName(EncodedValue.fromInt32(1), &class_info_pointer, &class_info_length))
+        fail("private static class-info name mismatch");
+
+    var projected_name = ZigString{ .tagged_ptr = 0x225, .len = 225 };
+    JSC__JSValue__getNameProperty(evaluate(context, "({ [Symbol.toStringTag]: 'Tagged225' })"), context, &projected_name);
+    if (!JSC__JSValue__isStrictEqual(ZigString__toValueGC(&projected_name, context), evaluate(context, "'Tagged225'"), context))
+        fail("private name-property projection mismatch");
+    projected_name = .{ .tagged_ptr = 0x225, .len = 225 };
+    JSC__JSValue__getClassName(evaluate(context, "new (class Fixture225 {})"), context, &projected_name);
+    if (!JSC__JSValue__isStrictEqual(ZigString__toValueGC(&projected_name, context), evaluate(context, "'Fixture225'"), context))
+        fail("private calculated class-name projection mismatch");
+
+    var owned_display_name = BunString{ .tag = .dead, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+    JSC__JSValue__getName(evaluate(context, "({ [Symbol.toStringTag]: '名字😀' })"), context, &owned_display_name);
+    if (owned_display_name.tag != .wtf_string_impl or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &owned_display_name), evaluate(context, "'名字😀'"), context))
+        fail("private owned display-name projection mismatch");
+    Bun__WTFStringImpl__deref(owned_display_name.value.wtf_string_impl);
 
     StringBuilder__init(&string_builder);
     StringBuilder__appendInt(&string_builder, std.math.minInt(i32));
@@ -3153,5 +3180,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 205/205 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 209/209 symbols linked; runtime matrix passed\n", .{});
 }

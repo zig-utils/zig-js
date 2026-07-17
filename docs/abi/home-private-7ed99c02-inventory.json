@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 221,
-      "pending": 225
+      "implemented": 225,
+      "pending": 221
     }
   },
   "declarations": [
@@ -1991,10 +1991,10 @@
       "line": 2332,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getClassInfoName(value: JSValue, out: *[*:0]const u8, len: *usize) bool;",
       "declaration_sha256": "c3f7dfeefef1a03e5b3deac5cda466db93fb46046b583a727b2c43de93a6a834",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getClassName",
@@ -2002,10 +2002,10 @@
       "line": 1136,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getClassName(this: JSValue, global: *JSGlobalObject, ret: *ZigString) void;",
       "declaration_sha256": "a552221d65591c44bb60c62652abdf7bd3ee61627f68afea261849a2a4b503e9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getDirectIndex",
@@ -2068,10 +2068,10 @@
       "line": 1129,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getName(jsc.JSValue, *jsc.JSGlobalObject, *bun.String) void;",
       "declaration_sha256": "9672ecb0e163266845388bb1f06ca0a13063117d13a8858edd057bffafbbf3a8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getNameProperty",
@@ -2079,10 +2079,10 @@
       "line": 1120,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__getNameProperty(this: JSValue, global: *JSGlobalObject, ret: *ZigString) void;",
       "declaration_sha256": "9c1f0cba113825b308805ba26d2784fce245a2ad5e173d38fdf3df1b9b1eef27",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__getOwn",

@@ -16577,6 +16577,13 @@ fn symbolToStringTagKey(self: *Interpreter) ?[]const u8 {
     return tt.asObj().symbolKey();
 }
 
+/// Internal storage key for the VM-wide well-known `Symbol.toStringTag`.
+/// Private embedding shims use this to reproduce JSC PropertyName lookups
+/// without consulting the mutable public `Symbol` binding a second time.
+pub fn objectToStringTagKey(self: *Interpreter) ?[]const u8 {
+    return symbolToStringTagKey(self);
+}
+
 /// `Error.isError(v)` — true iff `v` is an object with [[ErrorData]], looking
 /// through a Proxy to its target (and false for a revoked proxy).
 fn errorIsErrorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
