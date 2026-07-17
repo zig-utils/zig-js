@@ -30899,6 +30899,7 @@ fn installTypedArrays(env: *Environment, rs: *Shape) EvalError!void {
     try installCrypto(env, rs, object_proto);
     try installURLSearchParams(env, rs, object_proto);
     try installURL(env, rs, object_proto);
+    try installProcess(env, rs, object_proto);
     try installEventTarget(env, rs, object_proto);
     try installAbort(env, rs, object_proto);
     try installHeaders(env, rs, object_proto);
@@ -40932,6 +40933,194 @@ fn urlCanParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     return Value.boolVal((try urlParse(self, input, base)) != null);
 }
 
+// ===== process EventEmitter =========================================
+// Bun's private process/rejection ABI dispatches through the realm's process
+// object. Keep the listener graph in hidden JS-owned slots so callbacks remain
+// precise-GC roots and every realm gets an isolated emitter. Listener records
+// contain the normalized event key, callback, and once flag.
+fn processIsProcess(v: Value) bool {
+    return v.isObject() and evBool(v.asObj(), "#processBrand\x00runtime");
+}
+
+fn processListeners(self: *Interpreter, process_obj: *value.Object) EvalError!*value.Object {
+    if (process_obj.getOwn("#processListeners\x00runtime")) |v| if (v.isObject()) return v.asObj();
+    const listeners = (try self.newArray()).asObj();
+    try process_obj.setOwn(self.arena, self.root_shape, "#processListeners\x00runtime", Value.obj(listeners));
+    return listeners;
+}
+
+fn processEventKey(self: *Interpreter, event: Value) EvalError!Value {
+    return Value.strOwned(self.arena, try self.arena.dupe(u8, try self.keyOf(event)));
+}
+
+fn processListenerMatches(rec: Value, event_key: Value, listener: ?Value) bool {
+    if (!rec.isObject()) return false;
+    const ro = rec.asObj();
+    const rk = ro.getOwn("#processEvent\x00runtime") orelse return false;
+    if (!value.strictEquals(rk, event_key)) return false;
+    if (listener) |wanted| {
+        const callback = ro.getOwn("#processCallback\x00runtime") orelse return false;
+        return value.strictEquals(callback, wanted);
+    }
+    return true;
+}
+
+fn processRemoveRecord(self: *Interpreter, process_obj: *value.Object, record: *value.Object) EvalError!void {
+    const listeners = try processListeners(self, process_obj);
+    const fresh = (try self.newArray()).asObj();
+    for (try listeners.internalElementsSnapshot(self.arena)) |rec| {
+        if (rec.isObject() and rec.asObj() == record) continue;
+        try fresh.appendElement(self.arena, rec);
+    }
+    try process_obj.setOwn(self.arena, self.root_shape, "#processListeners\x00runtime", Value.obj(fresh));
+}
+
+fn processAddListener(self: *Interpreter, this: Value, args: []const Value, once: bool) value.HostError!Value {
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const event_key = try processEventKey(self, arg(args, 0));
+    const listener = arg(args, 1);
+    if (!listener.isObject() or !listener.asObj().isCallableObject())
+        return self.throwError("TypeError", "The \"listener\" argument must be a function");
+
+    const record = try gc_mod.allocObj(self.arena);
+    record.* = .{};
+    try record.setOwn(self.arena, self.root_shape, "#processEvent\x00runtime", event_key);
+    try record.setOwn(self.arena, self.root_shape, "#processCallback\x00runtime", listener);
+    try record.setOwn(self.arena, self.root_shape, "#processOnce\x00runtime", Value.boolVal(once));
+    try (try processListeners(self, this.asObj())).appendElement(self.arena, Value.obj(record));
+    return this;
+}
+
+fn processOnFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return processAddListener(self, this, args, false);
+}
+
+fn processOnceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return processAddListener(self, this, args, true);
+}
+
+fn processRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const event_key = try processEventKey(self, arg(args, 0));
+    const listener = arg(args, 1);
+    if (!listener.isObject() or !listener.asObj().isCallableObject())
+        return self.throwError("TypeError", "The \"listener\" argument must be a function");
+
+    const listeners = try processListeners(self, this.asObj());
+    const snapshot = try listeners.internalElementsSnapshot(self.arena);
+    var remove_index: ?usize = null;
+    var i = snapshot.len;
+    while (i > 0) {
+        i -= 1;
+        if (processListenerMatches(snapshot[i], event_key, listener)) {
+            remove_index = i;
+            break;
+        }
+    }
+    if (remove_index) |drop| {
+        const fresh = (try self.newArray()).asObj();
+        for (snapshot, 0..) |rec, index| if (index != drop) try fresh.appendElement(self.arena, rec);
+        try this.asObj().setOwn(self.arena, self.root_shape, "#processListeners\x00runtime", Value.obj(fresh));
+    }
+    return this;
+}
+
+fn processListenerCountFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const event_key = try processEventKey(self, arg(args, 0));
+    const listener: ?Value = if (args.len > 1) args[1] else null;
+    if (listener) |candidate| if (!candidate.isObject() or !candidate.asObj().isCallableObject())
+        return Value.num(0);
+    var count: usize = 0;
+    for (try (try processListeners(self, this.asObj())).internalElementsSnapshot(self.arena)) |rec| {
+        if (processListenerMatches(rec, event_key, listener)) count += 1;
+    }
+    return Value.num(@floatFromInt(count));
+}
+
+fn processEmitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const event_key = try processEventKey(self, arg(args, 0));
+    const snapshot = try (try processListeners(self, this.asObj())).internalElementsSnapshot(self.arena);
+    var emitted = false;
+    for (snapshot) |rec| {
+        if (!processListenerMatches(rec, event_key, null)) continue;
+        emitted = true;
+        const ro = rec.asObj();
+        if (evBool(ro, "#processOnce\x00runtime")) try processRemoveRecord(self, this.asObj(), ro);
+        const callback = ro.getOwn("#processCallback\x00runtime") orelse continue;
+        _ = try self.callValueWithThis(callback, if (args.len > 1) args[1..] else &.{}, this);
+    }
+    if (!emitted and event_key.isString() and std.mem.eql(u8, event_key.asStr(), "error")) {
+        const reason = arg(args, 1);
+        if (reason.isObject() and reason.asObj().behavior.is_error) {
+            self.exception = reason;
+            try self.notifyDebuggerException(false);
+            return error.Throw;
+        }
+        const err = try self.makeError("Error", "Unhandled 'error' event");
+        if (!reason.isUndefined()) try err.asObj().setOwn(self.arena, self.root_shape, "context", reason);
+        self.exception = err;
+        try self.notifyDebuggerException(false);
+        return error.Throw;
+    }
+    return Value.boolVal(emitted);
+}
+
+fn processSetCaptureCallbackFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const callback = arg(args, 0);
+    if (!callback.isNull() and (!callback.isObject() or !callback.asObj().isCallableObject()))
+        return self.throwError("TypeError", "The \"fn\" argument must be a function or null");
+    try this.asObj().setOwn(self.arena, self.root_shape, "#processCapture\x00runtime", callback);
+    return Value.undef();
+}
+
+fn processHasCaptureCallbackFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (!processIsProcess(this)) return self.throwError("TypeError", "process EventEmitter method called on an incompatible receiver");
+    const callback = this.asObj().getOwn("#processCapture\x00runtime") orelse Value.nul();
+    return Value.boolVal(callback.isObject() and callback.asObj().isCallableObject());
+}
+
+fn installProcess(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
+    const a = env.arena;
+    const process_obj = try gc_mod.allocObj(a);
+    process_obj.* = .{ .proto = object_proto };
+    try process_obj.setOwn(a, rs, "#processBrand\x00runtime", Value.boolVal(true));
+    try process_obj.setOwn(a, rs, "#processCapture\x00runtime", Value.nul());
+
+    try setNative(a, rs, process_obj, "on", 2, processOnFn);
+    try setNative(a, rs, process_obj, "once", 2, processOnceFn);
+    try setNative(a, rs, process_obj, "removeListener", 2, processRemoveListenerFn);
+    try setNative(a, rs, process_obj, "listenerCount", 1, processListenerCountFn);
+    try setNative(a, rs, process_obj, "emit", 1, processEmitFn);
+    try setNative(a, rs, process_obj, "setUncaughtExceptionCaptureCallback", 1, processSetCaptureCallbackFn);
+    try setNative(a, rs, process_obj, "hasUncaughtExceptionCaptureCallback", 0, processHasCaptureCallbackFn);
+
+    const on = process_obj.getOwn("on").?;
+    try process_obj.setOwn(a, rs, "addListener", on);
+    try process_obj.setAttr(a, "addListener", .{ .enumerable = false, .configurable = true, .writable = true });
+    const remove_listener = process_obj.getOwn("removeListener").?;
+    try process_obj.setOwn(a, rs, "off", remove_listener);
+    try process_obj.setAttr(a, "off", .{ .enumerable = false, .configurable = true, .writable = true });
+
+    if (env.get("Symbol")) |symbol| if (symbol.isObject()) {
+        if (symbol.asObj().getOwn("toStringTag")) |tag| if (tag.isObject() and tag.asObj().is_symbol) {
+            try process_obj.setOwn(a, rs, tag.asObj().symbolKey(), Value.str("process"));
+            try process_obj.setAttr(a, tag.asObj().symbolKey(), .{ .writable = false, .enumerable = false, .configurable = true });
+        };
+    };
+    try env.put("process", Value.obj(process_obj));
+}
+
 // ===== Event / EventTarget (DOM Events, tree-less flat model) =========
 // An Event carries its state in hidden slots: \x00Et type, \x00Eb/Ec/Eo bubbles/
 // cancelable/composed, \x00Ed defaultPrevented, \x00Esp/Esi stop(-immediate)
@@ -44205,6 +44394,65 @@ test "interpreter evaluates arithmetic with precedence" {
     defer arena.deinit();
     const v = try evalSource(arena.allocator(), "1 + 2 * 3");
     try std.testing.expectEqual(@as(f64, 7), v.asNum());
+}
+
+test "process EventEmitter preserves Node listener and realm semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let log = "";
+        \\function a1(v) { log += "a" + v; process.off("work", b1); process.on("work", c1); }
+        \\function b1(v) { log += "b" + v; }
+        \\function c1(v) { log += "c" + v; }
+        \\let aliases = process.on === process.addListener && process.off === process.removeListener;
+        \\let hidden = Object.getOwnPropertyNames(process).every(function (key) { return key.indexOf("processBrand") < 0 && key.indexOf("processListeners") < 0; });
+        \\let chain = process.on("work", a1) === process;
+        \\process.on("work", b1).on("work", b1);
+        \\let duplicateCount = process.listenerCount("work", b1) === 2;
+        \\let first = process.emit("work", 1);
+        \\let newestRemoved = process.listenerCount("work", b1) === 1;
+        \\let second = process.emit("work", 2);
+        \\let snapshotOrder = log === "a1b1b1a2b2c2";
+        \\let nested = 0;
+        \\process.once("nested", function () { nested++; process.emit("nested"); });
+        \\process.emit("nested");
+        \\let onceBeforeCall = nested === 1 && process.listenerCount("nested") === 0;
+        \\let receiver = false;
+        \\process.once("args", function (x, y) { receiver = this === process && x === 3 && y === 4; });
+        \\process.emit("args", 3, 4);
+        \\aliases && hidden && chain && duplicateCount && newestRemoved && first && second && snapshotOrder && onceBeforeCall && receiver
+    )).asBool());
+
+    try std.testing.expect((try evalSource(a,
+        \\let reached = false;
+        \\process.on("throw", function () { throw 42; });
+        \\process.on("throw", function () { reached = true; });
+        \\let propagated = false;
+        \\try { process.emit("throw"); } catch (e) { propagated = e === 42; }
+        \\let capture = function () {};
+        \\let before = !process.hasUncaughtExceptionCaptureCallback();
+        \\process.setUncaughtExceptionCaptureCallback(capture);
+        \\let during = process.hasUncaughtExceptionCaptureCallback();
+        \\process.setUncaughtExceptionCaptureCallback(null);
+        \\let after = !process.hasUncaughtExceptionCaptureCallback();
+        \\let symbol = Symbol("event");
+        \\let symbolSeen = false;
+        \\process.on(symbol, function () { symbolSeen = true; });
+        \\let symbolIsolated = process.emit(symbol) && !process.emit(Symbol("event"));
+        \\let alien = $262.createRealm().global;
+        \\let realmIsolated = alien.process !== process && alien.process.listenerCount("throw") === 0;
+        \\propagated && !reached && before && during && after && symbolSeen && symbolIsolated && realmIsolated
+    )).asBool());
+
+    try std.testing.expect((try evalSource(a,
+        \\let sameError = new TypeError("boom");
+        \\let errorPropagated = false;
+        \\try { process.emit("error", sameError); } catch (e) { errorPropagated = e === sameError; }
+        \\let wrapped = false;
+        \\try { process.emit("error", 9); } catch (e) { wrapped = e instanceof Error && e.context === 9; }
+        \\errorPropagated && wrapped
+    )).asBool());
 }
 
 test "interpreter concatenates strings" {
