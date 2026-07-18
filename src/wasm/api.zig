@@ -24,16 +24,94 @@ const Shape = shape.Shape;
 const ErrorDescriptor = struct { name: []const u8, proto: *Object };
 const ModuleDescriptor = struct { proto: *Object, compile_error_proto: *Object };
 const MemoryDescriptor = struct { proto: *Object };
+const TableDescriptor = struct { proto: *Object };
 const GlobalDescriptor = struct { proto: *Object };
+const InstanceDescriptor = struct {
+    proto: *Object,
+    function_proto: *Object,
+    memory_proto: *Object,
+    table_proto: *Object,
+    global_proto: *Object,
+    link_error_proto: *Object,
+    runtime_error_proto: *Object,
+};
 
 const MemoryOwner = struct {
     store: *context.Context,
     mem: *exec.MemoryInst,
     wrapper: *Object,
+    owns_native: bool = true,
+
+    fn deinit(self: *MemoryOwner) void {
+        if (self.mem.on_grow_ctx == @as(?*anyopaque, @ptrCast(self))) {
+            self.mem.on_grow = null;
+            self.mem.on_grow_ctx = null;
+        }
+        if (self.owns_native) exec.destroyMemory(self.store.gpa, self.mem);
+        self.store.gpa.destroy(self);
+    }
 };
 
 const GlobalOwner = struct {
+    store: *context.Context,
     glob: *exec.GlobalInst,
+    owns_native: bool = true,
+
+    fn deinit(self: *GlobalOwner) void {
+        if (self.owns_native) exec.destroyGlobal(self.store.gpa, self.glob);
+        self.store.gpa.destroy(self);
+    }
+};
+
+const TableOwner = struct {
+    store: *context.Context,
+    table: *exec.TableInst,
+    wrapper: *Object,
+    owns_native: bool = true,
+    lock: std.atomic.Mutex = .unlocked,
+    refs: []std.atomic.Value(u64),
+    retired_refs: std.ArrayListUnmanaged([]std.atomic.Value(u64)) = .empty,
+
+    fn lockOwner(self: *TableOwner) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn unlockOwner(self: *TableOwner) void {
+        self.lock.unlock();
+    }
+
+    fn deinit(self: *TableOwner) void {
+        for (self.retired_refs.items) |refs| self.store.gpa.free(refs);
+        self.retired_refs.deinit(self.store.gpa);
+        self.store.gpa.free(self.refs);
+        if (self.owns_native) exec.destroyTable(self.store.gpa, self.table);
+        self.store.gpa.destroy(self);
+    }
+};
+
+const FunctionOwner = struct {
+    store: *context.Context,
+    func: *exec.FuncInst,
+    function_type: types.FuncType,
+    runtime_error_proto: *Object,
+};
+
+const JsImportBridge = struct {
+    store: *context.Context,
+    callable: Value,
+    function_type: types.FuncType,
+};
+
+const InstanceOwner = struct {
+    store: *context.Context,
+    inst: *exec.Instance,
+    bridges: []JsImportBridge,
+
+    fn deinit(self: *InstanceOwner) void {
+        exec.destroyInstance(self.store.gpa, self.inst);
+        self.store.gpa.free(self.bridges);
+        self.store.gpa.destroy(self);
+    }
 };
 
 fn setData(a: std.mem.Allocator, rs: *Shape, obj: *Object, name: []const u8, v: Value, attrs: value.PropAttr) !void {
@@ -352,6 +430,128 @@ fn memoryGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     return Value.num(@floatFromInt(result));
 }
 
+const TableRef = struct {
+    value: Value,
+    func: ?*exec.FuncInst,
+};
+
+fn tableRefFromValue(self: *Interpreter, store: *context.Context, input: Value) value.HostError!TableRef {
+    if (input.isNull()) return .{ .value = Value.nul(), .func = null };
+    const object = languageObject(input) orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
+    const state = object.wasmFunction() orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
+    const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
+    if (owner.store != store) return self.throwError("TypeError", "WebAssembly function belongs to a different store");
+    return .{ .value = input, .func = owner.func };
+}
+
+fn tableFromThis(self: *Interpreter, this: Value, operation: []const u8) value.HostError!*TableOwner {
+    const object = languageObject(this) orelse return self.throwError("TypeError", operation);
+    const state = object.wasmTable() orelse return self.throwError("TypeError", operation);
+    return @ptrCast(@alignCast(state.table orelse return self.throwError("TypeError", operation)));
+}
+
+fn allocateTableRefs(store: *context.Context, len: usize, fill: Value) value.HostError![]std.atomic.Value(u64) {
+    const refs = try store.gpa.alloc(std.atomic.Value(u64), len);
+    for (refs) |*ref| ref.* = .init(fill.bits);
+    return refs;
+}
+
+fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const native: *TableDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Table must be called with new");
+    const descriptor = try requireDescriptor(self, args, "WebAssembly.Table requires a descriptor object");
+    const element = try self.toStringV(try self.getProperty(Value.obj(descriptor), "element"));
+    if (!std.mem.eql(u8, element, "anyfunc")) return self.throwError("TypeError", "WebAssembly.Table MVP element type must be anyfunc");
+    const raw_initial = try self.getProperty(Value.obj(descriptor), "initial");
+    if (raw_initial.isUndefined()) return self.throwError("TypeError", "WebAssembly.Table descriptor requires initial");
+    const initial = try toIndexU32(self, raw_initial, std.math.maxInt(u32), "WebAssembly.Table initial is out of range");
+    const maximum = try optionalMaximum(self, descriptor, initial, std.math.maxInt(u32), "WebAssembly.Table maximum is out of range");
+    const proto = try constructedPrototype(self, native.proto);
+    const store = try storeFor(self);
+    const fill = try tableRefFromValue(self, store, if (args.len > 1) args[1] else Value.nul());
+
+    const table = try exec.createTable(store.gpa, initial, maximum);
+    errdefer exec.destroyTable(store.gpa, table);
+    if (fill.func != null) @memset(table.elems, fill.func);
+    const refs = try allocateTableRefs(store, initial, fill.value);
+    errdefer store.gpa.free(refs);
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = proto };
+    const owner = try store.gpa.create(TableOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .table = table, .wrapper = object, .refs = refs };
+    const state = try object.wasmTableState(self.arena);
+    state.table = @ptrCast(owner);
+    state.refs = refs;
+    try store.wasm_registry.append(store.gpa, .{ .table = @ptrCast(owner) });
+    if (fill.value.isObject()) gc.barrierValueFrom(object, fill.value);
+    return Value.obj(object);
+}
+
+fn tableLengthGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.length getter requires a Table");
+    owner.lockOwner();
+    defer owner.unlockOwner();
+    return Value.num(@floatFromInt(owner.refs.len));
+}
+
+fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.get requires a Table");
+    const index = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table index is out of range");
+    owner.lockOwner();
+    defer owner.unlockOwner();
+    if (index >= owner.refs.len) return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
+    return .{ .bits = owner.refs[index].load(.acquire) };
+}
+
+fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.set requires a Table");
+    const index = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table index is out of range");
+    owner.lockOwner();
+    const in_bounds = index < owner.refs.len;
+    owner.unlockOwner();
+    if (!in_bounds) return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
+    const replacement = try tableRefFromValue(self, owner.store, if (args.len > 1) args[1] else Value.nul());
+    owner.lockOwner();
+    defer owner.unlockOwner();
+    owner.table.lockTable();
+    owner.table.elems[index] = replacement.func;
+    owner.table.unlockTable();
+    owner.refs[index].store(replacement.value.bits, .release);
+    gc.barrierValueFrom(owner.wrapper, replacement.value);
+    return Value.undef();
+}
+
+fn tableGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.grow requires a Table");
+    const delta = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table grow delta is out of range");
+    const fill = try tableRefFromValue(self, owner.store, if (args.len > 1) args[1] else Value.nul());
+    owner.lockOwner();
+    defer owner.unlockOwner();
+    const old_len: u32 = @intCast(owner.refs.len);
+    const limit = owner.table.limits.max orelse std.math.maxInt(u32);
+    if (delta > limit - old_len)
+        return self.throwError("RangeError", "WebAssembly.Table could not grow");
+    if (delta == 0) return Value.num(@floatFromInt(old_len));
+
+    const fresh = try allocateTableRefs(owner.store, @as(usize, old_len) + delta, fill.value);
+    errdefer owner.store.gpa.free(fresh);
+    for (owner.refs, 0..) |*old, i| fresh[i].store(old.load(.acquire), .monotonic);
+    try owner.retired_refs.ensureUnusedCapacity(owner.store.gpa, 1);
+    if (exec.tableGrowWith(owner.table, delta, fill.func) < 0)
+        return self.throwError("RangeError", "WebAssembly.Table could not grow");
+    owner.retired_refs.appendAssumeCapacity(owner.refs);
+    owner.refs = fresh;
+    owner.wrapper.setWasmTableRefs(self.arena, fresh) catch unreachable;
+    gc.barrierValueFrom(owner.wrapper, fill.value);
+    return Value.num(@floatFromInt(old_len));
+}
+
 fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostError!types.ValType {
     const raw = try self.getProperty(Value.obj(descriptor), "value");
     const name = try self.toStringV(raw);
@@ -376,6 +576,52 @@ fn coerceGlobalBits(self: *Interpreter, kind: types.ValType, input: Value) value
         .f64 => @bitCast(try self.toNumberV(input)),
         .funcref => unreachable,
     };
+}
+
+fn wasmBitsToJs(self: *Interpreter, kind: types.ValType, bits: u64) value.HostError!Value {
+    return switch (kind) {
+        .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(bits)))))),
+        .i64 => try self.makeBigInt(@as(i64, @bitCast(bits))),
+        .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
+        .f64 => Value.num(@bitCast(bits)),
+        .funcref => self.throwError("TypeError", "funcref cannot cross this MVP function boundary"),
+    };
+}
+
+fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Diagnostic) error{ Trap, Host }!void {
+    const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
+    const self: *Interpreter = @ptrCast(@alignCast(bridge.store.wasm_active_interp orelse return error.Host));
+    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
+    defer bridge.store.gpa.free(js_args);
+    for (args, bridge.function_type.params, 0..) |bits, kind, i|
+        js_args[i] = wasmBitsToJs(self, kind, bits) catch return error.Host;
+    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch return error.Host;
+    if (bridge.function_type.results.len > 0)
+        results[0] = coerceGlobalBits(self, bridge.function_type.results[0], result) catch return error.Host;
+}
+
+fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const function_state = self.active_native.?.wasmFunction() orelse return self.throwError("TypeError", "WebAssembly function is unavailable");
+    const owner: *FunctionOwner = @ptrCast(@alignCast(function_state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
+    const raw_args = try owner.store.gpa.alloc(u64, owner.function_type.params.len);
+    defer owner.store.gpa.free(raw_args);
+    const raw_results = try owner.store.gpa.alloc(u64, owner.function_type.results.len);
+    defer owner.store.gpa.free(raw_results);
+    for (owner.function_type.params, 0..) |kind, i|
+        raw_args[i] = try coerceGlobalBits(self, kind, if (i < args.len) args[i] else Value.undef());
+
+    var diag: types.Diagnostic = .{};
+    const previous = owner.store.wasm_active_interp;
+    owner.store.wasm_active_interp = @ptrCast(self);
+    defer owner.store.wasm_active_interp = previous;
+    exec.callFuncInst(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
+        error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
+        error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    if (raw_results.len == 0) return Value.undef();
+    return wasmBitsToJs(self, owner.function_type.results[0], raw_results[0]);
 }
 
 fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value {
@@ -412,7 +658,7 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     errdefer exec.destroyGlobal(store.gpa, glob);
     const owner = try store.gpa.create(GlobalOwner);
     errdefer store.gpa.destroy(owner);
-    owner.* = .{ .glob = glob };
+    owner.* = .{ .store = store, .glob = glob };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
     const state = try object.wasmGlobalState(self.arena);
@@ -439,6 +685,352 @@ fn globalValueOf(ctx: *anyopaque, this: Value, _: []const Value) value.HostError
     return globalValue(self, (try globalFromThis(self, this, "WebAssembly.Global.prototype.valueOf requires a Global")).glob);
 }
 
+const ResolvedImports = struct {
+    store: *context.Context,
+    funcs: []exec.ImportFunc,
+    tables: []*exec.TableInst,
+    mems: []*exec.MemoryInst,
+    globals: []*exec.GlobalInst,
+    bridges: []JsImportBridge,
+    values: []Value,
+    table_values: []Value,
+    mem_values: []Value,
+    global_values: []Value,
+
+    fn deinitTemps(self: *ResolvedImports) void {
+        self.store.gpa.free(self.funcs);
+        self.store.gpa.free(self.tables);
+        self.store.gpa.free(self.mems);
+        self.store.gpa.free(self.globals);
+    }
+};
+
+fn throwWasmWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: *Object) value.HostError {
+    return self.throwErrorWithProto(name, message, proto);
+}
+
+fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Module, import_object: Value, link_proto: *Object) value.HostError!ResolvedImports {
+    if (module.imports.len > 0 and languageObject(import_object) == null)
+        return throwWasmWithProto(self, "LinkError", "WebAssembly.Instance requires an imports object", link_proto);
+    const funcs = try store.gpa.alloc(exec.ImportFunc, module.imported_funcs);
+    errdefer store.gpa.free(funcs);
+    const tables = try store.gpa.alloc(*exec.TableInst, module.imported_tables);
+    errdefer store.gpa.free(tables);
+    const mems = try store.gpa.alloc(*exec.MemoryInst, module.imported_mems);
+    errdefer store.gpa.free(mems);
+    const globals = try store.gpa.alloc(*exec.GlobalInst, module.imported_globals);
+    errdefer store.gpa.free(globals);
+    const bridges = try store.gpa.alloc(JsImportBridge, module.imported_funcs);
+    errdefer store.gpa.free(bridges);
+    const values = try self.arena.alloc(Value, module.imports.len);
+    const table_values = try self.arena.alloc(Value, module.imported_tables);
+    const mem_values = try self.arena.alloc(Value, module.imported_mems);
+    const global_values = try self.arena.alloc(Value, module.imported_globals);
+
+    var fi: usize = 0;
+    var ti: usize = 0;
+    var mi: usize = 0;
+    var gi: usize = 0;
+    for (module.imports, 0..) |entry, import_index| {
+        const namespace_value = try self.getProperty(import_object, entry.module);
+        const namespace = languageObject(namespace_value) orelse
+            return throwWasmWithProto(self, "LinkError", "WebAssembly import module is not an object", link_proto);
+        const imported = try self.getProperty(Value.obj(namespace), entry.name);
+        values[import_index] = imported;
+        switch (entry.desc) {
+            .func => |type_index| {
+                if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", link_proto);
+                bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index] };
+                funcs[fi] = .{ .ctx = @ptrCast(&bridges[fi]), .type = module.types[type_index], .call = jsImportCall };
+                fi += 1;
+            },
+            .table => {
+                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", link_proto);
+                const state = object.wasmTable() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", link_proto);
+                const owner: *TableOwner = @ptrCast(@alignCast(state.table orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is unavailable", link_proto)));
+                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly table import belongs to another store", link_proto);
+                tables[ti] = owner.table;
+                table_values[ti] = imported;
+                ti += 1;
+            },
+            .mem => {
+                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", link_proto);
+                const state = object.wasmMemory() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", link_proto);
+                const owner: *MemoryOwner = @ptrCast(@alignCast(state.mem orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is unavailable", link_proto)));
+                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly memory import belongs to another store", link_proto);
+                mems[mi] = owner.mem;
+                mem_values[mi] = imported;
+                mi += 1;
+            },
+            .global => {
+                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is not a Global", link_proto);
+                const state = object.wasmGlobal() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is not a Global", link_proto);
+                const owner: *GlobalOwner = @ptrCast(@alignCast(state.glob orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is unavailable", link_proto)));
+                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly global import belongs to another store", link_proto);
+                globals[gi] = owner.glob;
+                global_values[gi] = imported;
+                gi += 1;
+            },
+        }
+    }
+    return .{
+        .store = store,
+        .funcs = funcs,
+        .tables = tables,
+        .mems = mems,
+        .globals = globals,
+        .bridges = bridges,
+        .values = values,
+        .table_values = table_values,
+        .mem_values = mem_values,
+        .global_values = global_values,
+    };
+}
+
+fn functionValueFor(
+    self: *Interpreter,
+    descriptor: *InstanceDescriptor,
+    store: *context.Context,
+    instance_object: *Object,
+    inst: *exec.Instance,
+    cache: []Value,
+    index: u32,
+    display_name: []const u8,
+) value.HostError!Value {
+    if (!cache[index].isUndefined()) return cache[index];
+    const function_type = inst.module.funcType(index);
+    var function_name = display_name;
+    if (std.mem.eql(u8, display_name, "wasm-function")) for (inst.module.exports) |entry| {
+        if (entry.kind == .func and entry.index == index) {
+            function_name = entry.name;
+            break;
+        }
+    };
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .native = wasmExportCall, .proto = descriptor.function_proto };
+    try interpreter.installNativeProps(self.arena, self.root_shape, object, function_name, function_type.params.len);
+    const owner = try self.arena.create(FunctionOwner);
+    owner.* = .{
+        .store = store,
+        .func = inst.funcs[index],
+        .function_type = function_type,
+        .runtime_error_proto = descriptor.runtime_error_proto,
+    };
+    const state = try object.wasmFunctionState(self.arena);
+    state.func = @ptrCast(owner);
+    state.owner_obj = instance_object;
+    cache[index] = Value.obj(object);
+    return cache[index];
+}
+
+fn wrapDefinedMemory(self: *Interpreter, descriptor: *InstanceDescriptor, store: *context.Context, instance_object: *Object, mem: *exec.MemoryInst) value.HostError!Value {
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = descriptor.memory_proto };
+    const owner = try store.gpa.create(MemoryOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .mem = mem, .wrapper = object, .owns_native = false };
+    const buffer = try makeMemoryBuffer(self, store, mem.bytes);
+    const state = try object.wasmMemoryState(self.arena);
+    state.mem = @ptrCast(owner);
+    state.buffer_obj = buffer;
+    state.owner_obj = instance_object;
+    mem.on_grow = memoryDidGrow;
+    mem.on_grow_ctx = @ptrCast(owner);
+    store.wasm_registry.appendAssumeCapacity(.{ .memory = @ptrCast(owner) });
+    return Value.obj(object);
+}
+
+fn wrapDefinedGlobal(self: *Interpreter, descriptor: *InstanceDescriptor, store: *context.Context, instance_object: *Object, glob: *exec.GlobalInst) value.HostError!Value {
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = descriptor.global_proto };
+    const owner = try store.gpa.create(GlobalOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .glob = glob, .owns_native = false };
+    const state = try object.wasmGlobalState(self.arena);
+    state.glob = @ptrCast(owner);
+    state.owner_obj = instance_object;
+    store.wasm_registry.appendAssumeCapacity(.{ .global = @ptrCast(owner) });
+    return Value.obj(object);
+}
+
+fn wrapDefinedTable(
+    self: *Interpreter,
+    descriptor: *InstanceDescriptor,
+    store: *context.Context,
+    instance_object: *Object,
+    inst: *exec.Instance,
+    table: *exec.TableInst,
+    function_cache: []Value,
+) value.HostError!Value {
+    const refs = try allocateTableRefs(store, table.elems.len, Value.nul());
+    errdefer store.gpa.free(refs);
+    for (table.elems, 0..) |func, i| if (func) |entry| {
+        var func_index: ?u32 = null;
+        for (inst.funcs, 0..) |candidate, index| if (candidate == entry) {
+            func_index = @intCast(index);
+            break;
+        };
+        if (func_index) |index| {
+            const exported = try functionValueFor(self, descriptor, store, instance_object, inst, function_cache, index, "wasm-function");
+            refs[i].store(exported.bits, .monotonic);
+        }
+    };
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = descriptor.table_proto };
+    const owner = try store.gpa.create(TableOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .table = table, .wrapper = object, .owns_native = false, .refs = refs };
+    const state = try object.wasmTableState(self.arena);
+    state.table = @ptrCast(owner);
+    state.refs = refs;
+    state.owner_obj = instance_object;
+    store.wasm_registry.appendAssumeCapacity(.{ .table = @ptrCast(owner) });
+    return Value.obj(object);
+}
+
+fn syncImportedTables(
+    self: *Interpreter,
+    descriptor: *InstanceDescriptor,
+    store: *context.Context,
+    instance_object: *Object,
+    inst: *exec.Instance,
+    resolved: *ResolvedImports,
+    function_cache: []Value,
+) value.HostError!void {
+    for (resolved.table_values) |table_value| {
+        const table_object = table_value.asObj();
+        const owner: *TableOwner = @ptrCast(@alignCast(table_object.wasmTable().?.table.?));
+        owner.lockOwner();
+        const native_snapshot = store.gpa.alloc(?*exec.FuncInst, owner.table.elems.len) catch {
+            owner.unlockOwner();
+            return error.OutOfMemory;
+        };
+        owner.table.lockTable();
+        @memcpy(native_snapshot, owner.table.elems);
+        owner.table.unlockTable();
+        owner.unlockOwner();
+        defer store.gpa.free(native_snapshot);
+        for (native_snapshot, 0..) |maybe_func, element_index| {
+            const func = maybe_func orelse continue;
+            var function_index: ?u32 = null;
+            for (inst.funcs, 0..) |candidate, index| if (candidate == func) {
+                function_index = @intCast(index);
+                break;
+            };
+            const index = function_index orelse continue;
+            const function_value = try functionValueFor(self, descriptor, store, instance_object, inst, function_cache, index, "wasm-function");
+            owner.lockOwner();
+            owner.table.lockTable();
+            const still_current = element_index < owner.table.elems.len and owner.table.elems[element_index] == func;
+            owner.table.unlockTable();
+            if (still_current and element_index < owner.refs.len)
+                owner.refs[element_index].store(function_value.bits, .release);
+            owner.unlockOwner();
+            if (still_current) gc.barrierValueFrom(table_object, function_value);
+        }
+    }
+}
+
+fn instanceConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *InstanceDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Instance must be called with new");
+    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
+    const module_object = languageObject(args[0]) orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
+    const module: *types.Module = @ptrCast(@alignCast(module_object.wasmModule() orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module")));
+    const store = try storeFor(self);
+    var resolved = try resolveImports(self, store, module, if (args.len > 1) args[1] else Value.undef(), descriptor.link_error_proto);
+    defer resolved.deinitTemps();
+    var bridges_owned = false;
+    defer if (!bridges_owned) store.gpa.free(resolved.bridges);
+
+    var diag: types.Diagnostic = .{};
+    const previous = store.wasm_active_interp;
+    store.wasm_active_interp = @ptrCast(self);
+    const inst = exec.instantiate(store.gpa, module, .{
+        .funcs = resolved.funcs,
+        .tables = resolved.tables,
+        .mems = resolved.mems,
+        .globals = resolved.globals,
+    }, &diag) catch |err| {
+        store.wasm_active_interp = previous;
+        return switch (err) {
+            error.Link => throwWasmWithProto(self, "LinkError", diag.message(), descriptor.link_error_proto),
+            error.Trap => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
+            error.Host => if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    };
+    store.wasm_active_interp = previous;
+    var inst_transferred = false;
+    defer if (!inst_transferred) exec.destroyInstance(store.gpa, inst);
+    try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
+
+    const owner = try store.gpa.create(InstanceOwner);
+    var owner_registered = false;
+    defer if (!owner_registered) store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .inst = inst, .bridges = resolved.bridges };
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
+    const state = try object.wasmInstanceState(self.arena);
+    state.inst = @ptrCast(owner);
+    state.module_obj = module_object;
+    state.import_vals = resolved.values;
+    store.wasm_registry.appendAssumeCapacity(.{ .instance = @ptrCast(owner) });
+    owner_registered = true;
+    inst_transferred = true;
+    bridges_owned = true;
+
+    const function_cache = try self.arena.alloc(Value, module.totalFuncs());
+    const table_cache = try self.arena.alloc(Value, module.totalTables());
+    const memory_cache = try self.arena.alloc(Value, module.totalMems());
+    const global_cache = try self.arena.alloc(Value, module.totalGlobals());
+    @memset(function_cache, Value.undef());
+    @memset(table_cache, Value.undef());
+    @memset(memory_cache, Value.undef());
+    @memset(global_cache, Value.undef());
+    for (resolved.table_values, 0..) |entry, i| table_cache[i] = entry;
+    for (resolved.mem_values, 0..) |entry, i| memory_cache[i] = entry;
+    for (resolved.global_values, 0..) |entry, i| global_cache[i] = entry;
+    try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
+
+    const exports = try gc.allocObj(self.arena);
+    exports.* = .{ .proto = null };
+    for (module.exports) |entry| {
+        const exported = switch (entry.kind) {
+            .func => try functionValueFor(self, descriptor, store, object, inst, function_cache, entry.index, entry.name),
+            .table => blk: {
+                if (table_cache[entry.index].isUndefined())
+                    table_cache[entry.index] = try wrapDefinedTable(self, descriptor, store, object, inst, inst.tables[entry.index], function_cache);
+                break :blk table_cache[entry.index];
+            },
+            .mem => blk: {
+                if (memory_cache[entry.index].isUndefined())
+                    memory_cache[entry.index] = try wrapDefinedMemory(self, descriptor, store, object, inst.mems[entry.index]);
+                break :blk memory_cache[entry.index];
+            },
+            .global => blk: {
+                if (global_cache[entry.index].isUndefined())
+                    global_cache[entry.index] = try wrapDefinedGlobal(self, descriptor, store, object, inst.globals[entry.index]);
+                break :blk global_cache[entry.index];
+            },
+        };
+        try setData(self.arena, self.root_shape, exports, entry.name, exported, .{ .writable = false, .enumerable = true, .configurable = false });
+    }
+    exports.setExtensible(false);
+    state.exports_obj = exports;
+    gc.barrierCellFrom(object, exports);
+    return Value.obj(object);
+}
+
+fn instanceExportsGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const object = languageObject(this) orelse return self.throwError("TypeError", "WebAssembly.Instance.prototype.exports getter requires an Instance");
+    const state = object.wasmInstance() orelse return self.throwError("TypeError", "WebAssembly.Instance.prototype.exports getter requires an Instance");
+    _ = state.inst orelse return self.throwError("TypeError", "WebAssembly.Instance is unavailable");
+    return Value.obj(state.exports_obj orelse return self.throwError("TypeError", "WebAssembly.Instance exports are unavailable"));
+}
+
 pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     const object_ctor = env.get("Object").?.asObj();
     const object_proto = object_ctor.getOwn("prototype").?.asObj();
@@ -448,6 +1040,8 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     namespace.* = .{ .proto = object_proto };
 
     var compile_error_proto: *Object = undefined;
+    var link_error_proto: *Object = undefined;
+    var runtime_error_proto: *Object = undefined;
     for ([_][]const u8{ "CompileError", "LinkError", "RuntimeError" }) |name| {
         const pair = try constructorPair(env, rs, name, 1, errorConstructor, error_proto, function_proto);
         try setData(env.arena, rs, pair.proto, "name", try Value.strAlloc(env.arena, name), .{ .writable = true, .enumerable = false, .configurable = true });
@@ -457,6 +1051,8 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
         pair.ctor.private_data = descriptor;
         try setData(env.arena, rs, namespace, name, Value.obj(pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
         if (std.mem.eql(u8, name, "CompileError")) compile_error_proto = pair.proto;
+        if (std.mem.eql(u8, name, "LinkError")) link_error_proto = pair.proto;
+        if (std.mem.eql(u8, name, "RuntimeError")) runtime_error_proto = pair.proto;
     }
 
     const module_pair = try constructorPair(env, rs, "Module", 1, moduleConstructor, object_proto, function_proto);
@@ -476,6 +1072,16 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try installMethod(env.arena, rs, memory_pair.proto, "grow", 1, memoryGrow);
     try setData(env.arena, rs, namespace, "Memory", Value.obj(memory_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
+    const table_pair = try constructorPair(env, rs, "Table", 1, tableConstructor, object_proto, function_proto);
+    const table_descriptor = try env.arena.create(TableDescriptor);
+    table_descriptor.* = .{ .proto = table_pair.proto };
+    table_pair.ctor.private_data = table_descriptor;
+    try installAccessor(env.arena, rs, table_pair.proto, "length", tableLengthGetter, null);
+    try installMethod(env.arena, rs, table_pair.proto, "get", 1, tableGet);
+    try installMethod(env.arena, rs, table_pair.proto, "set", 2, tableSet);
+    try installMethod(env.arena, rs, table_pair.proto, "grow", 1, tableGrow);
+    try setData(env.arena, rs, namespace, "Table", Value.obj(table_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
+
     const global_pair = try constructorPair(env, rs, "Global", 1, globalConstructor, object_proto, function_proto);
     const global_descriptor = try env.arena.create(GlobalDescriptor);
     global_descriptor.* = .{ .proto = global_pair.proto };
@@ -483,6 +1089,21 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try installAccessor(env.arena, rs, global_pair.proto, "value", globalValueGetter, globalValueSetter);
     try installMethod(env.arena, rs, global_pair.proto, "valueOf", 0, globalValueOf);
     try setData(env.arena, rs, namespace, "Global", Value.obj(global_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
+
+    const instance_pair = try constructorPair(env, rs, "Instance", 1, instanceConstructor, object_proto, function_proto);
+    const instance_descriptor = try env.arena.create(InstanceDescriptor);
+    instance_descriptor.* = .{
+        .proto = instance_pair.proto,
+        .function_proto = function_proto,
+        .memory_proto = memory_pair.proto,
+        .table_proto = table_pair.proto,
+        .global_proto = global_pair.proto,
+        .link_error_proto = link_error_proto,
+        .runtime_error_proto = runtime_error_proto,
+    };
+    instance_pair.ctor.private_data = instance_descriptor;
+    try installAccessor(env.arena, rs, instance_pair.proto, "exports", instanceExportsGetter, null);
+    try setData(env.arena, rs, namespace, "Instance", Value.obj(instance_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
     try installMethod(env.arena, rs, namespace, "validate", 1, validate);
 
@@ -492,7 +1113,9 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
             try setData(env.arena, rs, namespace, key, Value.str("WebAssembly"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, module_pair.proto, key, Value.str("WebAssembly.Module"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, memory_pair.proto, key, Value.str("WebAssembly.Memory"), .{ .writable = false, .enumerable = false, .configurable = true });
+            try setData(env.arena, rs, table_pair.proto, key, Value.str("WebAssembly.Table"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, global_pair.proto, key, Value.str("WebAssembly.Global"), .{ .writable = false, .enumerable = false, .configurable = true });
+            try setData(env.arena, rs, instance_pair.proto, key, Value.str("WebAssembly.Instance"), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
     try env.put("WebAssembly", Value.obj(namespace));
@@ -506,15 +1129,20 @@ pub fn teardownWasmStore(store: *context.Context) void {
             .module => |module_ptr| decode.destroyModule(store.gpa, @ptrCast(@alignCast(module_ptr))),
             .memory => |owner_ptr| {
                 const owner: *MemoryOwner = @ptrCast(@alignCast(owner_ptr));
-                exec.destroyMemory(store.gpa, owner.mem);
-                store.gpa.destroy(owner);
+                owner.deinit();
             },
             .global => |owner_ptr| {
                 const owner: *GlobalOwner = @ptrCast(@alignCast(owner_ptr));
-                exec.destroyGlobal(store.gpa, owner.glob);
-                store.gpa.destroy(owner);
+                owner.deinit();
             },
-            .instance, .table => {}, // implemented by the next store slice
+            .table => |owner_ptr| {
+                const owner: *TableOwner = @ptrCast(@alignCast(owner_ptr));
+                owner.deinit();
+            },
+            .instance => |owner_ptr| {
+                const owner: *InstanceOwner = @ptrCast(@alignCast(owner_ptr));
+                owner.deinit();
+            },
         }
     }
     store.wasm_registry.clearRetainingCapacity();
@@ -622,5 +1250,107 @@ test "wasm api Memory buffer survives precise GC and growth" {
         \\new Uint8Array(wasmMemoryRoot.buffer)[123] === 91;
     );
     try std.testing.expect(after.isBoolean() and after.asBool());
+    store.collectGarbage();
+}
+
+test "wasm api Table preserves null references across set and grow" {
+    const store = try context.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const table = new WebAssembly.Table({ element: 'anyfunc', initial: 2, maximum: 4 });
+        \\const first = table.length === 2 && table.get(0) === null && table.get(1) === null;
+        \\table.set(1, null);
+        \\const previous = table.grow(2, null);
+        \\let bounds = false, type = false, limit = false;
+        \\try { table.get(4); } catch (e) { bounds = e instanceof RangeError; }
+        \\try { table.set(0, function () {}); } catch (e) { type = e instanceof TypeError; }
+        \\try { table.grow(1); } catch (e) { limit = e instanceof RangeError && table.length === 4; }
+        \\class DerivedTable extends WebAssembly.Table {}
+        \\const derived = new DerivedTable({ element: 'anyfunc', initial: 0 });
+        \\first && previous === 2 && table.length === 4 && table.get(2) === null &&
+        \\bounds && type && limit && derived instanceof DerivedTable &&
+        \\Object.prototype.toString.call(table) === '[object WebAssembly.Table]';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+    store.collectGarbage();
+}
+
+test "wasm api Instance exports callable functions and preserves Table identity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const addBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+        \\const instance = new WebAssembly.Instance(new WebAssembly.Module(addBytes));
+        \\const add = instance.exports.add;
+        \\const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1, maximum: 2 });
+        \\table.set(0, add);
+        \\const previous = table.grow(1, add);
+        \\add(20, 22) === 42 && add.length === 2 && add.name === 'add' &&
+        \\table.get(0) === add && table.get(1) === add && previous === 1 &&
+        \\instance instanceof WebAssembly.Instance && Object.getPrototypeOf(instance.exports) === null &&
+        \\!Object.isExtensible(instance.exports) &&
+        \\Object.prototype.toString.call(instance) === '[object WebAssembly.Instance]';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+    store.collectGarbage();
+    const after_gc = try store.evaluate("instance.exports.add(40, 2) === 42 && table.get(0) === instance.exports.add");
+    try std.testing.expect(after_gc.isBoolean() and after_gc.asBool());
+}
+
+test "wasm api Instance links JS functions and preserves exceptions and import identity" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const importExportBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,14,1,3,101,110,118,6,97,110,115,119,101,114,0,0,7,10,1,6,97,110,115,119,101,114,0,0]);
+        \\const imported = function answer() { return 41; };
+        \\const linked = new WebAssembly.Instance(new WebAssembly.Module(importExportBytes), { env: { answer: imported } });
+        \\const memoryImportBytes = new Uint8Array([0,97,115,109,1,0,0,0,2,13,1,3,101,110,118,3,109,101,109,2,1,1,2,7,7,1,3,109,101,109,2,0]);
+        \\const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+        \\const memoryLinked = new WebAssembly.Instance(new WebAssembly.Module(memoryImportBytes), { env: { mem: memory } });
+        \\const tableElemBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,14,1,3,101,110,118,3,116,97,98,1,112,1,1,1,3,2,1,0,7,5,1,1,102,0,0,9,7,1,0,65,0,11,1,0,10,6,1,4,0,65,42,11]);
+        \\const importedTable = new WebAssembly.Table({ element: 'anyfunc', initial: 1, maximum: 1 });
+        \\const tableLinked = new WebAssembly.Instance(new WebAssembly.Module(tableElemBytes), { env: { tab: importedTable } });
+        \\const startBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,2,12,1,3,101,110,118,4,98,111,111,109,0,0,8,1,0]);
+        \\const marker = new Error('marker'); let same = false, link = false;
+        \\try { new WebAssembly.Instance(new WebAssembly.Module(startBytes), { env: { boom() { throw marker; } } }); } catch (e) { same = e === marker; }
+        \\try { new WebAssembly.Instance(new WebAssembly.Module(importExportBytes), { env: { answer: 1 } }); } catch (e) { link = e instanceof WebAssembly.LinkError; }
+        \\linked.exports.answer() === 41 && linked.exports.answer !== imported &&
+        \\memoryLinked.exports.mem === memory && importedTable.get(0) === tableLinked.exports.f &&
+        \\importedTable.get(0)() === 42 && same && link;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api exported traps become RuntimeError" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const trapBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,116,114,97,112,0,0,10,5,1,3,0,0,11]);
+        \\const trap = new WebAssembly.Instance(new WebAssembly.Module(trapBytes)).exports.trap;
+        \\let runtime = false;
+        \\try { trap(); } catch (e) { runtime = e instanceof WebAssembly.RuntimeError && e.message.includes('unreachable'); }
+        \\runtime;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api Instance wraps defined Memory Table and Global stores" {
+    const store = try context.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const memoryBytes = new Uint8Array([0,97,115,109,1,0,0,0,5,4,1,1,1,2,7,10,1,6,109,101,109,111,114,121,2,0]);
+        \\const tableBytes = new Uint8Array([0,97,115,109,1,0,0,0,4,5,1,112,1,1,2,7,5,1,1,116,1,0]);
+        \\const globalBytes = new Uint8Array([0,97,115,109,1,0,0,0,6,6,1,127,1,65,7,11,7,5,1,1,103,3,0]);
+        \\const memory = new WebAssembly.Instance(new WebAssembly.Module(memoryBytes)).exports.memory;
+        \\const table = new WebAssembly.Instance(new WebAssembly.Module(tableBytes)).exports.t;
+        \\const global = new WebAssembly.Instance(new WebAssembly.Module(globalBytes)).exports.g;
+        \\new Uint8Array(memory.buffer)[9] = 33;
+        \\const old = memory.buffer;
+        \\global.value = 9;
+        \\memory instanceof WebAssembly.Memory && memory.grow(1) === 1 && old.detached &&
+        \\new Uint8Array(memory.buffer)[9] === 33 && table instanceof WebAssembly.Table &&
+        \\table.length === 1 && table.get(0) === null && global instanceof WebAssembly.Global && global.value === 9;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
     store.collectGarbage();
 }

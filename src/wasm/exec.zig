@@ -55,6 +55,15 @@ pub const TableInst = struct {
     elems: []?*FuncInst,
     limits: types.Limits,
     gpa: Allocator,
+    lock: std.atomic.Mutex = .unlocked,
+
+    pub fn lockTable(self: *TableInst) void {
+        while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    pub fn unlockTable(self: *TableInst) void {
+        self.lock.unlock();
+    }
 };
 
 pub const GlobalInst = struct {
@@ -158,13 +167,22 @@ pub fn destroyTable(gpa: Allocator, tab: *TableInst) void {
 /// Grow by `delta` elements (null-initialized). Returns the previous
 /// element count, or -1 on failure.
 pub fn tableGrow(tab: *TableInst, delta: u32) i32 {
+    return tableGrowWith(tab, delta, null);
+}
+
+/// Grow and initialize new slots with `fill` while holding the table lock, so
+/// a concurrent indirect call observes either the old table or the complete
+/// grown table.
+pub fn tableGrowWith(tab: *TableInst, delta: u32, fill: ?*FuncInst) i32 {
+    tab.lockTable();
+    defer tab.unlockTable();
     const old: u32 = @intCast(tab.elems.len);
     if (delta == 0) return @intCast(old);
     const limit = tab.limits.max orelse std.math.maxInt(u32);
     if (old >= limit) return -1;
     if (delta > limit - old) return -1;
     tab.elems = tab.gpa.realloc(tab.elems, old + delta) catch return -1;
-    @memset(tab.elems[old..], null);
+    @memset(tab.elems[old..], fill);
     return @intCast(old);
 }
 
@@ -314,11 +332,14 @@ pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, d
     for (mod.elems) |e| {
         const tab = inst.tables[e.table];
         const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset)));
+        tab.lockTable();
         if (start + @as(u64, e.funcs.len) > tab.elems.len) {
+            tab.unlockTable();
             diag.set(types.Diagnostic.no_offset, "out of bounds table index", .{});
             return error.Link;
         }
         for (e.funcs, 0..) |fidx, j| tab.elems[@intCast(start + j)] = inst.funcs[fidx];
+        tab.unlockTable();
     }
 
     // 4. Data segments.
@@ -698,15 +719,19 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             .call_indirect => {
                 const i = popI32(s);
                 const tab = inst.tables[0];
-                if (i >= tab.elems.len) return s.trap("undefined element");
-                const target = tab.elems[i] orelse return s.trap("uninitialized element");
-                const actual: types.FuncType = switch (target.*) {
+                tab.lockTable();
+                const in_bounds = i < tab.elems.len;
+                const target = if (in_bounds) tab.elems[i] else null;
+                tab.unlockTable();
+                if (!in_bounds) return s.trap("undefined element");
+                const callable = target orelse return s.trap("uninitialized element");
+                const actual: types.FuncType = switch (callable.*) {
                     .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
                     .imported => |im| im.type,
                 };
                 if (!types.funcTypeEql(mod.types[instr.imm.idx], actual))
                     return s.trap("indirect call type mismatch");
-                try callFunc(s, target);
+                try callFunc(s, callable);
             },
             .drop => _ = pop(s),
             .select => {

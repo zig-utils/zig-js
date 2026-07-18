@@ -1016,9 +1016,9 @@ pub const ObjectRareState = union(ObjectRareTag) {
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
     wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
-    wasm_table: struct { table: ?*anyopaque = null, owner_obj: ?*Object = null },
+    wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
     wasm_global: struct { glob: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
-    wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.FuncInst
+    wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
 };
 
 /// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
@@ -1673,6 +1673,7 @@ pub const Object = struct {
     pub const WasmTraceSnapshot = struct {
         module_obj: ?*Object = null,
         import_vals: []const Value = &.{},
+        table_refs: []const std.atomic.Value(u64) = &.{},
         exports_obj: ?*Object = null,
         buffer_obj: ?*Object = null,
         owner_obj: ?*Object = null,
@@ -1741,7 +1742,7 @@ pub const Object = struct {
                 .buffer_obj = cold.rare.wasm_memory.buffer_obj,
                 .owner_obj = cold.rare.wasm_memory.owner_obj,
             },
-            .wasm_table => .{ .owner_obj = cold.rare.wasm_table.owner_obj },
+            .wasm_table => .{ .table_refs = cold.rare.wasm_table.refs, .owner_obj = cold.rare.wasm_table.owner_obj },
             .wasm_global => .{ .owner_obj = cold.rare.wasm_global.owner_obj },
             .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
             else => .{},
@@ -2047,6 +2048,13 @@ pub const Object = struct {
 
     pub fn wasmTableState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_table") {
         return self.ensureRare(fallback, .wasm_table, .{});
+    }
+
+    pub fn setWasmTableRefs(self: *Object, fallback: std.mem.Allocator, refs: []const std.atomic.Value(u64)) std.mem.Allocator.Error!void {
+        _ = try self.ensureRare(fallback, .wasm_table, .{});
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        self.coldState().?.rare.wasm_table.refs = refs;
     }
 
     pub inline fn wasmGlobal(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_global") {

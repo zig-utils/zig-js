@@ -193,6 +193,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // traced here.
     v.mark(cold.wasm.module_obj);
     for (cold.wasm.import_vals) |import_val| markValue(v, import_val);
+    for (cold.wasm.table_refs) |*ref| markValue(v, .{ .bits = @constCast(ref).load(.acquire) });
     v.mark(cold.wasm.exports_obj);
     v.mark(cold.wasm.buffer_obj);
     v.mark(cold.wasm.owner_obj);
