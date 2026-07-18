@@ -77,6 +77,11 @@ const MemoryDescriptor = struct { proto: *Object };
 const TableDescriptor = struct { proto: *Object };
 const GlobalDescriptor = struct { proto: *Object };
 const TagDescriptor = struct { proto: *Object };
+const ExceptionDescriptor = struct {
+    proto: *Object,
+    roots: *Object,
+    js_tag: *exec.TagInst,
+};
 const InstanceDescriptor = struct {
     proto: *Object,
     roots: *Object,
@@ -85,6 +90,7 @@ const InstanceDescriptor = struct {
     table_proto: *Object,
     global_proto: *Object,
     tag_proto: *Object,
+    exception_proto: *Object,
     link_error_proto: *Object,
     runtime_error_proto: *Object,
 };
@@ -1166,6 +1172,105 @@ fn tagType(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value
     return result;
 }
 
+fn exceptionFromThis(self: *Interpreter, this: Value, what: []const u8) value.HostError!*value.WasmException {
+    const object = languageObject(this) orelse return self.throwError("TypeError", what);
+    const state = object.wasmException() orelse return self.throwError("TypeError", what);
+    return state.exception orelse return self.throwError("TypeError", what);
+}
+
+fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *ExceptionDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Exception must be called with new");
+    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Exception requires a Tag");
+    const store = try storeFor(self);
+    const tag = try tagFromValue(self, args[0], store, "WebAssembly.Exception requires a Tag");
+    if (tag == descriptor.js_tag)
+        return self.throwError("TypeError", "WebAssembly.Exception cannot be constructed with WebAssembly.JSTag");
+    if (args.len < 2) return self.throwError("TypeError", "WebAssembly.Exception requires a payload sequence");
+    var payload_values: std.ArrayListUnmanaged(Value) = .empty;
+    try self.spreadInto(&payload_values, args[1]);
+    if (payload_values.items.len != tag.type.params.len)
+        return self.throwError("TypeError", "WebAssembly.Exception payload length does not match its Tag");
+
+    const temporary = try self.arena.alloc(exec.ValueSlot, tag.type.params.len);
+    var externref_count: usize = 0;
+    for (tag.type.params, payload_values.items, 0..) |kind, entry, index| {
+        temporary[index] = try jsToWasmSlot(self, store, kind, entry);
+        if (kind == .externref) externref_count += 1;
+    }
+    const payload = try store.gpa.dupe(exec.ValueSlot, temporary);
+    errdefer store.gpa.free(payload);
+    const externrefs = try store.gpa.alloc(Value, externref_count);
+    errdefer store.gpa.free(externrefs);
+    var externref_index: usize = 0;
+    for (payload) |slot| if (slot == .externref) {
+        externrefs[externref_index] = slot.externref;
+        externref_index += 1;
+    };
+    const exception = try store.gpa.create(value.WasmException);
+    errdefer store.gpa.destroy(exception);
+    exception.* = .{
+        .tag = @ptrCast(tag),
+        .payload = payload,
+        .externrefs = externrefs,
+        // JS-created records are owned directly by the Context registry. Mark
+        // them published so an exnref round-trip never links or frees them as
+        // an instance-created record.
+        .owner = @ptrCast(store),
+        .published = true,
+    };
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
+    const state = try object.wasmExceptionState(self.arena);
+    state.exception = exception;
+    state.payload_values = try self.arena.dupe(Value, payload_values.items);
+    exception.wrapper = object;
+    try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
+    store.appendWasmOwned(.{ .exception = @ptrCast(exception) }) catch |err| {
+        state.exception = null;
+        exception.wrapper = null;
+        exec.destroyExceptionRecord(store.gpa, exception);
+        return err;
+    };
+    return Value.obj(object);
+}
+
+fn exceptionIs(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const exception = try exceptionFromThis(self, this, "WebAssembly.Exception.prototype.is requires an Exception");
+    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Exception.prototype.is requires a Tag");
+    const tag = try tagFromValue(self, args[0], try storeFor(self), "WebAssembly.Exception.prototype.is requires a Tag");
+    return Value.boolVal(exception.tag == @as(*anyopaque, @ptrCast(tag)));
+}
+
+fn exceptionIndex(self: *Interpreter, input: Value) value.HostError!u32 {
+    const number = try self.toNumberV(input);
+    if (!std.math.isFinite(number) or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32))))
+        return self.throwError("TypeError", "WebAssembly.Exception argument index is out of range");
+    return @intFromFloat(@trunc(number));
+}
+
+fn exceptionGetArg(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const exception = try exceptionFromThis(self, this, "WebAssembly.Exception.prototype.getArg requires an Exception");
+    if (args.len < 2) return self.throwError("TypeError", "WebAssembly.Exception.prototype.getArg requires a Tag and index");
+    const tag = try tagFromValue(self, args[0], try storeFor(self), "WebAssembly.Exception.prototype.getArg requires a Tag");
+    if (exception.tag != @as(*anyopaque, @ptrCast(tag)))
+        return self.throwError("TypeError", "WebAssembly.Exception Tag does not match");
+    const index = try exceptionIndex(self, args[1]);
+    if (index >= exception.payload.len)
+        return self.throwError("RangeError", "WebAssembly.Exception argument index is out of bounds");
+    return wasmSlotToJs(self, tag.type.params[index], exception.payload[index], null);
+}
+
+fn exceptionStackGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    _ = try exceptionFromThis(self, this, "WebAssembly.Exception.prototype.stack getter requires an Exception");
+    // The proposal explicitly permits engines to decline traceStack requests.
+    return Value.undef();
+}
+
 const ResolvedImports = struct {
     store: *context.Context,
     funcs: []exec.ImportFunc,
@@ -1880,6 +1985,18 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     js_tag_state.tag = @ptrCast(js_tag_native);
     try setData(env.arena, rs, namespace, "JSTag", Value.obj(js_tag), .{ .writable = false, .enumerable = false, .configurable = false });
 
+    const exception_pair = try constructorPair(env, rs, "Exception", 1, exceptionConstructor, object_proto, function_proto);
+    const exception_roots = try gc.allocObj(env.arena);
+    exception_roots.* = .{};
+    try namespace.appendInternalElement(env.arena, Value.obj(exception_roots));
+    const exception_descriptor = try env.arena.create(ExceptionDescriptor);
+    exception_descriptor.* = .{ .proto = exception_pair.proto, .roots = exception_roots, .js_tag = js_tag_native };
+    exception_pair.ctor.private_data = exception_descriptor;
+    try installMethod(env.arena, rs, exception_pair.proto, "getArg", 2, exceptionGetArg);
+    try installMethod(env.arena, rs, exception_pair.proto, "is", 1, exceptionIs);
+    try installAccessor(env.arena, rs, exception_pair.proto, "stack", exceptionStackGetter, null);
+    try setData(env.arena, rs, namespace, "Exception", Value.obj(exception_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
+
     const instance_pair = try constructorPair(env, rs, "Instance", 1, instanceConstructor, object_proto, function_proto);
     const instance_roots = try gc.allocObj(env.arena);
     instance_roots.* = .{};
@@ -1893,6 +2010,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
         .table_proto = table_pair.proto,
         .global_proto = global_pair.proto,
         .tag_proto = tag_pair.proto,
+        .exception_proto = exception_pair.proto,
         .link_error_proto = link_error_proto,
         .runtime_error_proto = runtime_error_proto,
     };
@@ -1915,6 +2033,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
             try setData(env.arena, rs, table_pair.proto, key, Value.str("WebAssembly.Table"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, global_pair.proto, key, Value.str("WebAssembly.Global"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, tag_pair.proto, key, Value.str("WebAssembly.Tag"), .{ .writable = false, .enumerable = false, .configurable = true });
+            try setData(env.arena, rs, exception_pair.proto, key, Value.str("WebAssembly.Exception"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, instance_pair.proto, key, Value.str("WebAssembly.Instance"), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
@@ -1946,6 +2065,10 @@ pub fn teardownWasmStore(store: *context.Context) void {
                 const owner: *TagOwner = @ptrCast(@alignCast(owner_ptr));
                 owner.deinit();
             },
+            .exception => |exception_ptr| exec.destroyExceptionRecord(
+                store.gpa,
+                @ptrCast(@alignCast(exception_ptr)),
+            ),
             .table => |owner_ptr| {
                 const owner: *TableOwner = @ptrCast(@alignCast(owner_ptr));
                 owner.deinit();
@@ -2203,6 +2326,38 @@ test "wasm api constructs and links exception tags by identity" {
         \\  reflected.parameters.length === 1 && reflected.parameters[0] === 'i32' &&
         \\  WebAssembly.JSTag instanceof WebAssembly.Tag && WebAssembly.JSTag.type().parameters[0] === 'externref' &&
         \\  callError && brandError && linkError;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api constructs branded typed exceptions" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const marker = { value: 291 };
+        \\const tag = new WebAssembly.Tag({ parameters: ['i32', 'i64', 'f32', 'f64', 'externref'] });
+        \\const other = new WebAssembly.Tag({ parameters: ['i32', 'i64', 'f32', 'f64', 'externref'] });
+        \\const exception = new WebAssembly.Exception(tag, [4294967295, -1n, 1.337, NaN, marker], { traceStack: true });
+        \\let mismatch = false, bounds = false, invalidIndex = true, brand = false, jsTag = false, badPayload = false;
+        \\try { exception.getArg(other, 0); } catch (error) { mismatch = error instanceof TypeError; }
+        \\try { exception.getArg(tag, 5); } catch (error) { bounds = error instanceof RangeError; }
+        \\for (const index of [undefined, NaN, Infinity, -1, 4294967296]) {
+        \\  try { exception.getArg(tag, index); invalidIndex = false; } catch (error) { invalidIndex = invalidIndex && error instanceof TypeError; }
+        \\}
+        \\try { WebAssembly.Exception.prototype.is.call({}, tag); } catch (error) { brand = error instanceof TypeError; }
+        \\try { new WebAssembly.Exception(WebAssembly.JSTag, [{}]); } catch (error) { jsTag = error instanceof TypeError; }
+        \\try { new WebAssembly.Exception(tag, [1]); } catch (error) { badPayload = error instanceof TypeError; }
+        \\exception instanceof WebAssembly.Exception && Object.prototype.toString.call(exception) === '[object WebAssembly.Exception]' &&
+        \\  exception.is(tag) && !exception.is(other) && exception.getArg(tag, 0) === -1 &&
+        \\  exception.getArg(tag, 1) === -1n && exception.getArg(tag, 2) === Math.fround(1.337) &&
+        \\  Number.isNaN(exception.getArg(tag, 3)) && exception.getArg(tag, 4) === marker && exception.stack === undefined &&
+        \\  WebAssembly.Exception.length === 1 && WebAssembly.Exception.prototype.getArg.length === 2 &&
+        \\  WebAssembly.Exception.prototype.is.length === 1 && mismatch && bounds && invalidIndex && brand && jsTag && badPayload;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }

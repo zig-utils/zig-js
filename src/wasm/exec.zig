@@ -448,10 +448,14 @@ fn destroyExceptions(gpa: Allocator, inst: *Instance) void {
     while (raw != 0) {
         const exception: *js_value.WasmException = @ptrFromInt(raw);
         raw = if (exception.next) |next| @intFromPtr(next) else 0;
-        gpa.free(exception.payload);
-        gpa.free(exception.externrefs);
-        gpa.destroy(exception);
+        destroyExceptionRecord(gpa, exception);
     }
+}
+
+pub fn destroyExceptionRecord(gpa: Allocator, exception: *js_value.WasmException) void {
+    gpa.free(exception.payload);
+    gpa.free(exception.externrefs);
+    gpa.destroy(exception);
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,9 +2153,7 @@ fn finalizeExceptions(s: *State, include_stack: bool) void {
             publishStoredException(exception);
         } else {
             const owner: *Instance = @ptrCast(@alignCast(exception.owner));
-            owner.gpa.free(exception.payload);
-            owner.gpa.free(exception.externrefs);
-            owner.gpa.destroy(exception);
+            destroyExceptionRecord(owner.gpa, exception);
         }
     }
     s.created_exceptions.items.len = 0;

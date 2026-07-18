@@ -49,6 +49,13 @@ pub const WasmException = struct {
     payload: []const WasmSlot,
     externrefs: []const Value,
     owner: *anyopaque,
+    /// Stable JS identity for a WebAssembly.Exception. Native exceptions fill
+    /// this lazily when they cross into JS; JS-constructed exceptions set it
+    /// immediately. The owning exception root list traces the object.
+    wrapper: ?*Object = null,
+    /// Non-undefined only for the built-in JSTag transport. Such exceptions
+    /// escape back to JavaScript as the original thrown value, not a wrapper.
+    js_exception: Value = Value.undef(),
     next: ?*WasmException = null,
     published: bool = false,
 };
@@ -1117,6 +1124,7 @@ pub const ObjectRareTag = enum(u8) {
     wasm_global,
     wasm_function,
     wasm_tag,
+    wasm_exception,
 };
 
 /// Structured JavaScript stack metadata retained when an Error is created.
@@ -1199,6 +1207,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
     wasm_tag: struct { tag: ?*anyopaque = null, store: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.TagInst
+    wasm_exception: struct { exception: ?*WasmException = null, payload_values: []const Value = &.{}, owner_obj: ?*Object = null },
 };
 
 /// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
@@ -1934,6 +1943,7 @@ pub const Object = struct {
             },
             .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
             .wasm_tag => .{ .owner_obj = cold.rare.wasm_tag.owner_obj },
+            .wasm_exception => .{ .import_vals = cold.rare.wasm_exception.payload_values, .owner_obj = cold.rare.wasm_exception.owner_obj },
             else => .{},
         };
     }
@@ -2274,6 +2284,16 @@ pub const Object = struct {
 
     pub fn wasmTagState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_tag") {
         return self.ensureRare(fallback, .wasm_tag, .{});
+    }
+
+    pub inline fn wasmException(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_exception") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_exception)) return null;
+        return &cold.rare.wasm_exception;
+    }
+
+    pub fn wasmExceptionState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_exception") {
+        return self.ensureRare(fallback, .wasm_exception, .{});
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {

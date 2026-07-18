@@ -2212,6 +2212,7 @@ pub const WasmOwned = union(enum) {
     table: *anyopaque,
     global: *anyopaque,
     tag: *anyopaque,
+    exception: *anyopaque,
 };
 
 /// `JSGlobalContextRef`. Owns an arena for all interpreter-lived allocations

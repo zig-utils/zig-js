@@ -201,6 +201,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         while (raw != 0) {
             const exception: *const value.WasmException = @ptrFromInt(raw);
             for (exception.externrefs) |root| markValue(v, root);
+            v.mark(exception.wrapper);
             raw = if (exception.next) |next| @intFromPtr(next) else 0;
         }
     }
