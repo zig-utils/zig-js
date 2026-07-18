@@ -431,6 +431,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     tests.root_module.addOptions("private_abi_options", private_abi_options);
+    const wasm_test_options = b.addOptions();
+    wasm_test_options.addOption([]const u8, "threads_benchmark_source", @embedFile("bench/wasm_threads_comparison.js"));
+    tests.root_module.addOptions("wasm_test_options", wasm_test_options);
     const run_tests = b.addRunArtifact(tests);
     if (unit_shard_count) |count| {
         run_tests.setEnvironmentVariable("UNIT_SHARD_INDEX", b.fmt("{d}", .{unit_shard_index orelse 0}));

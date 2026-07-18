@@ -2279,6 +2279,40 @@ test "wasm api atomic exports scale across no-GIL Threads and wake waiters" {
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
+test "wasm Threads benchmark kernels survive repeated no-GIL lifecycle stress" {
+    const benchmark_source = @import("wasm_test_options").threads_benchmark_source;
+    for (0..5) |_| {
+        const store = try context.Context.createWith(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = true,
+            .wasm_features = .{ .threads = true },
+        });
+        defer store.destroy();
+        _ = try store.evaluate(benchmark_source);
+        const result = try store.evaluate(
+            \\function runThreadsKernel(name, jobs, lanes) {
+            \\  const selected = benchmarkFunction(name);
+            \\  __benchmarkPrepare(jobs, lanes, 0, true);
+            \\  const workers = [];
+            \\  for (let lane = 0; lane < lanes; lane++)
+            \\    workers.push(new Thread(selected, jobs, lane));
+            \\  let checksum = 0;
+            \\  for (const worker of workers) checksum += worker.join();
+            \\  return __benchmarkFinish(jobs, lanes, 0, true) === jobs * lanes;
+            \\}
+            \\let valid = true;
+            \\for (let round = 0; round < 4; round++) {
+            \\  valid = valid && runThreadsKernel('wasm_threads_atomic_add', 2000, 4);
+            \\  valid = valid && runThreadsKernel('wasm_threads_atomic_cas', 1000, 4);
+            \\  valid = valid && runThreadsKernel('wasm_threads_atomic_disjoint', 2000, 4);
+            \\  valid = valid && runThreadsKernel('wasm_threads_wait_notify', 200, 4);
+            \\}
+            \\valid;
+        );
+        try std.testing.expect(result.isBoolean() and result.asBool());
+    }
+}
+
 test "wasm api Global converts numeric values and enforces mutability" {
     const store = try context.Context.create(std.testing.allocator);
     defer store.destroy();
