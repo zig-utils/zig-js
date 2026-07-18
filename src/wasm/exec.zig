@@ -1156,6 +1156,26 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             .i64_reinterpret_f64 => try pushI64(s, @bitCast(popF64(s))),
             .f32_reinterpret_i32 => try pushF32(s, @bitCast(popI32(s))),
             .f64_reinterpret_i64 => try pushF64(s, @bitCast(pop(s))),
+            .i32_extend8_s => {
+                const value: i8 = @bitCast(@as(u8, @truncate(popI32(s))));
+                try pushI32(s, @bitCast(@as(i32, value)));
+            },
+            .i32_extend16_s => {
+                const value: i16 = @bitCast(@as(u16, @truncate(popI32(s))));
+                try pushI32(s, @bitCast(@as(i32, value)));
+            },
+            .i64_extend8_s => {
+                const value: i8 = @bitCast(@as(u8, @truncate(pop(s))));
+                try pushI64(s, @bitCast(@as(i64, value)));
+            },
+            .i64_extend16_s => {
+                const value: i16 = @bitCast(@as(u16, @truncate(pop(s))));
+                try pushI64(s, @bitCast(@as(i64, value)));
+            },
+            .i64_extend32_s => {
+                const value: i32 = @bitCast(@as(u32, @truncate(pop(s))));
+                try pushI64(s, @bitCast(@as(i64, value)));
+            },
         }
     }
     @memcpy(results, s.stack.items[s.stack.items.len - results.len ..]);
@@ -1413,7 +1433,11 @@ fn bitsToF64(v: u64) f64 {
 
 // Module / instance lifecycle helpers.
 fn buildModule(bytes: []const u8, diag: *types.Diagnostic) !*types.Module {
-    const mod = try decode.decode(talloc, bytes, diag);
+    return buildModuleWithFeatures(bytes, .{}, diag);
+}
+
+fn buildModuleWithFeatures(bytes: []const u8, features: types.Features, diag: *types.Diagnostic) !*types.Module {
+    const mod = try decode.decodeWithFeatures(talloc, bytes, features, diag);
     errdefer decode.destroyModule(talloc, mod);
     try validate.validate(mod, diag);
     return mod;
@@ -1435,8 +1459,12 @@ fn destroyBuilt(b: Built) void {
 }
 
 fn expectResults(comptime bytes: []const u8, funcidx: u32, args: []const u64, expected: []const u64) !void {
+    return expectResultsWithFeatures(bytes, .{}, funcidx, args, expected);
+}
+
+fn expectResultsWithFeatures(comptime bytes: []const u8, features: types.Features, funcidx: u32, args: []const u64, expected: []const u64) !void {
     var diag: types.Diagnostic = .{};
-    const mod = try buildModule(bytes, &diag);
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
     defer decode.destroyModule(talloc, mod);
     const inst = try instantiate(talloc, mod, .{}, &diag);
     defer destroyInstance(talloc, inst);
@@ -1483,6 +1511,11 @@ fn binopTrap(comptime op: types.Op, comptime pt: []const u8, comptime rt: []cons
 fn unop(comptime op: types.Op, comptime pt: []const u8, comptime rt: []const u8, a: u64, expected: u64) !void {
     const bytes = comptime arithModule(pt, rt, "\x20\x00" ++ ob(op));
     try expectResults(bytes, 0, &.{a}, &.{expected});
+}
+
+fn unopWithFeatures(comptime op: types.Op, comptime pt: []const u8, comptime rt: []const u8, features: types.Features, a: u64, expected: u64) !void {
+    const bytes = comptime arithModule(pt, rt, "\x20\x00" ++ ob(op));
+    try expectResultsWithFeatures(bytes, features, 0, &.{a}, &.{expected});
 }
 
 fn unopTrap(comptime op: types.Op, comptime pt: []const u8, comptime rt: []const u8, a: u64, msg: []const u8) !void {
@@ -2273,6 +2306,18 @@ test "wasm.exec conversions wrap and extend" {
     try unop(.i64_extend_i32_s, I32, I64, 0x7FFFFFFF, 0x7FFFFFFF);
     try unop(.i64_extend_i32_u, I32, I64, 0xFFFFFFFF, 0xFFFFFFFF);
     try unop(.i64_extend_i32_u, I32, I64, 0x80000000, 0x80000000);
+}
+
+test "wasm.exec sign-extension operations" {
+    const features: types.Features = .{ .sign_extension_ops = true };
+    try unopWithFeatures(.i32_extend8_s, I32, I32, features, 0x00000080, 0xFFFFFF80);
+    try unopWithFeatures(.i32_extend8_s, I32, I32, features, 0xFFFFFF7F, 0x0000007F);
+    try unopWithFeatures(.i32_extend16_s, I32, I32, features, 0x00008000, 0xFFFF8000);
+    try unopWithFeatures(.i32_extend16_s, I32, I32, features, 0xFFFF7FFF, 0x00007FFF);
+    try unopWithFeatures(.i64_extend8_s, I64, I64, features, 0x80, 0xFFFFFFFFFFFFFF80);
+    try unopWithFeatures(.i64_extend16_s, I64, I64, features, 0x8000, 0xFFFFFFFFFFFF8000);
+    try unopWithFeatures(.i64_extend32_s, I64, I64, features, 0x80000000, 0xFFFFFFFF80000000);
+    try unopWithFeatures(.i64_extend32_s, I64, I64, features, 0xFFFFFFFF7FFFFFFF, 0x000000007FFFFFFF);
 }
 
 test "wasm.exec conversions trunc f32 to int" {

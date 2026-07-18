@@ -482,6 +482,8 @@ const FuncValidator = struct {
                 .i64_reinterpret_f64 => try self.cvtop(.f64, .i64),
                 .f32_reinterpret_i32 => try self.cvtop(.i32, .f32),
                 .f64_reinterpret_i64 => try self.cvtop(.i64, .f64),
+                .i32_extend8_s, .i32_extend16_s => try self.unop(.i32),
+                .i64_extend8_s, .i64_extend16_s, .i64_extend32_s => try self.unop(.i64),
             }
         }
         // The final `end` closed the function frame exactly at instrs.len.
@@ -597,8 +599,12 @@ fn expectInvalidWithFeatures(comptime bytes: []const u8, features: types.Feature
 
 /// Body failure: message + the byte offset of instr `instridx` of func `funcidx`.
 fn expectInvalidAt(comptime bytes: []const u8, funcidx: usize, instridx: usize, msg: []const u8) !void {
+    return expectInvalidAtWithFeatures(bytes, .{}, funcidx, instridx, msg);
+}
+
+fn expectInvalidAtWithFeatures(comptime bytes: []const u8, features: types.Features, funcidx: usize, instridx: usize, msg: []const u8) !void {
     var diag: types.Diagnostic = .{};
-    const mod = try decode.decode(std.testing.allocator, bytes, &diag);
+    const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
     defer decode.destroyModule(std.testing.allocator, mod);
     const off = mod.code[funcidx].offsets[instridx];
     try std.testing.expectError(error.Invalid, validate(mod, &diag));
@@ -841,6 +847,11 @@ test "wasm.validate multiple tables" {
     try expectInvalidWithFeatures(defined, .{ .reference_types = true }, "WebAssembly feature reference-types is enabled but not implemented");
     try expectInvalid(hdr ++ sec(2, "\x01\x01a\x01t\x01\x70\x00\x01") ++
         sec(4, "\x01\x70\x00\x01"), "WebAssembly feature reference-types is disabled");
+}
+
+test "wasm.validate sign-extension operand types" {
+    const i64_to_i32 = comptime (hdr ++ sec(1, "\x01\x60\x01\x7E\x01\x7F") ++ func0 ++ code1("\x20\x00\xC0\x0B"));
+    try expectInvalidAtWithFeatures(i64_to_i32, .{ .sign_extension_ops = true }, 0, 1, "type mismatch");
 }
 
 test "wasm.validate elem unknown function" {

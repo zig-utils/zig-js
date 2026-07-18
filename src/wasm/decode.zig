@@ -542,6 +542,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 return r.unsupportedFeature(instr_off, .exception_handling);
             return r.failAt(instr_off, "invalid opcode 0x{x:0>2}", .{b});
         };
+        if (b >= 0xC0 and b <= 0xC4 and !r.features.sign_extension_ops)
+            return r.unsupportedFeature(instr_off, .sign_extension_ops);
         var instr: types.Instr = .{ .op = op };
         switch (op) {
             .block, .loop, .if_ => {
@@ -948,6 +950,16 @@ test "wasm.decode feature gates distinguish disabled dependency and pending impl
         0,
         "WebAssembly feature gc requires typed-function-references",
     );
+}
+
+test "wasm.decode sign-extension operations require and honor their feature" {
+    const bytes = hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\xC0\x0B";
+    try expectMalformed(bytes, 17, "WebAssembly feature sign-extension-ops is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .sign_extension_ops = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(types.Op.i32_extend8_s, mod.code[0].instrs[0].op);
 }
 
 test "wasm.decode malformed constant expressions" {

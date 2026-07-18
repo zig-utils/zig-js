@@ -295,9 +295,10 @@ pub const Instr = struct {
     };
 };
 
-/// Every MVP opcode, numbered by its binary encoding so the decoder is a
-/// total map: any byte not listed here (and every prefixed proposal opcode)
-/// is a deterministic malformed-module error.
+/// Every implemented opcode. Direct opcodes use their binary byte; prefixed
+/// opcodes use the prefix as the high byte and the subopcode as the low byte.
+/// The decoder still applies the owning feature gate before emitting any
+/// post-MVP instruction.
 pub const Op = enum(u16) {
     // Control
     unreachable_ = 0x00,
@@ -485,6 +486,12 @@ pub const Op = enum(u16) {
     i64_reinterpret_f64 = 0xBD,
     f32_reinterpret_i32 = 0xBE,
     f64_reinterpret_i64 = 0xBF,
+    // Sign-extension operations
+    i32_extend8_s = 0xC0,
+    i32_extend16_s = 0xC1,
+    i64_extend8_s = 0xC2,
+    i64_extend16_s = 0xC3,
+    i64_extend32_s = 0xC4,
 
     pub fn fromByte(b: u8) ?Op {
         return std.enums.fromInt(Op, @as(u16, b));
