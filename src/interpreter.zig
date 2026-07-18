@@ -12272,12 +12272,7 @@ pub const Interpreter = struct {
         const dst_avail = if (dst_off < dst_bytes.len) (dst_bytes.len - dst_off) / esz else 0;
         const n = @min(count, @min(src_avail, dst_avail)) * esz;
         if (n == 0) return;
-        const from = src_bytes[src_off..][0..n];
-        const to = dst_bytes[dst_off..][0..n];
-        if (src_ab == dst_ab and dst_off > src_off)
-            std.mem.copyBackwards(u8, to, from)
-        else
-            std.mem.copyForwards(u8, to, from);
+        value.copyArrayBufferBytes(dst_ab, dst_bytes, dst_off, src_ab, src_bytes, src_off, n);
     }
 
     /// Collect an iterable's values (via `Symbol.iterator`) or an array-like's
@@ -18250,7 +18245,7 @@ fn dataViewGetFn(comptime t: DVType) value.NativeFn {
                 4 => u32,
                 else => u64,
             };
-            const raw = std.mem.readInt(UInt, bytes[off..][0..t.bytes], endian);
+            const raw: UInt = @truncate(ab.readUnordered(bytes, off, t.bytes, endian));
             if (t.big) {
                 if (t.signed) return self.makeBigInt(@as(i64, @bitCast(@as(u64, raw))));
                 return self.makeBigInt(@as(i128, @as(u64, raw)));
@@ -18333,7 +18328,7 @@ fn dataViewSetFn(comptime t: DVType) value.NativeFn {
             } else {
                 raw = numToRaw(UInt, num);
             }
-            std.mem.writeInt(UInt, bytes[off..][0..t.bytes], raw, endian);
+            ab.writeUnordered(bytes, off, t.bytes, endian, raw);
             return Value.undef();
         }
     }.call;
@@ -20717,7 +20712,7 @@ fn arrayBufferSliceImpl(self: *Interpreter, this: Value, args: []const Value, co
         defer if (locked) ab.unlockBuffer();
         const src = ab.bytes();
         const copy_n = @min(safe_count, if (start < src.len) src.len - start else 0);
-        @memcpy(nb.bytes()[0..copy_n], src[start .. start + copy_n]);
+        value.copyArrayBufferBytes(nb, nb.bytes(), 0, ab, src, start, copy_n);
     }
     return new_v;
 }
@@ -20999,11 +20994,7 @@ fn typedArrayMethod(self: *Interpreter, o: *value.Object, name: []const u8, args
             const esz = ta.kind.byteSize();
             const bytes = abuf.bytes();
             const base = ta.byte_offset;
-            const dst = bytes[base + target * esz ..][0 .. count * esz];
-            const src = bytes[base + start * esz ..][0 .. count * esz];
-            // memmove: when the destination overlaps and follows the source,
-            // copy back-to-front so earlier writes don't clobber unread source.
-            if (target > start) std.mem.copyBackwards(u8, dst, src) else std.mem.copyForwards(u8, dst, src);
+            value.copyArrayBufferBytes(abuf, bytes, base + target * esz, abuf, bytes, base + start * esz, count * esz);
         }
         return recv;
     }
@@ -21222,7 +21213,7 @@ fn taReadRawU16(ta: *const value.TypedArrayData, i: usize) u16 {
     const bytes = buf.bytes();
     const off = ta.byte_offset + i * 2;
     if (off + 2 > bytes.len) return 0;
-    return std.mem.readInt(u16, bytes[off..][0..2], .little);
+    return @truncate(buf.readUnordered(bytes, off, 2, .little));
 }
 
 fn taWriteRawU16(ta: *value.TypedArrayData, i: usize, raw: u16) void {
@@ -21232,7 +21223,7 @@ fn taWriteRawU16(ta: *value.TypedArrayData, i: usize, raw: u16) void {
     const bytes = buf.bytes();
     const off = ta.byte_offset + i * 2;
     if (off + 2 > bytes.len) return;
-    std.mem.writeInt(u16, bytes[off..][0..2], raw, .little);
+    buf.writeUnordered(bytes, off, 2, .little, raw);
 }
 
 fn taWriteRawU16Run(ta: *value.TypedArrayData, raw: u16, count: usize, live_len: usize, out_i: *usize) void {
@@ -21701,7 +21692,11 @@ fn uint8SnapshotBytes(self: *Interpreter, o: *value.Object) EvalError!?[]u8 {
     defer if (locked) buf.unlockBuffer();
     const live = uint8ArrayBytes(o) orelse return null;
     const nn = @min(hint.len, live.len);
-    @memcpy(copy[0..nn], live[0..nn]);
+    if (buf.is_shared) {
+        for (0..nn) |i| copy[i] = @truncate(buf.readUnordered(live, i, 1, .little));
+    } else {
+        @memcpy(copy[0..nn], live[0..nn]);
+    }
     return copy[0..nn];
 }
 
@@ -21783,7 +21778,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
         defer if (locked) buf.unlockBuffer();
         if (uint8ArrayBytes(o)) |target| {
             const n = @min(r.bytes.len, target.len);
-            @memcpy(target[0..n], r.bytes[0..n]);
+            value.writeArrayBufferBytes(buf, target, 0, r.bytes[0..n]);
         }
     }
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
@@ -21809,7 +21804,7 @@ fn uint8SetFromHexFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         defer if (locked) buf.unlockBuffer();
         if (uint8ArrayBytes(o)) |target| {
             const n = @min(r.bytes.len, target.len);
-            @memcpy(target[0..n], r.bytes[0..n]);
+            value.writeArrayBufferBytes(buf, target, 0, r.bytes[0..n]);
         }
     }
     if (r.err) return self.throwError("SyntaxError", "invalid hex-encoded string");
@@ -40341,7 +40336,10 @@ fn textEncoderEncodeIntoFn(ctx: *anyopaque, this: Value, args: []const Value) va
     if (!dv.isObject() or dv.asObj().typedArray() == null or dv.asObj().typedArray().?.kind != .u8)
         return self.throwError("TypeError", "TextEncoder.encodeInto destination must be a Uint8Array");
     const ta = dv.asObj().typedArray().?;
-    const dest = ta.buffer.arrayBuffer().?.bytes()[ta.byte_offset .. ta.byte_offset + (ta.currentLength() orelse 0)];
+    const dest_buf = ta.buffer.arrayBuffer().?;
+    const locked = dest_buf.needsElementLock();
+    if (locked) dest_buf.lockBuffer();
+    const dest = dest_buf.bytes()[ta.byte_offset .. ta.byte_offset + (ta.currentLength() orelse 0)];
     var read: usize = 0;
     var written: usize = 0;
     var i: usize = 0;
@@ -40375,11 +40373,12 @@ fn textEncoderEncodeIntoFn(ctx: *anyopaque, this: Value, args: []const Value) va
         }
         const enc_n = std.unicode.utf8Encode(cp, &b) catch unreachable;
         if (written + enc_n > dest.len) break;
-        @memcpy(dest[written .. written + enc_n], b[0..enc_n]);
+        value.writeArrayBufferBytes(dest_buf, dest, written, b[0..enc_n]);
         written += enc_n;
         read += cu;
         i += byte_adv;
     }
+    if (locked) dest_buf.unlockBuffer();
     const res = (try self.newObject()).asObj();
     try self.setProp(res, "read", Value.num(@floatFromInt(read)));
     try self.setProp(res, "written", Value.num(@floatFromInt(written)));

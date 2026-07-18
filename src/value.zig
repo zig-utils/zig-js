@@ -512,7 +512,136 @@ pub const ArrayBufferData = struct {
     pub inline fn needsElementLock(self: *const ArrayBufferData) bool {
         return !self.is_shared and Object.element_locks_enabled.load(.monotonic);
     }
+
+    /// Read ordinary (non-`Atomics`) bytes from a buffer. Shared bytes use
+    /// monotonic byte atomics so overlapping ordinary/atomic accesses are a
+    /// defined host operation and remain visible to ThreadSanitizer. Reading
+    /// one byte at a time deliberately preserves JavaScript's permitted
+    /// tearing for multi-byte ordinary accesses.
+    pub fn readUnordered(self: *const ArrayBufferData, bytes_: []const u8, offset: usize, len: usize, endian: std.builtin.Endian) u64 {
+        var raw: u64 = 0;
+        for (0..len) |i| {
+            const source = if (endian == .little) i else len - 1 - i;
+            const byte = if (self.is_shared)
+                @atomicLoad(u8, @constCast(&bytes_[offset + source]), .monotonic)
+            else
+                bytes_[offset + source];
+            raw |= @as(u64, byte) << @intCast(i * 8);
+        }
+        return raw;
+    }
+
+    /// Write ordinary bytes, paired with `readUnordered`. Each shared byte is
+    /// independently atomic; the complete multi-byte value is not.
+    pub fn writeUnordered(self: *const ArrayBufferData, bytes_: []u8, offset: usize, len: usize, endian: std.builtin.Endian, raw: u64) void {
+        for (0..len) |i| {
+            const dest = if (endian == .little) i else len - 1 - i;
+            const byte: u8 = @truncate(raw >> @intCast(i * 8));
+            if (self.is_shared)
+                @atomicStore(u8, &bytes_[offset + dest], byte, .monotonic)
+            else
+                bytes_[offset + dest] = byte;
+        }
+    }
 };
+
+/// Memmove between ArrayBuffer byte ranges without introducing host data races
+/// when either backing is shared. Pointer ordering also handles two distinct
+/// SharedArrayBuffer wrappers over the same storage.
+pub fn copyArrayBufferBytes(dest_buf: *ArrayBufferData, dest_bytes: []u8, dest_offset: usize, source_buf: *const ArrayBufferData, source_bytes: []const u8, source_offset: usize, len: usize) void {
+    if (!dest_buf.is_shared and !source_buf.is_shared) {
+        const to = dest_bytes[dest_offset..][0..len];
+        const from = source_bytes[source_offset..][0..len];
+        if (@intFromPtr(to.ptr) <= @intFromPtr(from.ptr))
+            std.mem.copyForwards(u8, to, from)
+        else
+            std.mem.copyBackwards(u8, to, from);
+        return;
+    }
+
+    const dest_address = @intFromPtr(dest_bytes.ptr + dest_offset);
+    const source_address = @intFromPtr(source_bytes.ptr + source_offset);
+    if (dest_address > source_address and dest_address < source_address + len) {
+        var i = len;
+        while (i > 0) {
+            i -= 1;
+            dest_buf.writeUnordered(dest_bytes, dest_offset + i, 1, .little, source_buf.readUnordered(source_bytes, source_offset + i, 1, .little));
+        }
+    } else {
+        for (0..len) |i|
+            dest_buf.writeUnordered(dest_bytes, dest_offset + i, 1, .little, source_buf.readUnordered(source_bytes, source_offset + i, 1, .little));
+    }
+}
+
+pub fn writeArrayBufferBytes(dest_buf: *ArrayBufferData, dest_bytes: []u8, dest_offset: usize, source: []const u8) void {
+    if (!dest_buf.is_shared) {
+        @memcpy(dest_bytes[dest_offset..][0..source.len], source);
+        return;
+    }
+    for (source, 0..) |byte, i| dest_buf.writeUnordered(dest_bytes, dest_offset + i, 1, .little, byte);
+}
+
+fn taOrdinaryReadRaw(buf: *const ArrayBufferData, bytes_: []u8, offset: usize, kind: TAKind) u64 {
+    if (!buf.is_shared) return buf.readUnordered(bytes_, offset, kind.byteSize(), .little);
+    const p = bytes_.ptr + offset;
+    // ECMAScript IsNoTearConfiguration requires unordered integer TypedArray
+    // elements (other than the one-byte clamped distinction) to be read as one
+    // no-tear event. Float and BigInt unordered reads may tear byte-by-byte.
+    return switch (kind) {
+        .i8, .u8, .u8c => @atomicLoad(u8, @as(*u8, @ptrCast(p)), .monotonic),
+        .i16, .u16 => @atomicLoad(u16, @as(*u16, @ptrCast(@alignCast(p))), .monotonic),
+        .i32, .u32 => @atomicLoad(u32, @as(*u32, @ptrCast(@alignCast(p))), .monotonic),
+        else => buf.readUnordered(bytes_, offset, kind.byteSize(), .little),
+    };
+}
+
+fn taOrdinaryWriteRaw(buf: *const ArrayBufferData, bytes_: []u8, offset: usize, kind: TAKind, raw: u64) void {
+    if (!buf.is_shared) {
+        buf.writeUnordered(bytes_, offset, kind.byteSize(), .little, raw);
+        return;
+    }
+    const p = bytes_.ptr + offset;
+    switch (kind) {
+        .i8, .u8, .u8c => @atomicStore(u8, @as(*u8, @ptrCast(p)), @truncate(raw), .monotonic),
+        .i16, .u16 => @atomicStore(u16, @as(*u16, @ptrCast(@alignCast(p))), @truncate(raw), .monotonic),
+        .i32, .u32 => @atomicStore(u32, @as(*u32, @ptrCast(@alignCast(p))), @truncate(raw), .monotonic),
+        else => buf.writeUnordered(bytes_, offset, kind.byteSize(), .little, raw),
+    }
+}
+
+test "ArrayBuffer ordinary shared accesses are host-race-free" {
+    const storage = try SharedBufferStorage.create(64, null);
+    defer storage.release();
+    var buffer = ArrayBufferData{
+        .local_data = &.{},
+        .shared = storage,
+        .is_shared = true,
+    };
+    var start = std.atomic.Value(bool).init(false);
+
+    const AtomicSide = struct {
+        fn run(shared: *SharedBufferStorage, ready: *std.atomic.Value(bool)) void {
+            const words: [*]u32 = @ptrCast(@alignCast(shared.slice().ptr));
+            while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..20_000) |i| {
+                @atomicStore(u32, &words[0], @truncate(i), .seq_cst);
+                _ = @atomicLoad(u32, &words[2], .seq_cst);
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, AtomicSide.run, .{ storage, &start });
+    start.store(true, .release);
+    const bytes_ = buffer.bytes();
+    for (0..20_000) |i| {
+        _ = taOrdinaryReadRaw(&buffer, bytes_, 0, .u32);
+        taOrdinaryWriteRaw(&buffer, bytes_, 8, .u32, i);
+        writeArrayBufferBytes(&buffer, bytes_, 16, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
+        copyArrayBufferBytes(&buffer, bytes_, 17, &buffer, bytes_, 16, 7);
+    }
+    thread.join();
+
+    try std.testing.expect(buffer.readUnordered(bytes_, 0, 4, .little) < 20_000);
+}
 
 /// Read typed-array element `i` (within bounds, buffer attached) as a Number.
 pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
@@ -524,20 +653,21 @@ pub fn taRead(ta: *const TypedArrayData, i: usize) Value {
     // A resizable buffer may have shrunk below the view's cached length; reading
     // out of bounds returns 0 rather than a panic.
     if (off + ta.kind.byteSize() > bytes.len) return Value.num(0);
+    const raw = taOrdinaryReadRaw(buf, bytes, off, ta.kind);
     const n: f64 = switch (ta.kind) {
-        .i8 => @floatFromInt(@as(i8, @bitCast(bytes[off]))),
-        .u8, .u8c => @floatFromInt(bytes[off]),
-        .i16 => @floatFromInt(std.mem.readInt(i16, bytes[off..][0..2], .little)),
-        .u16 => @floatFromInt(std.mem.readInt(u16, bytes[off..][0..2], .little)),
-        .i32 => @floatFromInt(std.mem.readInt(i32, bytes[off..][0..4], .little)),
-        .u32 => @floatFromInt(std.mem.readInt(u32, bytes[off..][0..4], .little)),
-        .f16 => @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, bytes[off..][0..2], .little)))),
-        .f32 => @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[off..][0..4], .little)))),
-        .f64 => @bitCast(std.mem.readInt(u64, bytes[off..][0..8], .little)),
+        .i8 => @floatFromInt(@as(i8, @bitCast(@as(u8, @truncate(raw))))),
+        .u8, .u8c => @floatFromInt(@as(u8, @truncate(raw))),
+        .i16 => @floatFromInt(@as(i16, @bitCast(@as(u16, @truncate(raw))))),
+        .u16 => @floatFromInt(@as(u16, @truncate(raw))),
+        .i32 => @floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(raw))))),
+        .u32 => @floatFromInt(@as(u32, @truncate(raw))),
+        .f16 => @floatCast(@as(f16, @bitCast(@as(u16, @truncate(raw))))),
+        .f32 => @floatCast(@as(f32, @bitCast(@as(u32, @truncate(raw))))),
+        .f64 => @bitCast(raw),
         // A BigInt element read as a Number is lossy, but keeps the Number-typed
         // method paths crash-free; the interpreter's index get uses `taReadBig`.
-        .i64 => @floatFromInt(std.mem.readInt(i64, bytes[off..][0..8], .little)),
-        .u64 => @floatFromInt(std.mem.readInt(u64, bytes[off..][0..8], .little)),
+        .i64 => @floatFromInt(@as(i64, @bitCast(raw))),
+        .u64 => @floatFromInt(raw),
     };
     return Value.num(n);
 }
@@ -551,9 +681,10 @@ pub fn taReadBig(ta: *const TypedArrayData, i: usize) i128 {
     const bytes = buf.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + 8 > bytes.len) return 0;
+    const raw = taOrdinaryReadRaw(buf, bytes, off, ta.kind);
     return switch (ta.kind) {
-        .i64 => std.mem.readInt(i64, bytes[off..][0..8], .little),
-        .u64 => @as(i128, std.mem.readInt(u64, bytes[off..][0..8], .little)),
+        .i64 => @as(i64, @bitCast(raw)),
+        .u64 => @as(i128, raw),
         else => 0,
     };
 }
@@ -567,7 +698,7 @@ pub fn taWriteBig(ta: *const TypedArrayData, i: usize, val: i128) void {
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + 8 > bytes.len) return;
     const low: u64 = @truncate(@as(u128, @bitCast(val)));
-    std.mem.writeInt(u64, bytes[off..][0..8], low, .little);
+    taOrdinaryWriteRaw(buf, bytes, off, ta.kind, low);
 }
 
 /// ToInt of `num` truncated to a wrapping integer width (NaN/±Inf → 0).
@@ -591,36 +722,37 @@ pub fn taWrite(ta: *const TypedArrayData, i: usize, num: f64) void {
     const bytes = buf.bytes();
     const off = ta.byte_offset + i * ta.kind.byteSize();
     if (off + ta.kind.byteSize() > bytes.len) return; // shrunk resizable buffer
-    switch (ta.kind) {
-        .i8 => bytes[off] = @bitCast(taToInt(i8, num)),
-        .u8 => bytes[off] = taToInt(u8, num),
-        .u8c => {
+    const raw: u64 = switch (ta.kind) {
+        .i8 => @as(u8, @bitCast(taToInt(i8, num))),
+        .u8 => taToInt(u8, num),
+        .u8c => blk: {
             // ToUint8Clamp: NaN→0, round-half-to-even, clamp [0,255].
             if (std.math.isNan(num) or num <= 0) {
-                bytes[off] = 0;
+                break :blk 0;
             } else if (num >= 255) {
-                bytes[off] = 255;
+                break :blk 255;
             } else {
                 const f = @floor(num);
                 const rounded: f64 = if (num - f == 0.5)
                     (if (@mod(f, 2) == 0) f else f + 1)
                 else
                     @round(num);
-                bytes[off] = @intFromFloat(rounded);
+                break :blk @as(u8, @intFromFloat(rounded));
             }
         },
-        .i16 => std.mem.writeInt(i16, bytes[off..][0..2], taToInt(i16, num), .little),
-        .u16 => std.mem.writeInt(u16, bytes[off..][0..2], taToInt(u16, num), .little),
-        .i32 => std.mem.writeInt(i32, bytes[off..][0..4], taToInt(i32, num), .little),
-        .u32 => std.mem.writeInt(u32, bytes[off..][0..4], taToInt(u32, num), .little),
-        .f16 => std.mem.writeInt(u16, bytes[off..][0..2], @bitCast(@as(f16, @floatCast(num))), .little),
-        .f32 => std.mem.writeInt(u32, bytes[off..][0..4], @bitCast(@as(f32, @floatCast(num))), .little),
-        .f64 => std.mem.writeInt(u64, bytes[off..][0..8], @bitCast(num), .little),
+        .i16 => @as(u16, @bitCast(taToInt(i16, num))),
+        .u16 => taToInt(u16, num),
+        .i32 => @as(u32, @bitCast(taToInt(i32, num))),
+        .u32 => taToInt(u32, num),
+        .f16 => @as(u16, @bitCast(@as(f16, @floatCast(num)))),
+        .f32 => @as(u32, @bitCast(@as(f32, @floatCast(num)))),
+        .f64 => @bitCast(num),
         // A Number written to a BigInt array is only reached via the lossy
         // Number-typed method paths; the index set uses `taWriteBig`.
-        .i64 => std.mem.writeInt(i64, bytes[off..][0..8], taToInt(i64, num), .little),
-        .u64 => std.mem.writeInt(u64, bytes[off..][0..8], taToInt(u64, num), .little),
-    }
+        .i64 => @as(u64, @bitCast(taToInt(i64, num))),
+        .u64 => taToInt(u64, num),
+    };
+    taOrdinaryWriteRaw(buf, bytes, off, ta.kind, raw);
 }
 
 // ---- Atomic element access (the `Atomics.*` fast paths) -------------------

@@ -16,9 +16,10 @@
 //! - `len()` / `slice()` are lock-free (acquire load of the published length).
 //! - `grow` may race with other growers (CAS loop) and with readers (they see
 //!   either the old or the new length, never a torn one).
-//! - Element data races are the *JS program's* problem (per the memory model);
-//!   torn multi-byte access is prevented by natural alignment of typed-array
-//!   elements within the slab (`page_allocator` returns page-aligned slabs).
+//! - Element data races are the *JS program's* problem (per the memory model).
+//!   Access helpers use monotonic host atomics: one naturally aligned event for
+//!   ECMAScript's no-tear integer TypedArrays, and byte events for ordinary
+//!   DataView, float/BigInt, bulk, and Wasm operations that may tear.
 
 const std = @import("std");
 

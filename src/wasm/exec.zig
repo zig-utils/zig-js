@@ -87,7 +87,72 @@ pub const MemoryInst = struct {
     pub inline fn isShared(self: *const MemoryInst) bool {
         return self.shared_storage != null;
     }
+
+    /// Ordinary Wasm memory operations are byte-atomic on shared memories.
+    /// This preserves the proposal's permitted tearing for multi-byte accesses
+    /// while avoiding host-language data races with atomic instructions.
+    pub fn readUnordered(self: *const MemoryInst, offset: usize, len: usize) u64 {
+        const data = self.bytes();
+        var raw: u64 = 0;
+        for (0..len) |i| {
+            const byte = if (self.isShared())
+                @atomicLoad(u8, &data[offset + i], .monotonic)
+            else
+                data[offset + i];
+            raw |= @as(u64, byte) << @intCast(i * 8);
+        }
+        return raw;
+    }
+
+    pub fn writeUnordered(self: *MemoryInst, offset: usize, len: usize, raw: u64) void {
+        const data = self.bytes();
+        for (0..len) |i| {
+            const byte: u8 = @truncate(raw >> @intCast(i * 8));
+            if (self.isShared())
+                @atomicStore(u8, &data[offset + i], byte, .monotonic)
+            else
+                data[offset + i] = byte;
+        }
+    }
+
+    pub fn writeSliceUnordered(self: *MemoryInst, offset: usize, source: []const u8) void {
+        if (!self.isShared()) {
+            @memcpy(self.bytes()[offset..][0..source.len], source);
+            return;
+        }
+        for (source, 0..) |byte, i| @atomicStore(u8, &self.bytes()[offset + i], byte, .monotonic);
+    }
+
+    pub fn fillUnordered(self: *MemoryInst, offset: usize, len: usize, byte: u8) void {
+        if (!self.isShared()) {
+            @memset(self.bytes()[offset..][0..len], byte);
+            return;
+        }
+        for (0..len) |i| @atomicStore(u8, &self.bytes()[offset + i], byte, .monotonic);
+    }
 };
+
+fn copyMemoryUnordered(dest: *MemoryInst, dest_offset: usize, source: *const MemoryInst, source_offset: usize, len: usize) void {
+    if (!dest.isShared() and !source.isShared()) {
+        const to = dest.bytes()[dest_offset..][0..len];
+        const from = source.bytes()[source_offset..][0..len];
+        if (dest != source or dest_offset <= source_offset)
+            std.mem.copyForwards(u8, to, from)
+        else
+            std.mem.copyBackwards(u8, to, from);
+        return;
+    }
+
+    if (dest == source and dest_offset > source_offset) {
+        var i = len;
+        while (i > 0) {
+            i -= 1;
+            dest.writeUnordered(dest_offset + i, 1, source.readUnordered(source_offset + i, 1));
+        }
+    } else {
+        for (0..len) |i| dest.writeUnordered(dest_offset + i, 1, source.readUnordered(source_offset + i, 1));
+    }
+}
 
 pub const TableInst = struct {
     elems: []ValueSlot,
@@ -829,7 +894,23 @@ fn signExtendLane(value: u64, width: u8) u64 {
     return @bitCast(@as(i64, @bitCast(value << shift)) >> shift);
 }
 
-fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size: usize) ExecError![]u8 {
+const SimdMemoryRange = struct {
+    mem: *MemoryInst,
+    offset: usize,
+    len: usize,
+
+    fn readLittle(self: SimdMemoryRange, relative: usize, size: usize) u64 {
+        std.debug.assert(relative + size <= self.len);
+        return self.mem.readUnordered(self.offset + relative, size);
+    }
+
+    fn writeLittle(self: SimdMemoryRange, relative: usize, size: usize, value: u64) void {
+        std.debug.assert(relative + size <= self.len);
+        self.mem.writeUnordered(self.offset + relative, size, value);
+    }
+};
+
+fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size: usize) ExecError!SimdMemoryRange {
     const address: u64 = popI32(s);
     const start = address + @as(u64, memarg.offset);
     const mem = inst.mems[0];
@@ -837,7 +918,7 @@ fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size:
     if (start > memory_len or @as(u64, @intCast(size)) > memory_len - start)
         return s.trap("out of bounds memory access");
     const offset: usize = @intCast(start);
-    return mem.bytes()[offset..][0..size];
+    return .{ .mem = mem, .offset = offset, .len = size };
 }
 
 fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: bool) u128 {
@@ -847,6 +928,18 @@ fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: b
     for (0..lanes) |lane| {
         const start = lane * source_size;
         var value = readLittle(bytes[start..][0..source_size]);
+        if (signed) value = signExtendLane(value, source_width);
+        result = replaceLaneBits(result, @intCast(lane), target_width, value);
+    }
+    return result;
+}
+
+fn loadExtendedMemory(range: SimdMemoryRange, source_width: u8, target_width: u8, signed: bool) u128 {
+    const source_size: usize = source_width / 8;
+    const lanes = range.len / source_size;
+    var result: u128 = 0;
+    for (0..lanes) |lane| {
+        var value = range.readLittle(lane * source_size, source_size);
         if (signed) value = signExtendLane(value, source_width);
         result = replaceLaneBits(result, @intCast(lane), target_width, value);
     }
@@ -1608,23 +1701,23 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
     const op = simdOp(instr);
     switch (op) {
         .v128_load => {
-            const bytes = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
-            try pushVector(s, @as(u128, readLittle(bytes[0..8])) |
-                (@as(u128, readLittle(bytes[8..16])) << 64));
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
+            try pushVector(s, @as(u128, range.readLittle(0, 8)) |
+                (@as(u128, range.readLittle(8, 8)) << 64));
         },
-        .v128_load8x8_s, .v128_load8x8_u => try pushVector(s, loadExtended(
+        .v128_load8x8_s, .v128_load8x8_u => try pushVector(s, loadExtendedMemory(
             try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
             8,
             16,
             op == .v128_load8x8_s,
         )),
-        .v128_load16x4_s, .v128_load16x4_u => try pushVector(s, loadExtended(
+        .v128_load16x4_s, .v128_load16x4_u => try pushVector(s, loadExtendedMemory(
             try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
             16,
             32,
             op == .v128_load16x4_s,
         )),
-        .v128_load32x2_s, .v128_load32x2_u => try pushVector(s, loadExtended(
+        .v128_load32x2_s, .v128_load32x2_u => try pushVector(s, loadExtendedMemory(
             try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
             32,
             64,
@@ -1638,18 +1731,20 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
                 .v128_load64_splat => 64,
                 else => unreachable,
             };
-            const value = readLittle(try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, width / 8));
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, width / 8);
+            const value = range.readLittle(0, width / 8);
             try pushVector(s, splatLaneBits(value, width, @intCast(128 / width)));
         },
         .v128_load32_zero, .v128_load64_zero => {
             const size: usize = if (op == .v128_load32_zero) 4 else 8;
-            try pushVector(s, readLittle(try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, size)));
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, size);
+            try pushVector(s, range.readLittle(0, size));
         },
         .v128_store => {
             const vector = popVector(s);
-            const bytes = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
-            writeLittle(bytes[0..8], @truncate(vector));
-            writeLittle(bytes[8..16], @truncate(vector >> 64));
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
+            range.writeLittle(0, 8, @truncate(vector));
+            range.writeLittle(8, 8, @truncate(vector >> 64));
         },
         .v128_load8_lane, .v128_load16_lane, .v128_load32_lane, .v128_load64_lane => {
             const vector = popVector(s);
@@ -1661,7 +1756,8 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
                 else => unreachable,
             };
             const immediate = instr.imm.simd_memarg_lane;
-            const value = readLittle(try simdMemoryRange(s, inst, immediate.memarg, width / 8));
+            const range = try simdMemoryRange(s, inst, immediate.memarg, width / 8);
+            const value = range.readLittle(0, width / 8);
             try pushVector(s, replaceLaneBits(vector, immediate.lane, width, value));
         },
         .v128_store8_lane, .v128_store16_lane, .v128_store32_lane, .v128_store64_lane => {
@@ -1674,10 +1770,8 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
                 else => unreachable,
             };
             const immediate = instr.imm.simd_memarg_lane;
-            writeLittle(
-                try simdMemoryRange(s, inst, immediate.memarg, width / 8),
-                laneBits(vector, immediate.lane, width),
-            );
+            const range = try simdMemoryRange(s, inst, immediate.memarg, width / 8);
+            range.writeLittle(0, width / 8, laneBits(vector, immediate.lane, width));
         },
         else => return false,
     }
@@ -2335,7 +2429,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const memory = inst.mems[immediate.second];
                 if (source_end > bytes.len or dest_end > memory.bytes().len)
                     return s.trap("out of bounds memory access");
-                @memcpy(memory.bytes()[dest..@intCast(dest_end)], bytes[source..@intCast(source_end)]);
+                memory.writeSliceUnordered(dest, bytes[source..@intCast(source_end)]);
             },
             .data_drop => inst.data_segments[instr.imm.idx].dropped = true,
             .memory_copy => {
@@ -2349,12 +2443,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const dest_end = @as(u64, dest) + count;
                 if (source_end > source_memory.bytes().len or dest_end > dest_memory.bytes().len)
                     return s.trap("out of bounds memory access");
-                const dest_slice = dest_memory.bytes()[dest..@intCast(dest_end)];
-                const source_slice = source_memory.bytes()[source..@intCast(source_end)];
-                if (dest_memory != source_memory or dest <= source)
-                    std.mem.copyForwards(u8, dest_slice, source_slice)
-                else
-                    std.mem.copyBackwards(u8, dest_slice, source_slice);
+                copyMemoryUnordered(dest_memory, dest, source_memory, source, count);
             },
             .memory_fill => {
                 const count = popI32(s);
@@ -2363,7 +2452,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const memory = inst.mems[instr.imm.idx];
                 const end = @as(u64, dest) + count;
                 if (end > memory.bytes().len) return s.trap("out of bounds memory access");
-                @memset(memory.bytes()[dest..@intCast(end)], value);
+                memory.fillUnordered(dest, count, value);
             },
             .table_init => {
                 const count = popI32(s);
@@ -2432,148 +2521,148 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI32(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
+                try pushI32(s, @truncate(mem.readUnordered(ea, 4)));
             },
             .i64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                try pushI64(s, std.mem.readInt(u64, mem.bytes()[ea..][0..8], .little));
+                try pushI64(s, mem.readUnordered(ea, 8));
             },
             .f32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try push(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
+                try push(s, @truncate(mem.readUnordered(ea, 4)));
             },
             .f64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                try push(s, std.mem.readInt(u64, mem.bytes()[ea..][0..8], .little));
+                try push(s, mem.readUnordered(ea, 8));
             },
             .i32_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(mem.bytes()[ea])))));
+                try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(@as(u8, @truncate(mem.readUnordered(ea, 1))))))));
             },
             .i32_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI32(s, mem.bytes()[ea]);
+                try pushI32(s, @truncate(mem.readUnordered(ea, 1)));
             },
             .i32_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI32(s, @bitCast(@as(i32, std.mem.readInt(i16, mem.bytes()[ea..][0..2], .little))));
+                try pushI32(s, @bitCast(@as(i32, @as(i16, @bitCast(@as(u16, @truncate(mem.readUnordered(ea, 2))))))));
             },
             .i32_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI32(s, std.mem.readInt(u16, mem.bytes()[ea..][0..2], .little));
+                try pushI32(s, @truncate(mem.readUnordered(ea, 2)));
             },
             .i64_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI64(s, @bitCast(@as(i64, @as(i8, @bitCast(mem.bytes()[ea])))));
+                try pushI64(s, @bitCast(@as(i64, @as(i8, @bitCast(@as(u8, @truncate(mem.readUnordered(ea, 1))))))));
             },
             .i64_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI64(s, mem.bytes()[ea]);
+                try pushI64(s, mem.readUnordered(ea, 1));
             },
             .i64_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i16, mem.bytes()[ea..][0..2], .little))));
+                try pushI64(s, @bitCast(@as(i64, @as(i16, @bitCast(@as(u16, @truncate(mem.readUnordered(ea, 2))))))));
             },
             .i64_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI64(s, std.mem.readInt(u16, mem.bytes()[ea..][0..2], .little));
+                try pushI64(s, mem.readUnordered(ea, 2));
             },
             .i64_load32_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i32, mem.bytes()[ea..][0..4], .little))));
+                try pushI64(s, @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, @truncate(mem.readUnordered(ea, 4))))))));
             },
             .i64_load32_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI64(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
+                try pushI64(s, mem.readUnordered(ea, 4));
             },
             .i32_store => {
                 const v = popI32(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
+                mem.writeUnordered(ea, 4, v);
             },
             .i64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                std.mem.writeInt(u64, mem.bytes()[ea..][0..8], v, .little);
+                mem.writeUnordered(ea, 8, v);
             },
             .f32_store => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
+                mem.writeUnordered(ea, 4, v);
             },
             .f64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                std.mem.writeInt(u64, mem.bytes()[ea..][0..8], v, .little);
+                mem.writeUnordered(ea, 8, v);
             },
             .i32_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                mem.bytes()[ea] = v;
+                mem.writeUnordered(ea, 1, v);
             },
             .i32_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                std.mem.writeInt(u16, mem.bytes()[ea..][0..2], v, .little);
+                mem.writeUnordered(ea, 2, v);
             },
             .i64_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                mem.bytes()[ea] = v;
+                mem.writeUnordered(ea, 1, v);
             },
             .i64_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                std.mem.writeInt(u16, mem.bytes()[ea..][0..2], v, .little);
+                mem.writeUnordered(ea, 2, v);
             },
             .i64_store32 => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
+                mem.writeUnordered(ea, 4, v);
             },
             .memory_size => try pushI32(s, inst.mems[0].pages()),
             .memory_grow => {
@@ -3452,6 +3541,35 @@ test "wasm.exec executes every atomic load store RMW and cmpxchg opcode" {
     try std.testing.expectEqualStrings("unaligned atomic", state.diag.message());
 }
 
+test "wasm.exec ordinary shared memory accesses are host-race-free" {
+    const mem = try createMemoryTyped(talloc, 1, 1, true);
+    defer destroyMemory(talloc, mem);
+    var start = std.atomic.Value(bool).init(false);
+
+    const AtomicSide = struct {
+        fn run(memory: *MemoryInst, ready: *std.atomic.Value(bool)) void {
+            while (!ready.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..20_000) |i| {
+                atomicStoreRaw(memory.bytes(), 0, 4, i);
+                _ = atomicLoadRaw(memory.bytes(), 8, 4);
+                atomicStoreRaw(memory.bytes(), 16, 8, i);
+            }
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, AtomicSide.run, .{ mem, &start });
+    start.store(true, .release);
+    for (0..20_000) |i| {
+        _ = mem.readUnordered(0, 4);
+        mem.writeUnordered(8, 4, i);
+        mem.writeSliceUnordered(16, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 });
+        mem.fillUnordered(16, 8, @truncate(i));
+        copyMemoryUnordered(mem, 17, mem, 16, 7);
+    }
+    thread.join();
+
+    try std.testing.expect(mem.readUnordered(0, 4) < 20_000);
+}
+
 test "wasm.exec atomic wait and notify share the FIFO waiter table" {
     const mem = try createMemoryTyped(talloc, 1, 1, true);
     defer destroyMemory(talloc, mem);
@@ -3518,6 +3636,36 @@ test "wasm.exec atomic wait and notify share the FIFO waiter table" {
     try pushI64(&state, 0);
     try std.testing.expectError(error.Trap, executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_wait32)));
     try std.testing.expectEqualStrings("expected shared memory", diag.message());
+}
+
+test "wasm.exec atomic waiter survives shared growth and store destruction" {
+    const mem = try createMemoryTyped(talloc, 1, 2, true);
+    const storage = mem.shared_storage.?.retain();
+    defer storage.release();
+    atomicStoreRaw(storage.slice(), 0, 4, 0);
+
+    const Waiter = struct {
+        fn run(shared: *SharedBufferStorage, result: *agent.WaitOutcome) void {
+            result.* = agent.wait(shared, 0, i32, 0, 2 * std.time.ns_per_s);
+        }
+    };
+    var outcome: agent.WaitOutcome = .timed_out;
+    const thread = try std.Thread.spawn(.{}, Waiter.run, .{ storage, &outcome });
+
+    try std.testing.expectEqual(@as(i32, 1), memoryGrow(mem, 1));
+    destroyMemory(talloc, mem); // the independent waiter-domain hold remains
+
+    var woke: usize = 0;
+    var attempts: usize = 0;
+    while (woke == 0 and attempts < 100_000) : (attempts += 1) {
+        woke = agent.notify(storage, 0, 1);
+        if (woke == 0) std.Thread.yield() catch {};
+    }
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, 1), woke);
+    try std.testing.expectEqual(agent.WaitOutcome.ok, outcome);
+    try std.testing.expectEqual(@as(usize, 2 * types.PAGE_SIZE), storage.len());
 }
 
 // -- Instantiation: import resolution ----------------------------------------
