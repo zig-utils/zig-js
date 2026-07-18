@@ -392,6 +392,13 @@ const FuncValidator = struct {
         self.pushTypes(ft.results);
     }
 
+    fn tailCallFunc(self: *FuncValidator, ft: types.FuncType) Error!void {
+        if (!std.mem.eql(types.ValType, ft.results, self.frames[0].results))
+            return self.fail("type mismatch");
+        try self.popTypes(ft.params);
+        self.setUnreachable();
+    }
+
     // Signature helpers.
     fn unop(self: *FuncValidator, t: types.ValType) Error!void {
         try self.popExpect(t);
@@ -667,6 +674,12 @@ const FuncValidator = struct {
                         return self.fail("unknown function");
                     try self.callFunc(self.mod.funcType(idx));
                 },
+                .return_call => {
+                    const idx = instr.imm.idx;
+                    if (idx >= self.mod.totalFuncs())
+                        return self.fail("unknown function");
+                    try self.tailCallFunc(self.mod.funcType(idx));
+                },
                 .call_indirect => {
                     const tidx = instr.imm.call_indirect.type_index;
                     const tableidx = instr.imm.call_indirect.table_index;
@@ -676,6 +689,16 @@ const FuncValidator = struct {
                     if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
                     try self.popExpect(.i32);
                     try self.callFunc(self.mod.types[tidx]);
+                },
+                .return_call_indirect => {
+                    const tidx = instr.imm.call_indirect.type_index;
+                    const tableidx = instr.imm.call_indirect.table_index;
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
+                    if (tidx >= self.mod.types.len) return self.fail("unknown type");
+                    try self.popExpect(.i32);
+                    try self.tailCallFunc(self.mod.types[tidx]);
                 },
                 .drop => _ = try self.pop(),
                 .select => {
@@ -1536,6 +1559,112 @@ test "wasm.validate memory.grow and memory.size without memory" {
         code1("\x41\x01\x40\x00\x1A\x0B"), 0, 1, "unknown memory 0");
     try expectInvalidAt(hdr ++ type_void ++ func0 ++
         code1("\x3F\x00\x1A\x0B"), 0, 0, "unknown memory 0");
+}
+
+test "wasm.validate tail calls accept direct indirect and polymorphic stacks" {
+    const features: types.Features = .{ .tail_calls = true };
+    const direct = comptime (hdr ++ type_i32 ++ sec(3, "\x02\x00\x00") ++ sec(
+        10,
+        "\x02" ++ codeBody("\x00", "\x41\x07\x0B") ++ codeBody("\x00", "\x12\x00\x0B"),
+    ));
+    try expectValidWithFeatures(direct, features);
+
+    const indirect = comptime (hdr ++ type_i32 ++ func0 ++ table1 ++
+        code1("\x41\x00\x13\x00\x00\x0B"));
+    try expectValidWithFeatures(indirect, features);
+
+    const param_and_result_types = comptime sec(
+        1,
+        "\x02\x60\x01\x7E\x01\x7F\x60\x00\x01\x7F",
+    ); // (i64) -> i32, () -> i32
+    const unreachable_direct = comptime (hdr ++ param_and_result_types ++
+        sec(3, "\x02\x00\x01") ++ sec(
+        10,
+        "\x02" ++ codeBody("\x00", "\x41\x00\x0B") ++ codeBody("\x00", "\x00\x12\x00\x0B"),
+    ));
+    try expectValidWithFeatures(unreachable_direct, features);
+
+    const indirect_params = comptime (hdr ++ param_and_result_types ++
+        sec(3, "\x01\x01") ++ table1 ++
+        code1("\x42\x00\x41\x00\x13\x00\x00\x0B"));
+    try expectValidWithFeatures(indirect_params, features);
+
+    // Values below the callee operands are discarded by the polymorphic tail.
+    const extra_stack = comptime (hdr ++ type_i32 ++ sec(3, "\x02\x00\x00") ++ sec(
+        10,
+        "\x02" ++ codeBody("\x00", "\x41\x00\x0B") ++ codeBody("\x00", "\x42\x00\x12\x00\x0B"),
+    ));
+    try expectValidWithFeatures(extra_stack, features);
+}
+
+test "wasm.validate tail calls enforce results operands tables and indices" {
+    const features: types.Features = .{ .tail_calls = true };
+    const mismatched_results = comptime (hdr ++
+        sec(1, "\x02\x60\x00\x01\x7E\x60\x00\x01\x7F") ++
+        sec(3, "\x02\x00\x01") ++ sec(
+        10,
+        "\x02" ++ codeBody("\x00", "\x42\x00\x0B") ++ codeBody("\x00", "\x12\x00\x0B"),
+    ));
+    try expectInvalidAtWithFeatures(mismatched_results, features, 1, 0, "type mismatch");
+    const mismatched_indirect_results = comptime (hdr ++
+        sec(1, "\x02\x60\x00\x01\x7E\x60\x00\x01\x7F") ++
+        sec(3, "\x01\x01") ++ table1 ++
+        code1("\x41\x00\x13\x00\x00\x0B"));
+    try expectInvalidAtWithFeatures(mismatched_indirect_results, features, 0, 1, "type mismatch");
+
+    const param_and_result_types = comptime sec(
+        1,
+        "\x02\x60\x01\x7E\x01\x7F\x60\x00\x01\x7F",
+    );
+    const missing_param = comptime (hdr ++ param_and_result_types ++
+        sec(3, "\x02\x00\x01") ++ sec(
+        10,
+        "\x02" ++ codeBody("\x00", "\x41\x00\x0B") ++ codeBody("\x00", "\x12\x00\x0B"),
+    ));
+    try expectInvalidAtWithFeatures(missing_param, features, 1, 0, "type mismatch");
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ code1("\x12\x01\x0B"),
+        features,
+        0,
+        0,
+        "unknown function",
+    );
+
+    const bad_indirect_operand = comptime (hdr ++ param_and_result_types ++
+        sec(3, "\x01\x01") ++ table1 ++
+        code1("\x44\x00\x00\x00\x00\x00\x00\x00\x00\x41\x00\x13\x00\x00\x0B"));
+    try expectInvalidAtWithFeatures(bad_indirect_operand, features, 0, 2, "type mismatch");
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ code1("\x41\x00\x13\x00\x00\x0B"),
+        features,
+        0,
+        1,
+        "unknown table 0",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ table1 ++ code1("\x41\x00\x13\x01\x00\x0B"),
+        features,
+        0,
+        1,
+        "unknown type",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ table1 ++ code1("\x41\x00\x13\x00\x01\x0B"),
+        features,
+        0,
+        1,
+        "unknown table",
+    );
+
+    const externref_table = comptime (hdr ++ type_void ++ func0 ++
+        sec(4, "\x01\x6F\x00\x01") ++ code1("\x41\x00\x13\x00\x00\x0B"));
+    try expectInvalidAtWithFeatures(
+        externref_table,
+        .{ .tail_calls = true, .reference_types = true },
+        0,
+        1,
+        "type mismatch",
+    );
 }
 
 test "wasm.validate unknown function call" {

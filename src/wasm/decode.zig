@@ -728,7 +728,6 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             }
             if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
             if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
-            if (b == 0x12 or b == 0x13) return r.unsupportedFeature(instr_off, .tail_calls);
             if (b == 0x14 or b == 0x15) return r.unsupportedFeature(instr_off, .typed_function_references);
             if (b == 0x06 or b == 0x07 or b == 0x08 or b == 0x09 or b == 0x18 or b == 0x19)
                 return r.unsupportedFeature(instr_off, .exception_handling);
@@ -740,6 +739,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .fixed_width_simd);
         if (op == .atomic and !r.features.threads)
             return r.unsupportedFeature(instr_off, .threads);
+        if ((op == .return_call or op == .return_call_indirect) and !r.features.tail_calls)
+            return r.unsupportedFeature(instr_off, .tail_calls);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -801,6 +802,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .br,
             .br_if,
             .call,
+            .return_call,
             .local_get,
             .local_set,
             .local_tee,
@@ -835,6 +837,14 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     break :blk 0;
                 };
                 instr.imm = .{ .call_indirect = .{ .type_index = typeidx, .table_index = tableidx } };
+            },
+            .return_call_indirect => {
+                // The pinned tail-call binary grammar always encodes both
+                // typeidx and tableidx, in that order.
+                instr.imm = .{ .call_indirect = .{
+                    .type_index = try r.readU32Leb(),
+                    .table_index = try r.readU32Leb(),
+                } };
             },
             .typed_select => {
                 const count_off = r.offset();
@@ -1298,6 +1308,34 @@ test "wasm.decode malformed code bodies" {
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x0B\x01", 18, "junk after last expression");
     // Two local groups of 0xFFFFFFFF each overflow the u32 locals range.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x0F\x01\x0D\x02\xFF\xFF\xFF\xFF\x0F\x7F\xFF\xFF\xFF\xFF\x0F\x7F", 23, "too many locals");
+}
+
+test "wasm.decode tail-call opcodes feature gate and immediates" {
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode(
+        "\x12\x81\x01" ++ // return_call function 129
+            "\x13\x82\x01\x03" ++ // return_call_indirect type 130, table 3
+            "\x0B",
+    ));
+    try expectMalformed(bytes, 17, "WebAssembly feature tail-calls is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .tail_calls = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(@as(usize, 3), mod.code[0].instrs.len);
+    try std.testing.expectEqual(types.Op.return_call, mod.code[0].instrs[0].op);
+    try std.testing.expectEqual(@as(u32, 129), mod.code[0].instrs[0].imm.idx);
+    try std.testing.expectEqual(types.Op.return_call_indirect, mod.code[0].instrs[1].op);
+    try std.testing.expectEqualDeep(
+        types.Instr.CallIndirect{ .type_index = 130, .table_index = 3 },
+        mod.code[0].instrs[1].imm.call_indirect,
+    );
+
+    try expectMalformedWithFeatures(
+        comptime (hdr ++ func_sec_1 ++ testCode("\x13\x00")),
+        .{ .tail_calls = true },
+        19,
+        "unexpected end",
+    );
 }
 
 test "wasm.decode fixed-width SIMD opcode inventory and immediates" {

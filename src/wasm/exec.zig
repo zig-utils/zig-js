@@ -2322,6 +2322,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             },
             .return_ => branchTo(s, @intCast(s.labels.items.len - 1 - fr.label_base)),
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
+            .return_call, .return_call_indirect => return s.trap("tail call execution not implemented"),
             .call_indirect => {
                 const i = popI32(s);
                 const immediate = instr.imm.call_indirect;

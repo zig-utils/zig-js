@@ -366,10 +366,10 @@ pub const Instr = struct {
     };
 };
 
-/// Every implemented opcode. Direct opcodes use their binary byte; prefixed
-/// opcodes use the prefix as the high byte and the subopcode as the low byte.
-/// The decoder still applies the owning feature gate before emitting any
-/// post-MVP instruction.
+/// Every recognized opcode in the current binary and validation profiles.
+/// Direct opcodes use their binary byte; prefixed opcodes use the prefix as the
+/// high byte and the subopcode as the low byte. The decoder still applies the
+/// owning feature gate before emitting any post-MVP instruction.
 pub const Op = enum(u16) {
     // Control
     unreachable_ = 0x00,
@@ -385,6 +385,8 @@ pub const Op = enum(u16) {
     return_ = 0x0F,
     call = 0x10,
     call_indirect = 0x11,
+    return_call = 0x12,
+    return_call_indirect = 0x13,
     // Parametric
     drop = 0x1A,
     select = 0x1B,
