@@ -20,6 +20,79 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"wasm-feature-profiles: {message}")
 
 
+def verify_terminal_inventory(
+    path: Path,
+    *,
+    kind: str,
+    profile: str,
+    repository: str,
+    commit: str,
+    features: list[str],
+    files: list[tuple[str, int, int]],
+) -> None:
+    document = json.loads(path.read_text())
+    require(document.get("schema_version") == 2, f"{profile}: unsupported terminal inventory schema")
+    require(document.get("kind") == kind, f"{profile}: terminal inventory kind drift")
+    require(document.get("profile") == profile, f"{profile}: terminal inventory profile drift")
+    require(document.get("features") == features, f"{profile}: terminal inventory feature drift")
+    require(SHA.fullmatch(document.get("engine_commit", "")) is not None, f"{profile}: invalid engine commit")
+    spec = document.get("spec", {})
+    declared = [name for name, _, _ in files]
+    require(spec.get("repository") == repository, f"{profile}: repository drift")
+    require(spec.get("commit") == commit, f"{profile}: proposal pin drift")
+    require(spec.get("declared_files") == declared, f"{profile}: declared file drift")
+    require(spec.get("files_declared") == len(files), f"{profile}: declared file count drift")
+    require(spec.get("files_scored") == len(files), f"{profile}: hidden file filtering")
+    converter = document.get("converter", {})
+    require(converter.get("version") == "1.0.39", f"{profile}: converter version drift")
+    require(converter.get("commit") == "ad75c5edcdff96d73c245b57fbc07607aaca9f95", f"{profile}: converter pin drift")
+    entries = document.get("files", [])
+    require([Path(entry.get("path", "")).name for entry in entries] == declared, f"{profile}: scored file drift")
+    expected_pass = sum(passed for _, passed, _ in files)
+    expected_na = sum(not_applicable for _, _, not_applicable in files)
+    totals = document.get("totals", {})
+    require(
+        totals == {
+            "fail": 0,
+            "not_applicable": expected_na,
+            "pass": expected_pass,
+            "runner_error": 0,
+            "total": expected_pass + expected_na,
+        },
+        f"{profile}: terminal totals are not green",
+    )
+    for entry, (_, passed, not_applicable) in zip(entries, files):
+        commands = entry.get("commands", [])
+        require(len(commands) == passed + not_applicable, f"{profile}: per-file command count drift")
+        require(entry.get("counts") == {
+            "fail": 0,
+            "not_applicable": not_applicable,
+            "pass": passed,
+            "runner_error": 0,
+            "total": passed + not_applicable,
+        }, f"{profile}: per-file totals are not green")
+        require(
+            all(command.get("status") in {"pass", "not_applicable"} for command in commands),
+            f"{profile}: hidden failed command",
+        )
+        require(
+            all(
+                command.get("mode") == ("not_applicable" if command.get("status") == "not_applicable" else "javascript_api")
+                for command in commands
+            ),
+            f"{profile}: command execution mode drift",
+        )
+        require(
+            all(
+                command.get("type") == "assert_malformed"
+                and command.get("detail") == "text-format syntax is not exposed by the JavaScript binary API"
+                for command in commands
+                if command.get("status") == "not_applicable"
+            ),
+            f"{profile}: unexplained non-applicable command",
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -67,6 +140,16 @@ def main() -> int:
         "--exception-runtime-source",
         type=Path,
         default=ROOT / "src/wasm/exec.zig",
+    )
+    parser.add_argument(
+        "--tail-call-terminal-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-tail-call-inventory.json",
+    )
+    parser.add_argument(
+        "--exception-handling-terminal-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-exception-handling-inventory.json",
     )
     parser.add_argument(
         "--simd-movement-inventory",
@@ -360,6 +443,25 @@ def main() -> int:
         and "WebAssembly.Exception.prototype.getArg" in exception_diff_source
         and "WebAssembly.JSTag" in exception_diff_source,
         "exception inventory/JavaScriptCore differential evidence drift",
+    )
+    tail_feature = next(feature for feature in features if feature["id"] == "tail_calls")
+    verify_terminal_inventory(
+        args.tail_call_terminal_inventory,
+        kind="webassembly_tail_call_inventory",
+        profile="tail-calls",
+        repository=tail_feature["repository"],
+        commit=tail_feature["commit"],
+        features=["multi_value", "reference_types", "bulk_memory", "tail_calls"],
+        files=[("return_call.wast", 44, 0), ("return_call_indirect.wast", 64, 11)],
+    )
+    verify_terminal_inventory(
+        args.exception_handling_terminal_inventory,
+        kind="webassembly_exception_handling_inventory",
+        profile="exception-handling",
+        repository=exception_feature["repository"],
+        commit=exception_feature["commit"],
+        features=["multi_value", "reference_types", "bulk_memory", "tail_calls", "exception_handling"],
+        files=[("tag.wast", 4, 0), ("throw.wast", 13, 0), ("throw_ref.wast", 15, 0), ("try_table.wast", 52, 2)],
     )
 
     movement = json.loads(args.simd_movement_inventory.read_text())

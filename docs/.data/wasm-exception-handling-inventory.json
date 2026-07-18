@@ -1,0 +1,794 @@
+{
+  "converter": {
+    "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+    "repository": "https://github.com/WebAssembly/wabt.git",
+    "version": "1.0.39"
+  },
+  "engine_commit": "b2d3f2480886d292fff4c3cac37a2e445aae7151",
+  "features": [
+    "multi_value",
+    "reference_types",
+    "bulk_memory",
+    "tail_calls",
+    "exception_handling"
+  ],
+  "files": [
+    {
+      "commands": [
+        {
+          "feature_area": "exception_handling",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 1,
+          "line": 11,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 2,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 3,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 4,
+        "runner_error": 0,
+        "total": 4
+      },
+      "feature_area": "exception_handling",
+      "path": "test/core/tag.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "exception_handling",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 1,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 2,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 3,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 4,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 5,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 6,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 7,
+          "line": 46,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 8,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 9,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 10,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 11,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 12,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 13,
+        "runner_error": 0,
+        "total": 13
+      },
+      "feature_area": "exception_handling",
+      "path": "test/core/throw.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "exception_handling",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 1,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 2,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 3,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 4,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 5,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 6,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 7,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 8,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 9,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 10,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 11,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 12,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 13,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 14,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 15,
+        "runner_error": 0,
+        "total": 15
+      },
+      "feature_area": "exception_handling",
+      "path": "test/core/throw_ref.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "exception_handling",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 1,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 2,
+          "line": 10,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 3,
+          "line": 258,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 4,
+          "line": 259,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 5,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 6,
+          "line": 263,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 7,
+          "line": 264,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 8,
+          "line": 266,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 9,
+          "line": 267,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 10,
+          "line": 268,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 11,
+          "line": 270,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 12,
+          "line": 271,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 13,
+          "line": 272,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 14,
+          "line": 274,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 15,
+          "line": 275,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 16,
+          "line": 276,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 17,
+          "line": 278,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 18,
+          "line": 279,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 19,
+          "line": 281,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 20,
+          "line": 282,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 21,
+          "line": 283,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 22,
+          "line": 285,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 23,
+          "line": 286,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 24,
+          "line": 288,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 25,
+          "line": 289,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 26,
+          "line": 290,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 27,
+          "line": 292,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 28,
+          "line": 293,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 29,
+          "line": 295,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 30,
+          "line": 296,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 31,
+          "line": 297,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 32,
+          "line": 299,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 33,
+          "line": 300,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 34,
+          "line": 302,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 35,
+          "line": 304,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 36,
+          "line": 305,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 37,
+          "line": 307,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 38,
+          "line": 308,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 39,
+          "line": 310,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 40,
+          "line": 311,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_exception"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 41,
+          "line": 313,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 42,
+          "line": 315,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 43,
+          "line": 337,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "exception_handling",
+          "index": 44,
+          "line": 340,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "exception_handling",
+          "index": 45,
+          "line": 345,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 46,
+          "line": 349,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 47,
+          "line": 360,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 48,
+          "line": 364,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 49,
+          "line": 369,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 50,
+          "line": 373,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 51,
+          "line": 377,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 52,
+          "line": 381,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "exception_handling",
+          "index": 53,
+          "line": 385,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 2,
+        "pass": 52,
+        "runner_error": 0,
+        "total": 54
+      },
+      "feature_area": "exception_handling",
+      "path": "test/core/try_table.wast"
+    }
+  ],
+  "kind": "webassembly_exception_handling_inventory",
+  "profile": "exception-handling",
+  "schema_version": 2,
+  "spec": {
+    "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+    "declared_files": [
+      "tag.wast",
+      "throw.wast",
+      "throw_ref.wast",
+      "try_table.wast"
+    ],
+    "files_available": 94,
+    "files_declared": 4,
+    "files_scored": 4,
+    "license": "Apache-2.0",
+    "repository": "https://github.com/WebAssembly/exception-handling.git",
+    "suite": "test/core/*.wast",
+    "tag": "proposal-revision"
+  },
+  "totals": {
+    "fail": 0,
+    "not_applicable": 2,
+    "pass": 84,
+    "runner_error": 0,
+    "total": 86
+  },
+  "totals_by_feature_area": {
+    "exception_handling": {
+      "fail": 0,
+      "not_applicable": 2,
+      "pass": 84,
+      "runner_error": 0,
+      "total": 86
+    }
+  }
+}

@@ -1,0 +1,1038 @@
+{
+  "converter": {
+    "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+    "repository": "https://github.com/WebAssembly/wabt.git",
+    "version": "1.0.39"
+  },
+  "engine_commit": "b2d3f2480886d292fff4c3cac37a2e445aae7151",
+  "features": [
+    "multi_value",
+    "reference_types",
+    "bulk_memory",
+    "tail_calls"
+  ],
+  "files": [
+    {
+      "commands": [
+        {
+          "feature_area": "tail_calls",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 1,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 2,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 3,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 4,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 5,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 6,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 7,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 8,
+          "line": 88,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 9,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 10,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 11,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 12,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 13,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 14,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 15,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 16,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 17,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 18,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 19,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 20,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 21,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 22,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 23,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 24,
+          "line": 111,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 25,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 26,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 27,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 28,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 29,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 30,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 31,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 32,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 33,
+          "line": 131,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 34,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 35,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 36,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 37,
+          "line": 158,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 38,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 39,
+          "line": 171,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 40,
+          "line": 178,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 41,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 42,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 43,
+          "line": 200,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 44,
+        "runner_error": 0,
+        "total": 44
+      },
+      "feature_area": "tail_calls",
+      "path": "test/core/return_call.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "tail_calls",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 1,
+          "line": 213,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 2,
+          "line": 214,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 3,
+          "line": 215,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 4,
+          "line": 216,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 5,
+          "line": 218,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 6,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 7,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 8,
+          "line": 222,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 9,
+          "line": 223,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 10,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 11,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 12,
+          "line": 227,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 13,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 14,
+          "line": 230,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 15,
+          "line": 231,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 16,
+          "line": 232,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 17,
+          "line": 233,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 18,
+          "line": 234,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 19,
+          "line": 235,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 20,
+          "line": 236,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 21,
+          "line": 237,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 22,
+          "line": 238,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 23,
+          "line": 240,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 24,
+          "line": 241,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 25,
+          "line": 242,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 26,
+          "line": 243,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 27,
+          "line": 244,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 28,
+          "line": 245,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 29,
+          "line": 247,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 30,
+          "line": 248,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 31,
+          "line": 249,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 32,
+          "line": 251,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 33,
+          "line": 252,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 34,
+          "line": 253,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 35,
+          "line": 254,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 36,
+          "line": 256,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 37,
+          "line": 257,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 38,
+          "line": 258,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 39,
+          "line": 259,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 40,
+          "line": 260,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 41,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 42,
+          "line": 262,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 43,
+          "line": 263,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 44,
+          "line": 264,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 45,
+          "line": 265,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 46,
+          "line": 266,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 47,
+          "line": 267,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 48,
+          "line": 273,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 49,
+          "line": 285,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 50,
+          "line": 297,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 51,
+          "line": 309,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 52,
+          "line": 321,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 53,
+          "line": 333,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 54,
+          "line": 345,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 55,
+          "line": 352,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 56,
+          "line": 362,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 57,
+          "line": 372,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "tail_calls",
+          "index": 58,
+          "line": 384,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 59,
+          "line": 399,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 60,
+          "line": 407,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 61,
+          "line": 415,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 62,
+          "line": 424,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 63,
+          "line": 432,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 64,
+          "line": 440,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 65,
+          "line": 446,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 66,
+          "line": 455,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 67,
+          "line": 463,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 68,
+          "line": 472,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 69,
+          "line": 482,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 70,
+          "line": 492,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 71,
+          "line": 502,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 72,
+          "line": 516,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 73,
+          "line": 523,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "tail_calls",
+          "index": 74,
+          "line": 534,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 11,
+        "pass": 64,
+        "runner_error": 0,
+        "total": 75
+      },
+      "feature_area": "tail_calls",
+      "path": "test/core/return_call_indirect.wast"
+    }
+  ],
+  "kind": "webassembly_tail_call_inventory",
+  "profile": "tail-calls",
+  "schema_version": 2,
+  "spec": {
+    "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+    "declared_files": [
+      "return_call.wast",
+      "return_call_indirect.wast"
+    ],
+    "files_available": 92,
+    "files_declared": 2,
+    "files_scored": 2,
+    "license": "Apache-2.0",
+    "repository": "https://github.com/WebAssembly/tail-call.git",
+    "suite": "test/core/*.wast",
+    "tag": "proposal-revision"
+  },
+  "totals": {
+    "fail": 0,
+    "not_applicable": 11,
+    "pass": 108,
+    "runner_error": 0,
+    "total": 119
+  },
+  "totals_by_feature_area": {
+    "tail_calls": {
+      "fail": 0,
+      "not_applicable": 11,
+      "pass": 108,
+      "runner_error": 0,
+      "total": 119
+    }
+  }
+}
