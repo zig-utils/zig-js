@@ -40,7 +40,7 @@ All figures below are checked-in, reproducible results. Full pins, runner bounda
 | WebAssembly tail calls | **108 / 108 applicable commands** | [inventory](docs/.data/wasm-tail-call-inventory.json) |
 | WebAssembly exceptions | **84 / 84 applicable commands** | [inventory](docs/.data/wasm-exception-handling-inventory.json) |
 
-Memory64 binary handling, validation, runtime, and JavaScript API behavior pass the focused **22 / 22** normal and ThreadSanitizer tests; terminal upstream scoring remains tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). The Wasm GC proposal is pinned at `756060f5`; recursive groups, canonical type identity, subtyping, and all 33 instruction encodings now decode and validate behind the feature gate. Runtime objects and precise tracing continue in [#299](https://github.com/zig-utils/zig-js/issues/299). Inventory facts are not reported as pass scores.
+Memory64 binary handling, validation, runtime, and JavaScript API behavior pass the focused **22 / 22** normal and ThreadSanitizer tests; terminal upstream scoring remains tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). The Wasm GC proposal is pinned at `756060f5`; all 33 instructions validate, and the runtime now covers aggregates, casts, i31, canonical cross-instance wrappers, cyclic collection, and precise host tracing. Extern conversions and terminal stress/corpus evidence remain in [#299](https://github.com/zig-utils/zig-js/issues/299) and [#300](https://github.com/zig-utils/zig-js/issues/300). Inventory facts are not reported as pass scores.
 
 ## Performance
 
@@ -199,7 +199,7 @@ The memory model, lifecycle rules, sanitizer strategy, and current work are main
 The green configured runners do not mean the entire JavaScript/JSC universe is complete. Remaining boundaries include:
 
 - the rest of JavaScriptCore framework/private internals and the remaining Bun/Home private ABI;
-- Wasm GC runtime, memory64 terminal corpus scoring, shell-only Wasm/JIT hooks, and final Threads host-wide stress evidence;
+- remaining Wasm GC extern-conversion/stress evidence, terminal proposal corpus scoring, shell-only Wasm/JIT hooks, and final Threads host-wide stress evidence;
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
 The implementation roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134). The evidence-backed removal of this section is tracked explicitly in [#246](https://github.com/zig-utils/zig-js/issues/246).
