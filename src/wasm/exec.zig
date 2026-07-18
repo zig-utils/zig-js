@@ -924,6 +924,139 @@ fn executeSimdIntegerComparison(s: *State, op: simd.Op) ExecError!bool {
     return true;
 }
 
+const SimdUnaryInteger = enum { abs, neg, popcnt };
+
+const SimdUnaryIntegerOp = struct {
+    width: u8,
+    operation: SimdUnaryInteger,
+};
+
+fn simdUnaryInteger(op: simd.Op) ?SimdUnaryIntegerOp {
+    return switch (op) {
+        .i8x16_abs => .{ .width = 8, .operation = .abs },
+        .i8x16_neg => .{ .width = 8, .operation = .neg },
+        .i8x16_popcnt => .{ .width = 8, .operation = .popcnt },
+        .i16x8_abs => .{ .width = 16, .operation = .abs },
+        .i16x8_neg => .{ .width = 16, .operation = .neg },
+        .i32x4_abs => .{ .width = 32, .operation = .abs },
+        .i32x4_neg => .{ .width = 32, .operation = .neg },
+        .i64x2_abs => .{ .width = 64, .operation = .abs },
+        .i64x2_neg => .{ .width = 64, .operation = .neg },
+        else => null,
+    };
+}
+
+fn mapSimdUnaryInteger(vector: u128, descriptor: SimdUnaryIntegerOp) u128 {
+    var result: u128 = 0;
+    for (0..128 / descriptor.width) |lane| {
+        const value = laneBits(vector, @intCast(lane), descriptor.width);
+        const mapped = switch (descriptor.operation) {
+            .abs => if (value >> @intCast(descriptor.width - 1) != 0) 0 -% value else value,
+            .neg => 0 -% value,
+            .popcnt => @popCount(value),
+        };
+        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
+    }
+    return result;
+}
+
+const SimdShift = enum { left, right_signed, right_unsigned };
+
+const SimdShiftOp = struct {
+    width: u8,
+    operation: SimdShift,
+};
+
+fn simdShift(op: simd.Op) ?SimdShiftOp {
+    return switch (op) {
+        .i8x16_shl => .{ .width = 8, .operation = .left },
+        .i8x16_shr_s => .{ .width = 8, .operation = .right_signed },
+        .i8x16_shr_u => .{ .width = 8, .operation = .right_unsigned },
+        .i16x8_shl => .{ .width = 16, .operation = .left },
+        .i16x8_shr_s => .{ .width = 16, .operation = .right_signed },
+        .i16x8_shr_u => .{ .width = 16, .operation = .right_unsigned },
+        .i32x4_shl => .{ .width = 32, .operation = .left },
+        .i32x4_shr_s => .{ .width = 32, .operation = .right_signed },
+        .i32x4_shr_u => .{ .width = 32, .operation = .right_unsigned },
+        .i64x2_shl => .{ .width = 64, .operation = .left },
+        .i64x2_shr_s => .{ .width = 64, .operation = .right_signed },
+        .i64x2_shr_u => .{ .width = 64, .operation = .right_unsigned },
+        else => null,
+    };
+}
+
+fn shiftSimdLanes(vector: u128, shift: u32, descriptor: SimdShiftOp) u128 {
+    const amount: u6 = @intCast(shift & (descriptor.width - 1));
+    var result: u128 = 0;
+    for (0..128 / descriptor.width) |lane| {
+        const value = laneBits(vector, @intCast(lane), descriptor.width);
+        const shifted = switch (descriptor.operation) {
+            .left => value << amount,
+            .right_unsigned => value >> amount,
+            .right_signed => @as(u64, @bitCast(@as(i64, @bitCast(signExtendLane(value, descriptor.width))) >> amount)),
+        };
+        result = replaceLaneBits(result, @intCast(lane), descriptor.width, shifted);
+    }
+    return result;
+}
+
+const SimdWrappingBinary = enum { add, sub, mul };
+
+const SimdWrappingBinaryOp = struct {
+    width: u8,
+    operation: SimdWrappingBinary,
+};
+
+fn simdWrappingBinary(op: simd.Op) ?SimdWrappingBinaryOp {
+    return switch (op) {
+        .i8x16_add => .{ .width = 8, .operation = .add },
+        .i8x16_sub => .{ .width = 8, .operation = .sub },
+        .i16x8_add => .{ .width = 16, .operation = .add },
+        .i16x8_sub => .{ .width = 16, .operation = .sub },
+        .i16x8_mul => .{ .width = 16, .operation = .mul },
+        .i32x4_add => .{ .width = 32, .operation = .add },
+        .i32x4_sub => .{ .width = 32, .operation = .sub },
+        .i32x4_mul => .{ .width = 32, .operation = .mul },
+        .i64x2_add => .{ .width = 64, .operation = .add },
+        .i64x2_sub => .{ .width = 64, .operation = .sub },
+        .i64x2_mul => .{ .width = 64, .operation = .mul },
+        else => null,
+    };
+}
+
+fn mapSimdWrappingBinary(left: u128, right: u128, descriptor: SimdWrappingBinaryOp) u128 {
+    var result: u128 = 0;
+    for (0..128 / descriptor.width) |lane| {
+        const a = laneBits(left, @intCast(lane), descriptor.width);
+        const b = laneBits(right, @intCast(lane), descriptor.width);
+        const mapped = switch (descriptor.operation) {
+            .add => a +% b,
+            .sub => a -% b,
+            .mul => a *% b,
+        };
+        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
+    }
+    return result;
+}
+
+fn executeSimdIntegerBasic(s: *State, op: simd.Op) ExecError!bool {
+    if (simdUnaryInteger(op)) |descriptor| {
+        try pushVector(s, mapSimdUnaryInteger(popVector(s), descriptor));
+        return true;
+    }
+    if (simdShift(op)) |descriptor| {
+        const amount = popI32(s);
+        try pushVector(s, shiftSimdLanes(popVector(s), amount, descriptor));
+        return true;
+    }
+    if (simdWrappingBinary(op)) |descriptor| {
+        const right = popVector(s);
+        try pushVector(s, mapSimdWrappingBinary(popVector(s), right, descriptor));
+        return true;
+    }
+    return false;
+}
+
 fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
     const op = simdOp(instr);
     switch (op) {
@@ -1008,6 +1141,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     if (try executeSimdMemory(s, inst, instr)) return;
     const op = simdOp(instr);
     if (try executeSimdIntegerComparison(s, op)) return;
+    if (try executeSimdIntegerBasic(s, op)) return;
     switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
         .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
