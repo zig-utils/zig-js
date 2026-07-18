@@ -1074,6 +1074,29 @@ fn gcObjectFromSlot(s: *State, slot: WasmSlot) ExecError!*GcObject {
     return @ptrCast(@alignCast(raw));
 }
 
+fn gcReferenceMatches(inst: *const Instance, slot: WasmSlot, target: types.RefType) bool {
+    if (slotIsNull(slot)) return target.nullable;
+    return switch (slot) {
+        .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
+        .gcref => |raw| blk: {
+            const object: *GcObject = @ptrCast(@alignCast(raw.?));
+            if (target.heap.concreteIndex() != null) {
+                if (object.owner != inst) break :blk false;
+                break :blk validate.heapTypeMatches(
+                    inst.module,
+                    types.HeapType.concrete(object.type_index),
+                    target.heap,
+                );
+            }
+            break :blk switch (object.kind) {
+                .struct_ => target.heap == .struct_ or target.heap == .eq or target.heap == .any,
+                .array => target.heap == .array or target.heap == .eq or target.heap == .any,
+            };
+        },
+        else => false,
+    };
+}
+
 fn normalizePackedField(storage: types.StorageType, slot: WasmSlot) WasmSlot {
     return switch (storage) {
         .i8 => .{ .numeric = slot.numericBits() & 0xff },
@@ -1287,6 +1310,33 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
                 const source_range = checkedRange(source, count, elems.len) orelse return s.trap("out of bounds array initialization");
                 @memcpy(destination.fields[destination_range.start..destination_range.end], elems[source_range.start..source_range.end]);
             }
+        },
+        .ref_test, .ref_test_null, .ref_cast, .ref_cast_null => {
+            const reference = popSlot(s);
+            const immediate = instr.imm.gc_heap;
+            const target: types.RefType = .{
+                .nullable = op == .ref_test_null or op == .ref_cast_null,
+                .heap = immediate.heap,
+            };
+            const matches = gcReferenceMatches(inst, reference, target);
+            if (op == .ref_test or op == .ref_test_null) {
+                try pushBool(s, matches);
+            } else {
+                if (!matches) return s.trap("cast failure");
+                try pushSlot(s, reference);
+            }
+        },
+        .br_on_cast, .br_on_cast_fail => {
+            const reference = popSlot(s);
+            const immediate = instr.imm.gc_cast_branch;
+            const target: types.RefType = .{
+                .nullable = immediate.target_nullable,
+                .heap = immediate.target_heap,
+            };
+            const matches = gcReferenceMatches(inst, reference, target);
+            try pushSlot(s, reference);
+            if ((op == .br_on_cast and matches) or (op == .br_on_cast_fail and !matches))
+                branchTo(s, immediate.label_index);
         },
         .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
         .i31_get_u => try pushI32(s, popSlot(s).i31ref),
@@ -6456,6 +6506,40 @@ test "wasm.exec GC array data element and overlapping copy operations" {
     defer destroyInstance(talloc, copy_inst);
     try invoke(copy_inst, 0, &.{}, &result, &copy_diag);
     try std.testing.expectEqual(@as(u64, 2), result[0]);
+}
+
+test "wasm.exec GC tests casts and cast branches use runtime identity" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{ "\x5F\x00", "\x5E\x7F\x01", ft("", I32) }) ++
+        funcSec(&.{ 2, 2, 2, 2, 2 }) ++
+        codeSec(&.{
+            "\xFB\x00\x00\xFB\x14\x00",
+            "\xD0\x00\xFB\x14\x00",
+            "\xFB\x00\x00\xFB\x16\x00\x1A" ++ i32c(7),
+            "\xD0\x6B\xFB\x16\x6B\x1A" ++ i32c(0),
+            "\x02\x6D\xFB\x00\x00\xFB\x18\x00\x00\x6B\x6B\x0B\x1A" ++ i32c(1),
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+    var result: [1]u64 = undefined;
+    try invoke(inst, 0, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 1), result[0]);
+    try invoke(inst, 1, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 0), result[0]);
+    try invoke(inst, 2, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 7), result[0]);
+    try std.testing.expectError(error.Trap, invoke(inst, 3, &.{}, &result, &diag));
+    try std.testing.expectEqualStrings("cast failure", diag.message());
+    try invoke(inst, 4, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 1), result[0]);
 }
 
 test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {

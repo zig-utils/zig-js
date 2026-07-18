@@ -193,7 +193,7 @@ fn definedTypeEquivalent(mod: *const types.Module, a_index: u32, b_index: u32) b
 /// Nominal heap matching from the pinned GC proposal. Concrete definitions
 /// follow their declared (earlier) supertype chain; abstract nodes form the
 /// three disjoint function, external, and internal hierarchies.
-fn heapTypeMatches(mod: *const types.Module, sub: types.HeapType, super: types.HeapType) bool {
+pub fn heapTypeMatches(mod: *const types.Module, sub: types.HeapType, super: types.HeapType) bool {
     if (sub == super) return true;
 
     if (sub.concreteIndex()) |start| {
