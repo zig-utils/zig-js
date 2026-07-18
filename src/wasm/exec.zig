@@ -79,7 +79,10 @@ pub const TableInst = struct {
 
 pub const GlobalInst = struct {
     type: types.GlobalType,
-    value: u64,
+    value: ValueSlot,
+    ref_root: std.atomic.Value(u64) = .init(js_value.Value.undef().bits),
+    barrier_ctx: ?*anyopaque = null,
+    barrier: ?*const fn (*anyopaque, ValueSlot) void = null,
 };
 
 pub const Imports = struct {
@@ -199,9 +202,28 @@ pub fn tableGrowWith(tab: *TableInst, delta: u32, fill: ?*FuncInst) i32 {
 }
 
 pub fn createGlobal(gpa: Allocator, gt: types.GlobalType, value: u64) error{OutOfMemory}!*GlobalInst {
+    return createGlobalSlot(gpa, gt, .{ .numeric = value });
+}
+
+pub fn createGlobalSlot(gpa: Allocator, gt: types.GlobalType, value: ValueSlot) error{OutOfMemory}!*GlobalInst {
     const g = try gpa.create(GlobalInst);
     g.* = .{ .type = gt, .value = value };
+    publishGlobalValue(g, value);
     return g;
+}
+
+fn publishGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
+    const bits = switch (slot) {
+        .externref => |ref| ref.bits,
+        .numeric, .funcref => js_value.Value.undef().bits,
+    };
+    global.ref_root.store(bits, .release);
+    if (global.barrier) |barrier| barrier(global.barrier_ctx.?, slot);
+}
+
+pub fn setGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
+    global.value = slot;
+    publishGlobalValue(global, slot);
 }
 
 pub fn destroyGlobal(gpa: Allocator, g: *GlobalInst) void {
@@ -224,12 +246,12 @@ fn limitsCompatible(actual: types.Limits, declared: types.Limits) bool {
     return true;
 }
 
-fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) u64 {
+fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
     return switch (ce) {
-        .i32 => |v| @as(u32, @bitCast(v)),
-        .i64 => |v| @as(u64, @bitCast(v)),
-        .f32 => |bits| @as(u64, bits),
-        .f64 => |bits| bits,
+        .i32 => |v| .{ .numeric = @as(u32, @bitCast(v)) },
+        .i64 => |v| .{ .numeric = @as(u64, @bitCast(v)) },
+        .f32 => |bits| .{ .numeric = @as(u64, bits) },
+        .f64 => |bits| .{ .numeric = bits },
         .global => |k| inst.globals[k].value,
     };
 }
@@ -338,7 +360,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.globals = try a.alloc(*GlobalInst, mod.totalGlobals());
     for (imports.globals, 0..) |g, k| inst.globals[k] = g;
     for (mod.globals, 0..) |gd, j| {
-        const g = try createGlobal(gpa, gd.type, evalConstExpr(inst, gd.init));
+        const g = try createGlobalSlot(gpa, gd.type, evalConstExpr(inst, gd.init));
         created_globals += 1;
         inst.globals[mod.imported_globals + j] = g;
     }
@@ -348,7 +370,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     // traps happen later and deliberately retain already-applied mutations.
     for (mod.elems) |e| {
         const tab = inst.tables[e.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset)));
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset).numericBits()));
         tab.lockTable();
         const table_len: u64 = @intCast(tab.elems.len);
         const available = if (start <= table_len) tab.elems.len - @as(usize, @intCast(start)) else 0;
@@ -361,7 +383,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     }
     for (mod.datas) |d| {
         const mem = inst.mems[d.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset)));
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset).numericBits()));
         const memory_len: u64 = @intCast(mem.bytes.len);
         const available = if (start <= memory_len) mem.bytes.len - @as(usize, @intCast(start)) else 0;
         if (start > memory_len or d.bytes.len > available) {
@@ -373,7 +395,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     // 4. Apply element segments.
     for (mod.elems) |e| {
         const tab = inst.tables[e.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset)));
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset).numericBits()));
         tab.lockTable();
         for (e.funcs, 0..) |fidx, j| tab.elems[@intCast(start + j)] = inst.funcs[fidx];
         tab.unlockTable();
@@ -382,7 +404,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     // 5. Apply data segments.
     for (mod.datas) |d| {
         const mem = inst.mems[d.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset)));
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset).numericBits()));
         const lo: usize = @intCast(start);
         @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
     }
@@ -900,8 +922,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .local_get => try pushSlot(s, s.locals.items[fr.locals_base + instr.imm.idx]),
             .local_set => s.locals.items[fr.locals_base + instr.imm.idx] = popSlot(s),
             .local_tee => s.locals.items[fr.locals_base + instr.imm.idx] = s.stack.items[s.stack.items.len - 1],
-            .global_get => try push(s, inst.globals[instr.imm.idx].value),
-            .global_set => inst.globals[instr.imm.idx].value = pop(s),
+            .global_get => try pushSlot(s, inst.globals[instr.imm.idx].value),
+            .global_set => setGlobalValue(inst.globals[instr.imm.idx], popSlot(s)),
             .i32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
@@ -1365,6 +1387,11 @@ fn echoReferenceSlot(_: *anyopaque, args: []const ValueSlot, results: []ValueSlo
     results[0] = args[0];
 }
 
+fn recordGlobalBarrier(raw: *anyopaque, slot: ValueSlot) void {
+    const count: *usize = @ptrCast(@alignCast(raw));
+    if (slot == .externref) count.* += 1;
+}
+
 fn leb(comptime v: u64) []const u8 {
     comptime {
         var buf: []const u8 = &.{};
@@ -1764,9 +1791,9 @@ test "wasm.exec host constructors memory table global" {
     const g = try createGlobal(talloc, .{ .val = .i64, .mutable = true }, 0xDEADBEEF);
     defer destroyGlobal(talloc, g);
     try std.testing.expectEqual(types.GlobalType{ .val = .i64, .mutable = true }, g.type);
-    try std.testing.expectEqual(@as(u64, 0xDEADBEEF), g.value);
-    g.value = 7;
-    try std.testing.expectEqual(@as(u64, 7), g.value);
+    try std.testing.expectEqual(@as(u64, 0xDEADBEEF), g.value.numericBits());
+    setGlobalValue(g, .{ .numeric = 7 });
+    try std.testing.expectEqual(@as(u64, 7), g.value.numericBits());
 }
 
 // -- Instantiation: import resolution ----------------------------------------
@@ -1922,10 +1949,10 @@ test "wasm.exec instantiate global initializers" {
     const b = try build(mod_bytes);
     defer destroyBuilt(b);
     try std.testing.expectEqual(@as(usize, 4), b.inst.globals.len);
-    try std.testing.expectEqual(i32v(42), b.inst.globals[0].value);
-    try std.testing.expectEqual(i64v(-7), b.inst.globals[1].value);
-    try std.testing.expectEqual(f32v(1.5), b.inst.globals[2].value);
-    try std.testing.expectEqual(f64v(-2.5), b.inst.globals[3].value);
+    try std.testing.expectEqual(i32v(42), b.inst.globals[0].value.numericBits());
+    try std.testing.expectEqual(i64v(-7), b.inst.globals[1].value.numericBits());
+    try std.testing.expectEqual(f32v(1.5), b.inst.globals[2].value.numericBits());
+    try std.testing.expectEqual(f64v(-2.5), b.inst.globals[3].value.numericBits());
     try std.testing.expectEqual(i32v(42), try run1(b.inst, 0, &.{}));
     try std.testing.expectEqual(i64v(-7), try run1(b.inst, 1, &.{}));
     try std.testing.expectEqual(f32v(1.5), try run1(b.inst, 2, &.{}));
@@ -1946,7 +1973,7 @@ test "wasm.exec instantiate global init referencing imported global" {
     defer destroyGlobal(talloc, imported);
     const inst = try instantiate(talloc, mod, .{ .globals = &.{imported} }, &diag);
     defer destroyInstance(talloc, inst);
-    try std.testing.expectEqual(@as(u64, 99), inst.globals[1].value);
+    try std.testing.expectEqual(@as(u64, 99), inst.globals[1].value.numericBits());
     try std.testing.expectEqual(@as(u64, 99), try run1(inst, 0, &.{}));
 }
 
@@ -2617,6 +2644,26 @@ test "wasm.exec typed invocation preserves references and rejects numeric aliase
     );
     try std.testing.expect(funcref_result[0] == .funcref);
     try std.testing.expect(funcref_result[0].funcref.? == @as(*anyopaque, @ptrCast(&function_marker)));
+}
+
+test "wasm.exec global reference roots publish overwrite and barrier state" {
+    var object = js_value.Object{};
+    const global = try createGlobalSlot(
+        talloc,
+        .{ .val = .externref, .mutable = true },
+        .{ .externref = js_value.Value.obj(&object) },
+    );
+    defer destroyGlobal(talloc, global);
+    try std.testing.expectEqual(js_value.Value.obj(&object).bits, global.ref_root.load(.acquire));
+
+    var barriers: usize = 0;
+    global.barrier_ctx = @ptrCast(&barriers);
+    global.barrier = recordGlobalBarrier;
+    setGlobalValue(global, .{ .externref = js_value.Value.obj(&object) });
+    try std.testing.expectEqual(@as(usize, 1), barriers);
+    setGlobalValue(global, .{ .numeric = 7 });
+    try std.testing.expectEqual(js_value.Value.undef().bits, global.ref_root.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), barriers);
 }
 
 test "wasm.exec conversions trunc f32 to int" {

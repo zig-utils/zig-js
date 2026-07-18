@@ -1036,10 +1036,10 @@ pub const ObjectRareState = union(ObjectRareTag) {
     // registry owns their memory, so these slots are weak views — only the
     // Object edges below participate in GC tracing.
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
-    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null },
+    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exports_obj: ?*Object = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
     wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
-    wasm_global: struct { glob: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
+    wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
 };
 
@@ -1696,6 +1696,8 @@ pub const Object = struct {
         module_obj: ?*Object = null,
         import_vals: []const Value = &.{},
         table_refs: []const std.atomic.Value(u64) = &.{},
+        global_refs: []const *std.atomic.Value(u64) = &.{},
+        global_ref: ?*std.atomic.Value(u64) = null,
         exports_obj: ?*Object = null,
         buffer_obj: ?*Object = null,
         owner_obj: ?*Object = null,
@@ -1758,6 +1760,7 @@ pub const Object = struct {
             .wasm_instance => .{
                 .module_obj = cold.rare.wasm_instance.module_obj,
                 .import_vals = cold.rare.wasm_instance.import_vals,
+                .global_refs = cold.rare.wasm_instance.global_refs,
                 .exports_obj = cold.rare.wasm_instance.exports_obj,
             },
             .wasm_memory => .{
@@ -1765,7 +1768,10 @@ pub const Object = struct {
                 .owner_obj = cold.rare.wasm_memory.owner_obj,
             },
             .wasm_table => .{ .table_refs = cold.rare.wasm_table.refs, .owner_obj = cold.rare.wasm_table.owner_obj },
-            .wasm_global => .{ .owner_obj = cold.rare.wasm_global.owner_obj },
+            .wasm_global => .{
+                .global_ref = cold.rare.wasm_global.ref,
+                .owner_obj = cold.rare.wasm_global.owner_obj,
+            },
             .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
             else => .{},
         };

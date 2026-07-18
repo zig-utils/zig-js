@@ -39,6 +39,11 @@ fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void 
     machine.serviceGcSafepoint();
 }
 
+fn barrierGlobalReference(raw: *anyopaque, slot: exec.ValueSlot) void {
+    const owner: *Object = @ptrCast(@alignCast(raw));
+    if (slot == .externref) gc.barrierValueFrom(owner, slot.externref);
+}
+
 const ErrorDescriptor = struct { name: []const u8, proto: *Object };
 const ModuleDescriptor = struct { proto: *Object, compile_error_proto: *Object };
 const MemoryDescriptor = struct { proto: *Object };
@@ -78,6 +83,7 @@ const MemoryOwner = struct {
 const GlobalOwner = struct {
     store: *context.Context,
     glob: *exec.GlobalInst,
+    wrapper: *Object,
     owns_native: bool = true,
 
     fn deinit(self: *GlobalOwner) void {
@@ -744,17 +750,18 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
     if (target.wasmGlobal()) |global_state| {
         if (args.len != 1) return self.throwError("TypeError", "raw WebAssembly Global takes no arguments");
         const owner: *GlobalOwner = @ptrCast(@alignCast(global_state.glob orelse return self.throwError("TypeError", "WebAssembly global is unavailable")));
-        return rawBitsString(self, owner.glob.type.val, owner.glob.value);
+        return rawBitsString(self, owner.glob.type.val, owner.glob.value.numericBits());
     }
     return self.throwError("TypeError", "raw WebAssembly target must be an exported function or Global");
 }
 
 fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value {
+    const bits = glob.value.numericBits();
     return switch (glob.type.val) {
-        .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(glob.value)))))),
-        .i64 => try self.makeBigInt(@as(i64, @bitCast(glob.value))),
-        .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value))))),
-        .f64 => Value.num(@bitCast(glob.value)),
+        .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(bits)))))),
+        .i64 => try self.makeBigInt(@as(i64, @bitCast(bits))),
+        .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
+        .f64 => Value.num(@bitCast(bits)),
         .funcref, .externref => unreachable,
     };
 }
@@ -781,13 +788,16 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     const store = try storeFor(self);
     const glob = try exec.createGlobal(store.gpa, .{ .val = kind, .mutable = mutable }, bits);
     errdefer exec.destroyGlobal(store.gpa, glob);
-    const owner = try store.gpa.create(GlobalOwner);
-    errdefer store.gpa.destroy(owner);
-    owner.* = .{ .store = store, .glob = glob };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
+    const owner = try store.gpa.create(GlobalOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .glob = glob, .wrapper = object };
     const state = try object.wasmGlobalState(self.arena);
     state.glob = @ptrCast(owner);
+    state.ref = &glob.ref_root;
+    glob.barrier_ctx = @ptrCast(object);
+    glob.barrier = barrierGlobalReference;
     try store.wasm_registry.append(store.gpa, .{ .global = @ptrCast(owner) });
     return Value.obj(object);
 }
@@ -801,7 +811,7 @@ fn globalValueSetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self = activeInterpreter(ctx);
     const owner = try globalFromThis(self, this, "WebAssembly.Global.prototype.value setter requires a Global");
     if (!owner.glob.type.mutable) return self.throwError("TypeError", "WebAssembly.Global is immutable");
-    owner.glob.value = try coerceGlobalBits(self, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef());
+    exec.setGlobalValue(owner.glob, .{ .numeric = try coerceGlobalBits(self, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef()) });
     return Value.undef();
 }
 
@@ -1007,9 +1017,10 @@ fn wrapDefinedGlobal(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     object.* = .{ .proto = descriptor.global_proto };
     const owner = try store.gpa.create(GlobalOwner);
     errdefer store.gpa.destroy(owner);
-    owner.* = .{ .store = store, .glob = glob, .owns_native = false };
+    owner.* = .{ .store = store, .glob = glob, .wrapper = object, .owns_native = false };
     const state = try object.wasmGlobalState(self.arena);
     state.glob = @ptrCast(owner);
+    state.ref = &glob.ref_root;
     state.owner_obj = instance_object;
     store.wasm_registry.appendAssumeCapacity(.{ .global = @ptrCast(owner) });
     return Value.obj(object);
@@ -1154,6 +1165,13 @@ fn instantiateModuleObject(
     state.inst = @ptrCast(owner);
     state.module_obj = module_object;
     state.import_vals = resolved.values;
+    const global_refs = try self.arena.alloc(*std.atomic.Value(u64), inst.globals.len);
+    for (inst.globals, 0..) |global, i| global_refs[i] = &global.ref_root;
+    state.global_refs = global_refs;
+    for (inst.globals[module.imported_globals..]) |global| {
+        global.barrier_ctx = @ptrCast(object);
+        global.barrier = barrierGlobalReference;
+    }
     try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
     store.wasm_registry.appendAssumeCapacity(.{ .instance = @ptrCast(owner) });
     owner_registered = true;
