@@ -333,20 +333,48 @@ a real shared-realm `Thread`, and an isolated `Worker` that mutates an old
 suite passes 176/176, Worker filters pass 33/33, and structured-clone filters
 pass 11/11 at this checkpoint, all with zero failures, skips, or leaks.
 
-This is a binary/validation/embedding foundation, not an executable-profile
-claim. Atomic instructions still trap deterministically instead of exposing
-partial semantics. Atomic execution and wait/notify are tracked by
-[#286](https://github.com/zig-utils/zig-js/issues/286), and upstream/TSan/scaling evidence by
+At checkpoint `f5cc0f7a`, the executable atomic foundation is complete. All
+widths of atomic load/store, add/sub/and/or/xor/exchange, compare-exchange, and
+fence use hardware SeqCst operations. `memory.atomic.wait32`, `wait64`, and
+`notify` share the engine's FIFO waiter domains, implement exact result codes,
+signed nanosecond timeout conversion, alignment/bounds checks, the unshared
+wait trap, and notify-on-unshared behavior. Blocking calls release the optional
+context GIL, publish parked native-stack roots, and use targeted stop predicates
+so Worker/Context termination interrupts only its own waiters.
+
+Ordinary accesses to shared storage are also host-race-free without changing
+the language memory model. ECMAScript's no-tear integer TypedArrays use one
+monotonic width-sized event. DataView, floating/BigInt unordered access, Wasm
+scalar/SIMD loads and stores, and bulk memory use monotonic byte events, retaining
+their permitted multi-byte tearing while remaining clean under TSan when they
+overlap an atomic instruction. Bounds are checked before any scalar, SIMD, or
+bulk mutation, and shared growth never relocates an active address.
+
+The exact pinned `threads/atomic.wast` path passes 372/372 with zero failures,
+not-applicable commands, or runner errors. The complete unit root passes
+1,069/1,069 with zero skips, failures, or leaks; the focused overlapping
+ordinary/atomic TSan run passes 4/4. Those witnesses include eight no-GIL
+Threads incrementing one Wasm counter, JS `Atomics`/Wasm differential access,
+real cross-thread wait/notify, mismatch and timeout behavior, Worker termination,
+waiter interruption/unlink, and a waiter surviving shared growth plus native
+Memory-owner destruction.
+
+This is an executable correctness claim, not the terminal Threads profile
+score. The pinned proposal also contains script-level `(thread ...)` litmus and
+wait/notify directives that the pinned WABT converter cannot lower; the runner
+records those conversions as errors rather than hidden skips. Implementing that
+script layer, running the complete proposal/TSan matrix, and publishing scaling
+and system-engine evidence are tracked by
 [#287](https://github.com/zig-utils/zig-js/issues/287). Parent
-[#265](https://github.com/zig-utils/zig-js/issues/265) closes only after all
-three are complete.
+[#265](https://github.com/zig-utils/zig-js/issues/265) closes only after that
+evidence lands.
 
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation.
 A selected feature with no landed binary foundation produces a deterministic
 `WebAssembly.CompileError` identifying it; the explicitly documented Threads
-foundation above instead decodes, validates, and supplies the shared-memory JS
-boundary before its deterministic runtime trap until #286 completes execution:
+profile above decodes, validates, embeds, and executes its atomic instruction
+surface:
 
 ```zig
 const ctx = try js.Context.createWith(gpa, .{

@@ -149,6 +149,12 @@ atomic order for the addressed shared integer element. A reader that observes a
 published atomic flag also observes writes sequenced before the publishing
 atomic operation. Non-atomic shared-buffer byte access does not gain this edge.
 
+WebAssembly atomic loads, stores, read-modify-write operations,
+compare-exchange, and fence participate in the same hardware SeqCst order.
+Wasm wait32/wait64 compare and enqueue in the shared waiter domain; notify
+selects current matching waiters but does not itself mutate memory. Ordinary
+Wasm shared-memory operations remain unordered and may tear across bytes.
+
 Property-mode `Atomics.*` operations are linearized for the addressed
 `(object, property key)` cell. A load/RMW/wait observation of a value written by
 an earlier atomic operation on that cell publishes writes sequenced before the
@@ -200,8 +206,12 @@ objects, and restriction does not turn other objects into synchronized data.
 ## ThreadSanitizer Suppression Policy
 
 CI currently runs the no-GIL ThreadSanitizer corpus without a suppression file.
-Plain typed-array paths take the buffer lock, and Atomics paths use hardware
-atomics, so even JavaScript program-byte access stays TSan-clean today.
+Shared integer TypedArray paths use one monotonic, naturally aligned event when
+ECMAScript requires no-tear behavior. Tearable DataView, float/BigInt, bulk, and
+ordinary Wasm paths use monotonic byte events; `Atomics.*` and Wasm atomic
+instructions use width-sized SeqCst events. Consequently overlapping program
+byte access remains TSan-clean without a suppression or a cross-agent buffer
+lock.
 
 If a future JS-defined program-byte false positive genuinely requires a
 suppression, it must land with a deterministic, load-bearing witness that fails

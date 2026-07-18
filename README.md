@@ -112,7 +112,8 @@ reproduction command, and performance evidence are in
 [WebAssembly status](docs/wasm.md).
 
 The Phase-4 WebAssembly Threads profile now has its exact pinned binary,
-validator, and shared-memory embedding foundation. The checked-in [67-opcode `0xfe` inventory](docs/.data/wasm-atomic-opcodes.json)
+validator, shared-memory embedding, and complete atomic execution foundation.
+The checked-in [67-opcode `0xfe` inventory](docs/.data/wasm-atomic-opcodes.json)
 locks the 13-file proposal corpus, reserved opcode gap, immediates, natural
 alignments, and stack shapes. Shared memory limits decode behind the `threads`
 feature and require a maximum; every atomic instruction and fence validates
@@ -121,11 +122,17 @@ and imported shared memories, and `Memory.grow` use one stable refcounted slab.
 Each successful grow returns a fresh fixed-length `SharedArrayBuffer`; old
 buffers keep their original length without detaching and continue to alias the
 same bytes across imports, shared-realm `Thread`, structured clone, and isolated
-`Worker` boundaries. Atomic execution and wait/notify, followed by terminal
-TSan/corpus/performance evidence, remain tracked by
-[#286](https://github.com/zig-utils/zig-js/issues/286) and
-[#287](https://github.com/zig-utils/zig-js/issues/287); the profile is not yet
-presented as executable.
+`Worker` boundaries. Every atomic load/store, RMW, compare-exchange, fence,
+wait32/wait64, and notify form executes with exact alignment, bounds, timeout,
+result-code, trap, and SeqCst behavior. Blocking waits release serialized-mode
+GIL ownership, publish parked stack roots, and wake selectively on Worker or
+Context termination. Ordinary shared TypedArray, DataView, scalar/SIMD Wasm,
+and bulk-memory accesses use host atomics without strengthening permitted
+multi-byte tearing. The pinned executable `threads/atomic.wast` witness passes
+372/372; the complete 1,069-test root passes with zero skips, failures, or
+leaks, and focused overlapping-access TSan witnesses are clean. Terminal
+proposal-script, full TSan matrix, and scaling/JSC evidence remain tracked by
+[#287](https://github.com/zig-utils/zig-js/issues/287).
 
 ## Performance
 
@@ -895,8 +902,10 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including Threads, exceptions/tail
-  calls, and memory64/GC (the complete MVP binary runtime, JavaScript API,
+  from the PR-249 reference corpus, including exceptions/tail calls and
+  memory64/GC, plus terminal Threads proposal-script/TSan/scaling evidence
+  tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
+  MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
   type/decoder/validator foundation, complete feature-gated reference instructions, typed multi-table runtime,
   precise-GC funcref/externref slots, arbitrary externref Table/Global identity

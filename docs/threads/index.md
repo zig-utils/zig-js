@@ -37,6 +37,7 @@ rules.
 | Area | Status | Verification |
 |---|---|---|
 | Refcounted `SharedArrayBuffer` storage | Implemented in `src/shared_buffer.zig` and typed-array storage in `src/value.zig`. | Unit tests, test262 SAB / Atomics shards, TSan gates. |
+| WebAssembly shared memory and atomic execution | Complete atomic opcode execution, SeqCst RMW/CAS/fence, wait32/wait64/notify, fixed historical Memory buffers, and targeted termination interruption. Terminal proposal-script/TSan/scaling evidence remains in issue #287. | Pinned `threads/atomic.wast` 372/372, 1,069-test root, focused overlapping-access TSan witnesses. |
 | `$262.agent` and typed-array `Atomics.wait` / `notify` / `waitAsync` | Implemented in `src/agent.zig` with hooks in the interpreter and VM. | Unit tests and real test262 agent cases. |
 | Structured clone and ArrayBuffer transfer/detach | Implemented in `src/structured_clone.zig`. | Unit tests, workers, and agents. |
 | Embedder `Worker` API | Implemented in `src/worker.zig` with C-API hooks in `src/c_api.zig`. | Worker unit tests, exact host-hook wake coverage, and C-API round trips. |
