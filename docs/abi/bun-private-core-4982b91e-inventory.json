@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 292,
-      "pending": 144
+      "implemented": 293,
+      "pending": 143
     }
   },
   "home_comparison": {
@@ -3051,10 +3051,10 @@
       "line": 859,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSGlobalObject__setTimeZone(this: *JSGlobalObject, timeZone: *const ZigString) bool;",
       "declaration_sha256": "a411421e06db5bbda93dbe710d4157761469f36100272fad49a47143135462ee",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSGlobalObject__throwOutOfMemoryError",

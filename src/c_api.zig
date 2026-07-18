@@ -8530,6 +8530,34 @@ export fn JSGlobalObject__clearExceptionExceptTermination(global: JSContextRef) 
     return true;
 }
 
+/// `WTF::setTimeZoneOverride` + `vm.dateCache.resetIfNecessarySlow()`
+/// (ZigGlobalObject.cpp:3117): a process-wide default zone consumed by
+/// Intl.DateTimeFormat (and `Date#toLocaleString`, which routes through it)
+/// and `Temporal.Now` when no explicit zone is given. zig-js keeps no date
+/// cache, so the pinned reset is vacuous. Empty input clears the override
+/// (WTF's reset); unknown names return false with the override unchanged.
+/// Note: zig-js `Date` local-time methods are UTC-coincident by engine design,
+/// so the override flows to the Intl/Temporal default-zone consumers.
+export fn JSGlobalObject__setTimeZone(global: JSContextRef, time_zone: ?*const PrivateZigString) callconv(.c) bool {
+    const context = ctxForHandleInspection(global) orelse return false;
+    const string_ref = time_zone orelse return false;
+    const decoded = privateZigStringValue(context, string_ref) catch {
+        // Conversion failures (dead strings, OOM) surface only as the pinned
+        // false return; clear any transient boundary exception they published.
+        if (context.c_api_group) |opaque_group| {
+            const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+            group.pending_exception = null;
+            group.primary.private_pending_exception_root = null;
+        }
+        return false;
+    };
+    const bytes = decoded.asStr();
+    if (bytes.len == 0) return interp.setTimeZoneOverride(gpa, null);
+    var buf: [128]u8 = undefined;
+    const canonical = interp.validCanonicalTimeZoneName(bytes, &buf) orelse return false;
+    return interp.setTimeZoneOverride(gpa, canonical);
+}
+
 export fn JSGlobalObject__requestTermination(global: JSContextRef) callconv(.c) void {
     const context = ctxForHandleInspection(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;

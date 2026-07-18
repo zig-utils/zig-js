@@ -23479,7 +23479,7 @@ fn dtfProcessOptions(self: *Interpreter, raw: Value) EvalError!DtfOptions {
 fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequired, defaults: DtfDefaults) EvalError!DtfOptions {
     // CoerceOptionsToObject: undefined -> none; null -> TypeError; primitive -> boxed.
     const raw: Value = if (raw_in.isUndefined()) Value.undef() else Value.obj(try self.toObject(raw_in));
-    var r = DtfOptions{};
+    var r = DtfOptions{ .time_zone = timeZoneOverride() orelse "UTC" };
     // Read options only when an options object was supplied; the required/default
     // logic below still runs for `new Intl.DateTimeFormat()` (no options).
     if (raw.isObject()) {
@@ -37961,7 +37961,7 @@ fn temporalNowInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value
 fn temporalNowPlainDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else TimeZone{ .name = "UTC", .offset_ns = 0 };
+    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else nowTimeZone();
     const epoch_ns = nowEpochNs(self);
     const local_ns = epoch_ns + @as(i128, timeZoneOffsetAtEpoch(tz.name, epoch_ns, tz.offset_ns));
     const days = @divFloor(local_ns, 86_400_000_000_000);
@@ -38003,16 +38003,16 @@ fn temporalNowPlainTimeFn(ctx: *anyopaque, this: Value, args: []const Value) val
     return Value.obj(o);
 }
 fn temporalNowTimeZoneIdFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = ctx;
     _ = this;
     _ = args;
-    return Value.str("UTC");
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return Value.strAlloc(self.arena, timeZoneOverride() orelse "UTC");
 }
 
 fn temporalNowZonedDateTimeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else TimeZone{ .name = "UTC", .offset_ns = 0 };
+    const tz = if (args.len > 0 and !args[0].isUndefined()) try resolveTimeZoneArg(self, args[0]) else nowTimeZone();
     const o = try makeTemporal(self, .zoned_date_time, "\x00T.ZonedDateTime");
     o.temporalData().?.epoch_ns = nowEpochNs(self);
     o.temporalData().?.tz_name = tz.name;
@@ -38476,6 +38476,65 @@ fn zdtEpochFromParsed(self: *Interpreter, tz: TimeZone, p: ParsedDT, behavior: Z
     };
     try checkInstantEpochNs(self, epoch_ns);
     return epoch_ns;
+}
+
+// ---- Process-wide default time zone (WTF::setTimeZoneOverride) -----------
+
+var tz_override_lock: std.atomic.Mutex = .unlocked;
+var tz_override: ?[]const u8 = null;
+
+fn tzOverrideLock() void {
+    var spins: usize = 0;
+    while (!tz_override_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+/// `WTF::setTimeZoneOverride`: a process-wide default time zone consulted when
+/// a consumer (Intl.DateTimeFormat, Temporal.Now) supplies no explicit zone.
+/// `canonical_name` must already pass `validCanonicalTimeZoneName`; null clears
+/// the override (WTF's empty-input reset). The slice is duplicated with
+/// `allocator` and never freed — overrides are a boot-time rarity, like WTF's
+/// process-lifetime global.
+pub fn setTimeZoneOverride(allocator: std.mem.Allocator, canonical_name: ?[]const u8) bool {
+    const owned: ?[]const u8 = if (canonical_name) |n| allocator.dupe(u8, n) catch return false else null;
+    tzOverrideLock();
+    tz_override = owned;
+    tz_override_lock.unlock();
+    return true;
+}
+
+pub fn timeZoneOverride() ?[]const u8 {
+    tzOverrideLock();
+    defer tz_override_lock.unlock();
+    return tz_override;
+}
+
+fn nowTimeZone() TimeZone {
+    return .{ .name = timeZoneOverride() orelse "UTC", .offset_ns = 0 };
+}
+
+/// Validate a candidate named zone the way the Intl pipeline does — ASCII
+/// word-case normalization per `/`_`-` segment, then alias resolution and the
+/// canonical IANA table — returning the canonical name, or null when the zone
+/// is unknown, malformed, or longer than `buf`. Offset-form zones are not
+/// named zones and are rejected here like the Intl named-zone path.
+pub fn validCanonicalTimeZoneName(name: []const u8, buf: []u8) ?[]const u8 {
+    if (name.len == 0 or name.len > buf.len) return null;
+    if (name[0] == '+' or name[0] == '-' or name[0] >= 0x80) return null;
+    var word_start = true;
+    for (name, 0..) |c, i| {
+        if (std.ascii.isAlphabetic(c)) {
+            buf[i] = if (word_start) std.ascii.toUpper(c) else std.ascii.toLower(c);
+            word_start = false;
+        } else {
+            buf[i] = c;
+            word_start = (c == '/' or c == '_' or c == '-');
+        }
+    }
+    const canonical = canonicalTimeZoneName(buf[0..name.len]);
+    if (!iana_zones.isCanonical(canonical)) return null;
+    return canonical;
 }
 
 fn canonicalTimeZoneName(name: []const u8) []const u8 {

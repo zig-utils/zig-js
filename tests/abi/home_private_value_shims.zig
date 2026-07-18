@@ -506,6 +506,7 @@ extern "c" fn JSGlobalObject__clearExceptionExceptTermination(JSContextRef) bool
 extern "c" fn JSGlobalObject__clearTerminationException(JSContextRef) void;
 extern "c" fn JSGlobalObject__createOutOfMemoryError(JSContextRef) EncodedValue;
 extern "c" fn JSGlobalObject__requestTermination(JSContextRef) void;
+extern "c" fn JSGlobalObject__setTimeZone(JSContextRef, ?*const ZigString) bool;
 extern "c" fn JSGlobalObject__throwOutOfMemoryError(JSContextRef) void;
 extern "c" fn JSGlobalObject__throwStackOverflow(JSContextRef) void;
 extern "c" fn JSGlobalObject__tryTakeException(JSContextRef) EncodedValue;
@@ -5303,5 +5304,43 @@ pub fn main() void {
     if (!contention.entered.load(.acquire))
         fail("private API lock foreign thread never acquired");
 
-    std.debug.print("Home private value shims: 287/287 symbols linked; runtime matrix passed\n", .{});
+    // Process-wide default time zone override (#303): WTF::setTimeZoneOverride
+    // semantics consumed by the Intl/Temporal default-zone paths.
+    const tz_ny_bytes = "America/New_York";
+    var tz_ny = ZigString{ .tagged_ptr = @intFromPtr(tz_ny_bytes.ptr), .len = tz_ny_bytes.len };
+    const tz_bad_bytes = "Not/AZone";
+    var tz_bad = ZigString{ .tagged_ptr = @intFromPtr(tz_bad_bytes.ptr), .len = tz_bad_bytes.len };
+    const tz_berlin_bytes = "europe/berlin";
+    var tz_berlin = ZigString{ .tagged_ptr = @intFromPtr(tz_berlin_bytes.ptr), .len = tz_berlin_bytes.len };
+    const tz_alias_bytes = "America/Atka";
+    var tz_alias = ZigString{ .tagged_ptr = @intFromPtr(tz_alias_bytes.ptr), .len = tz_alias_bytes.len };
+    var tz_empty = ZigString{ .tagged_ptr = 0, .len = 0 };
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
+        fail("private time zone default baseline mismatch");
+    if (JSGlobalObject__setTimeZone(null, &tz_ny) or JSGlobalObject__setTimeZone(context, null))
+        fail("private setTimeZone null-boundary mismatch");
+    if (JSGlobalObject__setTimeZone(context, &tz_bad))
+        fail("private setTimeZone accepted unknown zone");
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")))
+        fail("private setTimeZone rejection disturbed state");
+    if (!JSGlobalObject__setTimeZone(context, &tz_ny))
+        fail("private setTimeZone rejected canonical zone");
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'America/New_York'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'America/New_York'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo' }).resolvedOptions().timeZone === 'Asia/Tokyo'")) or
+        !JSC__JSValue__toBoolean(evaluate(foreign_context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'America/New_York'")))
+        fail("private time zone override consumer mismatch");
+    if (!JSGlobalObject__setTimeZone(context, &tz_berlin) or
+        !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'Europe/Berlin'")))
+        fail("private setTimeZone case normalization mismatch");
+    if (!JSGlobalObject__setTimeZone(context, &tz_alias) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'America/Adak'")))
+        fail("private setTimeZone alias canonicalization mismatch");
+    if (!JSGlobalObject__setTimeZone(context, &tz_empty) or
+        !JSC__JSValue__toBoolean(evaluate(context, "new Intl.DateTimeFormat('en-US').resolvedOptions().timeZone === 'UTC'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
+        fail("private setTimeZone empty reset mismatch");
+
+    std.debug.print("Home private value shims: 288/288 symbols linked; runtime matrix passed\n", .{});
 }
