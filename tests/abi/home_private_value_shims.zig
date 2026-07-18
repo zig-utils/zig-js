@@ -5,6 +5,10 @@ const JSValueRef = ?*anyopaque;
 const JSObjectRef = ?*anyopaque;
 const JSStringRef = ?*anyopaque;
 
+extern "c" fn tmpfile() ?*std.c.FILE;
+extern "c" fn fileno(*std.c.FILE) c_int;
+extern "c" fn fflush(*std.c.FILE) c_int;
+
 const EncodedValue = enum(i64) {
     empty = 0,
     null = 2,
@@ -299,6 +303,7 @@ extern "c" fn JSBuffer__isBuffer(JSContextRef, EncodedValue) bool;
 extern "c" fn JSBuffer__bufferFromLength(JSContextRef, i64) EncodedValue;
 extern "c" fn JSBuffer__bufferFromPointerAndLengthAndDeinit(JSContextRef, [*]u8, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
 extern "c" fn JSBuffer__fromMmap(JSContextRef, *anyopaque, usize) EncodedValue;
+extern "c" fn ArrayBuffer__fromSharedMemfd(i64, JSContextRef, usize, usize, usize, u8) EncodedValue;
 extern "c" fn JSC__JSValue__createUninitializedUint8Array(JSContextRef, usize) EncodedValue;
 extern "c" fn Bun__makeArrayBufferWithBytesNoCopy(JSContextRef, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
 extern "c" fn Bun__makeTypedArrayWithBytesNoCopy(JSContextRef, PrivateTypedArrayType, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
@@ -1479,6 +1484,42 @@ pub fn main() void {
         if (typed_exception != null or !JSBuffer__isBuffer(context, mmap_buffer) or
             @intFromPtr(mmap_buffer_bytes) != @intFromPtr(fixture_mapping.ptr) or @as(*u8, @ptrCast(mmap_buffer_bytes)).* != 0x6b)
             fail("mmap Buffer ownership mismatch");
+
+        const shared_file = tmpfile() orelse fail("shared memfd fixture file creation failed");
+        defer _ = std.c.fclose(shared_file);
+        const shared_source = [_]u8{ 31, 32, 33, 34, 35, 36, 37, 38, 39, 40 };
+        if (std.c.fwrite(&shared_source, 1, shared_source.len, shared_file) != shared_source.len or fflush(shared_file) != 0)
+            fail("shared memfd fixture write failed");
+        const shared_native_fd = fileno(shared_file);
+        if (shared_native_fd < 0) fail("shared memfd fixture descriptor lookup failed");
+        const shared_fd: i64 = shared_native_fd;
+
+        const shared_array_buffer = ArrayBuffer__fromSharedMemfd(shared_fd, context, 2, 5, shared_source.len, 48);
+        const shared_array_buffer_ptr = JSObjectGetArrayBufferBytesPtr(context, shared_array_buffer.cellPointer(), &typed_exception) orelse
+            fail("shared memfd ArrayBuffer pointer lookup failed");
+        const shared_array_buffer_bytes = @as([*]u8, @ptrCast(shared_array_buffer_ptr))[0..5];
+        if (typed_exception != null or
+            JSObjectGetArrayBufferByteLength(context, shared_array_buffer.cellPointer(), &typed_exception) != 5 or
+            !std.mem.eql(u8, shared_array_buffer_bytes, shared_source[2..7]))
+            fail("shared memfd ArrayBuffer slice mismatch");
+        shared_array_buffer_bytes[0] = 0xee;
+        var shared_file_bytes: [shared_source.len]u8 = undefined;
+        const shared_file_read = std.c.pread(shared_native_fd, &shared_file_bytes, shared_file_bytes.len, 0);
+        if (shared_file_read != @as(isize, @intCast(shared_source.len)) or !std.mem.eql(u8, &shared_file_bytes, &shared_source))
+            fail("shared memfd mapping was not private");
+
+        const shared_uint8 = ArrayBuffer__fromSharedMemfd(shared_fd, context, 4, 3, shared_source.len, 50);
+        const shared_uint8_ptr = JSObjectGetTypedArrayBytesPtr(context, shared_uint8.cellPointer(), &typed_exception) orelse
+            fail("shared memfd Uint8Array pointer lookup failed");
+        if (typed_exception != null or JSBuffer__isBuffer(context, shared_uint8) or
+            JSObjectGetTypedArrayLength(context, shared_uint8.cellPointer(), &typed_exception) != 3 or
+            !std.mem.eql(u8, @as([*]u8, @ptrCast(shared_uint8_ptr))[0..3], shared_source[4..7]))
+            fail("shared memfd Uint8Array slice mismatch");
+        if (ArrayBuffer__fromSharedMemfd(-1, context, 0, 1, 1, 48) != .empty or
+            ArrayBuffer__fromSharedMemfd(shared_fd, context, shared_source.len, 1, shared_source.len, 48) != .empty or
+            ArrayBuffer__fromSharedMemfd(shared_fd, context, 0, 1, shared_source.len, 61) != .empty or
+            JSGlobalObject__hasException(context))
+            fail("invalid shared memfd input was not rejected cleanly");
     }
 
     const uninitialized_uint8 = JSC__JSValue__createUninitializedUint8Array(context, 7);
@@ -4649,5 +4690,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 262/262 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 263/263 symbols linked; runtime matrix passed\n", .{});
 }

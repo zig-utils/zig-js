@@ -12299,6 +12299,97 @@ export fn JSBuffer__fromMmap(
     );
 }
 
+const PrivateSharedMemfdMapping = struct {
+    allocator: std.mem.Allocator,
+    mapping: []align(std.heap.page_size_min) u8,
+};
+
+fn privateReleaseSharedMemfdMapping(_: ?*anyopaque, raw_owner: ?*anyopaque) callconv(.c) void {
+    if (comptime builtin.os.tag == .windows) return;
+    const owner: *PrivateSharedMemfdMapping = @ptrCast(@alignCast(raw_owner orelse return));
+    const allocator = owner.allocator;
+    std.posix.munmap(owner.mapping);
+    if (builtin.is_test) _ = private_mmap_release_count.fetchAdd(1, .monotonic);
+    allocator.destroy(owner);
+}
+
+fn privateDuplicateSharedMemfd(fd: i64) ?std.posix.fd_t {
+    if (comptime builtin.os.tag == .windows) return null;
+    const native_fd = std.math.cast(std.posix.fd_t, fd) orelse return null;
+    while (true) {
+        const duplicated = std.posix.system.dup(native_fd);
+        switch (std.posix.errno(duplicated)) {
+            .SUCCESS => return @intCast(duplicated),
+            .INTR => continue,
+            else => return null,
+        }
+    }
+}
+
+fn privateSharedMemfdHasSize(fd: std.posix.fd_t, total_size: usize) bool {
+    if (comptime builtin.os.tag == .windows) return false;
+    const fstat_fn = if (std.posix.lfs64_abi) std.posix.system.fstat64 else std.posix.system.fstat;
+    var stat = std.mem.zeroes(std.posix.Stat);
+    while (true) switch (std.posix.errno(fstat_fn(fd, &stat))) {
+        .SUCCESS => break,
+        .INTR => continue,
+        else => return false,
+    };
+    if ((stat.mode & std.posix.S.IFMT) != std.posix.S.IFREG) return false;
+    const file_size: u64 = @bitCast(stat.size);
+    return std.math.cast(u64, total_size) != null and @as(u64, @intCast(total_size)) <= file_size;
+}
+
+/// Imports a caller-owned memfd/file descriptor through a private, writable
+/// mapping. The descriptor itself is never consumed: a short-lived duplicate
+/// closes immediately after mmap while the full mapping remains owned by the
+/// resulting JS backing store.
+export fn ArrayBuffer__fromSharedMemfd(
+    fd: i64,
+    global: JSContextRef,
+    byte_offset: usize,
+    byte_length: usize,
+    total_size: usize,
+    requested_type: u8,
+) callconv(.c) EncodedValue {
+    if (comptime builtin.os.tag == .windows) return .empty;
+    const kind: ?value.TAKind = if (requested_type == private_jstype.selectedTag(.ArrayBuffer))
+        null
+    else if (requested_type == private_jstype.selectedTag(.Uint8Array))
+        .u8
+    else
+        return .empty;
+    if (total_size == 0 or byte_offset > total_size or byte_length > total_size - byte_offset) return .empty;
+    const context = ctxForEvaluation(global) orelse return .empty;
+
+    const duplicated_fd = privateDuplicateSharedMemfd(fd) orelse return .empty;
+    defer _ = std.posix.system.close(duplicated_fd);
+    if (!privateSharedMemfdHasSize(duplicated_fd, total_size)) return .empty;
+
+    const mapping = std.posix.mmap(
+        null,
+        total_size,
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE },
+        duplicated_fd,
+        0,
+    ) catch return .empty;
+    const mapping_owner = context.gpa.create(PrivateSharedMemfdMapping) catch {
+        std.posix.munmap(mapping);
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    mapping_owner.* = .{ .allocator = context.gpa, .mapping = mapping };
+    return privateMakeExternalBufferValue(
+        context,
+        mapping.ptr + byte_offset,
+        byte_length,
+        privateReleaseSharedMemfdMapping,
+        mapping_owner,
+        kind,
+    );
+}
+
 export fn JSC__JSValue__createUninitializedUint8Array(
     global: JSContextRef,
     len: usize,
@@ -18723,6 +18814,91 @@ test "private JSBuffer constructors preserve ranges external finalizers and mmap
 
     JSGlobalContextRelease(context);
     try std.testing.expectEqual(@as(usize, 2), deallocator_state.calls);
+}
+
+test "private shared memfd imports preserve slices private writes and mapping ownership" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(std.testing.io, "shared-buffer.bin", .{ .read = true });
+    defer file.close(std.testing.io);
+    const original = [_]u8{ 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 };
+    try file.writePositionalAll(std.testing.io, &original, 0);
+    const fd: i64 = @intCast(file.handle);
+    const releases_before = private_mmap_release_count.load(.monotonic);
+
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const array_buffer = ArrayBuffer__fromSharedMemfd(
+        fd,
+        context,
+        3,
+        5,
+        original.len,
+        private_jstype.selectedTag(.ArrayBuffer),
+    );
+    const array_buffer_data = (privateValueFrom(context, array_buffer) orelse return error.ArrayBufferCreateFailed).asObj().arrayBuffer() orelse
+        return error.ArrayBufferCreateFailed;
+    try std.testing.expectEqualSlices(u8, original[3..8], array_buffer_data.bytes());
+    try std.testing.expect(!array_buffer_data.is_shared);
+    try std.testing.expect(array_buffer_data.external_owner != null);
+
+    array_buffer_data.bytes()[0] = 0xee;
+    var file_bytes: [original.len]u8 = undefined;
+    try std.testing.expectEqual(original.len, try file.readPositionalAll(std.testing.io, &file_bytes, 0));
+    try std.testing.expectEqualSlices(u8, &original, &file_bytes);
+    try std.testing.expect(array_buffer_data.external_owner.?.release());
+    try std.testing.expect(!array_buffer_data.external_owner.?.release());
+    try std.testing.expectEqual(releases_before + 1, private_mmap_release_count.load(.monotonic));
+
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(-1, context, 0, 1, 1, private_jstype.selectedTag(.ArrayBuffer)));
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(fd, context, 0, 0, 0, private_jstype.selectedTag(.ArrayBuffer)));
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(fd, context, original.len, 1, original.len, private_jstype.selectedTag(.ArrayBuffer)));
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(fd, context, std.math.maxInt(usize), 1, original.len, private_jstype.selectedTag(.ArrayBuffer)));
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(fd, context, 0, 1, original.len + 1, private_jstype.selectedTag(.ArrayBuffer)));
+    try std.testing.expectEqual(EncodedValue.empty, ArrayBuffer__fromSharedMemfd(fd, context, 0, 1, original.len, private_jstype.selectedTag(.DataView)));
+    try std.testing.expect(!JSGlobalObject__hasException(context));
+    JSGlobalContextRelease(context);
+    try std.testing.expectEqual(releases_before + 1, private_mmap_release_count.load(.monotonic));
+
+    const teardown_context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const uint8_array = ArrayBuffer__fromSharedMemfd(
+        fd,
+        teardown_context,
+        7,
+        6,
+        original.len,
+        private_jstype.selectedTag(.Uint8Array),
+    );
+    const typed = (privateValueFrom(teardown_context, uint8_array) orelse return error.Uint8ArrayCreateFailed).asObj().typedArray() orelse
+        return error.Uint8ArrayCreateFailed;
+    try std.testing.expectEqual(value.TAKind.u8, typed.kind);
+    try std.testing.expectEqual(@as(usize, 6), typed.currentLength().?);
+    try std.testing.expectEqualSlices(u8, original[7..13], typed.buffer.arrayBuffer().?.bytes());
+    JSGlobalContextRelease(teardown_context);
+    try std.testing.expectEqual(releases_before + 2, private_mmap_release_count.load(.monotonic));
+
+    const gc_context_object = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    gc_context_object.initCApiRef();
+    const gc_context: JSContextRef = @ptrCast(gc_context_object);
+    _ = ArrayBuffer__fromSharedMemfd(
+        fd,
+        gc_context,
+        1,
+        2,
+        original.len,
+        private_jstype.selectedTag(.ArrayBuffer),
+    );
+    try std.testing.expectEqual(releases_before + 2, private_mmap_release_count.load(.monotonic));
+    JSGarbageCollect(gc_context);
+    try std.testing.expectEqual(releases_before + 3, private_mmap_release_count.load(.monotonic));
+    JSGlobalContextRelease(gc_context);
+    try std.testing.expectEqual(releases_before + 3, private_mmap_release_count.load(.monotonic));
+
+    // The mapping owns only its duplicate; the caller's descriptor remains live.
+    @memset(&file_bytes, 0);
+    try std.testing.expectEqual(original.len, try file.readPositionalAll(std.testing.io, &file_bytes, 0));
+    try std.testing.expectEqualSlices(u8, &original, &file_bytes);
 }
 
 test "private uninitialized Uint8Array stays explicit writable and GC-accounted" {

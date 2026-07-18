@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 278,
-      "pending": 168
+      "implemented": 279,
+      "pending": 167
     }
   },
   "declarations": [
@@ -99,10 +99,10 @@
       "line": 74,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ArrayBuffer__fromSharedMemfd(fd: i64, globalObject: *jsc.JSGlobalObject, byte_offset: usize, byte_length: usize, total_size: usize, jsc.JSValue.JSType) jsc.JSValue;",
       "declaration_sha256": "96ec0e978f863c5de9e955be94951e893b665f0e7266f7bf0f0e2455dbb1bf21",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BakeCreateProdGlobal",
