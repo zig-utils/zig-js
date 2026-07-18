@@ -98,8 +98,9 @@ commands, and 581 explicitly non-applicable text-format parser commands. This
 score covers sign extension, nontrapping conversions, multi-value control,
 reference types, and bulk memory/table operations. SIMD, Threads, exceptions,
 and tail calls are independently pinned and scored below. Memory64 now has a
-pinned binary/validation boundary, while memory64 execution, Wasm GC, and
-shell-only hooks remain outside this profile. Exact pins, feature-area
+pinned binary, validation, runtime, and JavaScript API boundary, while its
+terminal corpus score, Wasm GC, and shell-only hooks remain outside this
+profile. Exact pins, feature-area
 subtotals, CI gates, and reproduction are in
 [WebAssembly status](docs/wasm.md).
 
@@ -166,10 +167,22 @@ feature, the IR, decoder, and validator now preserve and enforce memory64 and
 table64 address widths across active segments, scalar/SIMD/atomic memory
 operations, bulk memory/table operations, indirect calls, size, and grow.
 Malformed encodings, disabled gates, 4 GiB+ offsets, and every decoder
-allocation-failure point have focused zero-leak witnesses. This is deliberately
-not an execution claim: runtime/JavaScript API behavior is tracked by
-[#297](https://github.com/zig-utils/zig-js/issues/297), and terminal corpus
-scoring by [#300](https://github.com/zig-utils/zig-js/issues/300).
+allocation-failure point have focused zero-leak witnesses.
+
+The runtime uses checked u64 effective-address and range arithmetic for scalar,
+SIMD, atomic, bulk-memory, table64, and indirect-call operations. On supported
+64-bit hosts the JavaScript API accepts the proposal's `address: "i64"`
+descriptors, requires BigInt address/size arguments, and returns BigInt from
+memory/table growth and table length. Allocation is capped deterministically at
+16 GiB of memory and 10,000,000 table elements; 32-bit hosts reject execution
+without truncation. Imported and exported objects preserve identity, shared
+memory64 grows in place while historical buffers retain fixed lengths, and
+failure-injection/precise-root checks cover partial construction and table64
+externrefs. The focused ordinary and ThreadSanitizer runs each pass **22/22
+memory64 tests with 0 failures, 0 skips, and 0 leaks**. This runtime/API
+boundary is complete in [#297](https://github.com/zig-utils/zig-js/issues/297);
+terminal upstream corpus scoring remains in
+[#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -1021,9 +1034,9 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including memory64 runtime/JavaScript API
-  and corpus scoring plus Wasm GC (the memory64 binary/validation boundary is
-  complete), plus terminal Threads
+  from the PR-249 reference corpus, including memory64 terminal corpus scoring
+  plus Wasm GC (the memory64 binary/validation/runtime/JavaScript API boundary
+  is complete), plus terminal Threads
   host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,

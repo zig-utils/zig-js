@@ -331,7 +331,7 @@ python3 tools/wasm-spec.py --profile exception-handling \
 zig build wasm-feature-profiles-check
 ```
 
-### Memory64 binary and validation boundary
+### Memory64 binary, validation, runtime, and JavaScript API boundary
 
 The finished Wasm 3.0 memory64 proposal is pinned at
 `WebAssembly/memory64@9003cd5e24e53b84cd9027ea3dd7ae57159a6db1`. The checked-in
@@ -356,25 +356,54 @@ offsets, loads/stores, SIMD and atomic operations, `memory.size/grow`,
 narrower-length rules for bulk copies. Memory/table initialization keeps its
 segment offset and length operands at i32 as required by the proposal. A
 memory32 memory argument above 2^32-1 is rejected even though its binary field
-is u64. Focused checks pass all 7 memory64 tests, the complete 24-test decoder
-filter, and the complete 53-test validator filter with no failures or leaks;
-allocation-failure injection covers every decoder allocation point.
+is u64. Allocation-failure injection covers every decoder allocation point.
+
+Execution retains i64 addresses through checked effective-address and range
+arithmetic rather than narrowing them through `usize` or u32. This applies to
+scalar, SIMD, atomic, bulk-memory, table64, indirect-call, active-segment,
+size, and grow operations. Out-of-bounds and overflowing accesses trap before
+mutation. Growth over a declared or host limit returns the full-width Wasm -1
+sentinel; zero growth succeeds even at the limit.
+
+The public JavaScript API accepts `address: "i64"` only when memory64 is
+enabled on a 64-bit host. Memory/Table constructors and methods require BigInt
+for i64 sizes and indices, return BigInt growth results and table lengths, and
+preserve imported/exported wrapper identity. The embedding caps actual
+memory64 allocation at 262,144 pages (16 GiB) and tables at 10,000,000
+elements. Valid core declarations can exceed those host limits, but allocation
+and growth reject them deterministically without truncation or partial
+mutation. A 32-bit host can still decode and validate memory64 modules, while
+runtime construction reports the unsupported host before allocation.
+
+Shared memory64 reserves only maxima inside that same host boundary, grows a
+stable backing concurrently, and publishes fresh fixed-length
+SharedArrayBuffer wrappers without detaching historical buffers. Cross-instance
+imports retain object identity and see the same bytes. Failure-injection checks
+cover decoder and instance construction rollback; precise-root checks prove
+table64 externrefs survive while stored and are reclaimed after clearing.
+
+The focused ordinary run and the same slice under ThreadSanitizer each pass
+**22/22 memory64 tests, with 0 failures, 0 skips, and 0 leaks**. These include
+forced 32-bit/64-bit host-policy witnesses, 4 GiB+ addresses, integer overflow,
+concurrent shared growth, repeated JavaScript growth, historical buffer aliases,
+cross-instance sharing, and allocation failure.
 
 Reproduce the checked-in facts and focused boundary with:
 
 ```sh
 zig build wasm-feature-profiles-check
 zig build test -Dtest-filter=memory64
+zig build test -Dtsan=true -Dtest-filter=memory64
 zig build test -Dtest-filter=wasm.decode
 zig build test -Dtest-filter=wasm.validate
 ```
 
-This boundary is complete in
-[#296](https://github.com/zig-utils/zig-js/issues/296). It does not claim i64
-runtime addressing, JavaScript API construction/growth policy, or an upstream
-corpus pass score; those are tracked by
-[#297](https://github.com/zig-utils/zig-js/issues/297) and
-[#300](https://github.com/zig-utils/zig-js/issues/300).
+The binary and validation boundary is complete in
+[#296](https://github.com/zig-utils/zig-js/issues/296), and runtime/JavaScript
+API/lifecycle coverage is complete in
+[#297](https://github.com/zig-utils/zig-js/issues/297). The 13,918-command
+inventory above is not yet a pass score; terminal upstream corpus scoring is
+tracked by [#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
