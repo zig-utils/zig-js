@@ -54,6 +54,11 @@ def main() -> int:
         default=ROOT / "src/wasm/atomic.zig",
     )
     parser.add_argument(
+        "--tail-call-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-tail-call-opcodes.json",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -146,6 +151,78 @@ def main() -> int:
     }
     inventoried_atomic = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(atomic_names, atomic_subopcodes)}
     require(runtime_atomic == inventoried_atomic, "atomic inventory/runtime opcode drift")
+
+    tail_feature = next(feature for feature in features if feature["id"] == "tail_calls")
+    tail_inventory = json.loads(args.tail_call_inventory.read_text())
+    require(tail_inventory.get("schema_version") == 1, "tail-call inventory: unsupported schema version")
+    require(tail_inventory.get("kind") == "webassembly_tail_call_opcode_inventory", "tail-call inventory: invalid kind")
+    tail_source = tail_inventory.get("source", {})
+    require(tail_source.get("repository") == tail_feature["repository"], "tail-call inventory/registry repository drift")
+    require(tail_source.get("commit") == tail_feature["commit"], "tail-call inventory/registry commit drift")
+    require(tail_source.get("corpus_files") == 2, "tail-call inventory: expected 2 corpus files")
+    tail_opcodes = tail_inventory.get("opcodes", [])
+    require(tail_inventory.get("opcode_count") == len(tail_opcodes) == 2, "tail-call inventory: expected 2 opcodes")
+    require(
+        [(entry.get("name"), entry.get("opcode")) for entry in tail_opcodes]
+        == [("return_call", 0x12), ("return_call_indirect", 0x13)],
+        "tail-call inventory: opcode map drift",
+    )
+    require(
+        [entry.get("immediate") for entry in tail_opcodes]
+        == ["function_index", "type_index_table_index"],
+        "tail-call inventory: immediate-kind drift",
+    )
+    require(
+        [entry.get("binary_fields") for entry in tail_opcodes]
+        == [["function_index:u32"], ["type_index:u32", "table_index:u32"]],
+        "tail-call inventory: binary-field order drift",
+    )
+    require(
+        [entry.get("stack") for entry in tail_opcodes]
+        == ["[t3* t1*] -> [t4*]", "[t3* t1* i32] -> [t4*]"],
+        "tail-call inventory: stack signature drift",
+    )
+    require(all(entry.get("stack_polymorphic") is True for entry in tail_opcodes), "tail-call inventory: stack-polymorphism drift")
+    expected_tail_rules = [
+        [
+            "current_function_return_type_present",
+            "function_index_defined",
+            "callee_results_equal_current_function_results",
+            "pop_callee_parameters",
+        ],
+        [
+            "current_function_return_type_present",
+            "table_index_defined",
+            "table_element_type_funcref",
+            "type_index_defined",
+            "callee_results_equal_current_function_results",
+            "pop_i32_table_element_index",
+            "pop_callee_parameters",
+        ],
+    ]
+    require([entry.get("validation_rules") for entry in tail_opcodes] == expected_tail_rules, "tail-call inventory: validation-rule drift")
+    op_enum = source.split("pub const Op = enum(u16) {", 1)[1].split("pub fn fromByte", 1)[0]
+    runtime_direct = {
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{2}),$", op_enum, re.MULTILINE)
+        if name in {"return_call", "return_call_indirect"}
+    }
+    require(runtime_direct == {(entry["name"], entry["opcode"]) for entry in tail_opcodes}, "tail-call inventory/runtime opcode drift")
+    tail_corpus = tail_inventory.get("corpus", {})
+    corpus_files = tail_corpus.get("files", [])
+    require(tail_corpus.get("top_level_commands") == 119, "tail-call inventory: expected 119 corpus commands")
+    require(
+        [(entry.get("path"), entry.get("top_level_commands"), entry.get("source_token_occurrences")) for entry in corpus_files]
+        == [
+            ("test/core/return_call.wast", 44, 28),
+            ("test/core/return_call_indirect.wast", 75, 56),
+        ],
+        "tail-call inventory: corpus file/count drift",
+    )
+    require(
+        sum(sum(entry.get("commands", {}).values()) for entry in corpus_files) == 119,
+        "tail-call inventory: command breakdown drift",
+    )
 
     movement = json.loads(args.simd_movement_inventory.read_text())
     require(movement.get("schema_version") == 2, "SIMD movement inventory: unsupported schema version")

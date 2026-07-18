@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_tail_call_opcode_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/tail-call.git",
+    "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+    "binary_document": "document/core/binary/instructions.rst",
+    "validation_document": "document/core/valid/instructions.rst",
+    "opcode_index": "document/core/appendix/index-instructions.py",
+    "corpus_root": "test/core",
+    "corpus_files": 2,
+    "document_license": "W3C Software and Document Notice and License",
+    "corpus_license": "Apache-2.0"
+  },
+  "opcode_count": 2,
+  "opcodes": [
+    {
+      "name": "return_call",
+      "opcode": 18,
+      "immediate": "function_index",
+      "binary_fields": [
+        "function_index:u32"
+      ],
+      "stack": "[t3* t1*] -> [t4*]",
+      "stack_polymorphic": true,
+      "validation_rules": [
+        "current_function_return_type_present",
+        "function_index_defined",
+        "callee_results_equal_current_function_results",
+        "pop_callee_parameters"
+      ]
+    },
+    {
+      "name": "return_call_indirect",
+      "opcode": 19,
+      "immediate": "type_index_table_index",
+      "binary_fields": [
+        "type_index:u32",
+        "table_index:u32"
+      ],
+      "stack": "[t3* t1* i32] -> [t4*]",
+      "stack_polymorphic": true,
+      "validation_rules": [
+        "current_function_return_type_present",
+        "table_index_defined",
+        "table_element_type_funcref",
+        "type_index_defined",
+        "callee_results_equal_current_function_results",
+        "pop_i32_table_element_index",
+        "pop_callee_parameters"
+      ]
+    }
+  ],
+  "corpus": {
+    "top_level_commands": 119,
+    "files": [
+      {
+        "path": "test/core/return_call.wast",
+        "top_level_commands": 44,
+        "source_token_occurrences": 28,
+        "commands": {
+          "module": 3,
+          "assert_return": 31,
+          "assert_invalid": 10
+        }
+      },
+      {
+        "path": "test/core/return_call_indirect.wast",
+        "top_level_commands": 75,
+        "source_token_occurrences": 56,
+        "commands": {
+          "module": 3,
+          "assert_return": 40,
+          "assert_trap": 7,
+          "assert_invalid": 14,
+          "assert_malformed": 11
+        }
+      }
+    ]
+  }
+}

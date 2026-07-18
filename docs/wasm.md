@@ -187,6 +187,20 @@ post-MVP profile are implemented. Validate registry drift with:
 zig build wasm-feature-profiles-check
 ```
 
+The tail-call binary and validation foundation is pinned independently to
+`WebAssembly/tail-call@a6003d06aefef41e20a3e36fe2e500062555c895`. Its
+[machine-readable inventory](.data/wasm-tail-call-opcodes.json) locks both
+opcodes, binary field order, stack-polymorphic signatures, validation rules,
+and the two proposal corpus files with all 119 top-level commands. Behind the
+`tail_calls` switch, `return_call` and `return_call_indirect` decode with exact
+byte-offset failures and validate direct/indirect indices, `funcref` tables,
+operand types, unreachable-polymorphic stacks, and exact current-function
+result compatibility. This foundation is tracked by
+[#288](https://github.com/zig-utils/zig-js/issues/288). Frame-replacing bounded
+execution is the next isolated slice in
+[#289](https://github.com/zig-utils/zig-js/issues/289); this foundation does not
+claim the proposal execution corpus yet.
+
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
 `WebAssembly/simd` revision. Its verifier locks the 56-file corpus count,
@@ -472,8 +486,8 @@ validate, instantiate, and execute through the public JavaScript API.
 Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
-scored Core 2 profile above; SIMD, Threads, exceptions/tail calls, memory64/GC,
-and shell-only hooks remain separate profiles.
+scored Core 2 profile above; SIMD, Threads, exception handling, tail-call
+execution, memory64/GC, and shell-only hooks remain separate profiles.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,
