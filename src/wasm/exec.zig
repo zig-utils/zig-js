@@ -173,6 +173,7 @@ pub const TableInst = struct {
     gpa: Allocator,
     lock: std.atomic.Mutex = .unlocked,
     host: ?TableHost = null,
+    owner_instance: ?*Instance = null,
 
     pub fn lockTable(self: *TableInst) void {
         while (!self.lock.tryLock()) std.atomic.spinLoopHint();
@@ -197,12 +198,14 @@ pub const GlobalInst = struct {
     ref_root: std.atomic.Value(u64) = .init(js_value.Value.undef().bits),
     barrier_ctx: ?*anyopaque = null,
     barrier: ?*const fn (*anyopaque, ValueSlot) void = null,
+    owner_instance: ?*Instance = null,
 };
 
 /// Runtime tag identity. Imported aliases point at the same TagInst; defined
 /// tags allocate distinct store objects even when their payload types match.
 pub const TagInst = struct {
     type: types.FuncType,
+    owner_instance: ?*Instance = null,
 };
 
 pub const ElemSegmentInst = struct {
@@ -285,6 +288,43 @@ fn traceGcReference(
             .numeric, .vector, .funcref, .i31ref => {},
         };
         owner.gc_object_lock.unlock();
+    }
+}
+
+fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
+    switch (slot) {
+        .gcref => |reference| if (reference) |root| root.trace(root, visitor, mark_value),
+        .externref => |root| mark_value(visitor, root),
+        .exnref => |exception| if (exception) |ex|
+            for (ex.externrefs) |root| mark_value(visitor, root),
+        .numeric, .vector, .funcref, .i31ref => {},
+    }
+}
+
+/// Type-erased host-GC entry point installed on the JavaScript Instance
+/// wrapper. Native globals, tables, and published exceptions are roots even
+/// when no exported aggregate wrapper is currently alive.
+pub fn traceInstanceGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
+    const inst: *Instance = @ptrCast(@alignCast(raw));
+    for (inst.globals) |global| traceGcRootSlot(global.value, visitor, mark_value);
+    for (inst.tables) |table| {
+        var index: usize = 0;
+        while (true) : (index += 1) {
+            table.lockTable();
+            if (index >= table.elems.len) {
+                table.unlockTable();
+                break;
+            }
+            const slot = table.elems[index];
+            table.unlockTable();
+            traceGcRootSlot(slot, visitor, mark_value);
+        }
+    }
+    var exception_raw = inst.exception_head.load(.acquire);
+    while (exception_raw != 0) {
+        const exception: *js_value.WasmException = @ptrFromInt(exception_raw);
+        for (exception.payload) |slot| traceGcRootSlot(slot, visitor, mark_value);
+        exception_raw = if (exception.next) |next| @intFromPtr(next) else 0;
     }
 }
 
@@ -844,11 +884,13 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
         .f64 => |bits| .{ .numeric = bits },
         .v128 => |bits| .{ .vector = bits },
         .global => |k| inst.globals[k].value,
-        .ref_null => |ref_type| switch (ref_type) {
-            .funcref => .{ .funcref = null },
-            .exnref => .{ .exnref = null },
-            .externref => .{ .externref = js_value.Value.nul() },
-            else => unreachable,
+        .ref_null => |ref_type| blk: {
+            const reference = ref_type.refType().?;
+            break :blk switch (reference.heap) {
+                .func, .nofunc => .{ .funcref = null },
+                .extern_, .noextern => .{ .externref = js_value.Value.nul() },
+                else => .{ .gcref = null },
+            };
         },
         .ref_func => |funcidx| .{ .funcref = @ptrCast(inst.funcs[funcidx]) },
     };
@@ -972,6 +1014,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (imports.tables, 0..) |t, k| inst.tables[k] = t;
     for (mod.tables, 0..) |tt, j| {
         const t = try createTableAddressed(gpa, tt.address, tt.elem, tt.limits.min, tt.limits.max);
+        t.owner_instance = inst;
         created_tables += 1;
         inst.tables[mod.imported_tables + j] = t;
     }
@@ -988,6 +1031,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (imports.globals, 0..) |g, k| inst.globals[k] = g;
     for (mod.globals, 0..) |gd, j| {
         const g = try createGlobalSlot(gpa, gd.type, evalConstExpr(inst, gd.init));
+        g.owner_instance = inst;
         created_globals += 1;
         inst.globals[mod.imported_globals + j] = g;
     }
@@ -996,6 +1040,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (imports.tags, 0..) |tag, k| inst.tags[k] = tag;
     for (mod.tags, 0..) |tag_decl, j| {
         const tag = try createTag(gpa, mod.funcTypeAt(tag_decl.type_index).?);
+        tag.owner_instance = inst;
         created_tags += 1;
         inst.tags[mod.imported_tags + j] = tag;
     }

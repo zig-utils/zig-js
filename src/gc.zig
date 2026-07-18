@@ -217,6 +217,15 @@ pub fn traceObject(o: *Object, v: anytype) void {
         };
         reference.trace(reference, @ptrCast(v), Marker.mark);
     }
+    if (cold.wasm.gc_trace) |trace| if (cold.wasm.gc_trace_context) |trace_context| {
+        const Marker = struct {
+            fn mark(raw: *anyopaque, child: Value) void {
+                const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+                markValue(visitor, child);
+            }
+        };
+        trace(trace_context, @ptrCast(v), Marker.mark);
+    };
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {

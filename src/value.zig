@@ -63,6 +63,7 @@ pub const WasmException = struct {
 
 pub const WasmGcMarkValueFn = *const fn (*anyopaque, Value) void;
 pub const WasmGcReleaseFn = *const fn (*anyopaque, *Object) void;
+pub const WasmGcTraceRootsFn = *const fn (*anyopaque, *anyopaque, WasmGcMarkValueFn) void;
 
 /// Type-erased tracing header embedded in every runtime-owned Wasm GC
 /// aggregate. Core GC can precisely visit nested JavaScript references
@@ -1220,7 +1221,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     // registry owns their memory, so these slots are weak views — only the
     // Object edges below participate in GC tracing.
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
-    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exception_head: ?*const std.atomic.Value(usize) = null, exports_obj: ?*Object = null },
+    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exception_head: ?*const std.atomic.Value(usize) = null, exports_obj: ?*Object = null, gc_trace_context: ?*anyopaque = null, gc_trace: ?WasmGcTraceRootsFn = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
     wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
     wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
@@ -1894,6 +1895,8 @@ pub const Object = struct {
         buffer_obj: ?*Object = null,
         owner_obj: ?*Object = null,
         gc_ref: ?*WasmGcRef = null,
+        gc_trace_context: ?*anyopaque = null,
+        gc_trace: ?WasmGcTraceRootsFn = null,
     };
 
     /// Stable snapshot of every GC-visible cold/rare edge. The concurrent
@@ -1956,6 +1959,8 @@ pub const Object = struct {
                 .global_refs = cold.rare.wasm_instance.global_refs,
                 .exception_head = cold.rare.wasm_instance.exception_head,
                 .exports_obj = cold.rare.wasm_instance.exports_obj,
+                .gc_trace_context = cold.rare.wasm_instance.gc_trace_context,
+                .gc_trace = cold.rare.wasm_instance.gc_trace,
             },
             .wasm_memory => .{
                 .buffer_obj = cold.rare.wasm_memory.buffer_obj,

@@ -240,7 +240,8 @@ fn tableHostSync(raw: *anyopaque, table: *exec.TableInst, start: usize, len: usi
             if (!mirroredFunctionMatches(current, func))
                 owner.refs[index].store(Value.nul().bits, .release);
         } else owner.refs[index].store(Value.nul().bits, .release),
-        .numeric, .vector, .exnref, .i31ref, .gcref => unreachable,
+        .i31ref, .gcref => owner.refs[index].store(Value.nul().bits, .release),
+        .numeric, .vector, .exnref => unreachable,
     };
 }
 
@@ -703,8 +704,12 @@ const TableRef = struct {
     slot: exec.ValueSlot,
 };
 
-fn tableRefFromValue(self: *Interpreter, store: *context.Context, elem_type: types.ValType, input: Value) value.HostError!TableRef {
+fn tableRefFromValue(self: *Interpreter, store: *context.Context, inst: ?*exec.Instance, elem_type: types.ValType, input: Value) value.HostError!TableRef {
     if (elem_type == .externref) return .{ .value = input, .slot = .{ .externref = input } };
+    if (elem_type.refType()) |reference| if (reference.heap != .func and reference.heap != .nofunc) {
+        const slot = try jsToWasmGcReference(self, inst, elem_type, input);
+        return .{ .value = Value.nul(), .slot = slot };
+    };
     if (input.isNull()) return .{ .value = Value.nul(), .slot = .{ .funcref = null } };
     const object = languageObject(input) orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
     const state = object.wasmFunction() orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
@@ -744,7 +749,7 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     const initial = try addressValueToU64(self, raw_initial, address, address.maxTableElements(), "WebAssembly.Table initial is out of range");
     const maximum = try optionalAddressMaximum(self, descriptor, address, initial, address.maxTableElements(), "WebAssembly.Table maximum is out of range");
     const proto = try constructedPrototype(self, native.proto);
-    const fill = try tableRefFromValue(self, store, elem_type, if (args.len > 1) args[1] else Value.nul());
+    const fill = try tableRefFromValue(self, store, null, elem_type, if (args.len > 1) args[1] else Value.nul());
 
     const table = exec.createTableAddressed(store.gpa, address, elem_type, initial, maximum) catch
         return self.throwError("RangeError", "WebAssembly.Table could not be allocated");
@@ -815,7 +820,16 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                     return resolved;
                 }
             },
-            .numeric, .vector, .exnref, .i31ref, .gcref => unreachable,
+            .i31ref, .gcref => {
+                const resolved = try wasmSlotToJs(self, owner.table.type, slot, owner.table.owner_instance);
+                owner.lockOwner();
+                owner.table.lockTable();
+                const unchanged = index < owner.table.elems.len and std.meta.eql(owner.table.elems[@intCast(index)], slot);
+                owner.table.unlockTable();
+                owner.unlockOwner();
+                if (unchanged) return resolved;
+            },
+            .numeric, .vector, .exnref => unreachable,
         }
     }
 }
@@ -828,7 +842,7 @@ fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const in_bounds = index < owner.refs.len;
     owner.unlockOwner();
     if (!in_bounds) return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
-    const replacement = try tableRefFromValue(self, owner.store, owner.table.type, if (args.len > 1) args[1] else Value.nul());
+    const replacement = try tableRefFromValue(self, owner.store, owner.table.owner_instance, owner.table.type, if (args.len > 1) args[1] else Value.nul());
     owner.lockOwner();
     defer owner.unlockOwner();
     owner.table.lockTable();
@@ -843,7 +857,7 @@ fn tableGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.grow requires a Table");
     const delta = try addressValueToU64(self, if (args.len > 0) args[0] else Value.undef(), owner.table.address, owner.table.address.maxTableElements(), "WebAssembly.Table grow delta is out of range");
-    const fill = try tableRefFromValue(self, owner.store, owner.table.type, if (args.len > 1) args[1] else Value.nul());
+    const fill = try tableRefFromValue(self, owner.store, owner.table.owner_instance, owner.table.type, if (args.len > 1) args[1] else Value.nul());
     owner.lockOwner();
     defer owner.unlockOwner();
     const old_len: u64 = @intCast(owner.refs.len);
@@ -878,14 +892,14 @@ fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostE
     return self.throwError("TypeError", "WebAssembly.Global descriptor has an unsupported value type");
 }
 
-fn coerceGlobalSlot(self: *Interpreter, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+fn coerceGlobalSlot(self: *Interpreter, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
     return switch (kind) {
         .externref => .{ .externref = input },
         .funcref => unreachable,
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
-        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript Global boundary"),
+        else => jsToWasmGcReference(self, inst, kind, input),
     };
 }
 
@@ -995,7 +1009,7 @@ fn jsToWasmSlot(self: *Interpreter, store: *context.Context, inst: ?*exec.Instan
         .v128 => return self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
         .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
         .externref => .{ .externref = input },
-        .funcref => (try tableRefFromValue(self, store, .funcref, input)).slot,
+        .funcref => (try tableRefFromValue(self, store, inst, .funcref, input)).slot,
         else => jsToWasmGcReference(self, inst, kind, input),
     };
 }
@@ -1199,7 +1213,7 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .funcref => unreachable,
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
-        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript Global boundary"),
+        else => wasmGcReferenceToJs(self, glob.value),
     };
 }
 
@@ -1221,9 +1235,9 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
         .externref => Value.nul(),
         else => Value.num(0),
     };
-    const slot = try coerceGlobalSlot(self, kind, initial);
     const proto = try constructedPrototype(self, native.proto);
     const store = try storeFor(self);
+    const slot = try coerceGlobalSlot(self, null, kind, initial);
     const glob = try exec.createGlobalSlot(store.gpa, .{ .val = kind, .mutable = mutable }, slot);
     errdefer exec.destroyGlobal(store.gpa, glob);
     const object = try gc.allocObj(self.arena);
@@ -1249,7 +1263,7 @@ fn globalValueSetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self = activeInterpreter(ctx);
     const owner = try globalFromThis(self, this, "WebAssembly.Global.prototype.value setter requires a Global");
     if (!owner.glob.type.mutable) return self.throwError("TypeError", "WebAssembly.Global is immutable");
-    exec.setGlobalValue(owner.glob, try coerceGlobalSlot(self, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef()));
+    exec.setGlobalValue(owner.glob, try coerceGlobalSlot(self, owner.glob.owner_instance, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef()));
     return Value.undef();
 }
 
@@ -1383,7 +1397,7 @@ fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     const temporary = try self.arena.alloc(exec.ValueSlot, tag.type.params.len);
     var externref_count: usize = 0;
     for (tag.type.params, payload_values, 0..) |kind, entry, index| {
-        temporary[index] = try jsToWasmSlot(self, store, null, kind, entry);
+        temporary[index] = try jsToWasmSlot(self, store, tag.owner_instance, kind, entry);
         if (kind == .externref) externref_count += 1;
     }
     const payload = try store.gpa.dupe(exec.ValueSlot, temporary);
@@ -1598,7 +1612,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 const global = try exec.createGlobalSlot(
                     store.gpa,
                     global_type,
-                    try coerceGlobalSlot(self, global_type.val, imported),
+                    try coerceGlobalSlot(self, null, global_type.val, imported),
                 );
                 coerced_globals[gi] = global;
                 globals[gi] = global;
@@ -1735,7 +1749,8 @@ fn wrapDefinedTable(
                 refs[i].store(exported.bits, .monotonic);
             }
         },
-        .numeric, .vector, .i31ref, .gcref => unreachable,
+        .i31ref, .gcref => {},
+        .numeric, .vector => unreachable,
     };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = descriptor.table_proto };
@@ -1875,6 +1890,8 @@ fn instantiateModuleObject(
     for (inst.globals, 0..) |global, i| global_refs[i] = &global.ref_root;
     state.global_refs = global_refs;
     state.exception_head = &inst.exception_head;
+    state.gc_trace_context = @ptrCast(inst);
+    state.gc_trace = exec.traceInstanceGcRoots;
     for (inst.globals[module.imported_globals..]) |global| {
         global.barrier_ctx = @ptrCast(object);
         global.barrier = barrierGlobalReference;
@@ -2396,24 +2413,39 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
     const before = try store.evaluate(
         \\const gcBytes = new Uint8Array([
         \\  0,97,115,109,1,0,0,0,
-        \\  1,19,4,95,0,96,0,1,100,0,96,1,100,0,1,100,0,96,0,1,108,
+        \\  1,22,4,95,1,111,0,96,1,111,1,100,0,96,1,100,0,1,100,0,96,0,1,108,
         \\  3,4,3,1,2,3,
-        \\  7,21,3,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
-        \\  10,19,3,5,0,251,1,0,11,4,0,32,0,11,6,0,65,127,251,28,11
+        \\  4,5,1,99,0,0,1,
+        \\  6,7,1,99,0,1,208,0,11,
+        \\  7,38,5,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
+        \\    5,116,97,98,108,101,1,0,6,103,108,111,98,97,108,3,0,
+        \\  10,21,3,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11
         \\]);
         \\globalThis.gcExports = new WebAssembly.Instance(new WebAssembly.Module(gcBytes)).exports;
-        \\globalThis.gcKeep = gcExports.make();
+        \\globalThis.gcMarker = { issue: 299 };
+        \\globalThis.gcMarkerWeak = new WeakRef(gcMarker);
+        \\globalThis.gcKeep = gcExports.make(gcMarker);
         \\globalThis.gcWeak = new WeakRef(gcKeep);
+        \\gcExports.table.set(0, gcKeep);
+        \\gcExports.global.value = gcKeep;
         \\Object.getPrototypeOf(gcKeep) === null && !Object.isExtensible(gcKeep) &&
-        \\  gcExports.echo(gcKeep) === gcKeep && gcExports.make() !== gcKeep && gcExports.i31() === -1;
+        \\  gcExports.echo(gcKeep) === gcKeep && gcExports.table.get(0) === gcKeep &&
+        \\  gcExports.global.value === gcKeep && gcExports.make() !== gcKeep && gcExports.i31() === -1;
     );
     try std.testing.expect(before.isBoolean() and before.asBool());
     store.collectGarbage();
     const retained = try store.evaluate("gcWeak.deref() === gcKeep && gcExports.echo(gcKeep) === gcKeep");
     try std.testing.expect(retained.isBoolean() and retained.asBool());
-    _ = try store.evaluate("globalThis.gcKeep = undefined");
+    _ = try store.evaluate("globalThis.gcMarker = undefined; globalThis.gcKeep = undefined");
     store.collectGarbage();
-    const reclaimed = try store.evaluate("gcWeak.deref() === undefined");
+    const native_roots = try store.evaluate(
+        "gcWeak.deref() === undefined && gcMarkerWeak.deref()?.issue === 299 && " ++
+            "(globalThis.gcRevived = gcExports.global.value) === gcExports.table.get(0)",
+    );
+    try std.testing.expect(native_roots.isBoolean() and native_roots.asBool());
+    _ = try store.evaluate("gcExports.table.set(0, null); gcExports.global.value = null; globalThis.gcRevived = undefined");
+    store.collectGarbage();
+    const reclaimed = try store.evaluate("gcWeak.deref() === undefined && gcMarkerWeak.deref() === undefined");
     try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
 }
 

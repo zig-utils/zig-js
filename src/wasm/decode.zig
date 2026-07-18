@@ -421,13 +421,8 @@ const Reader = struct {
 
     fn readTableType(self: *Reader) DecodeError!types.TableType {
         const et_off = self.offset();
-        const elem = types.ValType.fromByte(try self.readU8()) orelse
-            return self.failAt(et_off, "invalid element type", .{});
+        const elem = try self.readValType();
         if (!elem.isReference()) return self.failAt(et_off, "invalid element type", .{});
-        if (elem == .exnref and !self.features.exception_handling)
-            return self.unsupportedFeature(et_off, .exception_handling);
-        if (elem == .externref and !self.features.reference_types)
-            return self.unsupportedFeature(et_off, .reference_types);
         const decoded = try self.readLimits(.table);
         return .{ .address = decoded.address, .elem = elem, .limits = decoded.limits };
     }
@@ -467,8 +462,9 @@ const Reader = struct {
                 if (!self.features.reference_types)
                     return self.unsupportedFeature(op_off, .reference_types);
                 const type_off = self.offset();
-                const ref_type = try self.readValType();
-                if (!ref_type.isReference()) return self.failAt(type_off, "reference type expected", .{});
+                const ref_type = types.ValType.fromRef(.{ .nullable = true, .heap = try self.readHeapType() });
+                if (ref_type.isGcReference() and !self.features.gc)
+                    return self.unsupportedFeature(type_off, .gc);
                 break :blk .{ .ref_null = ref_type };
             },
             0xD2 => blk: {
