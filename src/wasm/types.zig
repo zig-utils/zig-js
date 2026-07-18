@@ -236,6 +236,7 @@ pub const ConstExpr = union(enum) {
     i64: i64,
     f32: u32, // raw bits
     f64: u64, // raw bits
+    v128: u128, // raw lane bits
     global: u32, // imported global index
     ref_null: ValType,
     ref_func: u32,
@@ -246,6 +247,7 @@ pub const ConstExpr = union(enum) {
             .i64 => .i64,
             .f32 => .f32,
             .f64 => .f64,
+            .v128 => .v128,
             .global => unreachable, // resolved against the import list
             .ref_null => |ref_type| ref_type,
             .ref_func => .funcref,

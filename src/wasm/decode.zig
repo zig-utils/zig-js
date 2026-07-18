@@ -361,6 +361,14 @@ const Reader = struct {
             0x42 => .{ .i64 = try self.readI64Leb() },
             0x43 => .{ .f32 = std.mem.readInt(u32, (try self.readBytes(4))[0..4], .little) },
             0x44 => .{ .f64 = std.mem.readInt(u64, (try self.readBytes(8))[0..8], .little) },
+            0xFD => blk: {
+                if (!self.features.fixed_width_simd)
+                    return self.unsupportedFeature(op_off, .fixed_width_simd);
+                const subopcode_off = self.offset();
+                if (try self.readU32Leb() != 0x0C)
+                    return self.failAt(subopcode_off, "constant expression required", .{});
+                break :blk .{ .v128 = std.mem.readInt(u128, (try self.readBytes(16))[0..16], .little) };
+            },
             0x23 => .{ .global = try self.readU32Leb() },
             0xD0 => blk: {
                 if (!self.features.reference_types)
@@ -399,7 +407,7 @@ fn parseTypeSection(r: *Reader, a: Allocator) DecodeError![]const types.FuncType
         const results = try a.alloc(types.ValType, rn);
         for (results) |*p| p.* = try r.readValType();
         if (rn > 1 and !r.features.multi_value)
-            return r.unsupportedFeature(res_off, .multi_value);
+            return r.failAt(res_off, "invalid result arity", .{});
         t.* = .{ .params = params, .results = results };
     }
     return ts;
@@ -1143,7 +1151,7 @@ test "wasm.decode malformed declarations" {
     // v128 is feature-gated in value positions.
     try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x7B\x00", 13, "WebAssembly feature fixed-width-simd is disabled");
     // Two results = multi-value proposal.
-    try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "WebAssembly feature multi-value is disabled");
+    try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "invalid result arity");
     // Import kind 4.
     try expectMalformed(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", 15, "invalid import kind");
     // Export kind 4.
@@ -1307,7 +1315,7 @@ test "wasm.decode multi-value signatures and type-index blocks" {
     const bytes = hdr ++
         "\x01\x06\x01\x60\x00\x02\x7F\x7E" ++
         func_sec_1 ++ "\x0A\x0B\x01\x09\x00\x02\x00\x41\x07\x42\x09\x0B\x0B";
-    try expectMalformed(bytes, 13, "WebAssembly feature multi-value is disabled");
+    try expectMalformed(bytes, 13, "invalid result arity");
 
     var diag: types.Diagnostic = .{};
     const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .multi_value = true }, &diag);

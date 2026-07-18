@@ -9,6 +9,8 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const simd = @import("simd.zig");
+const simd_meta = @import("simd_validate.zig");
 
 pub const Error = error{Invalid};
 
@@ -203,6 +205,25 @@ const Frame = struct {
 
 const MemInfo = struct { t: types.ValType, log2_bytes: u32 };
 
+const SimdDecoded = struct {
+    op: simd.Op,
+    memarg: ?types.Instr.MemArg = null,
+    lane: ?u8 = null,
+    shuffle: ?[16]u8 = null,
+};
+
+fn simdDecoded(instr: types.Instr) SimdDecoded {
+    return switch (instr.imm) {
+        .simd => |op| .{ .op = op },
+        .simd_memarg => |value| .{ .op = value.op, .memarg = value.memarg },
+        .simd_v128 => |value| .{ .op = value.op },
+        .simd_shuffle => |value| .{ .op = value.op, .shuffle = value.lanes },
+        .simd_lane => |value| .{ .op = value.op, .lane = value.lane },
+        .simd_memarg_lane => |value| .{ .op = value.op, .memarg = value.memarg, .lane = value.lane },
+        else => unreachable,
+    };
+}
+
 fn memInfo(op: types.Op) MemInfo {
     return switch (op) {
         .i32_load => .{ .t = .i32, .log2_bytes = 2 },
@@ -374,6 +395,109 @@ const FuncValidator = struct {
     fn cvtop(self: *FuncValidator, from: types.ValType, to: types.ValType) Error!void {
         try self.popExpect(from);
         self.push(stackVal(to));
+    }
+
+    fn validateSimd(self: *FuncValidator, instr: types.Instr) Error!void {
+        const decoded = simdDecoded(instr);
+        if (decoded.memarg) |memarg|
+            try self.memAccess(memarg, simd_meta.naturalAlignment(decoded.op).?);
+        if (decoded.lane) |lane|
+            if (lane >= simd_meta.laneLimit(decoded.op).?) return self.fail("invalid lane index");
+        if (decoded.shuffle) |lanes|
+            for (lanes) |lane| if (lane >= 32) return self.fail("invalid lane index");
+
+        switch (simd_meta.shape(decoded.op)) {
+            .load => {
+                try self.popExpect(.i32);
+                self.push(.v128);
+            },
+            .store, .lane_store => {
+                try self.popExpect(.v128);
+                try self.popExpect(.i32);
+            },
+            .lane_load => {
+                try self.popExpect(.v128);
+                try self.popExpect(.i32);
+                self.push(.v128);
+            },
+            .const_ => self.push(.v128),
+            .unary => {
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .binary => {
+                try self.popExpect(.v128);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .ternary => {
+                try self.popExpect(.v128);
+                try self.popExpect(.v128);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .test_ => {
+                try self.popExpect(.v128);
+                self.push(.i32);
+            },
+            .shift => {
+                try self.popExpect(.i32);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .splat_i32 => {
+                try self.popExpect(.i32);
+                self.push(.v128);
+            },
+            .splat_i64 => {
+                try self.popExpect(.i64);
+                self.push(.v128);
+            },
+            .splat_f32 => {
+                try self.popExpect(.f32);
+                self.push(.v128);
+            },
+            .splat_f64 => {
+                try self.popExpect(.f64);
+                self.push(.v128);
+            },
+            .extract_i32 => {
+                try self.popExpect(.v128);
+                self.push(.i32);
+            },
+            .extract_i64 => {
+                try self.popExpect(.v128);
+                self.push(.i64);
+            },
+            .extract_f32 => {
+                try self.popExpect(.v128);
+                self.push(.f32);
+            },
+            .extract_f64 => {
+                try self.popExpect(.v128);
+                self.push(.f64);
+            },
+            .replace_i32 => {
+                try self.popExpect(.i32);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .replace_i64 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .replace_f32 => {
+                try self.popExpect(.f32);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+            .replace_f64 => {
+                try self.popExpect(.f64);
+                try self.popExpect(.v128);
+                self.push(.v128);
+            },
+        }
     }
 
     fn run(self: *FuncValidator) Error!void {
@@ -637,7 +761,7 @@ const FuncValidator = struct {
                 .i64_const => self.push(.i64),
                 .f32_const => self.push(.f32),
                 .f64_const => self.push(.f64),
-                .simd => return self.fail("SIMD instruction validation not implemented"),
+                .simd => try self.validateSimd(instr),
                 .i32_eqz => try self.testop(.i32),
                 .i64_eqz => try self.testop(.i64),
                 .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => try self.relop(.i32),
@@ -820,6 +944,26 @@ test "wasm.validate fixed-width SIMD v128 signatures locals and control" {
         sec(3, "\x01\x00") ++
         sec(10, "\x01" ++ codeBody("\x01\x01\x7B", "\x02\x7B\x00\x0B\x1A\x20\x00\x0B")));
     try expectValidWithFeatures(bytes, .{ .fixed_width_simd = true });
+}
+
+test "wasm.validate fixed-width SIMD instruction signatures and immediates" {
+    const zero = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    const returns_vector = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x01\x7B") ++
+        func0 ++ code1("\xFD\x0C" ++ zero ++ "\x0B"));
+    try expectValidWithFeatures(returns_vector, .{ .fixed_width_simd = true });
+
+    const bad_lane = comptime (hdr ++ type_void ++ func0 ++
+        code1("\xFD\x0C" ++ zero ++ "\xFD\x15\x10\x1A\x0B"));
+    try expectInvalidAtWithFeatures(bad_lane, .{ .fixed_width_simd = true }, 0, 1, "invalid lane index");
+
+    const bad_alignment = comptime (hdr ++ type_void ++ func0 ++ mem1 ++
+        code1("\x41\x00\xFD\x00\x05\x00\x1A\x0B"));
+    try expectInvalidAtWithFeatures(bad_alignment, .{ .fixed_width_simd = true }, 0, 1, "alignment must not be larger than natural");
+
+    const bad_operands = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x41\x00\x41\x00\xFD\x6E\x1A\x0B"));
+    try expectInvalidAtWithFeatures(bad_operands, .{ .fixed_width_simd = true }, 0, 2, "type mismatch");
 }
 
 // Function 1 (type () -> i32, locals 2 x i32): block/loop/if-else results,
@@ -1064,10 +1208,10 @@ test "wasm.validate multiple memories" {
 
 test "wasm.validate multiple tables" {
     const defined = comptime (hdr ++ sec(4, "\x02\x70\x00\x01\x70\x00\x01"));
-    try expectInvalid(defined, "WebAssembly feature reference-types is disabled");
+    try expectInvalid(defined, "multiple tables");
     try expectValidWithFeatures(defined, .{ .reference_types = true });
     try expectInvalid(hdr ++ sec(2, "\x01\x01a\x01t\x01\x70\x00\x01") ++
-        sec(4, "\x01\x70\x00\x01"), "WebAssembly feature reference-types is disabled");
+        sec(4, "\x01\x70\x00\x01"), "multiple tables");
 }
 
 test "wasm.validate reference values instructions and typed tables" {
@@ -1226,7 +1370,7 @@ test "wasm.validate nontrapping conversion operand types" {
 
 test "wasm.validate elem unknown function" {
     const bytes = comptime (hdr ++ table1 ++ sec(9, "\x01\x00\x41\x00\x0B\x01\x07"));
-    try expectInvalid(bytes, "unknown function");
+    try expectInvalid(bytes, "unknown function 7");
 }
 
 test "wasm.validate elem unknown table and bad offset type" {

@@ -743,7 +743,8 @@ fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostE
 fn coerceGlobalSlot(self: *Interpreter, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
     return switch (kind) {
         .externref => .{ .externref = input },
-        .funcref, .v128 => unreachable,
+        .funcref => unreachable,
+        .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
     };
 }
@@ -902,18 +903,29 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     return Value.obj(result);
 }
 
-fn rawBitsString(self: *Interpreter, kind: types.ValType, bits: u64) value.HostError!Value {
-    const normalized = switch (kind) {
-        .i32, .f32 => @as(u64, @as(u32, @truncate(bits))),
-        .i64, .f64 => bits,
-        .funcref, .externref, .v128 => return self.throwError("TypeError", "value has no scalar bit encoding"),
+fn rawSlotString(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot) value.HostError!Value {
+    const normalized: u128 = switch (kind) {
+        .i32, .f32 => @as(u32, @truncate(slot.numericBits())),
+        .i64, .f64 => slot.numericBits(),
+        .v128 => slot.vectorBits(),
+        .funcref, .externref => return self.throwError("TypeError", "reference value has no raw bit encoding"),
     };
     return Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{normalized}));
 }
 
+fn rawSlotFromString(self: *Interpreter, kind: types.ValType, text: []const u8) value.HostError!exec.ValueSlot {
+    return switch (kind) {
+        .i32, .i64, .f32, .f64 => .{ .numeric = std.fmt.parseInt(u64, text, 10) catch
+            return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits") },
+        .v128 => .{ .vector = std.fmt.parseInt(u128, text, 10) catch
+            return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits") },
+        .funcref, .externref => self.throwError("TypeError", "reference value has no raw bit encoding"),
+    };
+}
+
 /// Test/conformance-only escape hatch installed by `Context.TestingOptions`.
 /// The first argument is a WebAssembly exported function or Global; remaining
-/// function arguments are unsigned decimal strings containing raw MVP value
+/// function arguments are unsigned decimal strings containing raw value
 /// bits. Returning a decimal string avoids every JS floating-point conversion.
 fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
@@ -924,38 +936,37 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
         const owner: *FunctionOwner = @ptrCast(@alignCast(function_state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
         if (args.len - 1 != owner.function_type.params.len)
             return self.throwError("TypeError", "raw WebAssembly argument count mismatch");
-        const raw_args = try owner.store.gpa.alloc(u64, owner.function_type.params.len);
+        const raw_args = try owner.store.gpa.alloc(exec.ValueSlot, owner.function_type.params.len);
         defer owner.store.gpa.free(raw_args);
-        const raw_results = try owner.store.gpa.alloc(u64, owner.function_type.results.len);
+        const raw_results = try owner.store.gpa.alloc(exec.ValueSlot, owner.function_type.results.len);
         defer owner.store.gpa.free(raw_results);
         for (args[1..], 0..) |argument, i| {
             const text = try self.toStringV(argument);
-            raw_args[i] = std.fmt.parseInt(u64, text, 10) catch
-                return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits");
+            raw_args[i] = try rawSlotFromString(self, owner.function_type.params[i], text);
         }
 
         var diag: types.Diagnostic = .{};
         const previous = owner.store.wasm_active_interp;
         owner.store.wasm_active_interp = @ptrCast(self);
         defer owner.store.wasm_active_interp = previous;
-        exec.callFuncInst(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
+        exec.callFuncInstSlots(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
             error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
             error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
             error.OutOfMemory => return error.OutOfMemory,
         };
         if (raw_results.len == 0) return Value.undef();
         if (raw_results.len == 1)
-            return rawBitsString(self, owner.function_type.results[0], raw_results[0]);
+            return rawSlotString(self, owner.function_type.results[0], raw_results[0]);
         const result = (try self.newArray()).asObj();
-        for (owner.function_type.results, raw_results) |kind, bits|
-            try result.appendElement(self.arena, try rawBitsString(self, kind, bits));
+        for (owner.function_type.results, raw_results) |kind, slot|
+            try result.appendElement(self.arena, try rawSlotString(self, kind, slot));
         return Value.obj(result);
     }
 
     if (target.wasmGlobal()) |global_state| {
         if (args.len != 1) return self.throwError("TypeError", "raw WebAssembly Global takes no arguments");
         const owner: *GlobalOwner = @ptrCast(@alignCast(global_state.glob orelse return self.throwError("TypeError", "WebAssembly global is unavailable")));
-        return rawBitsString(self, owner.glob.type.val, owner.glob.value.numericBits());
+        return rawSlotString(self, owner.glob.type.val, owner.glob.value);
     }
     return self.throwError("TypeError", "raw WebAssembly target must be an exported function or Global");
 }
@@ -967,7 +978,8 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value.numericBits()))))),
         .f64 => Value.num(@bitCast(glob.value.numericBits())),
         .externref => glob.value.externref,
-        .funcref, .v128 => unreachable,
+        .funcref => unreachable,
+        .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
     };
 }
 
@@ -1802,6 +1814,32 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
         \\var exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
         \\__wasmSpecInvokeBits(exports.f32, '2143289345') === '2143289345' &&
         \\__wasmSpecInvokeBits(exports.f64, '9221120237041090561') === '9221120237041090561';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api corpus harness preserves raw v128 functions and globals" {
+    const store = try context.Context.createWithTestingOptions(std.testing.allocator, .{
+        .wasm_spec_bit_exact = true,
+        .wasm_features = .{ .fixed_width_simd = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\var bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,1,123,1,123,
+        \\  3,2,1,0,
+        \\  6,22,1,123,0,253,12,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,11,
+        \\  7,9,2,1,102,0,0,1,103,3,0,
+        \\  10,6,1,4,0,32,0,11
+        \\]);
+        \\var exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+        \\var bits = '340282366920938463463374607431768211455';
+        \\let opaqueFunction = false, opaqueGlobal = false;
+        \\try { exports.f(); } catch (error) { opaqueFunction = error instanceof TypeError; }
+        \\try { exports.g.value; } catch (error) { opaqueGlobal = error instanceof TypeError; }
+        \\__wasmSpecInvokeBits(exports.f, bits) === bits &&
+        \\__wasmSpecInvokeBits(exports.g) === bits && opaqueFunction && opaqueGlobal;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }

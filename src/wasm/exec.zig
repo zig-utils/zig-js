@@ -327,6 +327,7 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
         .i64 => |v| .{ .numeric = @as(u64, @bitCast(v)) },
         .f32 => |bits| .{ .numeric = @as(u64, bits) },
         .f64 => |bits| .{ .numeric = bits },
+        .v128 => |bits| .{ .vector = bits },
         .global => |k| inst.globals[k].value,
         .ref_null => |ref_type| switch (ref_type) {
             .funcref => .{ .funcref = null },
@@ -3360,7 +3361,7 @@ test "wasm.exec call_indirect happy path" {
 test "wasm.exec call_indirect traps" {
     const b = try build(ci_bytes);
     defer destroyBuilt(b);
-    try runTrap(1, b.inst, 1, &.{1}, "uninitialized element"); // elem wrote only index 0
+    try runTrap(1, b.inst, 1, &.{1}, "uninitialized element 1"); // elem wrote only index 0
     try runTrap(1, b.inst, 1, &.{2}, "undefined element");
     try runTrap(1, b.inst, 1, &.{99}, "undefined element");
     try runTrap(1, b.inst, 2, &.{ 0, 0 }, "indirect call type mismatch"); // ()->i32 entry vs (i32)->i32
