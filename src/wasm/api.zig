@@ -1555,7 +1555,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", descriptor.link_error_proto);
                 if (imported.isObject()) if (imported.asObj().wasmFunction()) |state| {
                     const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", descriptor.link_error_proto)));
-                    if (owner.store != store or !types.funcTypeEql(owner.function_type, function_type))
+                    if (owner.store != store or !validate_mod.funcTypesEquivalentAcross(owner.inst.module, owner.function_type, module, function_type))
                         return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", descriptor.link_error_proto);
                 };
                 bridges[fi] = .{ .store = store, .callable = imported, .function_type = function_type, .js_tag = descriptor.js_tag };
@@ -1795,6 +1795,13 @@ fn syncImportedTables(
                     owner.refs[element_index].store(slot.externref.bits, .release);
                 owner.unlockOwner();
                 gc.barrierValueFrom(table_object, slot.externref);
+                continue;
+            }
+            if (slot != .funcref) {
+                owner.lockOwner();
+                if (element_index < owner.refs.len)
+                    owner.refs[element_index].store(Value.nul().bits, .release);
+                owner.unlockOwner();
                 continue;
             }
             const raw_func = slot.funcref orelse continue;
@@ -2422,6 +2429,16 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
         \\  10,21,3,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11
         \\]);
         \\globalThis.gcExports = new WebAssembly.Instance(new WebAssembly.Module(gcBytes)).exports;
+        \\const linkedBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,12,2,95,1,111,0,96,1,100,0,1,100,0,
+        \\  2,36,3,
+        \\    1,112,4,101,99,104,111,0,1,
+        \\    1,112,5,116,97,98,108,101,1,99,0,0,1,
+        \\    1,112,6,103,108,111,98,97,108,3,99,0,1,
+        \\  7,25,3,4,101,99,104,111,0,0,5,116,97,98,108,101,1,0,6,103,108,111,98,97,108,3,0
+        \\]);
+        \\globalThis.gcLinked = new WebAssembly.Instance(new WebAssembly.Module(linkedBytes), { p: gcExports }).exports;
         \\globalThis.gcMarker = { issue: 299 };
         \\globalThis.gcMarkerWeak = new WeakRef(gcMarker);
         \\globalThis.gcKeep = gcExports.make(gcMarker);
@@ -2430,7 +2447,9 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
         \\gcExports.global.value = gcKeep;
         \\Object.getPrototypeOf(gcKeep) === null && !Object.isExtensible(gcKeep) &&
         \\  gcExports.echo(gcKeep) === gcKeep && gcExports.table.get(0) === gcKeep &&
-        \\  gcExports.global.value === gcKeep && gcExports.make() !== gcKeep && gcExports.i31() === -1;
+        \\  gcExports.global.value === gcKeep && gcLinked.echo(gcKeep) === gcKeep &&
+        \\  gcLinked.table === gcExports.table && gcLinked.global === gcExports.global &&
+        \\  gcExports.make() !== gcKeep && gcExports.i31() === -1;
     );
     try std.testing.expect(before.isBoolean() and before.asBool());
     store.collectGarbage();

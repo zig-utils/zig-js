@@ -190,6 +190,213 @@ fn definedTypeEquivalent(mod: *const types.Module, a_index: u32, b_index: u32) b
     return definedTypeEquivalentDepth(mod, a_index, b_index, 0);
 }
 
+fn heapTypeEquivalentAcrossGroups(
+    a_mod: *const types.Module,
+    b_mod: *const types.Module,
+    a: types.HeapType,
+    b: types.HeapType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    if (a.concreteIndex()) |a_index| {
+        const b_index = b.concreteIndex() orelse return false;
+        const a_internal = groupContains(a_group, a_index);
+        const b_internal = groupContains(b_group, b_index);
+        if (a_internal or b_internal)
+            return a_internal and b_internal and a_index - a_group.start == b_index - b_group.start;
+        return definedTypeEquivalentAcrossDepth(a_mod, a_index, b_mod, b_index, depth + 1);
+    }
+    return a == b;
+}
+
+fn valTypeEquivalentAcrossGroups(
+    a_mod: *const types.Module,
+    b_mod: *const types.Module,
+    a: types.ValType,
+    b: types.ValType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    const a_ref = a.refType() orelse return a == b;
+    const b_ref = b.refType() orelse return false;
+    return a_ref.nullable == b_ref.nullable and heapTypeEquivalentAcrossGroups(
+        a_mod,
+        b_mod,
+        a_ref.heap,
+        b_ref.heap,
+        a_group,
+        b_group,
+        depth,
+    );
+}
+
+fn storageTypeEquivalentAcrossGroups(
+    a_mod: *const types.Module,
+    b_mod: *const types.Module,
+    a: types.StorageType,
+    b: types.StorageType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    return switch (a) {
+        .i8 => b == .i8,
+        .i16 => b == .i16,
+        .value => |a_value| switch (b) {
+            .value => |b_value| valTypeEquivalentAcrossGroups(a_mod, b_mod, a_value, b_value, a_group, b_group, depth),
+            else => false,
+        },
+    };
+}
+
+fn compositeTypeEquivalentAcrossGroups(
+    a_mod: *const types.Module,
+    b_mod: *const types.Module,
+    a: types.CompositeType,
+    b: types.CompositeType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    return switch (a) {
+        .func => |a_func| switch (b) {
+            .func => |b_func| blk: {
+                if (a_func.params.len != b_func.params.len or a_func.results.len != b_func.results.len)
+                    break :blk false;
+                for (a_func.params, b_func.params) |a_param, b_param|
+                    if (!valTypeEquivalentAcrossGroups(a_mod, b_mod, a_param, b_param, a_group, b_group, depth)) break :blk false;
+                for (a_func.results, b_func.results) |a_result, b_result|
+                    if (!valTypeEquivalentAcrossGroups(a_mod, b_mod, a_result, b_result, a_group, b_group, depth)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        },
+        .struct_ => |a_struct| switch (b) {
+            .struct_ => |b_struct| blk: {
+                if (a_struct.fields.len != b_struct.fields.len) break :blk false;
+                for (a_struct.fields, b_struct.fields) |a_field, b_field| {
+                    if (a_field.mutable != b_field.mutable or
+                        !storageTypeEquivalentAcrossGroups(a_mod, b_mod, a_field.storage, b_field.storage, a_group, b_group, depth))
+                        break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+        .array => |a_array| switch (b) {
+            .array => |b_array| a_array.field.mutable == b_array.field.mutable and
+                storageTypeEquivalentAcrossGroups(a_mod, b_mod, a_array.field.storage, b_array.field.storage, a_group, b_group, depth),
+            else => false,
+        },
+    };
+}
+
+fn definedTypeEquivalentAcrossDepth(
+    a_mod: *const types.Module,
+    a_index: u32,
+    b_mod: *const types.Module,
+    b_index: u32,
+    depth: usize,
+) bool {
+    if (a_mod == b_mod) return definedTypeEquivalentDepth(a_mod, a_index, b_index, depth);
+    if (a_index >= a_mod.types.len or b_index >= b_mod.types.len or
+        depth > a_mod.rec_groups.len + b_mod.rec_groups.len) return false;
+    const a_definition = a_mod.types[a_index];
+    const b_definition = b_mod.types[b_index];
+    if (a_definition.rec_group >= a_mod.rec_groups.len or b_definition.rec_group >= b_mod.rec_groups.len)
+        return false;
+    const a_group = a_mod.rec_groups[a_definition.rec_group];
+    const b_group = b_mod.rec_groups[b_definition.rec_group];
+    if (a_definition.rec_index != b_definition.rec_index or a_group.len != b_group.len) return false;
+
+    for (0..a_group.len) |rec_index| {
+        const a_subtype = a_mod.types[a_group.start + rec_index].subtype;
+        const b_subtype = b_mod.types[b_group.start + rec_index].subtype;
+        if (a_subtype.final != b_subtype.final or a_subtype.supertypes.len != b_subtype.supertypes.len)
+            return false;
+        for (a_subtype.supertypes, b_subtype.supertypes) |a_super, b_super|
+            if (!heapTypeEquivalentAcrossGroups(
+                a_mod,
+                b_mod,
+                types.HeapType.concrete(a_super),
+                types.HeapType.concrete(b_super),
+                a_group,
+                b_group,
+                depth,
+            )) return false;
+        if (!compositeTypeEquivalentAcrossGroups(
+            a_mod,
+            b_mod,
+            a_subtype.composite,
+            b_subtype.composite,
+            a_group,
+            b_group,
+            depth,
+        )) return false;
+    }
+    return true;
+}
+
+pub fn definedTypesEquivalentAcross(a_mod: *const types.Module, a_index: u32, b_mod: *const types.Module, b_index: u32) bool {
+    return definedTypeEquivalentAcrossDepth(a_mod, a_index, b_mod, b_index, 0);
+}
+
+pub fn valTypesEquivalentAcross(a_mod: *const types.Module, a: types.ValType, b_mod: *const types.Module, b: types.ValType) bool {
+    const a_ref = a.refType() orelse return a == b;
+    const b_ref = b.refType() orelse return false;
+    if (a_ref.nullable != b_ref.nullable) return false;
+    if (a_ref.heap.concreteIndex()) |a_index| {
+        const b_index = b_ref.heap.concreteIndex() orelse return false;
+        return definedTypesEquivalentAcross(a_mod, a_index, b_mod, b_index);
+    }
+    return a_ref.heap == b_ref.heap;
+}
+
+pub fn funcTypesEquivalentAcross(a_mod: *const types.Module, a: types.FuncType, b_mod: *const types.Module, b: types.FuncType) bool {
+    if (a.params.len != b.params.len or a.results.len != b.results.len) return false;
+    for (a.params, b.params) |a_param, b_param|
+        if (!valTypesEquivalentAcross(a_mod, a_param, b_mod, b_param)) return false;
+    for (a.results, b.results) |a_result, b_result|
+        if (!valTypesEquivalentAcross(a_mod, a_result, b_mod, b_result)) return false;
+    return true;
+}
+
+pub fn heapTypeMatchesAcross(
+    sub_mod: *const types.Module,
+    sub: types.HeapType,
+    super_mod: *const types.Module,
+    super: types.HeapType,
+) bool {
+    if (sub.concreteIndex()) |start| {
+        if (start >= sub_mod.types.len) return false;
+        var index = start;
+        while (true) {
+            const definition = sub_mod.types[index];
+            if (super.concreteIndex()) |wanted| {
+                if (definedTypesEquivalentAcross(sub_mod, index, super_mod, wanted)) return true;
+            } else switch (compositeKind(definition)) {
+                .func => if (super == .func) return true,
+                .struct_ => if (super == .struct_ or super == .eq or super == .any) return true,
+                .array => if (super == .array or super == .eq or super == .any) return true,
+            }
+            if (definition.subtype.supertypes.len == 0) return false;
+            index = definition.subtype.supertypes[0];
+            if (index >= sub_mod.types.len) return false;
+        }
+    }
+    if (super.concreteIndex()) |wanted| {
+        if (wanted >= super_mod.types.len) return false;
+        return switch (sub) {
+            .nofunc => compositeKind(super_mod.types[wanted]) == .func,
+            .none => compositeKind(super_mod.types[wanted]) != .func,
+            else => false,
+        };
+    }
+    return heapTypeMatches(sub_mod, sub, super);
+}
+
 /// Nominal heap matching from the pinned GC proposal. Concrete definitions
 /// follow their declared (earlier) supertype chain; abstract nodes form the
 /// three disjoint function, external, and internal hierarchies.
@@ -2737,6 +2944,23 @@ test "wasm.validate GC canonical recursive type identity" {
         "\x5F\x01\x63\x01\x00" ++
         "\x5F\x00"));
     try expectValidWithFeatures(legal_group_reference, gc_validation_features);
+}
+
+test "wasm.validate GC canonical identity crosses module-local indices" {
+    const a_bytes = comptime (hdr ++ sec(1, "\x01\x5F\x01\x63\x00\x00"));
+    const b_bytes = comptime (hdr ++ sec(1, "\x02\x60\x00\x00\x5F\x01\x63\x01\x00"));
+    const distinct_bytes = comptime (hdr ++ sec(1, "\x02\x60\x00\x00\x5F\x01\x7F\x00"));
+    var diag: types.Diagnostic = .{};
+    const a = try decode.decodeWithFeatures(std.testing.allocator, a_bytes, gc_validation_features, &diag);
+    defer decode.destroyModule(std.testing.allocator, a);
+    const b = try decode.decodeWithFeatures(std.testing.allocator, b_bytes, gc_validation_features, &diag);
+    defer decode.destroyModule(std.testing.allocator, b);
+    const distinct = try decode.decodeWithFeatures(std.testing.allocator, distinct_bytes, gc_validation_features, &diag);
+    defer decode.destroyModule(std.testing.allocator, distinct);
+
+    try std.testing.expect(definedTypesEquivalentAcross(a, 0, b, 1));
+    try std.testing.expect(definedTypesEquivalentAcross(b, 1, a, 0));
+    try std.testing.expect(!definedTypesEquivalentAcross(a, 0, distinct, 1));
 }
 
 test "wasm.validate GC packed access mutability and defaultability" {
