@@ -2392,6 +2392,27 @@ test "wasm.exec multi-value loop carries parameters" {
     try expectResultsWithFeatures(bytes, .{ .multi_value = true }, 0, &.{3}, &.{0});
 }
 
+test "wasm.exec multi-value branches calls and implicit else" {
+    const features: types.Features = .{ .multi_value = true };
+
+    const branch = comptime arithModule("", I32 ++ I64, "\x02\x00\x41\x07\x42\x09\x0C\x00\x00\x0B");
+    try expectResultsWithFeatures(branch, features, 0, &.{}, &.{ 7, 9 });
+
+    const branch_if = comptime arithModule("", I32 ++ I64, "\x02\x00\x41\x07\x42\x09\x41\x01\x0D\x00\x0B");
+    try expectResultsWithFeatures(branch_if, features, 0, &.{}, &.{ 7, 9 });
+
+    const branch_table = comptime arithModule("", I32 ++ I64, "\x02\x00\x41\x07\x42\x09\x41\x00\x0E\x01\x00\x00\x0B");
+    try expectResultsWithFeatures(branch_table, features, 0, &.{}, &.{ 7, 9 });
+
+    const implicit_else = comptime arithModule(I32, I32, "\x20\x00\x20\x00\x04\x00\x0B");
+    try expectResultsWithFeatures(implicit_else, features, 0, &.{5}, &.{5});
+    try expectResultsWithFeatures(implicit_else, features, 0, &.{0}, &.{0});
+
+    const call = comptime (hdr ++ typesSec(&.{ft("", I32 ++ I64)}) ++ funcSec(&.{ 0, 0 }) ++
+        codeSec(&.{ "\x41\x07\x42\x09", "\x10\x00" }));
+    try expectResultsWithFeatures(call, features, 1, &.{}, &.{ 7, 9 });
+}
+
 test "wasm.exec conversions trunc f32 to int" {
     try unop(.i32_trunc_f32_s, F32, I32, f32v(1.5), 1);
     try unop(.i32_trunc_f32_s, F32, I32, f32v(-1.5), i32v(-1));

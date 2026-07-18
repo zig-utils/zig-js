@@ -1619,6 +1619,16 @@ test "wasm api converts iterable multi-value imports and checks arity" {
         \\const good = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
         \\  env: { pair: () => new Set([3, 4n]) }
         \\}).exports.pair();
+        \\const producerBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,0,2,127,126,3,2,1,0,
+        \\  7,8,1,4,112,97,105,114,0,0,
+        \\  10,8,1,6,0,65,7,66,9,11
+        \\]);
+        \\const producer = new WebAssembly.Instance(new WebAssembly.Module(producerBytes));
+        \\const linked = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+        \\  env: { pair: producer.exports.pair }
+        \\}).exports.pair();
         \\let arity = false;
         \\try {
         \\  new WebAssembly.Instance(new WebAssembly.Module(bytes), {
@@ -1627,7 +1637,8 @@ test "wasm api converts iterable multi-value imports and checks arity" {
         \\} catch (error) {
         \\  arity = error instanceof TypeError && error.message.includes('wrong number of values');
         \\}
-        \\Array.isArray(good) && good[0] === 3 && good[1] === 4n && arity;
+        \\Array.isArray(good) && good[0] === 3 && good[1] === 4n &&
+        \\Array.isArray(linked) && linked[0] === 7 && linked[1] === 9n && arity;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
