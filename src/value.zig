@@ -67,6 +67,10 @@ pub const WasmSlot = union(enum) {
     funcref: ?*anyopaque,
     exnref: ?*WasmException,
     externref: Value,
+    /// Unboxed low 31 bits for the Wasm GC i31 hierarchy.
+    i31ref: u32,
+    /// Struct/array identity. The concrete header is runtime-owned.
+    gcref: ?*anyopaque,
 
     pub fn numericBits(self: WasmSlot) u64 {
         return switch (self) {

@@ -246,6 +246,11 @@ fn valTypeMatches(mod: *const types.Module, sub: types.ValType, super: types.Val
     return refTypeMatches(mod, sub_ref, super_ref);
 }
 
+fn valTypeDefaultable(value_type: types.ValType) bool {
+    const reference = value_type.refType() orelse return true;
+    return reference.nullable;
+}
+
 fn storageTypeMatches(mod: *const types.Module, sub: types.StorageType, super: types.StorageType) bool {
     return switch (sub) {
         .i8 => super == .i8,
@@ -413,7 +418,10 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
     for (mod.code) |body| {
-        for (body.locals) |l| try validateValType(mod, l, diag);
+        for (body.locals) |local| {
+            try validateValType(mod, local, diag);
+            if (!valTypeDefaultable(local)) return failMod(diag, "type is not defaultable");
+        }
     }
 
     // 4. Element segments.
@@ -845,9 +853,7 @@ const FuncValidator = struct {
     }
 
     fn requireDefaultable(self: *FuncValidator, value_type: types.ValType) Error!void {
-        if (value_type.refType()) |reference| {
-            if (!reference.nullable) return self.fail("type is not defaultable");
-        }
+        if (!valTypeDefaultable(value_type)) return self.fail("type is not defaultable");
     }
 
     fn requireNumericOrVector(self: *FuncValidator, value_type: types.ValType) Error!void {
@@ -2749,6 +2755,10 @@ test "wasm.validate GC packed access mutability and defaultability" {
     const nondefaultable = comptime (hdr ++ array_types ++ array_function ++
         code1("\x41\x00\xFB\x07\x00\x1A\x0B"));
     try expectInvalidAtWithFeatures(nondefaultable, gc_validation_features, 0, 1, "type is not defaultable");
+
+    const nondefaultable_local = comptime (hdr ++ array_types ++ array_function ++
+        sec(10, "\x01" ++ codeBody("\x01\x01\x64\x00", "\x0B")));
+    try expectInvalidWithFeatures(nondefaultable_local, gc_validation_features, "type is not defaultable");
 }
 
 test "wasm.validate GC cast branches refine fallthrough types" {

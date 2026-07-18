@@ -240,7 +240,7 @@ fn tableHostSync(raw: *anyopaque, table: *exec.TableInst, start: usize, len: usi
             if (!mirroredFunctionMatches(current, func))
                 owner.refs[index].store(Value.nul().bits, .release);
         } else owner.refs[index].store(Value.nul().bits, .release),
-        .numeric, .vector, .exnref => unreachable,
+        .numeric, .vector, .exnref, .i31ref, .gcref => unreachable,
     };
 }
 
@@ -815,7 +815,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                     return resolved;
                 }
             },
-            .numeric, .vector, .exnref => unreachable,
+            .numeric, .vector, .exnref, .i31ref, .gcref => unreachable,
         }
     }
 }
@@ -1689,7 +1689,7 @@ fn wrapDefinedTable(
                 refs[i].store(exported.bits, .monotonic);
             }
         },
-        .numeric, .vector => unreachable,
+        .numeric, .vector, .i31ref, .gcref => unreachable,
     };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = descriptor.table_proto };

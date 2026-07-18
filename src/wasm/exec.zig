@@ -467,12 +467,14 @@ fn tableGrowObserved(tab: *TableInst, delta: u64, fill: ValueSlot) ?u64 {
 }
 
 fn nullTableSlot(elem_type: types.ValType) ValueSlot {
-    return switch (elem_type) {
-        .funcref => .{ .funcref = null },
+    const reference = elem_type.refType() orelse return switch (elem_type) {
         .exnref => .{ .exnref = null },
-        .externref => .{ .externref = js_value.Value.nul() },
-        .i32, .i64, .f32, .f64, .v128 => unreachable,
         else => unreachable,
+    };
+    return switch (reference.heap) {
+        .func, .nofunc => .{ .funcref = null },
+        .extern_, .noextern => .{ .externref = js_value.Value.nul() },
+        else => .{ .gcref = null },
     };
 }
 
@@ -494,7 +496,7 @@ pub fn createGlobalSlot(gpa: Allocator, gt: types.GlobalType, value: ValueSlot) 
 fn publishGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
     const bits = switch (slot) {
         .externref => |ref| ref.bits,
-        .numeric, .vector, .funcref, .exnref => js_value.Value.undef().bits,
+        .numeric, .vector, .funcref, .exnref, .i31ref, .gcref => js_value.Value.undef().bits,
     };
     global.ref_root.store(bits, .release);
     if (global.barrier) |barrier| barrier(global.barrier_ctx.?, slot);
@@ -839,12 +841,21 @@ pub fn callFuncInst(f: *const FuncInst, args: []const u64, results: []u64, diag:
 }
 
 fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
+    if (val_type.refType()) |reference| {
+        if (!reference.nullable and slotIsNull(slot)) return false;
+        return switch (reference.heap) {
+            .func, .nofunc => slot == .funcref,
+            .extern_, .noextern => slot == .externref,
+            .i31 => slot == .i31ref or (reference.nullable and slot == .gcref and slot.gcref == null),
+            .eq, .any => slot == .i31ref or slot == .gcref,
+            .struct_, .array, .none => slot == .gcref,
+            _ => reference.heap.concreteIndex() != null and slot == .gcref,
+        };
+    }
     return switch (val_type) {
         .i32, .i64, .f32, .f64 => slot == .numeric,
         .v128 => slot == .vector,
-        .funcref => slot == .funcref,
         .exnref => slot == .exnref,
-        .externref => slot == .externref,
         else => false,
     };
 }
@@ -997,6 +1008,39 @@ fn popSlot(s: *State) WasmSlot {
     const v = s.stack.items[s.stack.items.len - 1];
     s.stack.items.len -= 1;
     return v;
+}
+
+fn slotIsNull(slot: WasmSlot) bool {
+    return switch (slot) {
+        .funcref => |value| value == null,
+        .exnref => |value| value == null,
+        .externref => |value| value.isNull(),
+        .gcref => |value| value == null,
+        .i31ref => false,
+        .numeric, .vector => unreachable,
+    };
+}
+
+fn executeGcScalar(s: *State, instr: types.Instr) ExecError!void {
+    const op = switch (instr.imm) {
+        .gc => |value| value,
+        .gc_type => |value| value.op,
+        .gc_type_field => |value| value.op,
+        .gc_two_indices => |value| value.op,
+        .gc_heap => |value| value.op,
+        .gc_cast_branch => |value| value.op,
+        else => unreachable,
+    };
+    switch (op) {
+        .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
+        .i31_get_u => try pushI32(s, popSlot(s).i31ref),
+        .i31_get_s => {
+            const raw = popSlot(s).i31ref;
+            const signed: i32 = @as(i32, @bitCast(raw << 1)) >> 1;
+            try pushI32(s, @bitCast(signed));
+        },
+        else => return s.trap("WebAssembly GC aggregate instruction is not implemented"),
+    }
 }
 
 fn pushI32(s: *State, v: u32) ExecError!void {
@@ -2086,12 +2130,15 @@ fn popF64(s: *State) f64 {
 }
 
 fn zeroSlot(val_type: types.ValType) WasmSlot {
+    if (val_type.refType()) |reference| return switch (reference.heap) {
+        .func, .nofunc => .{ .funcref = null },
+        .extern_, .noextern => .{ .externref = js_value.Value.nul() },
+        else => .{ .gcref = null },
+    };
     return switch (val_type) {
         .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
         .v128 => .{ .vector = 0 },
-        .funcref => .{ .funcref = null },
         .exnref => .{ .exnref = null },
-        .externref => .{ .externref = js_value.Value.nul() },
         else => unreachable,
     };
 }
@@ -2205,7 +2252,7 @@ fn publishExceptionReference(s: *State, active: *ActiveException) ExecError!*js_
         .exnref => |nested| if (nested) |exception| {
             for (exception.externrefs) |root| try externref_set.put(s.alloc, root.bits, {});
         },
-        .numeric, .vector, .funcref => {},
+        .numeric, .vector, .funcref, .i31ref, .gcref => {},
     };
     const externrefs = try owner.gpa.alloc(js_value.Value, externref_set.count());
     errdefer owner.gpa.free(externrefs);
@@ -2962,21 +3009,10 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 table.elems[@intCast(index)] = slot;
                 if (table.host) |host| host.sync(host.ctx, table, @intCast(index), 1);
             },
-            .ref_null => try pushSlot(s, switch (instr.imm.type) {
-                .funcref => .{ .funcref = null },
-                .exnref => .{ .exnref = null },
-                .externref => .{ .externref = js_value.Value.nul() },
-                .i32, .i64, .f32, .f64, .v128 => unreachable,
-                else => unreachable,
-            }),
+            .ref_null => try pushSlot(s, zeroSlot(instr.imm.type)),
             .ref_is_null => {
                 const slot = popSlot(s);
-                try pushBool(s, switch (slot) {
-                    .funcref => |func| func == null,
-                    .exnref => |exception| exception == null,
-                    .externref => |ref| ref.isNull(),
-                    .numeric, .vector => unreachable,
-                });
+                try pushBool(s, slotIsNull(slot));
             },
             .ref_func => try pushSlot(s, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
             .table_grow => {
@@ -3267,7 +3303,22 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
-            .gc, .ref_eq, .ref_as_non_null => return s.trap("WebAssembly GC instruction is not implemented"),
+            .gc => try executeGcScalar(s, instr),
+            .ref_eq => {
+                const b = popSlot(s);
+                const a = popSlot(s);
+                const equal = switch (a) {
+                    .i31ref => |value| b == .i31ref and value == b.i31ref,
+                    .gcref => |value| b == .gcref and value == b.gcref,
+                    else => unreachable,
+                };
+                try pushBool(s, equal);
+            },
+            .ref_as_non_null => {
+                const reference = popSlot(s);
+                if (slotIsNull(reference)) return s.trap("null reference");
+                try pushSlot(s, reference);
+            },
             .simd => try executeSimd(s, inst, instr),
             .atomic => try executeAtomic(s, inst, instr),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
@@ -5989,6 +6040,35 @@ test "wasm.exec externref tables preserve arbitrary identity" {
     try std.testing.expect(inst.tables[0].elems[0].externref.asObj() == &object);
     try std.testing.expectEqual(@as(i32, 1), tableGrowWith(inst.tables[0], 1, results[0]));
     try std.testing.expect(inst.tables[0].elems[1].externref.asObj() == &object);
+}
+
+test "wasm.exec GC i31 equality and non-null scalar operations" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft("", I32), ft("", "") }) ++
+        funcSec(&.{ 0, 0, 1 }) ++
+        codeSec(&.{
+            i32c(-1) ++ "\xFB\x1C\xFB\x1D",
+            i32c(5) ++ "\xFB\x1C" ++ i32c(5) ++ "\xFB\x1C\xD3",
+            "\xD0\x6C\xD4\x1A",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    var result: [1]u64 = undefined;
+    try invoke(inst, 0, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(i32, -1))), @as(u32, @truncate(result[0])));
+    try invoke(inst, 1, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 1), result[0]);
+    try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("null reference", diag.message());
 }
 
 test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {

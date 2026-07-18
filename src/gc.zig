@@ -694,7 +694,7 @@ fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
         .externref => |root| markValue(v, root),
         .exnref => |exception| if (exception) |ex|
             for (ex.externrefs) |root| markValue(v, root),
-        .numeric, .vector, .funcref => {},
+        .numeric, .vector, .funcref, .i31ref, .gcref => {},
     }
 }
 
