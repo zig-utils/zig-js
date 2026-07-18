@@ -44,11 +44,20 @@ pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Valu
 /// The Wasm executor refreshes this stable descriptor before every GC
 /// checkpoint; the active Interpreter then publishes it through the same
 /// precise-root path as VM operand stacks and frame locals.
+pub const WasmException = struct {
+    tag: *anyopaque,
+    payload: []const WasmSlot,
+    externrefs: []const Value,
+    owner: *anyopaque,
+    next: ?*WasmException = null,
+    published: bool = false,
+};
+
 pub const WasmSlot = union(enum) {
     numeric: u64,
     vector: u128,
     funcref: ?*anyopaque,
-    exnref: ?*anyopaque,
+    exnref: ?*WasmException,
     externref: Value,
 
     pub fn numericBits(self: WasmSlot) u64 {
@@ -69,6 +78,7 @@ pub const WasmSlot = union(enum) {
 pub const WasmExecutionRoots = struct {
     stack: []const WasmSlot = &.{},
     locals: []const WasmSlot = &.{},
+    exceptions: []const *WasmException = &.{},
 };
 
 pub const HostClassGetResult = union(enum) {
@@ -1182,7 +1192,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     // registry owns their memory, so these slots are weak views — only the
     // Object edges below participate in GC tracing.
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
-    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exports_obj: ?*Object = null },
+    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exception_head: ?*const std.atomic.Value(usize) = null, exports_obj: ?*Object = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
     wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
     wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
@@ -1844,6 +1854,7 @@ pub const Object = struct {
         table_refs: []const std.atomic.Value(u64) = &.{},
         global_refs: []const *std.atomic.Value(u64) = &.{},
         global_ref: ?*std.atomic.Value(u64) = null,
+        exception_head: ?*const std.atomic.Value(usize) = null,
         exports_obj: ?*Object = null,
         buffer_obj: ?*Object = null,
         owner_obj: ?*Object = null,
@@ -1907,6 +1918,7 @@ pub const Object = struct {
                 .module_obj = cold.rare.wasm_instance.module_obj,
                 .import_vals = cold.rare.wasm_instance.import_vals,
                 .global_refs = cold.rare.wasm_instance.global_refs,
+                .exception_head = cold.rare.wasm_instance.exception_head,
                 .exports_obj = cold.rare.wasm_instance.exports_obj,
             },
             .wasm_memory => .{

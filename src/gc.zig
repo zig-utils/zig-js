@@ -196,6 +196,14 @@ pub fn traceObject(o: *Object, v: anytype) void {
     for (cold.wasm.table_refs) |*ref| markValue(v, .{ .bits = @constCast(ref).load(.acquire) });
     for (cold.wasm.global_refs) |ref| markValue(v, .{ .bits = ref.load(.acquire) });
     if (cold.wasm.global_ref) |ref| markValue(v, .{ .bits = ref.load(.acquire) });
+    if (cold.wasm.exception_head) |head| {
+        var raw = @constCast(head).load(.acquire);
+        while (raw != 0) {
+            const exception: *const value.WasmException = @ptrFromInt(raw);
+            for (exception.externrefs) |root| markValue(v, root);
+            raw = if (exception.next) |next| @intFromPtr(next) else 0;
+        }
+    }
     v.mark(cold.wasm.exports_obj);
     v.mark(cold.wasm.buffer_obj);
     v.mark(cold.wasm.owner_obj);
@@ -680,15 +688,20 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     for (machine.with_stack.items) |o| v.mark(o);
 }
 
+fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
+    switch (slot) {
+        .externref => |root| markValue(v, root),
+        .exnref => |exception| if (exception) |ex|
+            for (ex.externrefs) |root| markValue(v, root),
+        .numeric, .vector, .funcref => {},
+    }
+}
+
 fn traceWasmExecutionRoots(roots: *const value.WasmExecutionRoots, v: anytype) void {
-    for (roots.stack) |slot| switch (slot) {
-        .externref => |root| markValue(v, root),
-        .numeric, .vector, .funcref, .exnref => {},
-    };
-    for (roots.locals) |slot| switch (slot) {
-        .externref => |root| markValue(v, root),
-        .numeric, .vector, .funcref, .exnref => {},
-    };
+    for (roots.stack) |slot| traceWasmSlot(slot, v);
+    for (roots.locals) |slot| traceWasmSlot(slot, v);
+    for (roots.exceptions) |exception|
+        for (exception.externrefs) |root| markValue(v, root);
 }
 
 /// A `Visitor`-shaped adapter that routes every root it is handed through the
@@ -1540,7 +1553,7 @@ test "gc traces only the active microtask variant" {
     try std.testing.expect(!next_tick_marks.contains(&inactive_argument));
 }
 
-test "gc traces only externref WebAssembly slots" {
+test "gc traces direct and exception-payload WebAssembly roots" {
     const Recorder = struct {
         marked: [4]?*anyopaque = .{ null, null, null, null },
         len: usize = 0,
@@ -1562,17 +1575,42 @@ test "gc traces only externref WebAssembly slots" {
     var local_ref = Object{};
     var numeric_only = Object{};
     var funcref_only = Object{};
+    var nested_ref = Object{};
+    var pending_ref = Object{};
+    var dummy_tag: u8 = 0;
+    var dummy_owner: u8 = 0;
+    const nested_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&nested_ref) }};
+    var nested_exception: value.WasmException = .{
+        .tag = @ptrCast(&dummy_tag),
+        .payload = &nested_payload,
+        .externrefs = &.{Value.obj(&nested_ref)},
+        .owner = @ptrCast(&dummy_owner),
+    };
+    const pending_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&pending_ref) }};
+    var pending_exception: value.WasmException = .{
+        .tag = @ptrCast(&dummy_tag),
+        .payload = &pending_payload,
+        .externrefs = &.{Value.obj(&pending_ref)},
+        .owner = @ptrCast(&dummy_owner),
+    };
     const stack = [_]value.WasmSlot{
         .{ .numeric = @intFromPtr(&numeric_only) },
         .{ .funcref = @ptrCast(&funcref_only) },
         .{ .externref = Value.obj(&stack_ref) },
+        .{ .exnref = &nested_exception },
     };
     const locals = [_]value.WasmSlot{.{ .externref = Value.obj(&local_ref) }};
-    const roots: value.WasmExecutionRoots = .{ .stack = &stack, .locals = &locals };
+    const roots: value.WasmExecutionRoots = .{
+        .stack = &stack,
+        .locals = &locals,
+        .exceptions = &.{&pending_exception},
+    };
     var recorder: Recorder = .{};
     traceWasmExecutionRoots(&roots, &recorder);
     try std.testing.expect(recorder.contains(&stack_ref));
     try std.testing.expect(recorder.contains(&local_ref));
+    try std.testing.expect(recorder.contains(&nested_ref));
+    try std.testing.expect(recorder.contains(&pending_ref));
     try std.testing.expect(!recorder.contains(&numeric_only));
     try std.testing.expect(!recorder.contains(&funcref_only));
 }

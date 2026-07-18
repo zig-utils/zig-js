@@ -945,6 +945,7 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     defer active_wasm_interp = previous;
     exec.callFuncInstSlots(owner.func, slot_args, slot_results, &diag) catch |err| switch (err) {
         error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
+        error.Exception => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
         error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -1005,6 +1006,7 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
         defer active_wasm_interp = previous;
         exec.callFuncInstSlots(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
             error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
+            error.Exception => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
             error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
             error.OutOfMemory => return error.OutOfMemory,
         };
@@ -1480,6 +1482,7 @@ fn instantiateModuleObject(
     const global_refs = try self.arena.alloc(*std.atomic.Value(u64), inst.globals.len);
     for (inst.globals, 0..) |global, i| global_refs[i] = &global.ref_root;
     state.global_refs = global_refs;
+    state.exception_head = &inst.exception_head;
     for (inst.globals[module.imported_globals..]) |global| {
         global.barrier_ctx = @ptrCast(object);
         global.barrier = barrierGlobalReference;
@@ -1523,6 +1526,7 @@ fn instantiateModuleObject(
 
     exec.runStart(inst, &diag) catch |err| return switch (err) {
         error.Trap => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
+        error.Exception => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
         error.Host => if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
         error.OutOfMemory => error.OutOfMemory,
     };

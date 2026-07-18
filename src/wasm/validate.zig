@@ -1721,6 +1721,11 @@ test "wasm.validate modern exception instructions and catch branch types" {
     const bad_throw_ref = comptime (hdr ++ type_void ++ func0 ++
         code1("\x41\x00\x0A\x0B"));
     try expectInvalidAtWithFeatures(bad_throw_ref, features, 0, 1, "type mismatch");
+
+    const polymorphic_throw = comptime (hdr ++
+        sec(1, "\x02\x60\x01\x7F\x00\x60\x00\x00") ++ sec(3, "\x01\x01") ++
+        sec(13, "\x01\x00\x00") ++ code1("\x00\x08\x00\x0B"));
+    try expectValidWithFeatures(polymorphic_throw, features);
 }
 
 test "wasm.validate tail calls accept direct indirect and polymorphic stacks" {

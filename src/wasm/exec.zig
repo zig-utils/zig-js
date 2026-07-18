@@ -29,7 +29,7 @@ pub const ValueSlot = js_value.WasmSlot;
 const WasmSlot = ValueSlot;
 var atomic_fence_word = std.atomic.Value(u8).init(0);
 
-pub const ExecError = error{ OutOfMemory, Trap, Host };
+pub const ExecError = error{ OutOfMemory, Trap, Host, Exception };
 
 pub const RootHooks = struct {
     ctx: *anyopaque,
@@ -211,7 +211,7 @@ pub const Imports = struct {
     tags: []const *TagInst = &.{},
 };
 
-pub const LinkError = error{ OutOfMemory, Link, Trap, Host };
+pub const LinkError = error{ OutOfMemory, Link, Trap, Host, Exception };
 
 /// A fully instantiated module: full index spaces, imports first. `module`
 /// is borrowed (NOT owned); internal slices live in the instance arena.
@@ -224,6 +224,7 @@ pub const Instance = struct {
     mems: []*MemoryInst,
     globals: []*GlobalInst,
     tags: []*TagInst,
+    exception_head: std.atomic.Value(usize) = .init(0),
     elem_segments: []ElemSegmentInst,
     data_segments: []DataSegmentInst,
     gpa: Allocator,
@@ -440,6 +441,17 @@ pub fn createTag(gpa: Allocator, tag_type: types.FuncType) error{OutOfMemory}!*T
 
 pub fn destroyTag(gpa: Allocator, tag: *TagInst) void {
     gpa.destroy(tag);
+}
+
+fn destroyExceptions(gpa: Allocator, inst: *Instance) void {
+    var raw = inst.exception_head.load(.acquire);
+    while (raw != 0) {
+        const exception: *js_value.WasmException = @ptrFromInt(raw);
+        raw = if (exception.next) |next| @intFromPtr(next) else 0;
+        gpa.free(exception.payload);
+        gpa.free(exception.externrefs);
+        gpa.destroy(exception);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -696,6 +708,7 @@ pub fn destroyInstance(gpa: Allocator, inst: *Instance) void {
     for (inst.mems[mod.imported_mems..]) |m| destroyMemory(gpa, m);
     for (inst.globals[mod.imported_globals..]) |g| destroyGlobal(gpa, g);
     for (inst.tags[mod.imported_tags..]) |tag| destroyTag(gpa, tag);
+    destroyExceptions(gpa, inst);
     inst.arena.deinit();
     gpa.destroy(inst);
 }
@@ -799,7 +812,11 @@ fn runDefinedSlots(f: *const FuncInst, args: []const ValueSlot, results: []Value
         try hooks.enter(hooks.ctx, &s.roots);
         defer hooks.leave(hooks.ctx, &s.roots);
     }
-    try execute(&s, f, args, results);
+    execute(&s, f, args, results) catch |err| {
+        finalizeExceptions(&s, false);
+        return err;
+    };
+    finalizeExceptions(&s, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -814,15 +831,32 @@ const Label = struct {
     stack_height: usize, // operand stack height when the label was pushed
     arity: usize, // values carried on branch (loop -> 0)
     is_loop: bool,
+    is_try: bool = false,
 };
 
 const Frame = struct {
     func: *const FuncInst, // always .defined
     pc: u32,
     locals_base: usize,
+    locals_end: usize,
     stack_base: usize, // operand stack height at entry (params already consumed)
     label_base: usize, // label stack height at entry; function label sits here
     result_arity: usize,
+};
+
+const ExceptionHandler = struct {
+    frame_index: usize,
+    label_index: usize,
+    stack_height: usize,
+    inst: *Instance,
+    catches: []const types.Instr.Catch,
+};
+
+const ActiveException = struct {
+    tag: *TagInst,
+    payload: []const WasmSlot,
+    reference: ?*js_value.WasmException = null,
+    owner: *Instance,
 };
 
 const State = struct {
@@ -832,6 +866,9 @@ const State = struct {
     locals: std.ArrayListUnmanaged(WasmSlot) = .empty,
     frames: std.ArrayListUnmanaged(Frame) = .empty,
     labels: std.ArrayListUnmanaged(Label) = .empty,
+    handlers: std.ArrayListUnmanaged(ExceptionHandler) = .empty,
+    created_exceptions: std.ArrayListUnmanaged(*js_value.WasmException) = .empty,
+    touched_instances: std.ArrayListUnmanaged(*Instance) = .empty,
     roots: js_value.WasmExecutionRoots = .{},
     root_hooks: ?RootHooks = null,
 
@@ -844,6 +881,7 @@ const State = struct {
 fn checkpoint(s: *State) void {
     s.roots.stack = s.stack.items;
     s.roots.locals = s.locals.items;
+    s.roots.exceptions = s.created_exceptions.items;
     if (s.root_hooks) |hooks| hooks.checkpoint(hooks.ctx, &s.roots);
 }
 
@@ -1937,6 +1975,14 @@ fn zeroSlot(val_type: types.ValType) WasmSlot {
 fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     if (s.frames.items.len >= MAX_FRAMES) return s.trap("call stack exhausted");
     const def = f.defined;
+    var seen_instance = false;
+    for (s.touched_instances.items) |instance| {
+        if (instance == def.inst) {
+            seen_instance = true;
+            break;
+        }
+    }
+    if (!seen_instance) try s.touched_instances.append(s.alloc, def.inst);
     const mod = def.inst.module;
     const body = &mod.code[def.idx];
     const fty = mod.types[mod.funcs[def.idx]];
@@ -1951,6 +1997,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
         .func = f,
         .pc = 0,
         .locals_base = locals_base,
+        .locals_end = s.locals.items.len,
         .stack_base = s.stack.items.len,
         .label_base = s.labels.items.len,
         .result_arity = fty.results.len,
@@ -1974,6 +2021,15 @@ fn returnFrame(s: *State) void {
     s.labels.items.len = fr.label_base;
     s.locals.items.len = fr.locals_base;
     s.frames.items.len -= 1;
+    pruneHandlers(s);
+}
+
+fn pruneHandlers(s: *State) void {
+    while (s.handlers.items.len != 0) {
+        const handler = s.handlers.items[s.handlers.items.len - 1];
+        if (handler.frame_index < s.frames.items.len and handler.label_index < s.labels.items.len) break;
+        s.handlers.items.len -= 1;
+    }
 }
 
 /// Branch to the label `depth` levels out, carrying its arity of values.
@@ -1997,6 +2053,186 @@ fn branchTo(s: *State, depth: u32) void {
         s.labels.items.len = li;
         fr.pc = lab.target_pc;
     }
+    pruneHandlers(s);
+}
+
+fn publishStoredException(exception: *js_value.WasmException) void {
+    if (exception.published) return;
+    const owner: *Instance = @ptrCast(@alignCast(exception.owner));
+    var head = owner.exception_head.load(.acquire);
+    while (true) {
+        exception.next = if (head == 0) null else @ptrFromInt(head);
+        if (owner.exception_head.cmpxchgWeak(head, @intFromPtr(exception), .release, .acquire)) |observed| {
+            head = observed;
+        } else break;
+    }
+    exception.published = true;
+}
+
+fn publishExceptionReference(s: *State, active: *ActiveException) ExecError!*js_value.WasmException {
+    if (active.reference) |reference| return reference;
+    const owner = active.owner;
+    const payload = try owner.gpa.dupe(WasmSlot, active.payload);
+    errdefer owner.gpa.free(payload);
+    var externref_set: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    defer externref_set.deinit(s.alloc);
+    for (payload) |slot| switch (slot) {
+        .externref => |root| try externref_set.put(s.alloc, root.bits, {}),
+        .exnref => |nested| if (nested) |exception| {
+            for (exception.externrefs) |root| try externref_set.put(s.alloc, root.bits, {});
+        },
+        .numeric, .vector, .funcref => {},
+    };
+    const externrefs = try owner.gpa.alloc(js_value.Value, externref_set.count());
+    errdefer owner.gpa.free(externrefs);
+    var externref_index: usize = 0;
+    var externref_iterator = externref_set.keyIterator();
+    while (externref_iterator.next()) |bits| : (externref_index += 1)
+        externrefs[externref_index] = .{ .bits = bits.* };
+    const exception = owner.gpa.create(js_value.WasmException) catch |err| {
+        return err;
+    };
+    exception.* = .{
+        .tag = @ptrCast(active.tag),
+        .payload = payload,
+        .externrefs = externrefs,
+        .owner = @ptrCast(owner),
+    };
+    s.created_exceptions.append(s.alloc, exception) catch |err| {
+        owner.gpa.destroy(exception);
+        return err;
+    };
+    active.reference = exception;
+    return exception;
+}
+
+fn markCreatedException(s: *State, live: []bool, exception: *js_value.WasmException) void {
+    var found: ?usize = null;
+    for (s.created_exceptions.items, 0..) |candidate, index| {
+        if (candidate == exception) {
+            found = index;
+            break;
+        }
+    }
+    const index = found orelse return;
+    if (live[index]) return;
+    live[index] = true;
+    for (exception.payload) |slot|
+        if (slot == .exnref)
+            if (slot.exnref) |nested| markCreatedException(s, live, nested);
+}
+
+fn markExceptionSlots(s: *State, live: []bool, slots: []const WasmSlot) void {
+    for (slots) |slot|
+        if (slot == .exnref)
+            if (slot.exnref) |exception| markCreatedException(s, live, exception);
+}
+
+fn finalizeExceptions(s: *State, include_stack: bool) void {
+    if (s.created_exceptions.items.len == 0) return;
+    const live = s.alloc.alloc(bool, s.created_exceptions.items.len) catch {
+        for (s.created_exceptions.items) |exception| publishStoredException(exception);
+        return;
+    };
+    @memset(live, false);
+    if (include_stack) markExceptionSlots(s, live, s.stack.items);
+    for (s.touched_instances.items) |instance| {
+        for (instance.globals) |global| markExceptionSlots(s, live, &.{global.value});
+        for (instance.tables) |table| {
+            table.lockTable();
+            markExceptionSlots(s, live, table.elems);
+            table.unlockTable();
+        }
+    }
+    for (s.created_exceptions.items, live) |exception, is_live| {
+        if (is_live or exception.published) {
+            publishStoredException(exception);
+        } else {
+            const owner: *Instance = @ptrCast(@alignCast(exception.owner));
+            owner.gpa.free(exception.payload);
+            owner.gpa.free(exception.externrefs);
+            owner.gpa.destroy(exception);
+        }
+    }
+    s.created_exceptions.items.len = 0;
+}
+
+fn unwindToHandler(s: *State, handler: ExceptionHandler) void {
+    const frame = &s.frames.items[handler.frame_index];
+    s.frames.items.len = handler.frame_index + 1;
+    s.locals.items.len = frame.locals_end;
+    s.labels.items.len = handler.label_index;
+    s.stack.items.len = handler.stack_height;
+}
+
+fn handleException(s: *State, active: *ActiveException) ExecError!void {
+    while (s.handlers.items.len != 0) {
+        const handler = s.handlers.items[s.handlers.items.len - 1];
+        s.handlers.items.len -= 1;
+        unwindToHandler(s, handler);
+
+        for (handler.catches) |catch_clause| {
+            const matched = switch (catch_clause) {
+                .catch_tag => |tagged| handler.inst.tags[tagged.tag_index] == active.tag,
+                .catch_ref => |tagged| handler.inst.tags[tagged.tag_index] == active.tag,
+                .catch_all, .catch_all_ref => true,
+            };
+            if (!matched) continue;
+
+            switch (catch_clause) {
+                .catch_tag => |tagged| {
+                    for (active.payload) |slot| try pushSlot(s, slot);
+                    branchTo(s, tagged.label_index);
+                },
+                .catch_ref => |tagged| {
+                    for (active.payload) |slot| try pushSlot(s, slot);
+                    try pushSlot(s, .{ .exnref = try publishExceptionReference(s, active) });
+                    branchTo(s, tagged.label_index);
+                },
+                .catch_all => |label_index| branchTo(s, label_index),
+                .catch_all_ref => |label_index| {
+                    try pushSlot(s, .{ .exnref = try publishExceptionReference(s, active) });
+                    branchTo(s, label_index);
+                },
+            }
+            checkpoint(s);
+            return;
+        }
+    }
+
+    s.stack.items.len = 0;
+    s.locals.items.len = 0;
+    s.labels.items.len = 0;
+    s.frames.items.len = 0;
+    s.diag.set(types.Diagnostic.no_offset, "uncaught WebAssembly exception", .{});
+    return error.Exception;
+}
+
+fn throwTag(s: *State, inst: *Instance, tag_index: u32) ExecError!void {
+    const tag = inst.tags[tag_index];
+    const payload_len = tag.type.params.len;
+    const payload_start = s.stack.items.len - payload_len;
+    const payload = try s.alloc.dupe(WasmSlot, s.stack.items[payload_start..]);
+    s.stack.items.len = payload_start;
+    var active: ActiveException = .{ .tag = tag, .payload = payload, .owner = inst };
+    try handleException(s, &active);
+}
+
+fn throwReference(s: *State, inst: *Instance) ExecError!void {
+    const reference = popSlot(s).exnref orelse return s.trap("null exception reference");
+    var active: ActiveException = .{
+        .tag = @ptrCast(@alignCast(reference.tag)),
+        .payload = reference.payload,
+        .reference = reference,
+        .owner = inst,
+    };
+    try handleException(s, &active);
+}
+
+fn publishEscapingSlots(slots: []const WasmSlot) void {
+    for (slots) |slot|
+        if (slot == .exnref)
+            if (slot.exnref) |exception| publishStoredException(exception);
 }
 
 fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
@@ -2006,6 +2242,7 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
         .imported => |*imp| {
             const arg_start = s.stack.items.len - imp.type.params.len;
             const args = s.stack.items[arg_start..];
+            publishEscapingSlots(args);
             const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
             if (!argumentsMatchSignature(imp.type, args, res.len))
                 return s.trap("function signature mismatch");
@@ -2040,10 +2277,12 @@ fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
     for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlot(local_type));
     s.stack.items.len = current.stack_base;
     s.labels.items.len = current.label_base;
+    pruneHandlers(s);
     s.frames.items[current_index] = .{
         .func = f,
         .pc = 0,
         .locals_base = current.locals_base,
+        .locals_end = s.locals.items.len,
         .stack_base = current.stack_base,
         .label_base = current.label_base,
         .result_arity = fty.results.len,
@@ -2067,6 +2306,7 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
             const current = s.frames.items[s.frames.items.len - 1];
             const arg_start = s.stack.items.len - imp.type.params.len;
             const args = s.stack.items[arg_start..];
+            publishEscapingSlots(args);
             const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
             if (!argumentsMatchSignature(imp.type, args, res.len))
                 return s.trap("function signature mismatch");
@@ -2082,6 +2322,7 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
             s.labels.items.len = current.label_base;
             s.locals.items.len = current.locals_base;
             s.frames.items.len -= 1;
+            pruneHandlers(s);
             checkpoint(s);
         },
     }
@@ -2417,12 +2658,26 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 .arity = instr.imm.block.type.funcType(mod).?.results.len,
                 .is_loop = false,
             }),
-            .try_table => try s.labels.append(s.alloc, .{
-                .target_pc = instr.imm.try_table.block.end_pc,
-                .stack_height = s.stack.items.len - instr.imm.try_table.block.type.funcType(mod).?.params.len,
-                .arity = instr.imm.try_table.block.type.funcType(mod).?.results.len,
-                .is_loop = false,
-            }),
+            .try_table => {
+                const immediate = instr.imm.try_table;
+                const block_type = immediate.block.type.funcType(mod).?;
+                const label_index = s.labels.items.len;
+                const stack_height = s.stack.items.len - block_type.params.len;
+                try s.labels.append(s.alloc, .{
+                    .target_pc = immediate.block.end_pc,
+                    .stack_height = stack_height,
+                    .arity = block_type.results.len,
+                    .is_loop = false,
+                    .is_try = true,
+                });
+                try s.handlers.append(s.alloc, .{
+                    .frame_index = s.frames.items.len - 1,
+                    .label_index = label_index,
+                    .stack_height = stack_height,
+                    .inst = inst,
+                    .catches = immediate.catches,
+                });
+            },
             .loop => try s.labels.append(s.alloc, .{
                 .target_pc = instr.imm.block.else_pc,
                 .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
@@ -2456,6 +2711,11 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 fr.pc = instr.imm.block.end_pc;
             },
             .end => {
+                if (s.labels.items[s.labels.items.len - 1].is_try) {
+                    std.debug.assert(s.handlers.items.len != 0);
+                    std.debug.assert(s.handlers.items[s.handlers.items.len - 1].label_index == s.labels.items.len - 1);
+                    s.handlers.items.len -= 1;
+                }
                 s.labels.items.len -= 1;
                 if (s.labels.items.len == fr.label_base) returnFrame(s);
             },
@@ -2469,7 +2729,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 branchTo(s, if (i < bt.targets.len) bt.targets[i] else bt.default);
             },
             .return_ => branchTo(s, @intCast(s.labels.items.len - 1 - fr.label_base)),
-            .throw, .throw_ref => return s.trap("exception execution not implemented"),
+            .throw => try throwTag(s, inst, instr.imm.idx),
+            .throw_ref => try throwReference(s, inst),
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
             .return_call => try tailCallFunc(s, inst.funcs[instr.imm.idx]),
             .call_indirect => {
@@ -3088,6 +3349,7 @@ const I64 = "\x7E";
 const F32 = "\x7D";
 const F64 = "\x7C";
 const V128 = "\x7B";
+const EXNREF = "\x69";
 
 const f32nan: u64 = 0x7FC00000;
 const f64nan: u64 = 0x7FF8000000000000;
@@ -3298,6 +3560,17 @@ fn codeSecL(comptime locals_decl: []const u8, comptime body: []const u8) []const
     comptime {
         const full = locals_decl ++ body ++ "\x0B";
         return sec(10, leb(1) ++ leb(full.len) ++ full);
+    }
+}
+
+fn deepExceptionBody(comptime depth: usize) []const u8 {
+    comptime {
+        @setEvalBranchQuota(10_000);
+        var body: []const u8 = "\x1F\x40\x01\x00\x01\x00"; // outer tag 1 -> function
+        for (0..depth) |_| body = body ++ "\x1F\x40\x01\x00\x00\x00"; // nonmatching tag 0
+        body = body ++ i32c(123) ++ "\x08\x01";
+        for (0..depth + 1) |_| body = body ++ "\x0B";
+        return body ++ i32c(9);
     }
 }
 
@@ -4762,6 +5035,250 @@ test "wasm.exec exception tag instantiation is rollback-safe across allocation f
         instantiateExceptionTagsWithFailingAllocator,
         .{},
     );
+}
+
+test "wasm.exec exceptions match tag identity and unwind across calls" {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const identity_bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", I32) }) ++ funcSec(&.{1}) ++
+        sec(13, "\x02\x00\x00\x00\x00") ++ codeSec(&.{
+        "\x02\x7F" ++ // outer block -> i32
+            "\x02\x7F" ++ // inner block -> i32
+            "\x1F\x40\x02\x00\x00\x00\x00\x01\x01" ++
+            i32c(7) ++ "\x08\x01\x0B" ++ // throw tag 1
+            i32c(9) ++ "\x0B\x1A" ++ // wrong tag path reaches 11
+            i32c(11) ++ "\x0B",
+    }));
+    var diag: types.Diagnostic = .{};
+    const identity_mod = try buildModuleWithFeatures(identity_bytes, features, &diag);
+    defer decode.destroyModule(talloc, identity_mod);
+    const identity = try instantiate(talloc, identity_mod, .{}, &diag);
+    defer destroyInstance(talloc, identity);
+    var identity_result: [1]u64 = undefined;
+    try invoke(identity, 0, &.{}, &identity_result, &diag);
+    try std.testing.expectEqual(@as(u64, 7), identity_result[0]);
+
+    const call_bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", ""), ft("", I32) }) ++
+        funcSec(&.{ 1, 2 }) ++ sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        i32c(55) ++ "\x08\x00",
+        "\x1F\x40\x01\x00\x00\x00\x10\x00\x0B" ++ i32c(9),
+    }));
+    const call_mod = try buildModuleWithFeatures(call_bytes, features, &diag);
+    defer decode.destroyModule(talloc, call_mod);
+    const call_inst = try instantiate(talloc, call_mod, .{}, &diag);
+    defer destroyInstance(talloc, call_inst);
+    var call_result: [1]u64 = undefined;
+    try invoke(call_inst, 1, &.{}, &call_result, &diag);
+    try std.testing.expectEqual(@as(u64, 55), call_result[0]);
+
+    try std.testing.expectError(error.Exception, invoke(call_inst, 0, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("uncaught WebAssembly exception", diag.message());
+
+    const deep_bytes = comptime (hdr ++
+        typesSec(&.{ ft("", ""), ft(I32, ""), ft("", I32) }) ++
+        funcSec(&.{2}) ++ sec(13, "\x02\x00\x00\x00\x01") ++
+        codeSec(&.{deepExceptionBody(512)}));
+    const deep_mod = try buildModuleWithFeatures(deep_bytes, features, &diag);
+    defer decode.destroyModule(talloc, deep_mod);
+    const deep_inst = try instantiate(talloc, deep_mod, .{}, &diag);
+    defer destroyInstance(talloc, deep_inst);
+    var deep_result: [1]u64 = undefined;
+    try invoke(deep_inst, 0, &.{}, &deep_result, &diag);
+    try std.testing.expectEqual(@as(u64, 123), deep_result[0]);
+
+    const tail_bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", I32) }) ++ funcSec(&.{ 1, 1 }) ++
+        sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        i32c(7) ++ "\x08\x00",
+        "\x1F\x40\x01\x00\x00\x00\x12\x00\x0B" ++ i32c(9),
+    }));
+    const tail_mod = try buildModuleWithFeatures(tail_bytes, .{
+        .reference_types = true,
+        .exception_handling = true,
+        .tail_calls = true,
+    }, &diag);
+    defer decode.destroyModule(talloc, tail_mod);
+    const tail_inst = try instantiate(talloc, tail_mod, .{}, &diag);
+    defer destroyInstance(talloc, tail_inst);
+    var tail_result: [1]u64 = undefined;
+    try std.testing.expectError(error.Exception, invoke(tail_inst, 1, &.{}, &tail_result, &diag));
+
+    const trap_bytes = comptime (hdr ++ typesSec(&.{ft("", "")}) ++ funcSec(&.{0}) ++
+        codeSec(&.{"\x1F\x40\x01\x02\x00\x00\x0B"}));
+    const trap_mod = try buildModuleWithFeatures(trap_bytes, features, &diag);
+    defer decode.destroyModule(talloc, trap_mod);
+    const trap_inst = try instantiate(talloc, trap_mod, .{}, &diag);
+    defer destroyInstance(talloc, trap_inst);
+    try std.testing.expectError(error.Trap, invoke(trap_inst, 0, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("unreachable", diag.message());
+}
+
+test "wasm.exec exception payloads preserve bits references and rethrow identity" {
+    const features: types.Features = .{
+        .multi_value = true,
+        .reference_types = true,
+        .exception_handling = true,
+    };
+    var diag: types.Diagnostic = .{};
+    const bits_bytes = comptime (hdr ++
+        typesSec(&.{ ft(F32 ++ I64, ""), ft(F32 ++ I64, F32 ++ I64) }) ++
+        funcSec(&.{1}) ++ sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x00\x00\x00\x20\x00\x20\x01\x08\x00\x0B" ++
+            "\x20\x00\x20\x01",
+    }));
+    const bits_mod = try buildModuleWithFeatures(bits_bytes, features, &diag);
+    defer decode.destroyModule(talloc, bits_mod);
+    const bits_inst = try instantiate(talloc, bits_mod, .{}, &diag);
+    defer destroyInstance(talloc, bits_inst);
+    const nan_payload: u64 = 0x7FA1_2345;
+    const wide_payload: u64 = 0xFEDC_BA98_7654_3210;
+    var bit_results: [2]ValueSlot = undefined;
+    try invokeSlots(
+        bits_inst,
+        0,
+        &.{ .{ .numeric = nan_payload }, .{ .numeric = wide_payload } },
+        &bit_results,
+        &diag,
+    );
+    try std.testing.expectEqual(nan_payload, bit_results[0].numericBits());
+    try std.testing.expectEqual(wide_payload, bit_results[1].numericBits());
+
+    const ref_bytes = comptime (hdr ++
+        typesSec(&.{ ft("\x6F", ""), ft("\x6F", "\x6F") }) ++
+        funcSec(&.{1}) ++ sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x00\x00\x00\x20\x00\x08\x00\x0B\x20\x00",
+    }));
+    const ref_mod = try buildModuleWithFeatures(ref_bytes, features, &diag);
+    defer decode.destroyModule(talloc, ref_mod);
+    const ref_inst = try instantiate(talloc, ref_mod, .{}, &diag);
+    defer destroyInstance(talloc, ref_inst);
+    var object: js_value.Object = .{};
+    var ref_result: [1]ValueSlot = undefined;
+    try invokeSlots(
+        ref_inst,
+        0,
+        &.{.{ .externref = js_value.Value.obj(&object) }},
+        &ref_result,
+        &diag,
+    );
+    try std.testing.expect(ref_result[0].externref.asObj() == &object);
+
+    const rethrow_bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", I32 ++ EXNREF), ft("", I32) }) ++
+        funcSec(&.{2}) ++ sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x00\x00\x00" ++ // outer catch payload -> function
+            "\x02\x01" ++ // block type 1: () -> (i32, exnref)
+            "\x1F\x40\x01\x01\x00\x00" ++ // inner catch_ref -> block
+            i32c(42) ++ "\x08\x00\x0B" ++
+            i32c(0) ++ "\xD0\x69\x0B" ++
+            "\x0A\x0B" ++ i32c(9),
+    }));
+    const rethrow_mod = try buildModuleWithFeatures(rethrow_bytes, features, &diag);
+    defer decode.destroyModule(talloc, rethrow_mod);
+    const rethrow_inst = try instantiate(talloc, rethrow_mod, .{}, &diag);
+    defer destroyInstance(talloc, rethrow_inst);
+    var rethrow_result: [1]u64 = undefined;
+    try invoke(rethrow_inst, 0, &.{}, &rethrow_result, &diag);
+    try std.testing.expectEqual(@as(u64, 42), rethrow_result[0]);
+    try std.testing.expectEqual(@as(usize, 0), rethrow_inst.exception_head.load(.acquire));
+
+    const escaping_ref_bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", EXNREF), ft(EXNREF, I32) }) ++
+        funcSec(&.{ 1, 2 }) ++ sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x03\x00" ++ i32c(77) ++ "\x08\x00\x0B\xD0\x69",
+        "\x1F\x40\x01\x00\x00\x00\x20\x00\x0A\x0B" ++ i32c(9),
+    }));
+    const escaping_ref_mod = try buildModuleWithFeatures(escaping_ref_bytes, features, &diag);
+    defer decode.destroyModule(talloc, escaping_ref_mod);
+    const escaping_ref_inst = try instantiate(talloc, escaping_ref_mod, .{}, &diag);
+    defer destroyInstance(talloc, escaping_ref_inst);
+    var exception_result: [1]ValueSlot = undefined;
+    try invokeSlots(escaping_ref_inst, 0, &.{}, &exception_result, &diag);
+    try std.testing.expect(exception_result[0] == .exnref and exception_result[0].exnref != null);
+    try std.testing.expect(escaping_ref_inst.exception_head.load(.acquire) != 0);
+    var caught_again: [1]ValueSlot = undefined;
+    try invokeSlots(escaping_ref_inst, 1, &exception_result, &caught_again, &diag);
+    try std.testing.expectEqual(@as(u64, 77), caught_again[0].numericBits());
+
+    const null_ref_bytes = comptime (hdr ++ typesSec(&.{ft("", "")}) ++
+        funcSec(&.{0}) ++ codeSec(&.{"\xD0\x69\x0A"}));
+    const null_ref_mod = try buildModuleWithFeatures(null_ref_bytes, features, &diag);
+    defer decode.destroyModule(talloc, null_ref_mod);
+    const null_ref_inst = try instantiate(talloc, null_ref_mod, .{}, &diag);
+    defer destroyInstance(talloc, null_ref_inst);
+    try std.testing.expectError(error.Trap, invoke(null_ref_inst, 0, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("null exception reference", diag.message());
+}
+
+fn executeExceptionReferenceWithFailingAllocator(gpa: std.mem.Allocator) !void {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", EXNREF) }) ++ funcSec(&.{1}) ++
+        sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x03\x00" ++ i32c(17) ++ "\x08\x00\x0B\xD0\x69",
+    }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(gpa, mod, .{}, &diag);
+    defer destroyInstance(gpa, inst);
+    var result: [1]ValueSlot = undefined;
+    try invokeSlots(inst, 0, &.{}, &result, &diag);
+    try std.testing.expect(result[0] == .exnref and result[0].exnref != null);
+}
+
+test "wasm.exec exception reference promotion is allocation-failure atomic" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        executeExceptionReferenceWithFailingAllocator,
+        .{},
+    );
+}
+
+test "wasm.exec exception references publish concurrently" {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft(I32, ""), ft("", EXNREF) }) ++ funcSec(&.{1}) ++
+        sec(13, "\x01\x00\x00") ++ codeSec(&.{
+        "\x1F\x40\x01\x03\x00" ++ i32c(23) ++ "\x08\x00\x0B\xD0\x69",
+    }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    const Invocation = struct {
+        inst: *Instance,
+        result: [1]ValueSlot = undefined,
+        diag: types.Diagnostic = .{},
+        failure: ?ExecError = null,
+
+        fn run(self: *@This()) void {
+            invokeSlots(self.inst, 0, &.{}, &self.result, &self.diag) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var invocations: [8]Invocation = undefined;
+    var threads: [8]std.Thread = undefined;
+    for (&invocations, 0..) |*invocation, index| {
+        invocation.* = .{ .inst = inst };
+        threads[index] = try std.Thread.spawn(.{}, Invocation.run, .{invocation});
+    }
+    for (&threads) |*thread| thread.join();
+    for (&invocations) |*invocation| {
+        try std.testing.expectEqual(@as(?ExecError, null), invocation.failure);
+        try std.testing.expect(invocation.result[0] == .exnref and invocation.result[0].exnref != null);
+    }
+    var published: usize = 0;
+    var raw = inst.exception_head.load(.acquire);
+    while (raw != 0) : (published += 1) {
+        const exception: *const js_value.WasmException = @ptrFromInt(raw);
+        raw = if (exception.next) |next| @intFromPtr(next) else 0;
+    }
+    try std.testing.expectEqual(@as(usize, invocations.len), published);
 }
 
 test "wasm.exec tail calls preserve indirect checks and host imports" {
