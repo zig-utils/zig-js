@@ -121,6 +121,7 @@ const TableOwner = struct {
 const FunctionOwner = struct {
     store: *context.Context,
     func: *exec.FuncInst,
+    inst: *exec.Instance,
     function_type: types.FuncType,
     runtime_error_proto: *Object,
 };
@@ -129,6 +130,15 @@ const JsImportBridge = struct {
     store: *context.Context,
     callable: Value,
     function_type: types.FuncType,
+    inst: ?*exec.Instance = null,
+};
+
+const FunctionHostContext = struct {
+    store: *context.Context,
+    descriptor: *InstanceDescriptor,
+    instance_object: *Object,
+    inst: *exec.Instance,
+    cache: []Value,
 };
 
 const InstanceOwner = struct {
@@ -662,6 +672,55 @@ fn wasmBitsToJs(self: *Interpreter, kind: types.ValType, bits: u64) value.HostEr
     };
 }
 
+fn functionInstance(func: *exec.FuncInst, fallback: ?*exec.Instance) ?*exec.Instance {
+    return switch (func.*) {
+        .defined => |defined| defined.inst,
+        .imported => |imported| imported.owner_instance orelse fallback,
+    };
+}
+
+fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
+    return switch (kind) {
+        .i32, .i64, .f32, .f64 => wasmBitsToJs(self, kind, slot.numericBits()),
+        .externref => slot.externref,
+        .funcref => if (slot.funcref) |raw| blk: {
+            const func: *exec.FuncInst = @ptrCast(@alignCast(raw));
+            const inst = functionInstance(func, fallback) orelse
+                return self.throwError("TypeError", "WebAssembly function reference has no owning instance");
+            const host = inst.function_host orelse
+                return self.throwError("TypeError", "WebAssembly function reference is unavailable");
+            break :blk try host.resolve(host.ctx, func);
+        } else Value.nul(),
+    };
+}
+
+fn jsToWasmSlot(self: *Interpreter, store: *context.Context, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    return switch (kind) {
+        .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
+        .externref => .{ .externref = input },
+        .funcref => (try tableRefFromValue(self, store, .funcref, input)).slot,
+    };
+}
+
+fn resolveFunctionReference(raw: *anyopaque, func: *exec.FuncInst) value.HostError!Value {
+    const host: *FunctionHostContext = @ptrCast(@alignCast(raw));
+    const self: *Interpreter = @ptrCast(@alignCast(host.store.wasm_active_interp orelse return error.OutOfMemory));
+    for (host.inst.funcs, 0..) |candidate, index| {
+        if (candidate != func) continue;
+        return functionValueFor(
+            self,
+            host.descriptor,
+            host.store,
+            host.instance_object,
+            host.inst,
+            host.cache,
+            @intCast(index),
+            "wasm-function",
+        );
+    }
+    return self.throwError("TypeError", "WebAssembly function reference is unavailable");
+}
+
 fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Diagnostic) error{ Trap, Host }!void {
     const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
     const self: *Interpreter = @ptrCast(@alignCast(bridge.store.wasm_active_interp orelse return error.Host));
@@ -684,32 +743,57 @@ fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Di
     }
 }
 
+fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []exec.ValueSlot, _: *types.Diagnostic) error{ Trap, Host }!void {
+    const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
+    const self: *Interpreter = @ptrCast(@alignCast(bridge.store.wasm_active_interp orelse return error.Host));
+    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
+    defer bridge.store.gpa.free(js_args);
+    for (args, bridge.function_type.params, 0..) |slot, kind, i|
+        js_args[i] = wasmSlotToJs(self, kind, slot, bridge.inst) catch return error.Host;
+
+    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch return error.Host;
+    if (bridge.function_type.results.len == 0) return;
+    if (bridge.function_type.results.len == 1) {
+        results[0] = jsToWasmSlot(self, bridge.store, bridge.function_type.results[0], result) catch return error.Host;
+        return;
+    }
+
+    var values: std.ArrayListUnmanaged(Value) = .empty;
+    self.spreadInto(&values, result) catch return error.Host;
+    if (values.items.len != bridge.function_type.results.len) {
+        _ = self.throwError("TypeError", "WebAssembly multi-value import returned the wrong number of values") catch {};
+        return error.Host;
+    }
+    for (bridge.function_type.results, values.items, 0..) |kind, item, i|
+        results[i] = jsToWasmSlot(self, bridge.store, kind, item) catch return error.Host;
+}
+
 fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const function_state = self.active_native.?.wasmFunction() orelse return self.throwError("TypeError", "WebAssembly function is unavailable");
     const owner: *FunctionOwner = @ptrCast(@alignCast(function_state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
-    const raw_args = try owner.store.gpa.alloc(u64, owner.function_type.params.len);
-    defer owner.store.gpa.free(raw_args);
-    const raw_results = try owner.store.gpa.alloc(u64, owner.function_type.results.len);
-    defer owner.store.gpa.free(raw_results);
+    const slot_args = try owner.store.gpa.alloc(exec.ValueSlot, owner.function_type.params.len);
+    defer owner.store.gpa.free(slot_args);
+    const slot_results = try owner.store.gpa.alloc(exec.ValueSlot, owner.function_type.results.len);
+    defer owner.store.gpa.free(slot_results);
     for (owner.function_type.params, 0..) |kind, i|
-        raw_args[i] = try coerceGlobalBits(self, kind, if (i < args.len) args[i] else Value.undef());
+        slot_args[i] = try jsToWasmSlot(self, owner.store, kind, if (i < args.len) args[i] else Value.undef());
 
     var diag: types.Diagnostic = .{};
     const previous = owner.store.wasm_active_interp;
     owner.store.wasm_active_interp = @ptrCast(self);
     defer owner.store.wasm_active_interp = previous;
-    exec.callFuncInst(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
+    exec.callFuncInstSlots(owner.func, slot_args, slot_results, &diag) catch |err| switch (err) {
         error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
         error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    if (raw_results.len == 0) return Value.undef();
-    if (raw_results.len == 1)
-        return wasmBitsToJs(self, owner.function_type.results[0], raw_results[0]);
+    if (slot_results.len == 0) return Value.undef();
+    if (slot_results.len == 1)
+        return wasmSlotToJs(self, owner.function_type.results[0], slot_results[0], owner.inst);
     const result = (try self.newArray()).asObj();
-    for (owner.function_type.results, raw_results) |kind, bits|
-        try result.appendElement(self.arena, try wasmBitsToJs(self, kind, bits));
+    for (owner.function_type.results, slot_results) |kind, slot|
+        try result.appendElement(self.arena, try wasmSlotToJs(self, kind, slot, owner.inst));
     return Value.obj(result);
 }
 
@@ -908,7 +992,12 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                         return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", link_proto);
                 };
                 bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index] };
-                funcs[fi] = .{ .ctx = @ptrCast(&bridges[fi]), .type = module.types[type_index], .call = jsImportCall };
+                funcs[fi] = .{
+                    .ctx = @ptrCast(&bridges[fi]),
+                    .type = module.types[type_index],
+                    .call = jsImportCall,
+                    .call_slots = jsImportCallSlots,
+                };
                 fi += 1;
             },
             .table => {
@@ -1003,6 +1092,7 @@ fn functionValueFor(
     owner.* = .{
         .store = store,
         .func = inst.funcs[index],
+        .inst = inst,
         .function_type = function_type,
         .runtime_error_proto = descriptor.runtime_error_proto,
     };
@@ -1221,6 +1311,16 @@ fn instantiateModuleObject(
     @memset(table_cache, Value.undef());
     @memset(memory_cache, Value.undef());
     @memset(global_cache, Value.undef());
+    const function_host = try self.arena.create(FunctionHostContext);
+    function_host.* = .{
+        .store = store,
+        .descriptor = descriptor,
+        .instance_object = object,
+        .inst = inst,
+        .cache = function_cache,
+    };
+    inst.function_host = .{ .ctx = @ptrCast(function_host), .resolve = resolveFunctionReference };
+    for (resolved.bridges) |*bridge| bridge.inst = inst;
     for (resolved.table_values, 0..) |entry, i| table_cache[i] = entry;
     for (resolved.mem_values, 0..) |entry, i| memory_cache[i] = entry;
     for (resolved.global_values, 0..) |entry, i| global_cache[i] = entry;
@@ -1957,6 +2057,79 @@ test "wasm api externref Table and Global preserve identity and reclaim exactly"
     );
     store.collectGarbage();
     try std.testing.expect((try store.evaluate("externWeak.deref() === undefined")).asBool());
+}
+
+test "wasm api reference-valued exports and imports preserve canonical identity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .multi_value = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const identityBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,11,2,96,1,111,1,111,96,1,112,1,112,
+        \\  3,3,2,0,1,
+        \\  7,13,2,3,101,120,116,0,0,3,102,117,110,0,1,
+        \\  10,11,2,4,0,32,0,11,4,0,32,0,11
+        \\]);
+        \\const identity = new WebAssembly.Instance(new WebAssembly.Module(identityBytes));
+        \\const marker = { tag: 81 };
+        \\const ext = identity.exports.ext;
+        \\const fun = identity.exports.fun;
+        \\let rejected = false;
+        \\try { fun(function ordinary() {}); } catch (e) { rejected = e instanceof TypeError; }
+        \\const importBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,1,111,1,111,
+        \\  2,12,1,3,101,110,118,4,101,99,104,111,0,0,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,1,
+        \\  10,8,1,6,0,32,0,16,0,11
+        \\]);
+        \\let seen;
+        \\const linked = new WebAssembly.Instance(new WebAssembly.Module(importBytes), {
+        \\  env: { echo(value) { seen = value; return value; } }
+        \\});
+        \\const funImportBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,1,112,1,112,
+        \\  2,12,1,3,101,110,118,4,101,99,104,111,0,0,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,1,
+        \\  10,8,1,6,0,32,0,16,0,11
+        \\]);
+        \\let seenFun;
+        \\const funLinked = new WebAssembly.Instance(new WebAssembly.Module(funImportBytes), {
+        \\  env: { echo(value) { seenFun = value; return value; } }
+        \\});
+        \\const mixedBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,8,1,96,2,111,112,2,112,111,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,0,
+        \\  10,8,1,6,0,32,1,32,0,11
+        \\]);
+        \\const mixed = new WebAssembly.Instance(new WebAssembly.Module(mixedBytes)).exports.run;
+        \\const mixedResult = mixed(marker, ext);
+        \\const mixedImportBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,8,1,96,2,111,112,2,112,111,
+        \\  2,12,1,3,101,110,118,4,115,119,97,112,0,0,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,1,
+        \\  10,10,1,8,0,32,0,32,1,16,0,11
+        \\]);
+        \\const mixedLinked = new WebAssembly.Instance(new WebAssembly.Module(mixedImportBytes), {
+        \\  env: { swap(object, fn) { return [fn, object]; } }
+        \\});
+        \\const mixedImportResult = mixedLinked.exports.run(marker, ext);
+        \\ext(marker) === marker && fun(ext) === ext && fun(null) === null && rejected &&
+        \\  linked.exports.run(marker) === marker && seen === marker &&
+        \\  funLinked.exports.run(ext) === ext && seenFun === ext &&
+        \\  mixedResult[0] === ext && mixedResult[1] === marker &&
+        \\  mixedImportResult[0] === ext && mixedImportResult[1] === marker;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api Instance exports callable functions and preserves Table identity" {

@@ -9,9 +9,10 @@
 //! run the interpreter with per-invocation state, so host imports may
 //! re-enter wasm execution safely.
 //!
-//! Values on the operand stack and in `u64` argument/result slots are raw
-//! bits: i32 and f32 live in the low 32 bits with the upper bits zero; i64
-//! and f64 use all 64 bits.
+//! Values on the operand stack and typed argument/result slots retain their
+//! WebAssembly type. Numeric payloads are raw bits: i32 and f32 live in the
+//! low 32 bits with the upper bits zero; i64 and f64 use all 64 bits. The
+//! legacy `u64` invocation path is numeric-only.
 
 const std = @import("std");
 const js_value = @import("../value.zig");
@@ -38,6 +39,12 @@ pub const ImportFunc = struct {
     type: types.FuncType,
     call: *const fn (ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void,
     call_slots: ?*const fn (ctx: *anyopaque, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) error{ Trap, Host }!void = null,
+    owner_instance: ?*Instance = null,
+};
+
+pub const FunctionHost = struct {
+    ctx: *anyopaque,
+    resolve: *const fn (ctx: *anyopaque, func: *FuncInst) js_value.HostError!js_value.Value,
 };
 
 pub const FuncInst = union(enum) {
@@ -108,6 +115,7 @@ pub const Instance = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     root_hooks: ?RootHooks = null,
+    function_host: ?FunctionHost = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -356,6 +364,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (imports.funcs) |imf| {
         const p = try a.create(FuncInst);
         p.* = .{ .imported = imf };
+        p.imported.owner_instance = inst;
         inst.funcs[fi] = p;
         fi += 1;
     }
@@ -3123,6 +3132,29 @@ test "wasm.exec call_indirect cross-instance shared table" {
     const binst = try instantiate(talloc, bmod, .{ .tables = &.{tab} }, &diag);
     defer destroyInstance(talloc, binst);
     try std.testing.expectEqual(@as(u64, 77), try run1(binst, 0, &.{}));
+}
+
+test "wasm.exec call_indirect selects an explicit table across instances" {
+    const a_bytes = comptime (hdr ++ typesSec(&.{ft("", I32)}) ++ funcSec(&.{0}) ++ codeSec(&.{i32c(91)}));
+    const a = try build(a_bytes);
+    defer destroyBuilt(a);
+    const decoy = try createTable(talloc, 1, null);
+    defer destroyTable(talloc, decoy);
+    const target = try createTable(talloc, 1, null);
+    defer destroyTable(talloc, target);
+    target.elems[0] = .{ .funcref = @ptrCast(a.inst.funcs[0]) };
+
+    const b_bytes = comptime (hdr ++
+        typesSec(&.{ft("", I32)}) ++
+        importSec(&.{ impTable("a", "decoy", 1, null), impTable("a", "target", 1, null) }) ++
+        funcSec(&.{0}) ++
+        codeSec(&.{i32c(0) ++ "\x11\x00\x01"}));
+    var diag: types.Diagnostic = .{};
+    const bmod = try buildModuleWithFeatures(b_bytes, .{ .reference_types = true }, &diag);
+    defer decode.destroyModule(talloc, bmod);
+    const binst = try instantiate(talloc, bmod, .{ .tables = &.{ decoy, target } }, &diag);
+    defer destroyInstance(talloc, binst);
+    try std.testing.expectEqual(@as(u64, 91), try run1(binst, 0, &.{}));
 }
 
 // -- Globals ---------------------------------------------------------------------
