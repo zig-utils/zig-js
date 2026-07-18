@@ -258,7 +258,14 @@ const Reader = struct {
             -2 => .{ .value = .i64 },
             -3 => .{ .value = .f32 },
             -4 => .{ .value = .f64 },
-            // -16 (funcref) and anything else: not an MVP block type.
+            -16 => if (self.features.reference_types)
+                .{ .value = .funcref }
+            else
+                self.unsupportedFeature(off, .reference_types),
+            -17 => if (self.features.reference_types)
+                .{ .value = .externref }
+            else
+                self.unsupportedFeature(off, .reference_types),
             else => self.failAt(off, "invalid block type", .{}),
         };
     }
@@ -304,9 +311,12 @@ const Reader = struct {
 
     fn readTableType(self: *Reader) DecodeError!types.TableType {
         const et_off = self.offset();
-        const et = try self.readU8();
-        if (et != 0x70) return self.failAt(et_off, "invalid element type", .{});
-        return .{ .limits = try self.readLimits(.table) };
+        const elem = types.ValType.fromByte(try self.readU8()) orelse
+            return self.failAt(et_off, "invalid element type", .{});
+        if (!elem.isReference()) return self.failAt(et_off, "invalid element type", .{});
+        if (elem == .externref and !self.features.reference_types)
+            return self.unsupportedFeature(et_off, .reference_types);
+        return .{ .elem = elem, .limits = try self.readLimits(.table) };
     }
 
     fn readGlobalType(self: *Reader) DecodeError!types.GlobalType {
@@ -332,6 +342,19 @@ const Reader = struct {
             0x43 => .{ .f32 = std.mem.readInt(u32, (try self.readBytes(4))[0..4], .little) },
             0x44 => .{ .f64 = std.mem.readInt(u64, (try self.readBytes(8))[0..8], .little) },
             0x23 => .{ .global = try self.readU32Leb() },
+            0xD0 => blk: {
+                if (!self.features.reference_types)
+                    return self.unsupportedFeature(op_off, .reference_types);
+                const type_off = self.offset();
+                const ref_type = try self.readValType();
+                if (!ref_type.isReference()) return self.failAt(type_off, "reference type expected", .{});
+                break :blk .{ .ref_null = ref_type };
+            },
+            0xD2 => blk: {
+                if (!self.features.reference_types)
+                    return self.unsupportedFeature(op_off, .reference_types);
+                break :blk .{ .ref_func = try self.readU32Leb() };
+            },
             else => return self.failAt(op_off, "constant expression required", .{}),
         };
         const end_off = self.offset();
@@ -538,7 +561,11 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     break :proposal types.Op.fromFC(subopcode).?;
                 }
                 if (subopcode <= 14) return r.unsupportedFeature(instr_off, .bulk_memory);
-                if (subopcode <= 17) return r.unsupportedFeature(instr_off, .reference_types);
+                if (subopcode <= 17) {
+                    if (!r.features.reference_types)
+                        return r.unsupportedFeature(instr_off, .reference_types);
+                    break :proposal types.Op.fromFC(subopcode).?;
+                }
                 return r.failAt(instr_off, "invalid 0xfc subopcode {d}", .{subopcode});
             }
             if (b == 0xFD) return r.unsupportedFeature(instr_off, .fixed_width_simd);
@@ -552,6 +579,11 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
         };
         if (b >= 0xC0 and b <= 0xC4 and !r.features.sign_extension_ops)
             return r.unsupportedFeature(instr_off, .sign_extension_ops);
+        if ((op == .typed_select or op == .table_get or op == .table_set or
+            op == .ref_null or op == .ref_is_null or op == .ref_func or
+            op == .table_grow or op == .table_size or op == .table_fill) and
+            !r.features.reference_types)
+            return r.unsupportedFeature(instr_off, .reference_types);
         var instr: types.Instr = .{ .op = op };
         switch (op) {
             .block, .loop, .if_ => {
@@ -605,15 +637,46 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 }
                 continue;
             },
-            .br, .br_if, .call, .local_get, .local_set, .local_tee, .global_get, .global_set => {
+            .br,
+            .br_if,
+            .call,
+            .local_get,
+            .local_set,
+            .local_tee,
+            .global_get,
+            .global_set,
+            .table_get,
+            .table_set,
+            .ref_func,
+            .table_grow,
+            .table_size,
+            .table_fill,
+            => {
                 instr.imm = .{ .idx = try r.readU32Leb() };
             },
             .call_indirect => {
                 const typeidx = try r.readU32Leb();
-                const z_off = r.offset();
-                if (try r.readU8() != 0x00)
-                    return r.failAt(z_off, "zero byte expected", .{});
-                instr.imm = .{ .idx = typeidx };
+                const tableidx = if (r.features.reference_types)
+                    try r.readU32Leb()
+                else blk: {
+                    const z_off = r.offset();
+                    if (try r.readU8() != 0x00)
+                        return r.failAt(z_off, "zero byte expected", .{});
+                    break :blk 0;
+                };
+                instr.imm = .{ .call_indirect = .{ .type_index = typeidx, .table_index = tableidx } };
+            },
+            .typed_select => {
+                const count_off = r.offset();
+                const count = try r.readU32Leb();
+                if (count != 1) return r.failAt(count_off, "typed select requires exactly one result type", .{});
+                instr.imm = .{ .type = try r.readValType() };
+            },
+            .ref_null => {
+                const type_off = r.offset();
+                const ref_type = try r.readValType();
+                if (!ref_type.isReference()) return r.failAt(type_off, "reference type expected", .{});
+                instr.imm = .{ .type = ref_type };
             },
             .br_table => {
                 const cnt = try r.readCount();
@@ -653,6 +716,37 @@ const hdr = "\x00asm\x01\x00\x00\x00";
 /// Function section declaring one function of type 0 (type section is not
 /// needed: decoding does not resolve indices).
 const func_sec_1 = "\x03\x02\x01\x00";
+
+fn testLebLen(comptime v: usize) usize {
+    comptime {
+        var n: usize = 1;
+        var x = v;
+        while (x >= 0x80) : (n += 1) x >>= 7;
+        return n;
+    }
+}
+
+fn testLeb(comptime v: usize) *const [testLebLen(v)]u8 {
+    comptime {
+        var bytes: [testLebLen(v)]u8 = undefined;
+        var x = v;
+        for (&bytes) |*byte| {
+            byte.* = @intCast(x & 0x7F);
+            x >>= 7;
+            if (x != 0) byte.* |= 0x80;
+        }
+        return &bytes;
+    }
+}
+
+fn testSection(comptime id: u8, comptime payload: []const u8) []const u8 {
+    return comptime &[_]u8{id} ++ testLeb(payload.len) ++ payload;
+}
+
+fn testCode(comptime instrs: []const u8) []const u8 {
+    const body = comptime "\x00" ++ instrs;
+    return comptime testSection(10, "\x01" ++ testLeb(body.len) ++ body);
+}
 
 fn expectMalformed(bytes: []const u8, off: u32, msg: []const u8) !void {
     return expectMalformedWithFeatures(bytes, .{}, off, msg);
@@ -849,7 +943,10 @@ test "wasm.decode kitchen sink module" {
     try std.testing.expectEqualDeep(types.Instr.Imm{ .memarg = .{ .align_ = 0, .offset = 0 } }, body.instrs[17].imm);
     try std.testing.expectEqualDeep(types.Instr.Imm.none, body.instrs[18].imm);
     try std.testing.expectEqualDeep(types.Instr.Imm.none, body.instrs[19].imm);
-    try std.testing.expectEqualDeep(types.Instr.Imm{ .idx = 0 }, body.instrs[22].imm);
+    try std.testing.expectEqualDeep(
+        types.Instr.Imm{ .call_indirect = .{ .type_index = 0, .table_index = 0 } },
+        body.instrs[22].imm,
+    );
     try std.testing.expectEqualDeep(types.Instr.Imm{ .idx = 0 }, body.instrs[24].imm);
     try std.testing.expectEqualDeep(types.Instr.Imm{ .i32 = 42 }, body.instrs[26].imm);
 }
@@ -896,7 +993,7 @@ test "wasm.decode malformed declarations" {
     // Global mutability 2.
     try expectMalformed(hdr ++ "\x06\x06\x01\x7F\x02\x41\x00\x0B", 12, "malformed mutability");
     // Table element type 0x6F.
-    try expectMalformed(hdr ++ "\x02\x09\x01\x01\x61\x01\x74\x01\x6F\x00\x01", 16, "invalid element type");
+    try expectMalformed(hdr ++ "\x02\x09\x01\x01\x61\x01\x74\x01\x6F\x00\x01", 16, "WebAssembly feature reference-types is disabled");
     // Limits flag 0x03 is shared memory with a maximum.
     try expectMalformed(hdr ++ "\x05\x02\x01\x03", 11, "WebAssembly feature threads is disabled");
     // Memory min 65537 pages.
@@ -925,7 +1022,7 @@ test "wasm.decode malformed code bodies" {
     // Non-negative block type = type index (multi-value proposal).
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x01", 18, "WebAssembly feature multi-value is disabled");
     // funcref is not an MVP block type.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x70", 18, "invalid block type");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x70", 18, "WebAssembly feature reference-types is disabled");
     // else with an empty control stack.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x05", 17, "else opcode without matching if");
     // Body limit reached with a block still open.
@@ -964,6 +1061,51 @@ test "wasm.decode multi-value signatures and type-index blocks" {
     defer destroyModule(std.testing.allocator, mod);
     try std.testing.expectEqual(@as(usize, 2), mod.types[0].results.len);
     try std.testing.expectEqual(types.BlockType{ .type_index = 0 }, mod.code[0].instrs[0].imm.block.type);
+}
+
+test "wasm.decode reference instructions tables and constant expressions" {
+    const instrs =
+        "\xD0\x70" ++ // ref.null funcref
+        "\xD1" ++ // ref.is_null
+        "\x1A" ++ // drop
+        "\xD2\x00" ++ // ref.func 0
+        "\x1A" ++ // drop
+        "\x25\x01" ++ // table.get 1
+        "\x26\x01" ++ // table.set 1
+        "\x1C\x01\x6F" ++ // select (result externref)
+        "\x11\x00\x01" ++ // call_indirect type 0 table 1
+        "\xFC\x0F\x01" ++ // table.grow 1
+        "\xFC\x10\x01" ++ // table.size 1
+        "\xFC\x11\x01" ++ // table.fill 1
+        "\x0B";
+    const bytes = comptime hdr ++
+        testSection(1, "\x01\x60\x00\x00") ++
+        func_sec_1 ++
+        testSection(4, "\x02\x70\x00\x01\x6F\x00\x02") ++
+        testSection(6, "\x02\x70\x00\xD0\x70\x0B\x70\x00\xD2\x00\x0B") ++
+        testCode(instrs);
+
+    var diag: types.Diagnostic = .{};
+    try std.testing.expectError(error.Malformed, decode(std.testing.allocator, bytes, &diag));
+    try std.testing.expectEqualStrings("WebAssembly feature reference-types is disabled", diag.message());
+
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .reference_types = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(types.ValType.funcref, mod.tables[0].elem);
+    try std.testing.expectEqual(types.ValType.externref, mod.tables[1].elem);
+    try std.testing.expectEqualDeep(types.ConstExpr{ .ref_null = .funcref }, mod.globals[0].init);
+    try std.testing.expectEqualDeep(types.ConstExpr{ .ref_func = 0 }, mod.globals[1].init);
+    const decoded = mod.code[0].instrs;
+    try std.testing.expectEqual(types.ValType.funcref, decoded[0].imm.type);
+    try std.testing.expectEqual(@as(u32, 1), decoded[5].imm.idx);
+    try std.testing.expectEqual(types.ValType.externref, decoded[7].imm.type);
+    try std.testing.expectEqualDeep(
+        types.Instr.CallIndirect{ .type_index = 0, .table_index = 1 },
+        decoded[8].imm.call_indirect,
+    );
+    try std.testing.expectEqual(@as(u32, 1), decoded[9].imm.idx);
+    try std.testing.expectEqual(@as(u32, 1), decoded[10].imm.idx);
+    try std.testing.expectEqual(@as(u32, 1), decoded[11].imm.idx);
 }
 
 test "wasm.decode sign-extension operations require and honor their feature" {

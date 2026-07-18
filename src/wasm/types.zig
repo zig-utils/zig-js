@@ -172,8 +172,8 @@ pub const GlobalType = struct {
 };
 
 pub const TableType = struct {
+    elem: ValType = .funcref,
     limits: Limits,
-    // MVP element type is always funcref.
 };
 
 pub const MemType = struct {
@@ -233,6 +233,8 @@ pub const ConstExpr = union(enum) {
     f32: u32, // raw bits
     f64: u64, // raw bits
     global: u32, // imported global index
+    ref_null: ValType,
+    ref_func: u32,
 
     pub fn valType(self: ConstExpr) ValType {
         return switch (self) {
@@ -241,6 +243,8 @@ pub const ConstExpr = union(enum) {
             .f32 => .f32,
             .f64 => .f64,
             .global => unreachable, // resolved against the import list
+            .ref_null => |ref_type| ref_type,
+            .ref_func => .funcref,
         };
     }
 };
@@ -278,6 +282,8 @@ pub const Instr = struct {
         none: void,
         /// local / global / function / type index, or br depth.
         idx: u32,
+        type: ValType,
+        call_indirect: CallIndirect,
         i32: i32,
         i64: i64,
         f32: u32, // raw bits
@@ -294,6 +300,11 @@ pub const Instr = struct {
     pub const MemArg = struct {
         align_: u32,
         offset: u32,
+    };
+
+    pub const CallIndirect = struct {
+        type_index: u32,
+        table_index: u32,
     };
 
     pub const Block = struct {
@@ -332,12 +343,15 @@ pub const Op = enum(u16) {
     // Parametric
     drop = 0x1A,
     select = 0x1B,
+    typed_select = 0x1C,
     // Variable
     local_get = 0x20,
     local_set = 0x21,
     local_tee = 0x22,
     global_get = 0x23,
     global_set = 0x24,
+    table_get = 0x25,
+    table_set = 0x26,
     // Memory
     i32_load = 0x28,
     i64_load = 0x29,
@@ -507,6 +521,10 @@ pub const Op = enum(u16) {
     i64_extend8_s = 0xC2,
     i64_extend16_s = 0xC3,
     i64_extend32_s = 0xC4,
+    // Reference types
+    ref_null = 0xD0,
+    ref_is_null = 0xD1,
+    ref_func = 0xD2,
     // Nontrapping float-to-integer conversions (0xfc prefix)
     i32_trunc_sat_f32_s = 0xFC00,
     i32_trunc_sat_f32_u = 0xFC01,
@@ -516,6 +534,9 @@ pub const Op = enum(u16) {
     i64_trunc_sat_f32_u = 0xFC05,
     i64_trunc_sat_f64_s = 0xFC06,
     i64_trunc_sat_f64_u = 0xFC07,
+    table_grow = 0xFC0F,
+    table_size = 0xFC10,
+    table_fill = 0xFC11,
 
     pub fn fromByte(b: u8) ?Op {
         return std.enums.fromInt(Op, @as(u16, b));
@@ -607,6 +628,21 @@ pub const Module = struct {
             }
         }
         return self.globals[i].type;
+    }
+
+    /// Table type at any table index (imports precede module-defined tables).
+    pub fn tableType(self: *const Module, tableidx: u32) TableType {
+        var i: u32 = tableidx;
+        for (self.imports) |imp| {
+            switch (imp.desc) {
+                .table => |table| {
+                    if (i == 0) return table;
+                    i -= 1;
+                },
+                else => {},
+            }
+        }
+        return self.tables[i];
     }
 };
 

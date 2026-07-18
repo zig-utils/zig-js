@@ -20,32 +20,31 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
 }
 
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
-    // 1. Type indices must resolve; MVP value types are numeric only
-    //    (funcref in a valtype position is the reference-types proposal).
+    // 1. Type indices must resolve; reference value positions are opt-in.
     for (mod.types) |ft| {
-        for (ft.params) |p| if (p.isReference()) return unsupportedFeature(mod, diag, .reference_types);
-        for (ft.results) |r| if (r.isReference()) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.params) |p| if (p.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.results) |r| if (r.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
     }
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
-        .global => |g| if (g.val.isReference()) return unsupportedFeature(mod, diag, .reference_types),
+        .global => |g| if (g.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types),
         else => {},
     };
     for (mod.funcs) |t|
         if (t >= mod.types.len) return failMod(diag, "unknown type");
 
     // 2. MVP allows at most one table and one memory (imports + defined).
-    if (mod.totalTables() > 1) return unsupportedFeature(mod, diag, .reference_types);
+    if (mod.totalTables() > 1 and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
     if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
 
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
-        if (g.type.val.isReference()) return unsupportedFeature(mod, diag, .reference_types);
+        if (g.type.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
     for (mod.code) |body|
         for (body.locals) |l|
-            if (l.isReference()) return unsupportedFeature(mod, diag, .reference_types);
+            if (l.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
 
     // 4. Element segments.
     for (mod.elems) |e| {
@@ -118,6 +117,10 @@ fn checkConstExpr(
             if (gt.mutable) return failMod(diag, "constant expression required");
             if (gt.val != expected) return failMod(diag, "type mismatch");
         },
+        .ref_func => |funcidx| {
+            if (funcidx >= mod.totalFuncs()) return failMod(diag, "unknown function");
+            if (expected != .funcref) return failMod(diag, "type mismatch");
+        },
         else => if (expr.valType() != expected)
             return failMod(diag, "type mismatch"),
     }
@@ -125,7 +128,7 @@ fn checkConstExpr(
 
 /// Abstract operand: a concrete numeric type or `unknown`, the bottom type
 /// produced by the polymorphic stack after `unreachable`/branches.
-const StackVal = enum { unknown, i32, i64, f32, f64 };
+const StackVal = enum { unknown, i32, i64, f32, f64, funcref, externref };
 
 fn stackVal(vt: types.ValType) StackVal {
     return switch (vt) {
@@ -133,8 +136,8 @@ fn stackVal(vt: types.ValType) StackVal {
         .i64 => .i64,
         .f32 => .f32,
         .f64 => .f64,
-        // funcref is rejected module-wide before body validation runs.
-        .funcref, .externref => unreachable,
+        .funcref => .funcref,
+        .externref => .externref,
     };
 }
 
@@ -387,9 +390,12 @@ const FuncValidator = struct {
                     try self.callFunc(self.mod.funcType(idx));
                 },
                 .call_indirect => {
-                    const tidx = instr.imm.idx;
+                    const tidx = instr.imm.call_indirect.type_index;
+                    const tableidx = instr.imm.call_indirect.table_index;
                     if (tidx >= self.mod.types.len) return self.fail("unknown type");
-                    if (self.mod.totalTables() == 0) return self.fail("unknown table 0");
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
                     try self.popExpect(.i32);
                     try self.callFunc(self.mod.types[tidx]);
                 },
@@ -402,7 +408,16 @@ const FuncValidator = struct {
                     // unknown unifies with the other side.
                     if (t1 != .unknown and t2 != .unknown and t1 != t2)
                         return self.fail("type mismatch");
-                    self.push(if (t1 != .unknown) t1 else t2);
+                    const selected = if (t1 != .unknown) t1 else t2;
+                    if (selected == .funcref or selected == .externref)
+                        return self.fail("type mismatch");
+                    self.push(selected);
+                },
+                .typed_select => {
+                    try self.popExpect(.i32);
+                    try self.popExpect(instr.imm.type);
+                    try self.popExpect(instr.imm.type);
+                    self.push(stackVal(instr.imm.type));
                 },
                 .local_get => {
                     const t = self.localType(instr.imm.idx) orelse
@@ -431,6 +446,52 @@ const FuncValidator = struct {
                     const gt = self.mod.globalType(idx);
                     if (!gt.mutable) return self.fail("global is immutable");
                     try self.popExpect(gt.val);
+                },
+                .table_get => {
+                    const tableidx = instr.imm.idx;
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    try self.popExpect(.i32);
+                    self.push(stackVal(self.mod.tableType(tableidx).elem));
+                },
+                .table_set => {
+                    const tableidx = instr.imm.idx;
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    try self.popExpect(self.mod.tableType(tableidx).elem);
+                    try self.popExpect(.i32);
+                },
+                .ref_null => self.push(stackVal(instr.imm.type)),
+                .ref_is_null => {
+                    const ref = try self.pop();
+                    if (ref != .unknown and ref != .funcref and ref != .externref)
+                        return self.fail("type mismatch");
+                    self.push(.i32);
+                },
+                .ref_func => {
+                    if (instr.imm.idx >= self.mod.totalFuncs()) return self.fail("unknown function");
+                    self.push(.funcref);
+                },
+                .table_grow => {
+                    const tableidx = instr.imm.idx;
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).elem);
+                    self.push(.i32);
+                },
+                .table_size => {
+                    if (instr.imm.idx >= self.mod.totalTables())
+                        return if (instr.imm.idx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    self.push(.i32);
+                },
+                .table_fill => {
+                    const tableidx = instr.imm.idx;
+                    if (tableidx >= self.mod.totalTables())
+                        return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
+                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).elem);
+                    try self.popExpect(.i32);
                 },
                 .i32_load, .i64_load, .f32_load, .f64_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => {
                     const info = memInfo(instr.op);
@@ -861,9 +922,61 @@ test "wasm.validate multiple memories" {
 test "wasm.validate multiple tables" {
     const defined = comptime (hdr ++ sec(4, "\x02\x70\x00\x01\x70\x00\x01"));
     try expectInvalid(defined, "WebAssembly feature reference-types is disabled");
-    try expectInvalidWithFeatures(defined, .{ .reference_types = true }, "WebAssembly feature reference-types is enabled but not implemented");
+    try expectValidWithFeatures(defined, .{ .reference_types = true });
     try expectInvalid(hdr ++ sec(2, "\x01\x01a\x01t\x01\x70\x00\x01") ++
         sec(4, "\x01\x70\x00\x01"), "WebAssembly feature reference-types is disabled");
+}
+
+test "wasm.validate reference values instructions and typed tables" {
+    const body =
+        "\xD0\x6F\x21\x00" ++ // local 0 = ref.null externref
+        "\x20\x00\xD1\x1A" ++ // ref.is_null(local 0); drop
+        "\x41\x00\xD0\x6F\x26\x01" ++ // table.set externref table 1
+        "\x41\x00\x25\x01\xD1\x1A" ++ // table.get 1; ref.is_null; drop
+        "\xD2\x00\xD0\x70\x41\x01\x1C\x01\x70\x1A" ++ // typed funcref select
+        "\xD0\x70\x41\x01\xFC\x0F\x00\x1A" ++ // table.grow 0; drop old size
+        "\xFC\x10\x00\x1A" ++ // table.size 0; drop
+        "\x41\x00\xD0\x70\x41\x01\xFC\x11\x00" ++ // table.fill 0
+        "\x41\x00\x11\x00\x00" ++ // call_indirect type 0 table 0
+        "\x0B";
+    const bytes = comptime hdr ++
+        type_void ++ func0 ++
+        sec(4, "\x02\x70\x00\x01\x6F\x00\x01") ++
+        sec(6, "\x02\x70\x00\xD2\x00\x0B\x6F\x00\xD0\x6F\x0B") ++
+        sec(10, "\x01" ++ codeBody("\x01\x01\x6F", body));
+    try expectValidWithFeatures(bytes, .{ .reference_types = true });
+}
+
+test "wasm.validate reference instruction types and indices" {
+    const tables = comptime sec(4, "\x02\x70\x00\x01\x6F\x00\x01");
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ tables ++ code1("\x41\x00\x25\x02\x1A\x0B"),
+        .{ .reference_types = true },
+        0,
+        1,
+        "unknown table",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ tables ++ code1("\x41\x00\x11\x00\x01\x0B"),
+        .{ .reference_types = true },
+        0,
+        1,
+        "type mismatch",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ tables ++ code1("\xD2\x01\x1A\x0B"),
+        .{ .reference_types = true },
+        0,
+        0,
+        "unknown function",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ tables ++ code1("\xD0\x6F\xD0\x6F\x41\x00\x1B\x1A\x0B"),
+        .{ .reference_types = true },
+        0,
+        3,
+        "type mismatch",
+    );
 }
 
 test "wasm.validate sign-extension operand types" {

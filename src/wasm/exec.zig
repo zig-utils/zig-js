@@ -64,6 +64,7 @@ pub const MemoryInst = struct {
 
 pub const TableInst = struct {
     elems: []?*FuncInst,
+    type: types.ValType = .funcref,
     limits: types.Limits,
     gpa: Allocator,
     lock: std.atomic.Mutex = .unlocked,
@@ -163,10 +164,15 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
 }
 
 pub fn createTable(gpa: Allocator, initial: u32, max: ?u32) error{OutOfMemory}!*TableInst {
+    return createTableTyped(gpa, .funcref, initial, max);
+}
+
+pub fn createTableTyped(gpa: Allocator, elem_type: types.ValType, initial: u32, max: ?u32) error{OutOfMemory}!*TableInst {
     const t = try gpa.create(TableInst);
     errdefer gpa.destroy(t);
     t.* = .{
         .elems = try gpa.alloc(?*FuncInst, initial),
+        .type = elem_type,
         .limits = .{ .min = initial, .max = max },
         .gpa = gpa,
     };
@@ -253,6 +259,12 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
         .f32 => |bits| .{ .numeric = @as(u64, bits) },
         .f64 => |bits| .{ .numeric = bits },
         .global => |k| inst.globals[k].value,
+        .ref_null => |ref_type| switch (ref_type) {
+            .funcref => .{ .funcref = null },
+            .externref => .{ .externref = js_value.Value.nul() },
+            else => unreachable,
+        },
+        .ref_func => |funcidx| .{ .funcref = @ptrCast(inst.funcs[funcidx]) },
     };
 }
 
@@ -277,7 +289,9 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
             switch (imp.desc) {
                 .func => {},
                 .table => |tt| {
-                    if (!limitsCompatible(imports.tables[ti].limits, tt.limits)) {
+                    if (imports.tables[ti].type != tt.elem or
+                        !limitsCompatible(imports.tables[ti].limits, tt.limits))
+                    {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
                         return error.Link;
                     }
@@ -344,7 +358,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.tables = try a.alloc(*TableInst, mod.totalTables());
     for (imports.tables, 0..) |t, k| inst.tables[k] = t;
     for (mod.tables, 0..) |tt, j| {
-        const t = try createTable(gpa, tt.limits.min, tt.limits.max);
+        const t = try createTableTyped(gpa, tt.elem, tt.limits.min, tt.limits.max);
         created_tables += 1;
         inst.tables[mod.imported_tables + j] = t;
     }
@@ -897,7 +911,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
             .call_indirect => {
                 const i = popI32(s);
-                const tab = inst.tables[0];
+                const immediate = instr.imm.call_indirect;
+                const tab = inst.tables[immediate.table_index];
                 tab.lockTable();
                 const in_bounds = i < tab.elems.len;
                 const target = if (in_bounds) tab.elems[i] else null;
@@ -908,12 +923,12 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                     .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
                     .imported => |im| im.type,
                 };
-                if (!types.funcTypeEql(mod.types[instr.imm.idx], actual))
+                if (!types.funcTypeEql(mod.types[immediate.type_index], actual))
                     return s.trap("indirect call type mismatch");
                 try callFunc(s, callable);
             },
             .drop => _ = popSlot(s),
-            .select => {
+            .select, .typed_select => {
                 const c = popI32(s);
                 const v2 = popSlot(s);
                 const v1 = popSlot(s);
@@ -924,6 +939,65 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .local_tee => s.locals.items[fr.locals_base + instr.imm.idx] = s.stack.items[s.stack.items.len - 1],
             .global_get => try pushSlot(s, inst.globals[instr.imm.idx].value),
             .global_set => setGlobalValue(inst.globals[instr.imm.idx], popSlot(s)),
+            .table_get => {
+                const index = popI32(s);
+                const table = inst.tables[instr.imm.idx];
+                table.lockTable();
+                const in_bounds = index < table.elems.len;
+                const table_entry = if (in_bounds) table.elems[index] else null;
+                table.unlockTable();
+                if (!in_bounds) return s.trap("undefined element");
+                try pushSlot(s, .{ .funcref = if (table_entry) |func| @ptrCast(func) else null });
+            },
+            .table_set => {
+                const slot = popSlot(s);
+                const index = popI32(s);
+                const table = inst.tables[instr.imm.idx];
+                const replacement: ?*FuncInst = if (slot.funcref) |func| @ptrCast(@alignCast(func)) else null;
+                table.lockTable();
+                defer table.unlockTable();
+                if (index >= table.elems.len) return s.trap("undefined element");
+                table.elems[index] = replacement;
+            },
+            .ref_null => try pushSlot(s, switch (instr.imm.type) {
+                .funcref => .{ .funcref = null },
+                .externref => .{ .externref = js_value.Value.nul() },
+                else => unreachable,
+            }),
+            .ref_is_null => {
+                const slot = popSlot(s);
+                try pushBool(s, switch (slot) {
+                    .funcref => |func| func == null,
+                    .externref => |ref| ref.isNull(),
+                    .numeric => unreachable,
+                });
+            },
+            .ref_func => try pushSlot(s, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
+            .table_grow => {
+                const delta = popI32(s);
+                const slot = popSlot(s);
+                const fill: ?*FuncInst = if (slot.funcref) |func| @ptrCast(@alignCast(func)) else null;
+                try pushI32(s, @bitCast(tableGrowWith(inst.tables[instr.imm.idx], delta, fill)));
+            },
+            .table_size => {
+                const table = inst.tables[instr.imm.idx];
+                table.lockTable();
+                const len: u32 = @intCast(table.elems.len);
+                table.unlockTable();
+                try pushI32(s, len);
+            },
+            .table_fill => {
+                const count = popI32(s);
+                const slot = popSlot(s);
+                const start = popI32(s);
+                const fill: ?*FuncInst = if (slot.funcref) |func| @ptrCast(@alignCast(func)) else null;
+                const table = inst.tables[instr.imm.idx];
+                table.lockTable();
+                defer table.unlockTable();
+                const end = @as(u64, start) + count;
+                if (end > table.elems.len) return s.trap("out of bounds table access");
+                @memset(table.elems[start..@intCast(end)], fill);
+            },
             .i32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
@@ -2664,6 +2738,18 @@ test "wasm.exec typed invocation preserves references and rejects numeric aliase
     );
     try std.testing.expect(funcref_result[0] == .funcref);
     try std.testing.expect(funcref_result[0].funcref.? == @as(*anyopaque, @ptrCast(&function_marker)));
+}
+
+test "wasm.exec reference instructions and table operations" {
+    const body = comptime i32c(0) ++ "\xD2\x00\x26\x00" ++ // table[0] = ref.func 0
+        i32c(0) ++ "\x25\x00\xD1\x45" ++ // !ref.is_null(table[0]) => 1
+        "\xFC\x10\x00" ++ i32c(2) ++ "\x46\x6A" ++ // table.size == 2
+        "\xD0\x70" ++ i32c(1) ++ "\xFC\x0F\x00" ++ i32c(2) ++ "\x46\x6A" ++ // grow returns 2
+        i32c(0) ++ "\xD0\x70" ++ i32c(1) ++ "\xFC\x11\x00" ++ // fill slot 0 with null
+        i32c(0) ++ "\x25\x00\xD1\x6A"; // ref.is_null(table[0]) => 1
+    const bytes = comptime hdr ++
+        typesSec(&.{ft("", I32)}) ++ funcSec(&.{0}) ++ tableSec(2, 4) ++ codeSec(&.{body});
+    try expectResultsWithFeatures(bytes, .{ .reference_types = true }, 0, &.{}, &.{4});
 }
 
 test "wasm.exec global reference roots publish overwrite and barrier state" {
