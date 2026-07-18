@@ -111,6 +111,27 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn("new WebAssembly.Module", generated)
         self.assertNotIn("new WebAssembly.Instance", generated)
 
+    def test_command_shards_keep_module_epochs_intact(self) -> None:
+        document = {"commands": [
+            {"type": "module", "line": 1, "filename": "a.wasm"},
+            {"type": "assert_return", "line": 2, "action": {"type": "invoke", "field": "a"}},
+            {"type": "module", "line": 3, "filename": "b.wasm"},
+            {"type": "assert_return", "line": 4, "action": {"type": "invoke", "field": "b"}},
+            {"type": "assert_invalid", "line": 5, "filename": "bad.wasm"},
+        ]}
+        shards = wasm_spec.module_command_shards(document, 2)
+        flattened = sorted(
+            (command for shard in shards for command in shard["commands"]),
+            key=lambda command: command["_source_index"],
+        )
+        self.assertEqual([command["_source_index"] for command in flattened], list(range(5)))
+        for shard in shards:
+            commands = shard["commands"]
+            for index, command in enumerate(commands):
+                if command["type"] == "assert_return":
+                    self.assertGreater(index, 0)
+                    self.assertEqual(commands[index - 1]["type"], "module")
+
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
         exceptions = wasm_spec.PROFILES["exception-handling"]
@@ -132,7 +153,11 @@ class ScriptGenerationTests(unittest.TestCase):
             ["--enable-exceptions", "--enable-tail-call"],
         )
         self.assertEqual(len(memory64["default_files"]), 23)
-        self.assertEqual(memory64["converter_args"], ["--enable-memory64"])
+        self.assertEqual(memory64["converter_args"], [
+            "--enable-memory64", "--enable-multi-memory",
+            "--enable-function-references", "--enable-tail-call",
+            "--enable-exceptions",
+        ])
         self.assertEqual(len(gc["default_files"]), 18)
         self.assertEqual(
             gc["converter_args"],

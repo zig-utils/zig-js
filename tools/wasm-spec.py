@@ -152,7 +152,10 @@ PROFILES = {
         "wabt_version": "1.0.39",
         "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
         "evaluator_profile": "memory64",
-        "features": ["memory64"],
+        "features": [
+            "memory64", "multi_memory", "typed_function_references",
+            "tail_calls", "exception_handling",
+        ],
         "corpus_glob": "test/core/*.wast",
         "default_files": [
             "address64.wast", "align64.wast", "call_indirect.wast",
@@ -164,7 +167,11 @@ PROFILES = {
             "table_get.wast", "table_grow.wast", "table_init.wast",
             "table_set.wast", "table_size.wast",
         ],
-        "converter_args": ["--enable-memory64"],
+        "converter_args": [
+            "--enable-memory64", "--enable-multi-memory",
+            "--enable-function-references", "--enable-tail-call",
+            "--enable-exceptions",
+        ],
     },
     "gc": {
         "kind": "webassembly_gc_runtime_inventory",
@@ -938,6 +945,47 @@ def generate_scope_body(document: dict, directory: Path) -> str:
     return "\n".join(lines)
 
 
+def module_command_shards(document: dict, shard_count: int) -> list[dict]:
+    """Split independent module epochs without breaking their action state."""
+    if shard_count <= 1:
+        return [document]
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    independent = {
+        "assert_malformed", "assert_invalid", "assert_unlinkable",
+        "assert_uninstantiable",
+    }
+    for source_index, original in enumerate(document["commands"]):
+        command = dict(original)
+        command["_source_index"] = source_index
+        kind = command["type"]
+        if kind == "register" or command.get("action", {}).get("module") is not None:
+            raise WastSyntaxError("command sharding requires module-local actions without registrations")
+        if kind in ("module", "module_definition"):
+            if current:
+                groups.append(current)
+            current = [command]
+        elif kind in independent:
+            if current:
+                groups.append(current)
+                current = []
+            groups.append([command])
+        else:
+            current.append(command)
+    if current:
+        groups.append(current)
+
+    shards: list[list[dict]] = [[] for _ in range(min(shard_count, len(groups)))]
+    sizes = [0] * len(shards)
+    for group in sorted(groups, key=len, reverse=True):
+        target = min(range(len(shards)), key=lambda index: sizes[index])
+        shards[target].extend(group)
+        sizes[target] += len(group)
+    for shard in shards:
+        shard.sort(key=lambda command: command["_source_index"])
+    return [{**document, "commands": shard} for shard in shards]
+
+
 def run_file(
     wast: Path,
     converter: Path,
@@ -947,6 +995,7 @@ def run_file(
     spec_root: Path,
     evaluator_profile: str | None,
     converter_args: list[str],
+    command_shard_count: int,
 ) -> dict:
     stem = wast.stem
     directory = work_root / stem
@@ -1003,61 +1052,74 @@ def run_file(
         for command in document["commands"]:
             if command.get("type") == "module" and command.get("line") in definition_lines:
                 command["type"] = "module_definition"
-    script_path = directory / f"{stem}.js"
-    script_path.write_text(generate_script(document, directory))
     try:
-        env = os.environ.copy()
-        if evaluator_profile:
-            env["WASM_SPEC_PROFILE"] = evaluator_profile
-        evaluated = subprocess.run(
-            [str(engine), str(script_path)],
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        commands = [
-            {
-                "index": index,
-                "line": command.get("line", 0),
-                "type": command["type"],
-                "status": "runner_error",
-                "detail": "engine timeout",
-            }
-            for index, command in enumerate(document["commands"])
-        ]
-        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
-    if evaluated.returncode != 0:
-        detail = evaluated.stderr.strip() or f"engine exited {evaluated.returncode}"
-        commands = [
-            {
+        documents = module_command_shards(document, command_shard_count)
+    except WastSyntaxError as error:
+        detail = str(error)
+        return {
+            "path": wast.relative_to(spec_root).as_posix(),
+            "commands": [{
                 "index": index,
                 "line": command.get("line", 0),
                 "type": command["type"],
                 "status": "runner_error",
                 "detail": detail,
-            }
-            for index, command in enumerate(document["commands"])
-        ]
-        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
-    try:
-        report = json.loads(evaluated.stdout)
-    except json.JSONDecodeError as error:
-        commands = [
-            {
-                "index": index,
-                "line": command.get("line", 0),
-                "type": command["type"],
-                "status": "runner_error",
-                "detail": f"invalid evaluator JSON: {error}",
-            }
-            for index, command in enumerate(document["commands"])
-        ]
-        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
-    for index, command in enumerate(report["commands"]):
-        command["index"] = index
-    return {"path": wast.relative_to(spec_root).as_posix(), "commands": report["commands"]}
+            } for index, command in enumerate(document["commands"])],
+        }
+
+    merged_commands = []
+    for shard_index, shard_document in enumerate(documents):
+        script_path = directory / f"{stem}-{shard_index}.js"
+        script_path.write_text(generate_script(shard_document, directory))
+        env = os.environ.copy()
+        if evaluator_profile:
+            env["WASM_SPEC_PROFILE"] = evaluator_profile
+        detail = None
+        try:
+            evaluated = subprocess.run(
+                [str(engine), str(script_path)],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=env,
+            )
+            if evaluated.returncode != 0:
+                detail = evaluated.stderr.strip() or f"engine exited {evaluated.returncode}"
+            else:
+                report = json.loads(evaluated.stdout)
+        except subprocess.TimeoutExpired:
+            detail = "engine timeout"
+        except json.JSONDecodeError as error:
+            detail = f"invalid evaluator JSON: {error}"
+
+        if detail is not None:
+            for local_index, command in enumerate(shard_document["commands"]):
+                merged_commands.append({
+                    "index": command.get("_source_index", local_index),
+                    "line": command.get("line", 0),
+                    "type": command["type"],
+                    "status": "runner_error",
+                    "detail": detail,
+                })
+            continue
+        reported = report["commands"]
+        if command_shard_count > 1 and len(reported) != len(shard_document["commands"]):
+            detail = "sharded evaluator command count mismatch"
+            for command in shard_document["commands"]:
+                merged_commands.append({
+                    "index": command["_source_index"],
+                    "line": command.get("line", 0),
+                    "type": command["type"],
+                    "status": "runner_error",
+                    "detail": detail,
+                })
+            continue
+        for local_index, command in enumerate(reported):
+            source = shard_document["commands"][local_index]
+            command["index"] = source.get("_source_index", local_index)
+            merged_commands.append(command)
+    merged_commands.sort(key=lambda command: command["index"])
+    return {"path": wast.relative_to(spec_root).as_posix(), "commands": merged_commands}
 
 
 def counts(commands: list[dict]) -> dict[str, int]:
@@ -1123,8 +1185,16 @@ def main() -> int:
         help="per-file evaluator timeout (default: 600s for Core 2 structural, 120s otherwise)",
     )
     parser.add_argument("--keep-work", type=Path)
+    parser.add_argument(
+        "--command-shards",
+        type=int,
+        default=1,
+        help="split independent module epochs in each selected file across this many evaluator processes",
+    )
     parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
+    if args.command_shards < 1:
+        parser.error("--command-shards must be at least 1")
 
     profile = PROFILES[args.profile]
     timeout = args.timeout if args.timeout is not None else (
@@ -1179,6 +1249,7 @@ def main() -> int:
             spec_root,
             profile["evaluator_profile"],
             profile.get("converter_args", []),
+            args.command_shards,
         )
         area = feature_area(args.profile, wast.name)
         entry["feature_area"] = area
@@ -1226,6 +1297,7 @@ def main() -> int:
             "commit": profile["wabt_commit"],
         },
         "engine_commit": engine_commit,
+        "command_shards": args.command_shards,
         "totals": totals,
         "totals_by_feature_area": totals_by_feature_area,
         "files": files,
