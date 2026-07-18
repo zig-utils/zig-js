@@ -87,6 +87,24 @@ PROFILES = {
             "simd_store64_lane.wast",
         ],
     },
+    "simd": {
+        "kind": "webassembly_fixed_width_simd_inventory",
+        "repository": "https://github.com/WebAssembly/simd.git",
+        "tag": "proposal-revision",
+        "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "simd",
+        "features": [
+            "sign_extension_ops",
+            "nontrapping_float_to_int",
+            "multi_value",
+            "reference_types",
+            "bulk_memory",
+            "fixed_width_simd",
+        ],
+        "corpus_glob": "test/core/simd/*.wast",
+    },
 }
 
 
@@ -411,6 +429,13 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
             if requires_vector_bits(command):
                 expected = command.get("expected", [])
                 expression = raw_action_expression(command["action"])
+                vector_nan_policy = any(
+                    value.get("type") == "v128" and any(
+                        str(lane).startswith("nan:") for lane in value.get("value", [])
+                    )
+                    for value in expected
+                )
+                vector_mode = "vector_nan_policy" if vector_nan_policy else "vector_bits"
                 if len(expected) == 0:
                     comparison = "__actual===undefined"
                 elif len(expected) == 1 and expected[0].get("type") == "v128" and any(
@@ -427,10 +452,10 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                     comparison = f"JSON.stringify(__actual)==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
                 return (
                     f"{{try{{const __actual={expression};if({comparison}){{"
-                    f"{record_line(index, command, 'pass', mode='vector_bits')}"
-                    f"}}else{{{record_line(index, command, 'fail', 'raw vector result mismatch', 'vector_bits')}}}"
+                    f"{record_line(index, command, 'pass', mode=vector_mode)}"
+                    f"}}else{{{record_line(index, command, 'fail', 'raw vector result mismatch', vector_mode)}}}"
                     f"}}catch(__error){{__record({index},{int(command.get('line', 0))},"
-                    f"{js_string(kind)},'fail',__message(__error),'vector_bits');}}}}"
+                    f"{js_string(kind)},'fail',__message(__error),{js_string(vector_mode)});}}}}"
                 )
             if requires_bit_exact_nan(command):
                 expected = command.get("expected", [])
@@ -612,6 +637,8 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "mvp"
     if profile_name == "simd-movement":
         return "fixed_width_simd_movement"
+    if profile_name == "simd":
+        return "fixed_width_simd"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -664,6 +691,7 @@ def main() -> int:
         "mvp": ROOT / "docs/.data/wasm-spec-inventory.json",
         "core-2-structural": ROOT / "docs/.data/wasm-core-2-structural-inventory.json",
         "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
+        "simd": ROOT / "docs/.data/wasm-simd-inventory.json",
     }
     inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
