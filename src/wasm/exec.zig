@@ -20,7 +20,8 @@ const decode = @import("decode.zig");
 const validate = @import("validate.zig");
 
 const Allocator = std.mem.Allocator;
-const WasmSlot = js_value.WasmSlot;
+pub const ValueSlot = js_value.WasmSlot;
+const WasmSlot = ValueSlot;
 
 pub const ExecError = error{ OutOfMemory, Trap, Host };
 
@@ -36,6 +37,7 @@ pub const ImportFunc = struct {
     ctx: *anyopaque,
     type: types.FuncType,
     call: *const fn (ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void,
+    call_slots: ?*const fn (ctx: *anyopaque, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) error{ Trap, Host }!void = null,
 };
 
 pub const FuncInst = union(enum) {
@@ -421,24 +423,78 @@ pub fn invoke(inst: *Instance, funcidx: u32, args: []const u64, results: []u64, 
     return callFuncInst(inst.funcs[funcidx], args, results, diag);
 }
 
+pub fn invokeSlots(inst: *Instance, funcidx: u32, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
+    if (funcidx >= inst.funcs.len) {
+        diag.set(types.Diagnostic.no_offset, "unknown function", .{});
+        return error.Trap;
+    }
+    return callFuncInstSlots(inst.funcs[funcidx], args, results, diag);
+}
+
 /// Invoke a function instance obtained e.g. from a table (cross-instance).
 pub fn callFuncInst(f: *const FuncInst, args: []const u64, results: []u64, diag: *types.Diagnostic) ExecError!void {
+    const alloc = std.heap.page_allocator;
+    const slot_args = try alloc.alloc(ValueSlot, args.len);
+    defer alloc.free(slot_args);
+    const slot_results = try alloc.alloc(ValueSlot, results.len);
+    defer alloc.free(slot_results);
+    for (args, 0..) |bits, i| slot_args[i] = .{ .numeric = bits };
+    try callFuncInstSlots(f, slot_args, slot_results, diag);
+    for (slot_results, 0..) |slot, i| results[i] = slot.numericBits();
+}
+
+fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
+    return switch (val_type) {
+        .i32, .i64, .f32, .f64 => slot == .numeric,
+        .funcref => slot == .funcref,
+        .externref => slot == .externref,
+    };
+}
+
+fn argumentsMatchSignature(signature: types.FuncType, args: []const ValueSlot, result_len: usize) bool {
+    if (args.len != signature.params.len or result_len != signature.results.len) return false;
+    for (args, signature.params) |slot, val_type|
+        if (!slotMatchesType(slot, val_type)) return false;
+    return true;
+}
+
+fn callNumericImport(alloc: Allocator, imp: *const ImportFunc, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
+    const raw_args = try alloc.alloc(u64, args.len);
+    defer alloc.free(raw_args);
+    const raw_results = try alloc.alloc(u64, results.len);
+    defer alloc.free(raw_results);
+    for (args, 0..) |slot, i| raw_args[i] = slot.numericBits();
+    try imp.call(imp.ctx, raw_args, raw_results, diag);
+    for (raw_results, 0..) |bits, i| results[i] = .{ .numeric = bits };
+}
+
+/// Invoke a function instance with unambiguous numeric/reference slots.
+pub fn callFuncInstSlots(f: *const FuncInst, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
     switch (f.*) {
         .imported => |*imp| {
-            if (args.len != imp.type.params.len or results.len != imp.type.results.len) {
+            if (!argumentsMatchSignature(imp.type, args, results.len)) {
                 diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
                 return error.Trap;
             }
-            try imp.call(imp.ctx, args, results, diag);
+            if (imp.call_slots) |call_slots|
+                try call_slots(imp.ctx, args, results, diag)
+            else
+                try callNumericImport(std.heap.page_allocator, imp, args, results, diag);
+            for (results, imp.type.results) |slot, val_type| {
+                if (!slotMatchesType(slot, val_type)) {
+                    diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
+                    return error.Trap;
+                }
+            }
         },
-        .defined => try runDefined(f, args, results, diag),
+        .defined => try runDefinedSlots(f, args, results, diag),
     }
 }
 
-fn runDefined(f: *const FuncInst, args: []const u64, results: []u64, diag: *types.Diagnostic) ExecError!void {
+fn runDefinedSlots(f: *const FuncInst, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
     const def = f.defined;
     const fty = def.inst.module.types[def.inst.module.funcs[def.idx]];
-    if (args.len != fty.params.len or results.len != fty.results.len) {
+    if (!argumentsMatchSignature(fty, args, results.len)) {
         diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
         return error.Trap;
     }
@@ -565,6 +621,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     for (body.locals) |local_type| try s.locals.append(s.alloc, switch (local_type) {
         .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
         .funcref => .{ .funcref = null },
+        .externref => .{ .externref = js_value.Value.nul() },
     });
     try s.frames.append(s.alloc, .{
         .func = f,
@@ -624,12 +681,18 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
         .defined => try pushFrame(s, f),
         .imported => |*imp| {
             const arg_start = s.stack.items.len - imp.type.params.len;
-            const args = try s.alloc.alloc(u64, imp.type.params.len);
-            for (s.stack.items[arg_start..], 0..) |slot, i| args[i] = slot.numericBits();
-            const res = try s.alloc.alloc(u64, imp.type.results.len);
-            try imp.call(imp.ctx, args, res, s.diag);
+            const args = s.stack.items[arg_start..];
+            const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
+            if (!argumentsMatchSignature(imp.type, args, res.len))
+                return s.trap("function signature mismatch");
+            if (imp.call_slots) |call_slots|
+                try call_slots(imp.ctx, args, res, s.diag)
+            else
+                try callNumericImport(s.alloc, imp, args, res, s.diag);
+            for (res, imp.type.results) |slot, val_type|
+                if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
             s.stack.items.len = arg_start;
-            for (res) |v| try push(s, v);
+            for (res) |slot| try pushSlot(s, slot);
         },
     }
 }
@@ -745,8 +808,8 @@ fn truncSatI64U(x: anytype) u64 {
     return @intFromFloat(x);
 }
 
-fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64) ExecError!void {
-    for (args) |v| try push(s, v);
+fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: []ValueSlot) ExecError!void {
+    for (args) |slot| try pushSlot(s, slot);
     try pushFrame(s, entry);
     while (s.frames.items.len > 0) {
         const fr = &s.frames.items[s.frames.items.len - 1];
@@ -1252,8 +1315,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             .i64_trunc_sat_f64_u => try pushI64(s, truncSatI64U(popF64(s))),
         }
     }
-    for (s.stack.items[s.stack.items.len - results.len ..], 0..) |slot, i|
-        results[i] = slot.numericBits();
+    @memcpy(results, s.stack.items[s.stack.items.len - results.len ..]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,6 +1356,14 @@ const RootHookProbe = struct {
         std.debug.assert(roots.stack.len <= MAX_OPERAND_SLOTS);
     }
 };
+
+fn rejectNumericReferenceCall(_: *anyopaque, _: []const u64, _: []u64, _: *types.Diagnostic) error{ Trap, Host }!void {
+    return error.Trap;
+}
+
+fn echoReferenceSlot(_: *anyopaque, args: []const ValueSlot, results: []ValueSlot, _: *types.Diagnostic) error{ Trap, Host }!void {
+    results[0] = args[0];
+}
 
 fn leb(comptime v: u64) []const u8 {
     comptime {
@@ -2504,6 +2574,49 @@ test "wasm.exec execution root hooks balance across checkpoints and traps" {
     try std.testing.expectError(error.Trap, invoke(trapping.inst, 0, &.{}, &.{}, &diag));
     try std.testing.expectEqual(@as(usize, 2), probe.enters);
     try std.testing.expectEqual(@as(usize, 2), probe.leaves);
+}
+
+test "wasm.exec typed invocation preserves references and rejects numeric aliases" {
+    var diag: types.Diagnostic = .{};
+    var object = js_value.Object{};
+    const extern_import: FuncInst = .{ .imported = .{
+        .ctx = @ptrCast(&object),
+        .type = .{ .params = &.{.externref}, .results = &.{.externref} },
+        .call = rejectNumericReferenceCall,
+        .call_slots = echoReferenceSlot,
+    } };
+    var extern_result: [1]ValueSlot = undefined;
+    try callFuncInstSlots(
+        &extern_import,
+        &.{.{ .externref = js_value.Value.obj(&object) }},
+        &extern_result,
+        &diag,
+    );
+    try std.testing.expect(extern_result[0] == .externref);
+    try std.testing.expect(extern_result[0].externref.asObj() == &object);
+    var raw_result: [1]u64 = undefined;
+    try std.testing.expectError(
+        error.Trap,
+        callFuncInst(&extern_import, &.{@intFromPtr(&object)}, &raw_result, &diag),
+    );
+    try std.testing.expectEqualStrings("function signature mismatch", diag.message());
+
+    var function_marker: u8 = 0;
+    const funcref_import: FuncInst = .{ .imported = .{
+        .ctx = @ptrCast(&function_marker),
+        .type = .{ .params = &.{.funcref}, .results = &.{.funcref} },
+        .call = rejectNumericReferenceCall,
+        .call_slots = echoReferenceSlot,
+    } };
+    var funcref_result: [1]ValueSlot = undefined;
+    try callFuncInstSlots(
+        &funcref_import,
+        &.{.{ .funcref = @ptrCast(&function_marker) }},
+        &funcref_result,
+        &diag,
+    );
+    try std.testing.expect(funcref_result[0] == .funcref);
+    try std.testing.expect(funcref_result[0].funcref.? == @as(*anyopaque, @ptrCast(&function_marker)));
 }
 
 test "wasm.exec conversions trunc f32 to int" {

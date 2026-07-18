@@ -23,12 +23,12 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; MVP value types are numeric only
     //    (funcref in a valtype position is the reference-types proposal).
     for (mod.types) |ft| {
-        for (ft.params) |p| if (p == .funcref) return unsupportedFeature(mod, diag, .reference_types);
-        for (ft.results) |r| if (r == .funcref) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.params) |p| if (p.isReference()) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.results) |r| if (r.isReference()) return unsupportedFeature(mod, diag, .reference_types);
     }
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
-        .global => |g| if (g.val == .funcref) return unsupportedFeature(mod, diag, .reference_types),
+        .global => |g| if (g.val.isReference()) return unsupportedFeature(mod, diag, .reference_types),
         else => {},
     };
     for (mod.funcs) |t|
@@ -40,12 +40,12 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
-        if (g.type.val == .funcref) return unsupportedFeature(mod, diag, .reference_types);
+        if (g.type.val.isReference()) return unsupportedFeature(mod, diag, .reference_types);
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
     for (mod.code) |body|
         for (body.locals) |l|
-            if (l == .funcref) return unsupportedFeature(mod, diag, .reference_types);
+            if (l.isReference()) return unsupportedFeature(mod, diag, .reference_types);
 
     // 4. Element segments.
     for (mod.elems) |e| {
@@ -134,7 +134,7 @@ fn stackVal(vt: types.ValType) StackVal {
         .f32 => .f32,
         .f64 => .f64,
         // funcref is rejected module-wide before body validation runs.
-        .funcref => unreachable,
+        .funcref, .externref => unreachable,
     };
 }
 

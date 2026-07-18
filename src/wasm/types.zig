@@ -104,6 +104,7 @@ pub const ValType = enum(u8) {
     i64 = 0x7E,
     f32 = 0x7D,
     f64 = 0x7C,
+    externref = 0x6F,
     funcref = 0x70,
 
     pub fn fromByte(b: u8) ?ValType {
@@ -112,6 +113,7 @@ pub const ValType = enum(u8) {
             0x7E => .i64,
             0x7D => .f32,
             0x7C => .f64,
+            0x6F => .externref,
             0x70 => .funcref,
             else => null,
         };
@@ -119,6 +121,10 @@ pub const ValType = enum(u8) {
 
     pub fn name(self: ValType) []const u8 {
         return @tagName(self);
+    }
+
+    pub fn isReference(self: ValType) bool {
+        return self == .funcref or self == .externref;
     }
 };
 
@@ -137,6 +143,7 @@ pub const BlockType = union(enum) {
                 .i64 => &.{.i64},
                 .f32 => &.{.f32},
                 .f64 => &.{.f64},
+                .externref => &.{.externref},
                 .funcref => &.{.funcref},
             } },
             .type_index => |index| if (index < mod.types.len) mod.types[index] else null,

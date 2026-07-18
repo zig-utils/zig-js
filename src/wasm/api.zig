@@ -626,7 +626,7 @@ fn coerceGlobalBits(self: *Interpreter, kind: types.ValType, input: Value) value
         },
         .f32 => @as(u64, @as(u32, @bitCast(@as(f32, @floatCast(try self.toNumberV(input)))))),
         .f64 => @bitCast(try self.toNumberV(input)),
-        .funcref => unreachable,
+        .funcref, .externref => unreachable,
     };
 }
 
@@ -636,7 +636,7 @@ fn wasmBitsToJs(self: *Interpreter, kind: types.ValType, bits: u64) value.HostEr
         .i64 => try self.makeBigInt(@as(i64, @bitCast(bits))),
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
         .f64 => Value.num(@bitCast(bits)),
-        .funcref => self.throwError("TypeError", "funcref cannot cross this MVP function boundary"),
+        .funcref, .externref => self.throwError("TypeError", "reference value cannot cross this numeric function boundary"),
     };
 }
 
@@ -695,7 +695,7 @@ fn rawBitsString(self: *Interpreter, kind: types.ValType, bits: u64) value.HostE
     const normalized = switch (kind) {
         .i32, .f32 => @as(u64, @as(u32, @truncate(bits))),
         .i64, .f64 => bits,
-        .funcref => return self.throwError("TypeError", "funcref has no MVP scalar bit encoding"),
+        .funcref, .externref => return self.throwError("TypeError", "reference value has no scalar bit encoding"),
     };
     return Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{normalized}));
 }
@@ -755,7 +755,7 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .i64 => try self.makeBigInt(@as(i64, @bitCast(glob.value))),
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value))))),
         .f64 => Value.num(@bitCast(glob.value)),
-        .funcref => unreachable,
+        .funcref, .externref => unreachable,
     };
 }
 
@@ -918,7 +918,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 const primitive_matches = switch (global_type.val) {
                     .i32, .f32, .f64 => imported.isNumber(),
                     .i64 => imported.isObject() and imported.asObj().is_bigint,
-                    .funcref => false,
+                    .funcref, .externref => false,
                 };
                 if (!primitive_matches)
                     return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", link_proto);
