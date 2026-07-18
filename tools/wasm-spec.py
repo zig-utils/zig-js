@@ -527,12 +527,19 @@ def main() -> int:
     parser.add_argument("--engine", type=Path, default=ROOT / "zig-out/bin/wasm-spec-eval")
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--filter", help="run only corpus paths containing this text")
-    parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        help="per-file evaluator timeout (default: 120s for MVP, 600s for Core 2)",
+    )
     parser.add_argument("--keep-work", type=Path)
     parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
 
     profile = PROFILES[args.profile]
+    timeout = args.timeout if args.timeout is not None else (
+        600.0 if args.profile == "core-2-structural" else 120.0
+    )
     spec_root = (args.spec_root or ROOT / "wasm-spec").resolve()
     converter = args.wast2json.resolve()
     engine = args.engine.resolve()
@@ -562,7 +569,7 @@ def main() -> int:
             converter,
             engine,
             work_root,
-            args.timeout,
+            timeout,
             spec_root,
             profile["evaluator_profile"],
         )

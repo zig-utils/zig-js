@@ -89,6 +89,17 @@ jobs:
             cmd: |
               zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=linking -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-linking.json"
               zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=f32_bitwise -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-bit-exact.json"
+          # Exact pins plus one bounded witness from each completed Core 2
+          # structural area. The complete 90-file command stays reproducible
+          # without adding its multi-minute memory_copy case to every push.
+          - name: wasm-core-2-structural-smoke
+            wasm_core2: true
+            cmd: |
+              zig build wasm-spec-eval
+              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter imports.wast --inventory "$RUNNER_TEMP/wasm-core-2-imports.json"
+              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory_init.wast --inventory "$RUNNER_TEMP/wasm-core-2-memory-init.json"
+              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter ref_func.wast --inventory "$RUNNER_TEMP/wasm-core-2-ref-func.json"
+              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter unreached-valid.wast --inventory "$RUNNER_TEMP/wasm-core-2-unreached-valid.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
@@ -203,6 +214,19 @@ jobs:
             --output "$RUNNER_TEMP/wabt-1.0.12-linux.tar.gz"
           echo "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271  $RUNNER_TEMP/wabt-1.0.12-linux.tar.gz" | sha256sum --check
           tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.12-linux.tar.gz" --directory "$RUNNER_TEMP"
+      - name: Install pinned WebAssembly Core 2 corpus tools
+        if: matrix.wasm_core2 == true
+        working-directory: zig-js
+        run: |
+          git init "$RUNNER_TEMP/wasm-core-2"
+          git -C "$RUNNER_TEMP/wasm-core-2" remote add origin https://github.com/WebAssembly/spec.git
+          git -C "$RUNNER_TEMP/wasm-core-2" fetch --depth=1 origin fffc6e12fa454e475455a7b58d3b5dc343980c10
+          git -C "$RUNNER_TEMP/wasm-core-2" checkout --detach FETCH_HEAD
+          curl --fail --location --silent --show-error \
+            https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
+          echo "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f  $RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" --directory "$RUNNER_TEMP"
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}
