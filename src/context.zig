@@ -2672,6 +2672,10 @@ pub const Context = struct {
         /// Test-shell flag model for PR-249 `--useSharedArrayBuffer=0`: leave
         /// property Atomics installed, but hide the global SAB constructor.
         enable_shared_array_buffer: bool = true,
+        /// Install the private raw-bit WebAssembly corpus hook. This is kept out
+        /// of public Options and normal realms because it intentionally bypasses
+        /// the JavaScript Number boundary for exact f32/f64 payload assertions.
+        wasm_spec_bit_exact: bool = false,
         /// Experimental GIL-removal vertical slice (test-only): requires
         /// `enable_threads`, `enable_gc`, and `parallel_gc`. JS execution does
         /// not hold the context GIL; legacy blocking/result bookkeeping still
@@ -3010,6 +3014,8 @@ pub const Context = struct {
         self.tdz_marker = tdz;
 
         try interp.installGlobals(&self.env, self.root_shape);
+        if (options.wasm_spec_bit_exact)
+            try wasm_api.installSpecHarness(&self.env, self.root_shape);
         inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {
             self.c_api_builtin_constructors[index] = self.env.get(name) orelse Value.undef();
         }
@@ -12548,6 +12554,7 @@ test "Context public Options expose only stable thread controls" {
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_js"));
     try std.testing.expect(@hasField(Context.TestingOptions, "parallel_midscript_gc"));
     try std.testing.expect(@hasField(Context.TestingOptions, "enable_shared_array_buffer"));
+    try std.testing.expect(@hasField(Context.TestingOptions, "wasm_spec_bit_exact"));
     try std.testing.expect(@hasField(Context.TestingOptions, "heap_limit_bytes"));
 }
 

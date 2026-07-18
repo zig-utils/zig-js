@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024 * 1024));
     defer gpa.free(source);
 
-    const ctx = try js.Context.create(gpa);
+    const ctx = try js.Context.createWithTestingOptions(gpa, .{ .wasm_spec_bit_exact = true });
     defer ctx.destroy();
     const result = ctx.evaluate(source) catch |err| {
         var buf: [256]u8 = undefined;

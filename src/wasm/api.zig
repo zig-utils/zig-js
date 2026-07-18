@@ -657,6 +657,59 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     return wasmBitsToJs(self, owner.function_type.results[0], raw_results[0]);
 }
 
+fn rawBitsString(self: *Interpreter, kind: types.ValType, bits: u64) value.HostError!Value {
+    const normalized = switch (kind) {
+        .i32, .f32 => @as(u64, @as(u32, @truncate(bits))),
+        .i64, .f64 => bits,
+        .funcref => return self.throwError("TypeError", "funcref has no MVP scalar bit encoding"),
+    };
+    return Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{normalized}));
+}
+
+/// Test/conformance-only escape hatch installed by `Context.TestingOptions`.
+/// The first argument is a WebAssembly exported function or Global; remaining
+/// function arguments are unsigned decimal strings containing raw MVP value
+/// bits. Returning a decimal string avoids every JS floating-point conversion.
+fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    if (args.len == 0) return self.throwError("TypeError", "raw WebAssembly target is required");
+    const target = languageObject(args[0]) orelse return self.throwError("TypeError", "raw WebAssembly target is invalid");
+
+    if (target.wasmFunction()) |function_state| {
+        const owner: *FunctionOwner = @ptrCast(@alignCast(function_state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
+        if (args.len - 1 != owner.function_type.params.len)
+            return self.throwError("TypeError", "raw WebAssembly argument count mismatch");
+        const raw_args = try owner.store.gpa.alloc(u64, owner.function_type.params.len);
+        defer owner.store.gpa.free(raw_args);
+        const raw_results = try owner.store.gpa.alloc(u64, owner.function_type.results.len);
+        defer owner.store.gpa.free(raw_results);
+        for (args[1..], 0..) |argument, i| {
+            const text = try self.toStringV(argument);
+            raw_args[i] = std.fmt.parseInt(u64, text, 10) catch
+                return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits");
+        }
+
+        var diag: types.Diagnostic = .{};
+        const previous = owner.store.wasm_active_interp;
+        owner.store.wasm_active_interp = @ptrCast(self);
+        defer owner.store.wasm_active_interp = previous;
+        exec.callFuncInst(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
+            error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
+            error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (raw_results.len == 0) return Value.undef();
+        return rawBitsString(self, owner.function_type.results[0], raw_results[0]);
+    }
+
+    if (target.wasmGlobal()) |global_state| {
+        if (args.len != 1) return self.throwError("TypeError", "raw WebAssembly Global takes no arguments");
+        const owner: *GlobalOwner = @ptrCast(@alignCast(global_state.glob orelse return self.throwError("TypeError", "WebAssembly global is unavailable")));
+        return rawBitsString(self, owner.glob.type.val, owner.glob.value);
+    }
+    return self.throwError("TypeError", "raw WebAssembly target must be an exported function or Global");
+}
+
 fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value {
     return switch (glob.type.val) {
         .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(glob.value)))))),
@@ -1358,6 +1411,13 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try env.put("WebAssembly", Value.obj(namespace));
 }
 
+pub fn installSpecHarness(env: *Environment, rs: *Shape) value.HostError!void {
+    const function = try gc.allocObj(env.arena);
+    function.* = .{ .native = wasmSpecInvokeBits };
+    try interpreter.installNativeProps(env.arena, rs, function, "__wasmSpecInvokeBits", 1);
+    try env.put("__wasmSpecInvokeBits", Value.obj(function));
+}
+
 pub fn teardownWasmStore(store: *context.Context) void {
     var index = store.wasm_registry.items.len;
     while (index > 0) {
@@ -1411,6 +1471,29 @@ test "wasm api installs errors validates and reflects Module" {
         \\callType && compileType && sections.length === 1 && sections[0].byteLength === 2;
     );
     try std.testing.expect(boundaries.isBoolean() and boundaries.asBool());
+}
+
+test "wasm api corpus harness invokes float functions bit-exactly" {
+    const ordinary = try context.Context.create(std.testing.allocator);
+    defer ordinary.destroy();
+    const hidden = try ordinary.evaluate("typeof __wasmSpecInvokeBits === 'undefined'");
+    try std.testing.expect(hidden.isBoolean() and hidden.asBool());
+
+    const store = try context.Context.createWithTestingOptions(std.testing.allocator, .{ .wasm_spec_bit_exact = true });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\var bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,11,2,96,1,125,1,125,96,1,124,1,124,
+        \\  3,3,2,0,1,
+        \\  7,13,2,3,102,51,50,0,0,3,102,54,52,0,1,
+        \\  10,11,2,4,0,32,0,11,4,0,32,0,11
+        \\]);
+        \\var exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+        \\__wasmSpecInvokeBits(exports.f32, '2143289345') === '2143289345' &&
+        \\__wasmSpecInvokeBits(exports.f64, '9221120237041090561') === '9221120237041090561';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api compile snapshots bytes and rejects asynchronously" {
