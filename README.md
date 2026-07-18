@@ -416,7 +416,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**276 implemented / 155 pending**), 15
+files**, classified as 431 private (**278 implemented / 153 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -427,7 +427,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 276 private exports—encoded identity/cell equality, truthiness,
+The first 278 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -622,7 +622,17 @@ RangeErrors expose a read-only `code`; coded TypeErrors retain the pinned
 writable descriptor. Three AggregateError bridges create ordered fresh error
 arrays or preserve an existing exact array/cause, install standard non-enumerable
 descriptors, and read `errors` directly without consulting mutable prototypes.
-Eight property-boundary exports now create two-key selected-realm objects with
+Both pinned SystemError bridges consume the exact 160-byte extern struct without
+touching BunString field ownership. The ordinary boundary builds a fresh Error
+with the exact message—including an own empty `message`—and installs only the
+populated `code`/`path`/`dest`/`syscall`/`hostname` fields, a non-negative `fd`,
+and the unconditional `errno` in pinned insertion order, all writable and
+enumerable yet non-configurable; optional-field conversion failures clear and
+skip exactly like the pinned exception-scope paths. The `node:os` companion
+builds the `ERR_SYSTEM_ERROR` shape: a `SystemError`-named Error with
+non-enumerable code, the composed "A system error occurred" summary, and a plain
+`info` object carrying unconditional `code`/`syscall`/`message`/`errno` values
+shared with the error's own DontDelete `syscall`/`errno`. Eight property-boundary exports now create two-key selected-realm objects with
 the pinned key-2-first definition order, distinguish direct own writes from
 observable property-key coercion, implement ordinary deletion, and provide
 prototype-aware, pollution-mitigated, and own-only reads with exact
@@ -735,7 +745,7 @@ stable descriptor identity across sibling realms and callback-triggered GC.
 It visits own string/Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and the non-enumerable special cases, clears
 property-read failures where JSC does, and stops immediately on a callback-published
-exception. The 278/278 compiled fixture covers data and every accessor shape,
+exception. The 280/280 compiled fixture covers data and every accessor shape,
 C-class accessors, proxies, Symbols, filtering, reentry, GC, and foreign inputs.
 ZigString JSON parsing now constructs selected-realm values from every tagged
 string form. Syntax failures are returned as cleared SyntaxError values exactly
@@ -800,12 +810,12 @@ The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
 separately compiled fixtures pass 20 real cell kinds for each, including exact
-GetterSetter and CustomGetterSetter tags. All 276 private exports remain
+GetterSetter and CustomGetterSetter tags. All 278 private exports remain
 excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**268 implemented / 153
+437 symbols from 54 `src/jsc` files: 421 private (**270 implemented / 151
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;

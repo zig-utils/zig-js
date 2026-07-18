@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (276 implemented, 155 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (278 implemented, 153 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 276 private entries are implemented; the other 155 remain pending
+The first 278 private entries are implemented; the other 153 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -510,7 +510,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 278/278 compiled fixture additionally
+sibling realms, GC, and reentry; the 280/280 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -686,7 +686,18 @@ strings, and retain the first exception. Three AggregateError bridges create
 fresh ordered error arrays from encoded
 slices or preserve an exact existing array and cause. Standard message/errors/
 cause descriptors, direct own `errors` reads, selected realms, foreign-input
-rejection, and failure atomicity are covered. Eight property-boundary exports
+rejection, and failure atomicity are covered. Both pinned SystemError bridges
+consume the exact 160-byte extern struct without owning its BunString fields.
+The ordinary boundary creates a fresh Error with the exact message (including an
+own empty `message`) and installs only populated
+`code`/`path`/`dest`/`syscall`/`hostname` fields, a non-negative `fd`, and
+unconditional `errno` in pinned order, all writable/enumerable but
+non-configurable, with optional-field conversion failures cleared and skipped.
+The `node:os` companion creates the `ERR_SYSTEM_ERROR` shape: a
+`SystemError`-named Error with non-enumerable code, the composed summary
+message, and a plain `info` object carrying unconditional
+`code`/`syscall`/`message`/`errno` shared with the error's own DontDelete
+fields. Eight property-boundary exports
 add selected-realm two-key object creation with key-2-first definition order,
 direct ZigString own writes, exact ToPropertyKey writes, ordinary deletion,
 prototype-aware and Object.prototype-cutoff lookup, and own-only BunString or
@@ -773,7 +784,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (268 implemented, 153 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (270 implemented, 151 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
