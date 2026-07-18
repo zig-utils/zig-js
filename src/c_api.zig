@@ -33,6 +33,7 @@ const ast = @import("ast.zig");
 const gc_mod = @import("gc.zig");
 const value = @import("value.zig");
 const ContextMod = @import("context.zig");
+const agent = @import("agent.zig");
 const interp = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
@@ -548,6 +549,20 @@ const CContextGroup = struct {
     execution_forbidden: std.atomic.Value(bool) = .init(false),
     reported_extra_memory: std.atomic.Value(usize) = .init(0),
     async_gc_requested: std.atomic.Value(bool) = .init(false),
+    /// `JSC::VM::apiLock()`: recursive mutual exclusion among the native
+    /// API-lock holders of this VM — JSLock is recursive for its owner thread,
+    /// so same-thread nesting must not deadlock while foreign threads block.
+    api_lock: std.atomic.Mutex = .unlocked,
+    api_lock_owner: std.atomic.Value(u64) = .init(0),
+    api_lock_depth: usize = 0,
+    /// `JSC::Watchdog` equivalent: monotonic-nanosecond execution deadline.
+    /// Zero means no time limit (`Watchdog::noTimeLimit`); `watchdog_fired_ns`
+    /// records the deadline the host watchdog last terminated on so a single
+    /// arming fires at most once, while re-arming still fires again.
+    execution_deadline_ns: std.atomic.Value(u64) = .init(0),
+    watchdog_fired_ns: std.atomic.Value(u64) = .init(0),
+    watchdog_stop: std.atomic.Value(bool) = .init(false),
+    watchdog_thread: ?std.Thread = null,
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -575,6 +590,14 @@ const CContextGroup = struct {
     }
 
     fn destroy(self: *CContextGroup) void {
+        // Stop and join the host watchdog before any realm state it can touch
+        // (`primary.requestTermination`) is torn down; its nap bound keeps the
+        // join latency below ~1ms.
+        if (self.watchdog_thread) |thread| {
+            self.watchdog_stop.store(true, .release);
+            thread.join();
+            self.watchdog_thread = null;
+        }
         var index = self.contexts.items.len;
         while (index > 0) {
             index -= 1;
@@ -8617,6 +8640,130 @@ export fn JSC__VM__setExecutionForbidden(vm_ref: ?*anyopaque, forbidden: bool) c
     _ = forbidden; // Pinned JSC binding ignores the argument and only sets true.
     const group = privateGroupFromVM(vm_ref) orelse return;
     group.execution_forbidden.store(true, .release);
+}
+
+fn privateGroupApiLock(group: *CContextGroup) void {
+    const me: u64 = @intCast(std.Thread.getCurrentId());
+    if (group.api_lock_owner.load(.acquire) == me) {
+        group.api_lock_depth += 1;
+        return;
+    }
+    var spins: usize = 0;
+    while (!group.api_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+    group.api_lock_owner.store(me, .release);
+    group.api_lock_depth = 1;
+}
+
+fn privateGroupApiUnlock(group: *CContextGroup) void {
+    const me: u64 = @intCast(std.Thread.getCurrentId());
+    // Only the owning thread may release (JSC asserts on foreign release);
+    // tolerate it here like every other private boundary null/misuse guard.
+    if (group.api_lock_owner.load(.acquire) != me) return;
+    group.api_lock_depth -= 1;
+    if (group.api_lock_depth == 0) {
+        group.api_lock_owner.store(0, .release);
+        group.api_lock.unlock();
+    }
+}
+
+/// `vm->apiLock().lock()` (bindings.cpp:4906). Home's RAII `VM.Lock` pairs
+/// this with `JSC__VM__releaseAPILock`.
+export fn JSC__VM__getAPILock(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    privateGroupApiLock(group);
+}
+
+/// `vm->apiLock().unlock()` (bindings.cpp:4912).
+export fn JSC__VM__releaseAPILock(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    privateGroupApiUnlock(group);
+}
+
+/// `JSLockHolder locker(vm); callback(ctx);` (bindings.cpp:4896) — the
+/// deprecated callback form of the API lock.
+export fn JSC__VM__holdAPILock(
+    vm_ref: ?*anyopaque,
+    ctx: ?*anyopaque,
+    callback: ?*const fn (ctx: ?*anyopaque) callconv(.c) void,
+) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    const run = callback orelse return;
+    privateGroupApiLock(group);
+    defer privateGroupApiUnlock(group);
+    run(ctx);
+}
+
+fn privateMonotonicNowNs() u64 {
+    return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+}
+
+/// Host watchdog behind `JSC::Watchdog`: naps until the armed deadline, then
+/// raises the group's termination request and cooperatively interrupts running
+/// evaluation via `Context.requestTermination` — the thread-safe,
+/// allocation-free entry point context.zig documents for exactly this purpose.
+/// Per that contract the request is terminal for the context; zig-js does not
+/// resume evaluation after a time-limit termination the way JSC allows after
+/// `clearHasTerminationRequest`.
+fn privateExecutionWatchdog(group: *CContextGroup) void {
+    const io = agent.engineIo();
+    while (!group.watchdog_stop.load(.acquire)) {
+        const deadline = group.execution_deadline_ns.load(.acquire);
+        if (deadline == 0 or group.watchdog_fired_ns.load(.acquire) == deadline) {
+            std.Io.sleep(io, .fromNanoseconds(500_000), .awake) catch {};
+            continue;
+        }
+        const now = privateMonotonicNowNs();
+        if (now < deadline) {
+            const remaining = @min(deadline - now, 1_000_000);
+            std.Io.sleep(io, .fromNanoseconds(@intCast(remaining)), .awake) catch {};
+            continue;
+        }
+        group.watchdog_fired_ns.store(deadline, .release);
+        group.termination_requested.store(true, .release);
+        group.primary.requestTermination();
+    }
+}
+
+/// `vm->ensureWatchdog().setTimeLimit(Seconds{limit})` (bindings.cpp:4875).
+/// Mapping: `+inf` is `Watchdog::noTimeLimit`; non-positive limits fire at the
+/// next watchdog tick; NaN stays armed but never fires (JSC comparison
+/// semantics); finite limits saturate instead of overflowing the u64 deadline.
+export fn JSC__VM__setExecutionTimeLimit(vm_ref: ?*anyopaque, timeout: f64) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    const now = privateMonotonicNowNs();
+    const deadline: u64 = if (std.math.isNan(timeout))
+        std.math.maxInt(u64)
+    else if (std.math.isPositiveInf(timeout))
+        0
+    else if (timeout <= 0)
+        now
+    else blk: {
+        const ns = timeout * @as(f64, @floatFromInt(std.time.ns_per_s));
+        const headroom: f64 = @floatFromInt(std.math.maxInt(u64) - now);
+        if (ns >= headroom) break :blk std.math.maxInt(u64);
+        break :blk now + @as(u64, @intFromFloat(@ceil(ns)));
+    };
+    group.execution_deadline_ns.store(deadline, .release);
+    if (deadline != 0 and group.watchdog_thread == null) {
+        group.watchdog_thread = std.Thread.spawn(.{}, privateExecutionWatchdog, .{group}) catch null;
+    }
+}
+
+/// `if (vm->watchdog()) watchdog->setTimeLimit(noTimeLimit)` (bindings.cpp:4869).
+/// Disarming never clears an already-requested termination, matching JSC.
+export fn JSC__VM__clearExecutionTimeLimit(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.execution_deadline_ns.store(0, .release);
+    group.watchdog_fired_ns.store(0, .release);
+}
+
+/// `vm->watchdog() && vm->watchdog()->hasTimeLimit()` (bindings.cpp:2830). The
+/// limit stays reported after it fires, exactly like `Watchdog::hasTimeLimit`.
+export fn JSC__VM__hasExecutionTimeLimit(vm_ref: ?*anyopaque) callconv(.c) bool {
+    const group = privateGroupFromVM(vm_ref) orelse return false;
+    return group.execution_deadline_ns.load(.acquire) != 0;
 }
 
 fn privateSaturatingAddAtomic(value_: *std.atomic.Value(usize), amount: usize) void {

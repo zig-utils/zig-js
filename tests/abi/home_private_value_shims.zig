@@ -524,6 +524,12 @@ extern "c" fn JSC__VM__hasTerminationRequest(?*anyopaque) bool;
 extern "c" fn JSC__VM__isEntered(?*anyopaque) bool;
 extern "c" fn JSC__VM__notifyNeedTermination(?*anyopaque) void;
 extern "c" fn JSC__VM__setExecutionForbidden(?*anyopaque, bool) void;
+extern "c" fn JSC__VM__getAPILock(?*anyopaque) void;
+extern "c" fn JSC__VM__holdAPILock(?*anyopaque, ?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) void;
+extern "c" fn JSC__VM__releaseAPILock(?*anyopaque) void;
+extern "c" fn JSC__VM__setExecutionTimeLimit(?*anyopaque, f64) void;
+extern "c" fn JSC__VM__clearExecutionTimeLimit(?*anyopaque) void;
+extern "c" fn JSC__VM__hasExecutionTimeLimit(?*anyopaque) bool;
 extern "c" fn JSC__VM__blockBytesAllocated(?*anyopaque) usize;
 extern "c" fn JSC__VM__collectAsync(?*anyopaque) void;
 extern "c" fn JSC__VM__externalMemorySize(?*anyopaque) usize;
@@ -632,6 +638,30 @@ const MarkedArgumentFixtureState = struct {
     foreign: EncodedValue,
     calls: usize = 0,
 };
+
+const ApiLockProbe = struct {
+    vm: ?*anyopaque,
+    started: std.atomic.Value(bool) = .init(false),
+    entered: std.atomic.Value(bool) = .init(false),
+    received: ?*anyopaque = null,
+};
+
+fn apiLockProbeCallback(raw: ?*anyopaque) callconv(.c) void {
+    const probe: *ApiLockProbe = @ptrCast(@alignCast(raw.?));
+    probe.received = raw;
+    probe.entered.store(true, .release);
+}
+
+fn apiLockProbeThread(probe: *ApiLockProbe) void {
+    probe.started.store(true, .release);
+    JSC__VM__holdAPILock(probe.vm, probe, apiLockProbeCallback);
+}
+
+var api_lock_null_callback_ran: bool = false;
+fn apiLockNullCallback(raw: ?*anyopaque) callconv(.c) void {
+    _ = raw;
+    api_lock_null_callback_ran = true;
+}
 
 fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv(.c) void {
     const state: *MarkedArgumentFixtureState = @ptrCast(@alignCast(raw.?));
@@ -5191,5 +5221,87 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 281/281 symbols linked; runtime matrix passed\n", .{});
+    // VM execution-control exports (#302): API lock + execution time limit.
+    if (JSC__VM__hasExecutionTimeLimit(vm) or JSC__VM__hasExecutionTimeLimit(null))
+        fail("private execution time limit initial state mismatch");
+    JSC__VM__setExecutionTimeLimit(vm, 60.0);
+    if (!JSC__VM__hasExecutionTimeLimit(vm) or !JSC__VM__hasExecutionTimeLimit(sibling_vm) or
+        JSC__VM__hasExecutionTimeLimit(foreign_vm))
+        fail("private execution time limit arming/sharing mismatch");
+    JSC__VM__clearExecutionTimeLimit(vm);
+    if (JSC__VM__hasExecutionTimeLimit(vm))
+        fail("private execution time limit clear mismatch");
+    JSC__VM__setExecutionTimeLimit(vm, std.math.inf(f64));
+    if (JSC__VM__hasExecutionTimeLimit(vm))
+        fail("private execution time limit noTimeLimit mapping mismatch");
+    JSC__VM__setExecutionTimeLimit(null, 1.0);
+    JSC__VM__clearExecutionTimeLimit(null);
+
+    // The host watchdog really interrupts running evaluation: a 30ms limit
+    // aborts an unbounded loop, and `termination_requested` attributes the
+    // abort to the watchdog rather than the interpreter step budget.
+    const watchdog_context = JSGlobalContextCreate(null) orelse fail("watchdog context creation failed");
+    const watchdog_vm = JSC__JSGlobalObject__vm(watchdog_context) orelse fail("watchdog VM lookup failed");
+    JSC__VM__setExecutionTimeLimit(watchdog_vm, 0.03);
+    if (!JSC__VM__hasExecutionTimeLimit(watchdog_vm))
+        fail("private watchdog arming mismatch");
+    {
+        const loop_script = JSStringCreateWithUTF8CString("while (true) {}") orelse fail("loop script creation failed");
+        defer JSStringRelease(loop_script);
+        var loop_exception: JSValueRef = null;
+        const loop_result = JSEvaluateScript(watchdog_context, loop_script, null, null, 1, &loop_exception);
+        if (loop_result != null or loop_exception == null)
+            fail("private watchdog did not abort unbounded evaluation");
+        if (!JSC__VM__hasTerminationRequest(watchdog_vm))
+            fail("private watchdog abort did not request termination");
+        // JSC `Watchdog::hasTimeLimit` stays true after firing and clearing
+        // the limit never clears the termination request.
+        if (!JSC__VM__hasExecutionTimeLimit(watchdog_vm))
+            fail("private watchdog limit did not stay armed after firing");
+        JSC__VM__clearExecutionTimeLimit(watchdog_vm);
+        if (JSC__VM__hasExecutionTimeLimit(watchdog_vm) or !JSC__VM__hasTerminationRequest(watchdog_vm))
+            fail("private watchdog clear semantics mismatch");
+        JSC__VM__clearHasTerminationRequest(watchdog_vm);
+    }
+    JSGlobalContextRelease(watchdog_context);
+
+    // API lock: null-tolerant, recursive for the owner thread (JSLock
+    // semantics), and real mutual exclusion against foreign threads.
+    JSC__VM__getAPILock(null);
+    JSC__VM__releaseAPILock(null);
+    JSC__VM__holdAPILock(null, null, apiLockNullCallback);
+    if (api_lock_null_callback_ran)
+        fail("private API lock null VM ran callback");
+
+    var probe: ApiLockProbe = .{ .vm = vm };
+    JSC__VM__holdAPILock(vm, &probe, apiLockProbeCallback);
+    if (!probe.entered.load(.acquire) or probe.received != @as(?*anyopaque, @ptrCast(&probe)))
+        fail("private holdAPILock callback mismatch");
+
+    probe.entered.store(false, .release);
+    JSC__VM__getAPILock(vm);
+    JSC__VM__getAPILock(vm);
+    JSC__VM__holdAPILock(vm, &probe, apiLockProbeCallback);
+    JSC__VM__releaseAPILock(vm);
+    JSC__VM__releaseAPILock(vm);
+    if (!probe.entered.load(.acquire))
+        fail("private recursive API lock callback mismatch");
+
+    var contention: ApiLockProbe = .{ .vm = vm };
+    JSC__VM__getAPILock(vm);
+    const lock_thread = std.Thread.spawn(.{}, apiLockProbeThread, .{&contention}) catch
+        fail("API lock probe thread spawn failed");
+    while (!contention.started.load(.acquire)) std.Thread.yield() catch {};
+    var guard: usize = 0;
+    while (guard < 100_000) : (guard += 1) {
+        if (contention.entered.load(.acquire))
+            fail("private API lock admitted foreign thread while held");
+        std.Thread.yield() catch {};
+    }
+    JSC__VM__releaseAPILock(vm);
+    lock_thread.join();
+    if (!contention.entered.load(.acquire))
+        fail("private API lock foreign thread never acquired");
+
+    std.debug.print("Home private value shims: 287/287 symbols linked; runtime matrix passed\n", .{});
 }

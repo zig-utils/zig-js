@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 286,
-      "pending": 150
+      "implemented": 292,
+      "pending": 144
     }
   },
   "home_comparison": {
@@ -2525,10 +2525,10 @@
       "line": 104,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__clearExecutionTimeLimit(vm: *VM) void;",
       "declaration_sha256": "be8c23a3f329d5b82766070f8df172685d1d059e84ed9bbec440519d9603f23e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__clearHasTerminationRequest",
@@ -2635,10 +2635,10 @@
       "line": 38,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__getAPILock(vm: *VM) void;",
       "declaration_sha256": "447e785a2f7ef7f63511809d94d598dd758bc2fbbecb516a806679055857e014",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__hasExecutionTimeLimit",
@@ -2646,10 +2646,10 @@
       "line": 26,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__hasExecutionTimeLimit(vm: *VM) bool;",
       "declaration_sha256": "2e6c58b8ef8b3d67f4fad7fe47ce24408f53b5a070a9f43256e8f7f50fd9bd25",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__hasTerminationRequest",
@@ -2679,10 +2679,10 @@
       "line": 32,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__holdAPILock(this: *VM, ctx: ?*anyopaque, callback: *const fn (ctx: ?*anyopaque) callconv(.c) void) void;",
       "declaration_sha256": "d8421b7bedd64d3a43a2352dfb7300b02f2435c84b26f22ea95540de56feaf00",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__isEntered",
@@ -2756,10 +2756,10 @@
       "line": 39,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__releaseAPILock(vm: *VM) void;",
       "declaration_sha256": "1a8bf29d7c4016658e668beeb1e914f380a198569a75f1e7e96935471b06db51",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__releaseWeakRefs",
@@ -2822,10 +2822,10 @@
       "line": 99,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__setExecutionTimeLimit(vm: *VM, timeout: f64) void;",
       "declaration_sha256": "db0138a2ac28c98a6fec10eae115285fb5d07672fabe9456511a754dacb92ca0",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__shrinkFootprint",
