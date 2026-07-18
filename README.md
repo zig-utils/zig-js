@@ -138,9 +138,10 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI-only changes through `ed109b6d` do not execute in these benchmark
+The ABI and WebAssembly API changes through `1296dd80` do not execute in these benchmark
 workloads, so the validated 1,540-sample July 17 matrix remains the latest
-score set; no unchanged benchmark was rerun for the debugger async-call slice.
+score set; no unchanged benchmark was rerun for debugger metadata or
+WebAssembly module validation and reflection.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -166,7 +167,7 @@ The configured test262 coverage for these surfaces is green.
 
 **Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, dynamic `import()`, dynamic-import catch-target behavior, `import defer` async-module behavior, and top-level-await graph ordering covered by the configured runner.
 
-**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal`, and `Intl` coverage.
+**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal` and `Intl` coverage, plus the documented [WebAssembly MVP work in progress](docs/wasm.md).
 
 ## Using It
 
@@ -831,7 +832,10 @@ and the final evidence-backed removal of this section is tracked by
 [issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
-- WebAssembly and JIT shell hooks from the PR-249 reference corpus;
+- the remaining WebAssembly JS/store surface, upstream spec inventory, and
+  WebAssembly/JIT shell hooks from the PR-249 reference corpus (the implemented
+  decoder, validator, executor, `Module`, reflection, and error surface are
+  documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
 ## Used By

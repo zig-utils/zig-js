@@ -25,7 +25,7 @@ zig-js is an early but capable v1: a correct tree-walking interpreter over a bro
 :::
 
 ::: tip Built-ins
-`Object`, `Array`, `String`, `Number`, `Boolean`, `Math`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Symbol`, `Function`, `Date`, the `Error` family, `Promise`, `Proxy`, `Reflect`, and `RegExp` — including modern surface like ES2024 `Set` operations, `Object.groupBy`, `Array` hole/sparse semantics, and well-known symbols.
+`Object`, `Array`, `String`, `Number`, `Boolean`, `Math`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Symbol`, `Function`, `Date`, the `Error` family, `Promise`, `Proxy`, `Reflect`, and `RegExp` — including modern surface like ES2024 `Set` operations, `Object.groupBy`, `Array` hole/sparse semantics, and well-known symbols. The first [WebAssembly MVP](/wasm) API slice provides module validation and reflection while the store API remains in progress.
 :::
 
 ::: warning Scope caveat
