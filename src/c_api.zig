@@ -12906,13 +12906,28 @@ fn privateDuplicateSharedMemfd(fd: i64) ?std.posix.fd_t {
 
 fn privateSharedMemfdHasSize(fd: std.posix.fd_t, total_size: usize) bool {
     if (comptime builtin.os.tag == .windows) return false;
-    // Zig dev.1417 removed the redundant Linux `fstat64` declaration while
-    // retaining `lfs64_abi`. Keep compatibility with both toolchain shapes:
-    // newer libc ABIs expose the wide layout through ordinary `fstat`.
-    const fstat_fn = if (std.posix.lfs64_abi and @hasDecl(std.posix.system, "fstat64"))
-        std.posix.system.fstat64
-    else
-        std.posix.system.fstat;
+    // Zig dev.1417 removed the libc `fstat64` declaration on Linux and leaves
+    // `std.posix.system.fstat` as `void` there. Use the stable Linux statx
+    // syscall surface; other POSIX targets retain the traditional fstat ABI.
+    if (comptime builtin.os.tag == .linux) {
+        var statx = std.mem.zeroes(std.os.linux.Statx);
+        while (true) switch (std.os.linux.errno(std.os.linux.statx(
+            fd,
+            "",
+            std.os.linux.AT.EMPTY_PATH,
+            .{ .TYPE = true, .SIZE = true },
+            &statx,
+        ))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return false,
+        };
+        if (!statx.mask.TYPE or !statx.mask.SIZE) return false;
+        if ((statx.mode & std.posix.S.IFMT) != std.posix.S.IFREG) return false;
+        return std.math.cast(u64, total_size) != null and @as(u64, @intCast(total_size)) <= statx.size;
+    }
+
+    const fstat_fn = if (std.posix.lfs64_abi) std.posix.system.fstat64 else std.posix.system.fstat;
     var stat = std.mem.zeroes(std.posix.Stat);
     while (true) switch (std.posix.errno(fstat_fn(fd, &stat))) {
         .SUCCESS => break,
