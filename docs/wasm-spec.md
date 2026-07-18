@@ -23,11 +23,14 @@ zig build wasm-spec -Dwasm-spec-filter=linking   # only matching files
 zig build wasm-spec -Dwasm-spec-out=tests/wasm/spec/inventory.json
 ```
 
-`WASM_SPEC_DIR` overrides the artifact directory. The runner re-executes
-itself once per `.wast` file (`WASM_SPEC_WORKER=<file>`) for crash isolation:
-a worker that dies or exceeds the 120 s watchdog is recorded as a crash entry
-instead of aborting the inventory. Every directive executes through the real
-JavaScript `WebAssembly` API — no test-only engine hooks.
+`WASM_SPEC_DIR` overrides the artifact directory. For CI compatibility the
+step also accepts `-Dwasm-spec-inventory=<path>` (alias of `-Dwasm-spec-out`)
+and `-Dwast2json=<path>` (unused — the packed artifacts already embed
+converter output, so no converter is needed at run time). The runner
+re-executes itself once per `.wast` file (`WASM_SPEC_WORKER=<file>`) for crash
+isolation: a worker that dies or exceeds the 120 s watchdog is recorded as a
+crash entry instead of aborting the inventory. Every directive executes
+through the real JavaScript `WebAssembly` API — no test-only engine hooks.
 
 ## Current inventory
 

@@ -506,8 +506,14 @@ pub fn build(b: *std.Build) void {
     // once per .wast file (WASM_SPEC_WORKER=<file>) for crash isolation.
     // `-Dwasm-spec-filter=<substr>` runs only matching files;
     // `-Dwasm-spec-out=<path>` also writes the aggregate inventory JSON.
+    // Compatibility: the CI smoke gate invokes this step with
+    // `-Dwast2json=<path>` (accepted, unused — the packed artifacts already
+    // embed converter output, so no converter is needed at run time) and
+    // `-Dwasm-spec-inventory=<path>` (alias of `-Dwasm-spec-out`).
     const wasm_spec_filter = b.option([]const u8, "wasm-spec-filter", "wasm-spec: run only files whose name contains this substring") orelse "";
-    const wasm_spec_out = b.option([]const u8, "wasm-spec-out", "wasm-spec: also write the aggregate inventory JSON to this path") orelse "";
+    const wasm_spec_out_compat = b.option([]const u8, "wasm-spec-inventory", "wasm-spec: alias of -Dwasm-spec-out (CI smoke gate compatibility)") orelse "";
+    _ = b.option([]const u8, "wast2json", "wasm-spec: accepted for CI compatibility; the packed runner needs no converter at run time") orelse "";
+    const wasm_spec_out = b.option([]const u8, "wasm-spec-out", "wasm-spec: also write the aggregate inventory JSON to this path") orelse wasm_spec_out_compat;
     const wasm_spec_options = b.addOptions();
     wasm_spec_options.addOption([]const u8, "filter", wasm_spec_filter);
     wasm_spec_options.addOption([]const u8, "out", wasm_spec_out);

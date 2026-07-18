@@ -94,17 +94,30 @@ Run the focused suite with:
 zig build test -Dtest-filter=wasm
 ```
 
-Build WABT 1.0.12 at the pinned commit above, then reproduce the deliberate
-complete corpus run with:
+Reproduce the deliberate complete corpus run with the live-WABT evaluator
+(WABT 1.0.12 at the pinned commit above, plus a `WebAssembly/spec` checkout at
+the pinned commit — the initialized `wasm-spec` submodule is the default
+`--spec-root`):
 
 ```sh
-zig build wasm-spec -Dwast2json=/path/to/wabt-1.0.12/wast2json
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py --profile mvp \
+  --spec-root /path/to/WebAssembly-spec \
+  --wast2json /path/to/wabt-1.0.12/wast2json
 ```
 
-CI runs bounded `linking.wast` and `f32_bitwise.wast` smoke/drift gates. Together
-they verify the corpus pin, converter compatibility, 118 linking/store commands,
-and all 364 f32 bit-exact cases without putting the multi-minute complete
-inventory on every push.
+The packed native runner executes the same pinned corpus from checked-in
+artifacts with no converter at run time (see [wasm-spec.md](wasm-spec.md)):
+
+```sh
+zig build wasm-spec
+```
+
+CI runs bounded `linking.wast` and `f32_bitwise.wast` smoke/drift gates through
+the packed runner. Together they execute all 114 applicable linking/store
+commands and 348 of 364 f32 bit-exact cases (the remaining NaN-pattern cases
+are classified skips covered by the evaluator's raw-bit path) without putting
+the multi-minute complete inventory on every push.
 
 ### Core 2 structural profile
 
