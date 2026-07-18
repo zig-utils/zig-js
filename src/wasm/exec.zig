@@ -304,16 +304,29 @@ pub fn destroyMemory(gpa: Allocator, mem: *MemoryInst) void {
 /// failure (limit exceeded or allocation failure); failure leaves the
 /// memory untouched.
 pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
+    const previous = memoryGrowAddressed(mem, delta) orelse return -1;
+    return @intCast(previous);
+}
+
+/// Full-width core grow operation. Null is the Wasm -1 sentinel. Every size
+/// conversion is checked before mutation, and the host callback can still
+/// roll back a published candidate buffer atomically.
+pub fn memoryGrowAddressed(mem: *MemoryInst, delta: u64) ?u64 {
     while (!mem.grow_lock.tryLock()) std.atomic.spinLoopHint();
     defer mem.grow_lock.unlock();
-    const old_pages = mem.pages();
-    if (delta == 0) return @intCast(old_pages);
-    const limit = @min(mem.limits.max orelse types.MAX_PAGES, types.MAX_PAGES);
-    if (old_pages >= limit) return -1;
-    if (delta > limit - old_pages) return -1;
-    const new_len = @as(usize, old_pages + delta) * types.PAGE_SIZE;
+    const old_pages: u64 = mem.pages();
+    if (delta == 0) return old_pages;
+    const host_limit: u64 = if (mem.address == .i64) MAX_HOST_MEMORY64_PAGES else types.MAX_PAGES;
+    const limit = @min(mem.limits.max orelse mem.address.maxMemoryPages(), host_limit);
+    if (old_pages >= limit or delta > limit - old_pages) return null;
+    const new_pages = old_pages + delta;
+    const new_len_u64 = std.math.mul(u64, new_pages, types.PAGE_SIZE) catch return null;
+    if (new_len_u64 > std.math.maxInt(usize)) return null;
+    const new_len: usize = @intCast(new_len_u64);
     if (mem.shared_storage) |storage| {
-        const old_len = storage.growBy(@as(usize, delta) * types.PAGE_SIZE) catch return -1;
+        const delta_len_u64 = std.math.mul(u64, delta, types.PAGE_SIZE) catch return null;
+        if (delta_len_u64 > std.math.maxInt(usize)) return null;
+        const old_len = storage.growBy(@intCast(delta_len_u64)) catch return null;
         std.debug.assert(old_len / types.PAGE_SIZE == old_pages);
         if (mem.on_grow) |cb| {
             // The shared slab never moves. The hook only installs a new fixed
@@ -321,17 +334,17 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
             // their old lengths.
             if (!cb(mem.on_grow_ctx orelse @ptrCast(mem), mem)) {
                 std.debug.assert(storage.rollbackGrow(new_len, old_len));
-                return -1;
+                return null;
             }
         }
-        mem.limits.min = old_pages + delta;
-        return @intCast(old_pages);
+        mem.limits.min = new_pages;
+        return old_pages;
     }
     if (mem.on_grow) |cb| {
         // Host-observed grow: `realloc` may release the old bytes before the
         // hook could observe the grown buffer, so allocate fresh, publish the
         // new bytes, run the hook, and only then free the old slab.
-        const fresh = mem.gpa.alloc(u8, new_len) catch return -1;
+        const fresh = mem.gpa.alloc(u8, new_len) catch return null;
         @memcpy(fresh[0..mem.local_bytes.len], mem.local_bytes);
         @memset(fresh[mem.local_bytes.len..], 0);
         const old = mem.local_bytes;
@@ -339,16 +352,16 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
         if (!cb(mem.on_grow_ctx orelse @ptrCast(mem), mem)) {
             mem.local_bytes = old;
             mem.gpa.free(fresh);
-            return -1;
+            return null;
         }
         mem.gpa.free(old);
-        mem.limits.min = old_pages + delta;
-        return @intCast(old_pages);
+        mem.limits.min = new_pages;
+        return old_pages;
     }
-    mem.local_bytes = mem.gpa.realloc(mem.local_bytes, new_len) catch return -1;
+    mem.local_bytes = mem.gpa.realloc(mem.local_bytes, new_len) catch return null;
     @memset(mem.local_bytes[@as(usize, old_pages) * types.PAGE_SIZE ..], 0);
-    mem.limits.min = old_pages + delta;
-    return @intCast(old_pages);
+    mem.limits.min = new_pages;
+    return old_pages;
 }
 
 pub fn createTable(gpa: Allocator, initial: u32, max: ?u32) error{OutOfMemory}!*TableInst {
@@ -389,42 +402,51 @@ pub fn tableGrow(tab: *TableInst, delta: u32) i32 {
 /// a concurrent indirect call observes either the old table or the complete
 /// grown table.
 pub fn tableGrowWith(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
-    tab.lockTable();
-    defer tab.unlockTable();
-    const old: u32 = @intCast(tab.elems.len);
-    if (delta == 0) return @intCast(old);
-    const limit = tab.limits.max orelse std.math.maxInt(u32);
-    if (old >= limit) return -1;
-    if (delta > limit - old) return -1;
-    tab.elems = tab.gpa.realloc(tab.elems, old + delta) catch return -1;
-    @memset(tab.elems[old..], fill);
-    tab.limits.min = old + delta;
-    return @intCast(old);
+    const previous = tableGrowAddressed(tab, delta, fill) orelse return -1;
+    return @intCast(previous);
 }
 
-fn tableGrowObserved(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
+pub fn tableGrowAddressed(tab: *TableInst, delta: u64, fill: ValueSlot) ?u64 {
+    tab.lockTable();
+    defer tab.unlockTable();
+    const old: u64 = @intCast(tab.elems.len);
+    if (delta == 0) return old;
+    const limit = @min(tab.limits.max orelse tab.address.maxTableElements(), MAX_HOST_TABLE_ELEMENTS);
+    if (old >= limit or delta > limit - old) return null;
+    const new_len_u64 = old + delta;
+    if (new_len_u64 > std.math.maxInt(usize)) return null;
+    const new_len: usize = @intCast(new_len_u64);
+    tab.elems = tab.gpa.realloc(tab.elems, new_len) catch return null;
+    @memset(tab.elems[@intCast(old)..], fill);
+    tab.limits.min = new_len_u64;
+    return old;
+}
+
+fn tableGrowObserved(tab: *TableInst, delta: u64, fill: ValueSlot) ?u64 {
     if (tab.host) |host| host.lock(host.ctx);
     defer if (tab.host) |host| host.unlock(host.ctx);
     tab.lockTable();
     defer tab.unlockTable();
-    const old: u32 = @intCast(tab.elems.len);
-    if (delta == 0) return @intCast(old);
-    const limit = tab.limits.max orelse std.math.maxInt(u32);
-    if (old >= limit or delta > limit - old) return -1;
-    const new_len: usize = @as(usize, old) + delta;
-    const fresh = tab.gpa.alloc(ValueSlot, new_len) catch return -1;
-    @memcpy(fresh[0..old], tab.elems);
-    @memset(fresh[old..], fill);
+    const old: u64 = @intCast(tab.elems.len);
+    if (delta == 0) return old;
+    const limit = @min(tab.limits.max orelse tab.address.maxTableElements(), MAX_HOST_TABLE_ELEMENTS);
+    if (old >= limit or delta > limit - old) return null;
+    const new_len_u64 = old + delta;
+    if (new_len_u64 > std.math.maxInt(usize)) return null;
+    const new_len: usize = @intCast(new_len_u64);
+    const fresh = tab.gpa.alloc(ValueSlot, new_len) catch return null;
+    @memcpy(fresh[0..@intCast(old)], tab.elems);
+    @memset(fresh[@intCast(old)..], fill);
     if (tab.host) |host| if (!host.ensure_len(host.ctx, new_len)) {
         tab.gpa.free(fresh);
-        return -1;
+        return null;
     };
     const retired = tab.elems;
     tab.elems = fresh;
-    tab.limits.min = old + delta;
-    if (tab.host) |host| host.sync(host.ctx, tab, old, delta);
+    tab.limits.min = new_len_u64;
+    if (tab.host) |host| host.sync(host.ctx, tab, @intCast(old), @intCast(delta));
     tab.gpa.free(retired);
-    return @intCast(old);
+    return old;
 }
 
 fn nullTableSlot(elem_type: types.ValType) ValueSlot {
@@ -1045,14 +1067,13 @@ const SimdMemoryRange = struct {
 };
 
 fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size: usize) ExecError!SimdMemoryRange {
-    const address: u64 = popI32(s);
-    const start = address + @as(u64, memarg.offset);
     const mem = inst.mems[0];
-    const memory_len: u64 = @intCast(mem.bytes().len);
-    if (start > memory_len or @as(u64, @intCast(size)) > memory_len - start)
+    const address = popAddress(s, mem.address);
+    const start = std.math.add(u64, address, memarg.offset) catch
         return s.trap("out of bounds memory access");
-    const offset: usize = @intCast(start);
-    return .{ .mem = mem, .offset = offset, .len = size };
+    const range = checkedRange(start, size, mem.bytes().len) orelse
+        return s.trap("out of bounds memory access");
+    return .{ .mem = mem, .offset = range.start, .len = size };
 }
 
 fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: bool) u128 {
@@ -2004,6 +2025,35 @@ fn popI32(s: *State) u32 {
     return @truncate(pop(s));
 }
 
+fn popAddress(s: *State, address: types.AddressType) u64 {
+    return switch (address) {
+        .i32 => popI32(s),
+        .i64 => pop(s),
+    };
+}
+
+fn pushAddress(s: *State, address: types.AddressType, value: u64) ExecError!void {
+    switch (address) {
+        .i32 => try pushI32(s, @truncate(value)),
+        .i64 => try pushI64(s, value),
+    }
+}
+
+fn pushAddressGrowResult(s: *State, address: types.AddressType, value: ?u64) ExecError!void {
+    try pushAddress(s, address, value orelse switch (address) {
+        .i32 => std.math.maxInt(u32),
+        .i64 => std.math.maxInt(u64),
+    });
+}
+
+const CheckedRange = struct { start: usize, end: usize };
+
+fn checkedRange(start: u64, len: u64, bound: usize) ?CheckedRange {
+    const end = std.math.add(u64, start, len) catch return null;
+    if (end > bound or start > std.math.maxInt(usize)) return null;
+    return .{ .start = @intCast(start), .end = @intCast(end) };
+}
+
 fn popF32(s: *State) f32 {
     return @bitCast(@as(u32, @truncate(pop(s))));
 }
@@ -2444,11 +2494,11 @@ fn indirectCallable(
     expected: types.FuncType,
     immediate: types.Instr.CallIndirect,
 ) ExecError!*const FuncInst {
-    const i = popI32(s);
     const tab = inst.tables[immediate.table_index];
+    const i = popAddress(s, tab.address);
     tab.lockTable();
     const in_bounds = i < tab.elems.len;
-    const target = if (in_bounds) funcFromSlot(tab.elems[i]) else null;
+    const target = if (in_bounds) funcFromSlot(tab.elems[@intCast(i)]) else null;
     tab.unlockTable();
     if (!in_bounds) return s.trap("undefined element");
     const callable = target orelse {
@@ -2463,7 +2513,7 @@ fn indirectCallable(
     return callable;
 }
 
-fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u64, size: u64) ExecError!usize {
+fn effAddr(s: *State, mem: *const MemoryInst, addr: u64, offset: u64, size: u64) ExecError!usize {
     const ea = std.math.add(u64, addr, offset) catch return s.trap("out of bounds memory access");
     const end = std.math.add(u64, ea, size) catch return s.trap("out of bounds memory access");
     if (end > mem.bytes().len) return s.trap("out of bounds memory access");
@@ -2494,7 +2544,7 @@ fn atomicResultIsI64(op: wasm_atomic.Op) bool {
     };
 }
 
-fn atomicAddress(s: *State, mem: *const MemoryInst, addr: u32, memarg: types.Instr.MemArg, width: usize) ExecError!usize {
+fn atomicAddress(s: *State, mem: *const MemoryInst, addr: u64, memarg: types.Instr.MemArg, width: usize) ExecError!usize {
     const ea = try effAddr(s, mem, addr, memarg.offset, width);
     if ((ea & (width - 1)) != 0) return s.trap("unaligned atomic");
     return ea;
@@ -2572,7 +2622,7 @@ fn executeAtomic(s: *State, inst: *Instance, instr: types.Instr) ExecError!void 
     switch (decoded.op.shape()) {
         .notify => {
             const count: usize = popI32(s);
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             const storage = mem.shared_storage orelse {
                 try pushI32(s, 0);
@@ -2583,7 +2633,7 @@ fn executeAtomic(s: *State, inst: *Instance, instr: types.Instr) ExecError!void 
         .wait32, .wait64 => {
             const timeout: i64 = @bitCast(pop(s));
             const expected = pop(s);
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             const storage = mem.shared_storage orelse return s.trap("expected shared memory");
             checkpoint(s);
@@ -2607,20 +2657,20 @@ fn executeAtomic(s: *State, inst: *Instance, instr: types.Instr) ExecError!void 
             });
         },
         .load_i32, .load_i64 => {
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             const raw = atomicLoadRaw(mem.bytes(), ea, width);
             if (atomicResultIsI64(decoded.op)) try pushI64(s, raw) else try pushI32(s, @truncate(raw));
         },
         .store_i32, .store_i64 => {
             const value_bits = pop(s);
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             atomicStoreRaw(mem.bytes(), ea, width, value_bits);
         },
         .rmw_i32, .rmw_i64 => {
             const operand = pop(s);
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             const group = (@intFromEnum(decoded.op) - 0x1e) / 7;
             const old = switch (group) {
@@ -2637,7 +2687,7 @@ fn executeAtomic(s: *State, inst: *Instance, instr: types.Instr) ExecError!void 
         .cmpxchg_i32, .cmpxchg_i64 => {
             const replacement = pop(s);
             const expected = pop(s);
-            const address = popI32(s);
+            const address = popAddress(s, mem.address);
             const ea = try atomicAddress(s, mem, address, memarg, width);
             const old = atomicCmpxchgRaw(mem.bytes(), ea, width, expected, replacement);
             if (atomicResultIsI64(decoded.op)) try pushI64(s, old) else try pushI32(s, @truncate(old));
@@ -2867,26 +2917,26 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .global_get => try pushSlot(s, inst.globals[instr.imm.idx].value),
             .global_set => setGlobalValue(inst.globals[instr.imm.idx], popSlot(s)),
             .table_get => {
-                const index = popI32(s);
                 const table = inst.tables[instr.imm.idx];
+                const index = popAddress(s, table.address);
                 table.lockTable();
                 const in_bounds = index < table.elems.len;
-                const table_entry = if (in_bounds) table.elems[index] else nullTableSlot(table.type);
+                const table_entry = if (in_bounds) table.elems[@intCast(index)] else nullTableSlot(table.type);
                 table.unlockTable();
                 if (!in_bounds) return s.trap("undefined element");
                 try pushSlot(s, table_entry);
             },
             .table_set => {
                 const slot = popSlot(s);
-                const index = popI32(s);
                 const table = inst.tables[instr.imm.idx];
+                const index = popAddress(s, table.address);
                 if (table.host) |host| host.lock(host.ctx);
                 defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
                 if (index >= table.elems.len) return s.trap("undefined element");
-                table.elems[index] = slot;
-                if (table.host) |host| host.sync(host.ctx, table, index, 1);
+                table.elems[@intCast(index)] = slot;
+                if (table.host) |host| host.sync(host.ctx, table, @intCast(index), 1);
             },
             .ref_null => try pushSlot(s, switch (instr.imm.type) {
                 .funcref => .{ .funcref = null },
@@ -2905,95 +2955,96 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             },
             .ref_func => try pushSlot(s, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
             .table_grow => {
-                const delta = popI32(s);
+                const table = inst.tables[instr.imm.idx];
+                const delta = popAddress(s, table.address);
                 const slot = popSlot(s);
-                try pushI32(s, @bitCast(tableGrowObserved(inst.tables[instr.imm.idx], delta, slot)));
+                try pushAddressGrowResult(s, table.address, tableGrowObserved(table, delta, slot));
             },
             .table_size => {
                 const table = inst.tables[instr.imm.idx];
                 table.lockTable();
-                const len: u32 = @intCast(table.elems.len);
+                const len: u64 = @intCast(table.elems.len);
                 table.unlockTable();
-                try pushI32(s, len);
+                try pushAddress(s, table.address, len);
             },
             .table_fill => {
-                const count = popI32(s);
-                const slot = popSlot(s);
-                const start = popI32(s);
                 const table = inst.tables[instr.imm.idx];
+                const count = popAddress(s, table.address);
+                const slot = popSlot(s);
+                const start = popAddress(s, table.address);
                 if (table.host) |host| host.lock(host.ctx);
                 defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
-                const end = @as(u64, start) + count;
-                if (end > table.elems.len) return s.trap("out of bounds table access");
-                @memset(table.elems[start..@intCast(end)], slot);
-                if (table.host) |host| host.sync(host.ctx, table, start, count);
+                const range = checkedRange(start, count, table.elems.len) orelse
+                    return s.trap("out of bounds table access");
+                @memset(table.elems[range.start..range.end], slot);
+                if (table.host) |host| host.sync(host.ctx, table, range.start, range.end - range.start);
             },
             .memory_init => {
                 const count = popI32(s);
                 const source = popI32(s);
-                const dest = popI32(s);
                 const immediate = instr.imm.indices;
+                const memory = inst.mems[immediate.second];
+                const dest = popAddress(s, memory.address);
                 const segment = &inst.data_segments[immediate.first];
                 const bytes = if (segment.dropped) &.{} else segment.bytes;
-                const source_end = @as(u64, source) + count;
-                const dest_end = @as(u64, dest) + count;
-                const memory = inst.mems[immediate.second];
-                if (source_end > bytes.len or dest_end > memory.bytes().len)
+                const source_range = checkedRange(source, count, bytes.len) orelse
                     return s.trap("out of bounds memory access");
-                memory.writeSliceUnordered(dest, bytes[source..@intCast(source_end)]);
+                const dest_range = checkedRange(dest, count, memory.bytes().len) orelse
+                    return s.trap("out of bounds memory access");
+                memory.writeSliceUnordered(dest_range.start, bytes[source_range.start..source_range.end]);
             },
             .data_drop => inst.data_segments[instr.imm.idx].dropped = true,
             .memory_copy => {
-                const count = popI32(s);
-                const source = popI32(s);
-                const dest = popI32(s);
                 const immediate = instr.imm.indices;
                 const dest_memory = inst.mems[immediate.first];
                 const source_memory = inst.mems[immediate.second];
-                const source_end = @as(u64, source) + count;
-                const dest_end = @as(u64, dest) + count;
-                if (source_end > source_memory.bytes().len or dest_end > dest_memory.bytes().len)
+                const count = popAddress(s, types.AddressType.min(dest_memory.address, source_memory.address));
+                const source = popAddress(s, source_memory.address);
+                const dest = popAddress(s, dest_memory.address);
+                const source_range = checkedRange(source, count, source_memory.bytes().len) orelse
                     return s.trap("out of bounds memory access");
-                copyMemoryUnordered(dest_memory, dest, source_memory, source, count);
+                const dest_range = checkedRange(dest, count, dest_memory.bytes().len) orelse
+                    return s.trap("out of bounds memory access");
+                copyMemoryUnordered(dest_memory, dest_range.start, source_memory, source_range.start, dest_range.end - dest_range.start);
             },
             .memory_fill => {
-                const count = popI32(s);
-                const value: u8 = @truncate(popI32(s));
-                const dest = popI32(s);
                 const memory = inst.mems[instr.imm.idx];
-                const end = @as(u64, dest) + count;
-                if (end > memory.bytes().len) return s.trap("out of bounds memory access");
-                memory.fillUnordered(dest, count, value);
+                const count = popAddress(s, memory.address);
+                const value: u8 = @truncate(popI32(s));
+                const dest = popAddress(s, memory.address);
+                const range = checkedRange(dest, count, memory.bytes().len) orelse
+                    return s.trap("out of bounds memory access");
+                memory.fillUnordered(range.start, range.end - range.start, value);
             },
             .table_init => {
                 const count = popI32(s);
                 const source = popI32(s);
-                const dest = popI32(s);
                 const immediate = instr.imm.indices;
+                const table = inst.tables[immediate.second];
+                const dest = popAddress(s, table.address);
                 const segment = &inst.elem_segments[immediate.first];
                 const elems = if (segment.dropped) &.{} else segment.elems;
-                const source_end = @as(u64, source) + count;
-                const dest_end = @as(u64, dest) + count;
-                const table = inst.tables[immediate.second];
                 if (table.host) |host| host.lock(host.ctx);
                 defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
-                if (source_end > elems.len or dest_end > table.elems.len)
+                const source_range = checkedRange(source, count, elems.len) orelse
                     return s.trap("out of bounds table access");
-                @memcpy(table.elems[dest..@intCast(dest_end)], elems[source..@intCast(source_end)]);
-                if (table.host) |host| host.sync(host.ctx, table, dest, count);
+                const dest_range = checkedRange(dest, count, table.elems.len) orelse
+                    return s.trap("out of bounds table access");
+                @memcpy(table.elems[dest_range.start..dest_range.end], elems[source_range.start..source_range.end]);
+                if (table.host) |host| host.sync(host.ctx, table, dest_range.start, dest_range.end - dest_range.start);
             },
             .elem_drop => inst.elem_segments[instr.imm.idx].dropped = true,
             .table_copy => {
-                const count = popI32(s);
-                const source = popI32(s);
-                const dest = popI32(s);
                 const immediate = instr.imm.indices;
                 const dest_table = inst.tables[immediate.first];
                 const source_table = inst.tables[immediate.second];
+                const count = popAddress(s, types.AddressType.min(dest_table.address, source_table.address));
+                const source = popAddress(s, source_table.address);
+                const dest = popAddress(s, dest_table.address);
                 if (dest_table == source_table) {
                     if (dest_table.host) |host| host.lock(host.ctx);
                     dest_table.lockTable();
@@ -3018,171 +3069,174 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                         if (first.host) |host| host.unlock(host.ctx);
                     }
                 }
-                const source_end = @as(u64, source) + count;
-                const dest_end = @as(u64, dest) + count;
-                if (source_end > source_table.elems.len or dest_end > dest_table.elems.len)
+                const source_range = checkedRange(source, count, source_table.elems.len) orelse
                     return s.trap("out of bounds table access");
-                const dest_slice = dest_table.elems[dest..@intCast(dest_end)];
-                const source_slice = source_table.elems[source..@intCast(source_end)];
+                const dest_range = checkedRange(dest, count, dest_table.elems.len) orelse
+                    return s.trap("out of bounds table access");
+                const dest_slice = dest_table.elems[dest_range.start..dest_range.end];
+                const source_slice = source_table.elems[source_range.start..source_range.end];
                 if (dest_table != source_table or dest <= source)
                     std.mem.copyForwards(ValueSlot, dest_slice, source_slice)
                 else
                     std.mem.copyBackwards(ValueSlot, dest_slice, source_slice);
-                if (dest_table.host) |host| host.sync(host.ctx, dest_table, dest, count);
+                if (dest_table.host) |host| host.sync(host.ctx, dest_table, dest_range.start, dest_range.end - dest_range.start);
             },
             .i32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 try pushI32(s, @truncate(mem.readUnordered(ea, 4)));
             },
             .i64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 8);
                 try pushI64(s, mem.readUnordered(ea, 8));
             },
             .f32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 try push(s, @truncate(mem.readUnordered(ea, 4)));
             },
             .f64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 8);
                 try push(s, mem.readUnordered(ea, 8));
             },
             .i32_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(@as(u8, @truncate(mem.readUnordered(ea, 1))))))));
             },
             .i32_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 try pushI32(s, @truncate(mem.readUnordered(ea, 1)));
             },
             .i32_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 try pushI32(s, @bitCast(@as(i32, @as(i16, @bitCast(@as(u16, @truncate(mem.readUnordered(ea, 2))))))));
             },
             .i32_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 try pushI32(s, @truncate(mem.readUnordered(ea, 2)));
             },
             .i64_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 try pushI64(s, @bitCast(@as(i64, @as(i8, @bitCast(@as(u8, @truncate(mem.readUnordered(ea, 1))))))));
             },
             .i64_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 try pushI64(s, mem.readUnordered(ea, 1));
             },
             .i64_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 try pushI64(s, @bitCast(@as(i64, @as(i16, @bitCast(@as(u16, @truncate(mem.readUnordered(ea, 2))))))));
             },
             .i64_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 try pushI64(s, mem.readUnordered(ea, 2));
             },
             .i64_load32_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 try pushI64(s, @bitCast(@as(i64, @as(i32, @bitCast(@as(u32, @truncate(mem.readUnordered(ea, 4))))))));
             },
             .i64_load32_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 try pushI64(s, mem.readUnordered(ea, 4));
             },
             .i32_store => {
                 const v = popI32(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 mem.writeUnordered(ea, 4, v);
             },
             .i64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 8);
                 mem.writeUnordered(ea, 8, v);
             },
             .f32_store => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 mem.writeUnordered(ea, 4, v);
             },
             .f64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 8);
                 mem.writeUnordered(ea, 8, v);
             },
             .i32_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 mem.writeUnordered(ea, 1, v);
             },
             .i32_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 mem.writeUnordered(ea, 2, v);
             },
             .i64_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 1);
                 mem.writeUnordered(ea, 1, v);
             },
             .i64_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 2);
                 mem.writeUnordered(ea, 2, v);
             },
             .i64_store32 => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
-                const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
+                const ea = try effAddr(s, mem, popAddress(s, mem.address), m.offset, 4);
                 mem.writeUnordered(ea, 4, v);
             },
-            .memory_size => try pushI32(s, inst.mems[0].pages()),
+            .memory_size => {
+                const memory = inst.mems[0];
+                try pushAddress(s, memory.address, memory.pages());
+            },
             .memory_grow => {
-                const delta = popI32(s);
+                const memory = inst.mems[0];
+                const delta = popAddress(s, memory.address);
                 checkpoint(s);
-                const r = memoryGrow(inst.mems[0], delta);
-                try pushI32(s, @bitCast(r));
+                try pushAddressGrowResult(s, memory.address, memoryGrowAddressed(memory, delta));
             },
             .i32_const => try pushI32(s, @bitCast(instr.imm.i32)),
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
@@ -3692,10 +3746,24 @@ fn memSec(comptime min: u32, comptime max: ?u32) []const u8 {
     }
 }
 
+fn mem64Sec(comptime min: usize, comptime max: ?usize) []const u8 {
+    comptime {
+        if (max) |m| return sec(5, "\x01\x05" ++ leb(min) ++ leb(m));
+        return sec(5, "\x01\x04" ++ leb(min));
+    }
+}
+
 fn tableSec(comptime min: u32, comptime max: ?u32) []const u8 {
     comptime {
         if (max) |m| return sec(4, "\x01\x70\x01" ++ leb(min) ++ leb(m));
         return sec(4, "\x01\x70\x00" ++ leb(min));
+    }
+}
+
+fn table64Sec(comptime min: usize, comptime max: ?usize) []const u8 {
+    comptime {
+        if (max) |m| return sec(4, "\x01\x70\x05" ++ leb(min) ++ leb(m));
+        return sec(4, "\x01\x70\x04" ++ leb(min));
     }
 }
 
@@ -4033,6 +4101,121 @@ test "wasm.exec memory64 active offsets retain all address bits" {
     defer decode.destroyModule(talloc, mod);
     try std.testing.expectError(error.Trap, instantiate(talloc, mod, .{}, &diag));
     try std.testing.expectEqualStrings("out of bounds memory index", diag.message());
+}
+
+test "wasm.exec memory64 scalar access size grow and overflow traps" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            ft(I64 ++ I32, I32),
+            ft("", I64),
+            ft(I64, I64),
+        }) ++
+        funcSec(&.{ 0, 1, 2 }) ++ mem64Sec(1, 2) ++ codeSec(&.{
+        "\x20\x00\x20\x01\x36\x02\x00\x20\x00\x28\x02\x00",
+        "\x3F\x00",
+        "\x20\x00\x40\x00",
+    }));
+    const features: types.Features = .{ .memory64 = true };
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try std.testing.expectEqual(@as(u64, 0xA5A5_5A5A), try run1(inst, 0, &.{ 8, 0xA5A5_5A5A }));
+    try std.testing.expectEqual(@as(u64, 1), try run1(inst, 1, &.{}));
+    try runTrap(1, inst, 0, &.{ 0x1_0000_0000, 7 }, "out of bounds memory access");
+    try runTrap(1, inst, 0, &.{ std.math.maxInt(u64), 7 }, "out of bounds memory access");
+
+    try std.testing.expectEqual(@as(u64, 1), try run1(inst, 2, &.{1}));
+    try std.testing.expectEqual(@as(u64, 2), try run1(inst, 1, &.{}));
+    try std.testing.expectEqual(std.math.maxInt(u64), try run1(inst, 2, &.{1}));
+    try std.testing.expectEqual(@as(u64, 2), try run1(inst, 1, &.{}));
+}
+
+test "wasm.exec memory64 table64 size grow and overflow traps" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft("", I64), ft(I64, I64), ft(I64, "\x70") }) ++
+        funcSec(&.{ 0, 1, 2 }) ++ table64Sec(1, 2) ++ codeSec(&.{
+        "\xFC\x10\x00",
+        "\xD0\x70\x20\x00\xFC\x0F\x00",
+        "\x20\x00\x25\x00",
+    }));
+    const features: types.Features = .{ .memory64 = true, .reference_types = true };
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try std.testing.expectEqual(@as(u64, 1), try run1(inst, 0, &.{}));
+    try std.testing.expectEqual(@as(u64, 1), try run1(inst, 1, &.{1}));
+    try std.testing.expectEqual(@as(u64, 2), try run1(inst, 0, &.{}));
+    try std.testing.expectEqual(std.math.maxInt(u64), try run1(inst, 1, &.{1}));
+    try runTrap(1, inst, 2, &.{0x1_0000_0000}, "undefined element");
+}
+
+test "wasm.exec memory64 bulk initialization uses full-width destinations" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{ft(I64, I32)}) ++ funcSec(&.{0}) ++ mem64Sec(1, null) ++
+        sec(12, "\x01") ++ codeSec(&.{
+        "\x20\x00\x41\x00\x41\x01\xFC\x08\x00\x00\x20\x00\x2D\x00\x00",
+    }) ++ sec(11, "\x01\x01\x01A"));
+    const features: types.Features = .{ .memory64 = true, .bulk_memory = true };
+    try expectResultsWithFeatures(bytes, features, 0, &.{7}, &.{65});
+    try expectTrapWithFeatures(bytes, features, 1, 0, &.{0x1_0000_0000}, "out of bounds memory access");
+}
+
+test "wasm.exec memory64 bulk fill copy are bounds atomic" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft(I64 ++ I64, I32), ft(I64 ++ I64 ++ I64, I32), ft(I64, I32) }) ++
+        funcSec(&.{ 0, 1, 2 }) ++ mem64Sec(1, null) ++ codeSec(&.{
+        "\x20\x00" ++ i32c(0x5A) ++ "\x20\x01\xFC\x0B\x00\x20\x00\x2D\x00\x00",
+        "\x20\x00\x20\x01\x20\x02\xFC\x0A\x00\x00\x20\x00\x2D\x00\x00",
+        "\x20\x00\x2D\x00\x00",
+    }));
+    const features: types.Features = .{ .memory64 = true, .bulk_memory = true };
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try std.testing.expectEqual(@as(u64, 0x5A), try run1(inst, 0, &.{ 5, 3 }));
+    try std.testing.expectEqual(@as(u64, 0x5A), try run1(inst, 1, &.{ 10, 5, 3 }));
+    try runTrap(1, inst, 0, &.{ 0x1_0000_0000, 1 }, "out of bounds memory access");
+    try std.testing.expectEqual(@as(u64, 0), try run1(inst, 2, &.{0}));
+}
+
+test "wasm.exec memory64 indirect calls retain table64 indices" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{ ft("", I32), ft(I64, I32) }) ++ funcSec(&.{ 0, 1 }) ++
+        table64Sec(1, 1) ++ sec(9, "\x01\x00\x42\x00\x0B\x01\x00") ++ codeSec(&.{
+        i32c(42),
+        "\x20\x00\x11\x00\x00",
+    }));
+    const features: types.Features = .{ .memory64 = true };
+    try expectResultsWithFeatures(bytes, features, 1, &.{0}, &.{42});
+    try expectTrapWithFeatures(bytes, features, 1, 1, &.{0x1_0000_0000}, "undefined element");
+}
+
+test "wasm.exec memory64 SIMD and atomic accesses use i64 addresses" {
+    const simd_bytes = comptime (hdr ++
+        typesSec(&.{ft(I64, I32)}) ++ funcSec(&.{0}) ++ mem64Sec(1, null) ++ codeSec(&.{
+        "\x20\x00\xFD\x00\x04\x00\xFD\x1B\x00",
+    }));
+    const simd_features: types.Features = .{ .memory64 = true, .fixed_width_simd = true };
+    try expectResultsWithFeatures(simd_bytes, simd_features, 0, &.{0}, &.{0});
+    try expectTrapWithFeatures(simd_bytes, simd_features, 1, 0, &.{0x1_0000_0000}, "out of bounds memory access");
+
+    const atomic_bytes = comptime (hdr ++
+        typesSec(&.{ft(I64, I32)}) ++ funcSec(&.{0}) ++
+        sec(5, "\x01\x07\x01\x01") ++ codeSec(&.{
+        "\x20\x00\xFE\x10\x02\x00",
+    }));
+    const atomic_features: types.Features = .{ .memory64 = true, .threads = true };
+    try expectResultsWithFeatures(atomic_bytes, atomic_features, 0, &.{0}, &.{0});
+    try expectTrapWithFeatures(atomic_bytes, atomic_features, 1, 0, &.{0x1_0000_0000}, "out of bounds memory access");
 }
 
 test "wasm.exec host constructors memory table global" {
@@ -4609,7 +4792,7 @@ fn hostReenter(ctx_raw: *anyopaque, args: []const u64, results: []u64, diag: *ty
             diag.set(types.Diagnostic.no_offset, "{s}", .{inner.message()});
             return error.Trap;
         },
-        error.OutOfMemory, error.Host => return error.Host,
+        error.OutOfMemory, error.Host, error.Exception => return error.Host,
     };
 }
 
