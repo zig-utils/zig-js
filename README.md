@@ -128,10 +128,17 @@ their validation rules, and 86 top-level commands across the four dedicated
 proposal files. Behind the opt-in feature, tag declarations, sections,
 imports/exports, type validation, runtime identity, linking, and rollback-safe
 ownership are implemented. Module reflection reports the standard `tag` kind;
-the JavaScript `WebAssembly.Tag`/`Exception` boundary is tracked separately by
-[#291](https://github.com/zig-utils/zig-js/issues/291). Exception values,
-instruction validation/execution, unwinding, and the proposal score remain
-tracked by [#290](https://github.com/zig-utils/zig-js/issues/290).
+`exnref`, `throw`, `throw_ref`, and `try_table` now decode, validate, and
+execute with tag-identity matching and all four catch forms. Typed payloads
+retain exact integer/float bits and reference identity across nested blocks,
+ordinary calls, rethrows, and tail-frame replacement; traps remain uncatchable.
+Dropped exception references are reclaimed at invocation teardown, while
+escaped references publish atomically into the instance's precise-GC root
+list. A 512-handler unwind, allocation-failure injection, and eight concurrent
+publishers pass in both normal and ThreadSanitizer runs: **8/8 tests, 0 failed,
+0 skipped, 0 leaked** in each. The JavaScript `WebAssembly.Tag`/`Exception`
+boundary remains [#291](https://github.com/zig-utils/zig-js/issues/291), and the
+complete proposal score remains [#292](https://github.com/zig-utils/zig-js/issues/292).
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -973,8 +980,8 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including exception instruction execution
-  and proposal corpus scoring, tail-call proposal corpus scoring, and
+  from the PR-249 reference corpus, including the exception JavaScript host API
+  and exception/tail-call proposal corpus scoring, and
   memory64/GC, plus terminal Threads host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,

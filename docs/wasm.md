@@ -239,14 +239,36 @@ distinct identities, and failed instantiation tears down every partially
 created tag. The core linker checks exact payload types, while Module
 import/export reflection exposes the standard `tag` kind. The JavaScript
 `WebAssembly.Tag` and `WebAssembly.Exception` objects remain
-[#291](https://github.com/zig-utils/zig-js/issues/291). `exnref`, instruction
-validation/execution, typed unwinding, root safety, and the proposal score
-remain [#290](https://github.com/zig-utils/zig-js/issues/290).
+[#291](https://github.com/zig-utils/zig-js/issues/291).
+
+The core exception runtime is complete at `979bb195`. `exnref`, `throw`,
+`throw_ref`, `try_table`, and every catch form decode and validate against the
+pinned rules. Runtime handlers match store tag identity, unwind nested blocks
+and ordinary calls, disappear correctly across tail-frame replacement, and do
+not intercept traps. Payload slots retain exact integer and NaN bits plus
+externref identity; `catch_ref` and `catch_all_ref` preserve the same exception
+record across `throw_ref` and later invocations. Dropped temporary references
+are reclaimed when an invocation ends. Escaped records publish through an
+atomic per-instance list whose flattened reference roots are visible both to
+active execution checkpoints and ordinary object tracing.
+
+Focused normal and ThreadSanitizer runs each pass all 8 executor tests with 0
+failures, skips, leaks, or reported races. They include 512 nested handlers,
+eight concurrent publishers, exhaustive allocation-failure injection, null
+`throw_ref`, uncaught propagation, cross-call and cross-invocation rethrows,
+tail-call handler removal, and trap bypass. The focused binary/validation and
+GC-root witnesses pass 4/4 and 3/3 respectively. The exact proposal-script
+score remains the terminal [#292](https://github.com/zig-utils/zig-js/issues/292)
+gate rather than being inferred from these unit witnesses.
 
 Reproduce the focused tag ownership and failure-atomicity witness with:
 
 ```sh
 zig build test -Dtest-filter='exception tag'
+zig build test -Dtest-filter='modern exception'
+zig build test -Dtest-filter='wasm.exec exception'
+zig build test -Dtsan=true -Dtest-filter='wasm.exec exception'
+zig build test -Dtest-filter='exception-payload WebAssembly roots'
 ```
 
 The fixed-width-SIMD foundation additionally checks in an exact

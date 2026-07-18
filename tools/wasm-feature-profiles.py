@@ -64,6 +64,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-exception-handling-opcodes.json",
     )
     parser.add_argument(
+        "--exception-runtime-source",
+        type=Path,
+        default=ROOT / "src/wasm/exec.zig",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -232,6 +237,7 @@ def main() -> int:
     )
 
     exception_feature = next(feature for feature in features if feature["id"] == "exception_handling")
+    exception_runtime_source = args.exception_runtime_source.read_text()
     exception_inventory = json.loads(args.exception_handling_inventory.read_text())
     require(exception_inventory.get("schema_version") == 1, "exception inventory: unsupported schema version")
     require(exception_inventory.get("kind") == "webassembly_exception_handling_binary_inventory", "exception inventory: invalid kind")
@@ -291,6 +297,19 @@ def main() -> int:
         "exception inventory/runtime tag declaration drift",
     )
     require(
+        re.search(r"^    exnref = 0x69,$", source, re.MULTILINE) is not None,
+        "exception inventory/runtime exnref drift",
+    )
+    runtime_exception_ops = {
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{2}),$", op_enum, re.MULTILINE)
+        if name in {"throw", "throw_ref", "try_table"}
+    }
+    require(
+        runtime_exception_ops == {(entry["name"], entry["opcode"]) for entry in exception_inventory["opcodes"]},
+        "exception inventory/runtime opcode drift",
+    )
+    require(
         "13 => 6," in decode_source
         and "mod.tags = try parseTagSection(&r, a);" in decode_source,
         "exception inventory/runtime tag section drift",
@@ -304,6 +323,21 @@ def main() -> int:
         "fn validateTagType" in validate_source
         and "e.index >= mod.totalTags()" in validate_source,
         "exception inventory/runtime tag validation drift",
+    )
+    require(
+        all(token in decode_source for token in (".catch_tag", ".catch_ref", ".catch_all", ".catch_all_ref")),
+        "exception inventory/runtime catch-clause drift",
+    )
+    require(
+        all(token in exception_runtime_source for token in (
+            "fn handleException",
+            "fn throwTag",
+            "fn throwReference",
+            "fn finalizeExceptions",
+            "deepExceptionBody(512)",
+            "exception references publish concurrently",
+        )),
+        "exception inventory/runtime unwinding evidence drift",
     )
 
     movement = json.loads(args.simd_movement_inventory.read_text())
