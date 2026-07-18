@@ -107,6 +107,24 @@ def action_expression(action: dict) -> str:
     raise ValueError(f"unknown action type {action['type']}")
 
 
+def is_nan_bits(value: dict) -> bool:
+    kind = value.get("type")
+    raw = int(value.get("value", "0"), 0)
+    if kind == "f32":
+        return raw & 0x7F800000 == 0x7F800000 and raw & 0x007FFFFF != 0
+    if kind == "f64":
+        return (
+            raw & 0x7FF0000000000000 == 0x7FF0000000000000
+            and raw & 0x000FFFFFFFFFFFFF != 0
+        )
+    return False
+
+
+def requires_bit_exact_nan(command: dict) -> bool:
+    values = command.get("expected", []) + command.get("action", {}).get("args", [])
+    return any(is_nan_bits(value) for value in values)
+
+
 PRELUDE = r"""
 const __report = { commands: [] };
 const __modules = Object.create(null);
@@ -215,6 +233,13 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{js_string(kind)},'fail',__message(__error));}}}}"
             )
         if kind == "assert_return":
+            if requires_bit_exact_nan(command):
+                return record_line(
+                    index,
+                    command,
+                    "not_applicable",
+                    "exact NaN payload/sign is not observable through JavaScript Number; tracked by #261",
+                )
             expression = action_expression(command["action"])
             expected = json.dumps(command.get("expected", []), separators=(",", ":"))
             return (
