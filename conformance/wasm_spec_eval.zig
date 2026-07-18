@@ -5,7 +5,8 @@
 //! ordinary zig-js Context and prints the script's final JSON string verbatim.
 //! `WASM_SPEC_PROFILE=core-2-structural` enables the completed structural set;
 //! `WASM_SPEC_PROFILE=simd` adds fixed-width SIMD; `threads` selects shared
-//! memories and atomic execution.
+//! memories and atomic execution; `tail-calls` and `exception-handling` select
+//! their exact pinned proposal feature gates.
 
 const std = @import("std");
 const js = @import("js");
@@ -21,9 +22,13 @@ pub fn main(init: std.process.Init) !void {
 
     const profile = init.environ_map.get("WASM_SPEC_PROFILE") orelse "";
     const structural = std.mem.eql(u8, profile, "core-2-structural") or
-        std.mem.eql(u8, profile, "simd");
+        std.mem.eql(u8, profile, "simd") or
+        std.mem.eql(u8, profile, "tail-calls") or
+        std.mem.eql(u8, profile, "exception-handling");
     const simd = std.mem.eql(u8, profile, "simd");
     const threads = std.mem.eql(u8, profile, "threads");
+    const tail_calls = std.mem.eql(u8, profile, "tail-calls");
+    const exception_handling = std.mem.eql(u8, profile, "exception-handling");
     const ctx = try js.Context.createWithTestingOptions(gpa, .{
         .enable_threads = threads,
         .enable_gc = threads,
@@ -39,6 +44,8 @@ pub fn main(init: std.process.Init) !void {
             .reference_types = true,
             .bulk_memory = true,
             .fixed_width_simd = simd,
+            .tail_calls = tail_calls or exception_handling,
+            .exception_handling = exception_handling,
         } else .{},
     });
     defer ctx.destroy();

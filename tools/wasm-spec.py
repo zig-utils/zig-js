@@ -118,6 +118,32 @@ PROFILES = {
         "corpus_glob": "test/core/threads/*.wast",
         "converter_args": ["--enable-threads"],
     },
+    "tail-calls": {
+        "kind": "webassembly_tail_call_inventory",
+        "repository": "https://github.com/WebAssembly/tail-call.git",
+        "tag": "proposal-revision",
+        "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "tail-calls",
+        "features": ["multi_value", "reference_types", "bulk_memory", "tail_calls"],
+        "corpus_glob": "test/core/*.wast",
+        "default_files": ["return_call.wast", "return_call_indirect.wast"],
+        "converter_args": ["--enable-tail-call"],
+    },
+    "exception-handling": {
+        "kind": "webassembly_exception_handling_inventory",
+        "repository": "https://github.com/WebAssembly/exception-handling.git",
+        "tag": "proposal-revision",
+        "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "exception-handling",
+        "features": ["multi_value", "reference_types", "bulk_memory", "tail_calls", "exception_handling"],
+        "corpus_glob": "test/core/*.wast",
+        "default_files": ["tag.wast", "throw.wast", "throw_ref.wast", "try_table.wast"],
+        "converter_args": ["--enable-exceptions", "--enable-tail-call"],
+    },
 }
 
 
@@ -808,6 +834,13 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 action,
                 "WebAssembly.RuntimeError",
             )
+        if kind == "assert_exception":
+            return expected_exception(
+                index,
+                command,
+                action_expression(command["action"]),
+                "WebAssembly.Exception",
+            )
         if kind in ("assert_malformed", "assert_invalid"):
             if command.get("module_type") == "text":
                 return record_line(
@@ -978,6 +1011,10 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "fixed_width_simd"
     if profile_name == "threads":
         return "threads"
+    if profile_name == "tail-calls":
+        return "tail_calls"
+    if profile_name == "exception-handling":
+        return "exception_handling"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -1032,6 +1069,8 @@ def main() -> int:
         "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
         "simd": ROOT / "docs/.data/wasm-simd-inventory.json",
         "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
+        "tail-calls": ROOT / "docs/.data/wasm-tail-call-inventory.json",
+        "exception-handling": ROOT / "docs/.data/wasm-exception-handling-inventory.json",
     }
     inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
