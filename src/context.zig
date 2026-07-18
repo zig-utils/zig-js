@@ -16471,6 +16471,108 @@ test "enable_gc: WebAssembly externref execution roots retain then release exact
     try std.testing.expect((try ctx.evaluate("wasmWeak.deref() === undefined")).asBool());
 }
 
+test "parallel_js: WebAssembly externref roots survive no-GIL collection then reclaim" {
+    // Keep the Wasm frame on this (parked) host thread while a different native
+    // thread drives real parallel JS + mid-script collection. The collector does
+    // not conservatively scan this thread in parallel mode, so the target can
+    // survive only if the frozen interpreter's tagged Wasm slot is traced.
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+        .parallel_midscript_gc = true,
+    });
+    defer ctx.destroy();
+
+    const target = try ctx.evaluate(
+        \\globalThis.wasmParallelRef = { tag: 29 };
+        \\globalThis.wasmParallelWeak = new WeakRef(wasmParallelRef);
+        \\wasmParallelRef;
+    );
+    _ = try ctx.evaluate("globalThis.wasmParallelRef = undefined");
+
+    var machine = ctx.interpreter();
+    const slots = [_]value.WasmSlot{.{ .externref = target }};
+    var roots: value.WasmExecutionRoots = .{ .stack = &slots };
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    try machine.pushWasmRoots(&roots);
+    var roots_registered = true;
+    defer if (roots_registered) machine.popWasmRoots(&roots);
+    // Model an execution frame stopped in a native wait. The parallel collector
+    // pins gc_root_lock and traces this stable root set directly.
+    machine.gc_parked.store(true, .release);
+    var parked = true;
+    defer {
+        if (parked) {
+            machine.lockGcRoots();
+            machine.gc_parked.store(false, .release);
+            machine.unlockGcRoots();
+        }
+    }
+
+    const source =
+        \\(() => {
+        \\  const threads = [];
+        \\  for (let t = 0; t < 3; t++) {
+        \\    threads.push(new Thread(() => {
+        \\      const keep = [];
+        \\      for (let round = 0; round < 6; round++) {
+        \\        let last = null;
+        \\        for (let i = 0; i < 500; i++) last = { a: i, b: { c: i }, d: [i, i + 1] };
+        \\        keep.push({ round: round, tag: last.a });
+        \\        let spin = 0;
+        \\        for (let j = 0; j < 6000; j++) spin = (spin + j) & 0x3fffffff;
+        \\        if (spin < 0) keep.push({ never: true });
+        \\      }
+        \\      if (keep.length !== 6) return -1;
+        \\      for (let i = 0; i < keep.length; i++)
+        \\        if (keep[i].round !== i || keep[i].tag !== 499) return -2;
+        \\      return 1;
+        \\    }));
+        \\  }
+        \\  let ok = 0;
+        \\  for (const thread of threads) if (thread.join() === 1) ok++;
+        \\  return ok;
+        \\})();
+    ;
+    const Worker = struct {
+        context: *Context,
+        source: []const u8,
+        ok: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            var attempt: usize = 0;
+            while (attempt < 10) : (attempt += 1) {
+                const result = self.context.evaluate(self.source) catch return;
+                if (!result.isNumber() or result.asNum() != 3) return;
+                if (self.context.gc_par_collections.load(.monotonic) > 0) {
+                    self.ok.store(true, .release);
+                    return;
+                }
+            }
+        }
+    };
+    var worker = Worker{ .context = ctx, .source = source };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    thread.join();
+
+    try std.testing.expect(worker.ok.load(.acquire));
+    try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
+    try std.testing.expect((try ctx.evaluate("wasmParallelWeak.deref()?.tag === 29")).asBool());
+
+    machine.lockGcRoots();
+    machine.gc_parked.store(false, .release);
+    machine.unlockGcRoots();
+    parked = false;
+    machine.popWasmRoots(&roots);
+    roots_registered = false;
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate("wasmParallelWeak.deref() === undefined")).asBool());
+}
+
 test "enable_gc: shell gc request runs at the evaluate-tail quiescent point" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
