@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (279 implemented, 152 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (285 implemented, 146 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 279 private entries are implemented; the other 152 remain pending
+The first 285 private entries are implemented; the other 146 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 281/281 compiled fixture additionally
+sibling realms, GC, and reentry; the 287/287 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -589,6 +589,25 @@ Precise heaps use zig-gc's race-safe live/last-full accounting API; arena VMs
 report committed arena capacity. Sibling/foreign isolation, null boundaries,
 counter saturation, deferred job execution, and first-exception preservation
 are covered.
+
+The VM execution-control slice adds the pinned API-lock trio and
+execution-time-limit trio. The group API lock maps `JSC::VM::apiLock()` onto a
+recursive per-group mutex: same-thread nesting increments depth without
+deadlock while foreign threads block on a real atomic mutex, and the deprecated
+callback form runs under that hold. The execution-time limit maps
+`JSC::Watchdog` onto a lazily spawned host-watchdog thread per context group
+that naps to the armed monotonic deadline, then raises the shared termination
+request and cooperatively interrupts running evaluation through the documented
+host-watchdog entry point. Arming mirrors the pinned timeout mapping (`+inf` is
+`noTimeLimit`, non-positive values fire at the next watchdog tick, NaN stays
+armed but never fires, finite values saturate instead of overflowing), one
+arming fires at most once, the limit stays reported after firing, and clearing
+never clears an already-requested termination. Per zig-js's documented
+host-watchdog contract the interruption is terminal for the context. The
+fixture covers armed-state sharing across sibling realms, foreign-VM isolation,
+null tolerance, recursive reentry, cross-thread exclusion, and a real 30ms
+interruption of an unbounded loop attributed to the watchdog through the
+termination request.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -745,7 +764,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 278-symbol
+the same frame/script identity and own every returned string. The 287-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -790,7 +809,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (271 implemented, 150 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (277 implemented, 144 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
