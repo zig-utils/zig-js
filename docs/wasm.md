@@ -237,9 +237,7 @@ tag declarations and section order decode exactly, imported and defined tag
 types validate, tag imports preserve store identity, definitions allocate
 distinct identities, and failed instantiation tears down every partially
 created tag. The core linker checks exact payload types, while Module
-import/export reflection exposes the standard `tag` kind. The JavaScript
-`WebAssembly.Tag` and `WebAssembly.Exception` objects remain
-[#291](https://github.com/zig-utils/zig-js/issues/291).
+import/export reflection exposes the standard `tag` kind.
 
 The core exception runtime is complete at `979bb195`. `exnref`, `throw`,
 `throw_ref`, `try_table`, and every catch form decode and validate against the
@@ -257,9 +255,38 @@ failures, skips, leaks, or reported races. They include 512 nested handlers,
 eight concurrent publishers, exhaustive allocation-failure injection, null
 `throw_ref`, uncaught propagation, cross-call and cross-invocation rethrows,
 tail-call handler removal, and trap bypass. The focused binary/validation and
-GC-root witnesses pass 4/4 and 3/3 respectively. The exact proposal-script
-score remains the terminal [#292](https://github.com/zig-utils/zig-js/issues/292)
-gate rather than being inferred from these unit witnesses.
+GC-root witnesses pass 4/4 and 3/3 respectively.
+
+The JavaScript boundary completed in
+[#291](https://github.com/zig-utils/zig-js/issues/291). `WebAssembly.Tag`
+accepts the Web IDL sequence descriptor with iterator-close and observable
+conversion order, `Tag.prototype.type()` returns a fresh descriptor, and the
+store owns one stable `WebAssembly.JSTag`. `WebAssembly.Exception` converts a
+typed payload, exposes branded `is()` and `getArg()` methods, accepts the
+proposal's `traceStack` option, and deliberately returns `undefined` from its
+optional `stack` accessor because this engine does not capture a stack trace.
+Constructor metadata, prototypes, descriptors, subclassing, receiver checks,
+arity, range errors, and cross-store rejection are covered explicitly.
+
+Imported tags retain their JavaScript identity; defined exports cache one
+wrapper per tag; callbacks, catches, `throw_ref`, rethrows, tail calls, async
+start rejection, and cross-instance transfers retain the same exception record
+where the proposal requires it. An arbitrary JavaScript value thrown by an
+imported callback is transported with `JSTag`, including `undefined`, while
+engine traps, stack exhaustion, and allocation failure remain uncatchable.
+Published wrappers and payload references are precise-GC roots, and failed
+construction or instantiation releases each partially owned record exactly
+once. Concurrent native-wrapper publication is atomic.
+
+The broad JavaScript API run passes 34/34 tests with no failures, skips, or
+leaks. A focused ThreadSanitizer transport run passes 3/3 with no race or leak,
+and the executor's normal and ThreadSanitizer runs remain 8/8. The public API
+differential compares 10 equivalent surface, descriptor, construction,
+identity, error, iteration-order, and subclassing rows against macOS system
+JavaScriptCore 22625.1.20.11.3; all rows match with digest
+`1bb603912329d2e7`. The exact proposal-script score remains the terminal
+[#292](https://github.com/zig-utils/zig-js/issues/292) gate rather than being
+inferred from these unit and differential witnesses.
 
 Reproduce the focused tag ownership and failure-atomicity witness with:
 
@@ -269,6 +296,9 @@ zig build test -Dtest-filter='modern exception'
 zig build test -Dtest-filter='wasm.exec exception'
 zig build test -Dtsan=true -Dtest-filter='wasm.exec exception'
 zig build test -Dtest-filter='exception-payload WebAssembly roots'
+zig build test -Dtest-filter='wasm api'
+zig build test -Dtsan=true -Dtest-filter='wasm api transports typed exceptions'
+zig build wasm-exception-jsc-diff
 ```
 
 The fixed-width-SIMD foundation additionally checks in an exact

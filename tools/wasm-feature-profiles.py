@@ -238,6 +238,9 @@ def main() -> int:
 
     exception_feature = next(feature for feature in features if feature["id"] == "exception_handling")
     exception_runtime_source = args.exception_runtime_source.read_text()
+    exception_api_source = (ROOT / "src/wasm/api.zig").read_text()
+    exception_diff_source = (ROOT / "tests/wasm_exception_jsc_diff.c").read_text()
+    build_source = (ROOT / "build.zig").read_text()
     exception_inventory = json.loads(args.exception_handling_inventory.read_text())
     require(exception_inventory.get("schema_version") == 1, "exception inventory: unsupported schema version")
     require(exception_inventory.get("kind") == "webassembly_exception_handling_binary_inventory", "exception inventory: invalid kind")
@@ -333,11 +336,30 @@ def main() -> int:
             "fn handleException",
             "fn throwTag",
             "fn throwReference",
+            "fn handleHostException",
             "fn finalizeExceptions",
             "deepExceptionBody(512)",
             "exception references publish concurrently",
         )),
         "exception inventory/runtime unwinding evidence drift",
+    )
+    require(
+        all(token in exception_api_source for token in (
+            "fn tagParameterTypes",
+            "fn tagConstructor",
+            "fn exceptionConstructor",
+            "fn exposeUncaughtException",
+            '"JSTag"',
+            "wasm api transports typed exceptions",
+            "wasm api exception payloads and wrappers survive precise GC",
+        )),
+        "exception inventory/JavaScript API evidence drift",
+    )
+    require(
+        "wasm-exception-jsc-diff" in build_source
+        and "WebAssembly.Exception.prototype.getArg" in exception_diff_source
+        and "WebAssembly.JSTag" in exception_diff_source,
+        "exception inventory/JavaScriptCore differential evidence drift",
     )
 
     movement = json.loads(args.simd_movement_inventory.read_text())

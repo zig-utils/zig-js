@@ -136,9 +136,14 @@ Dropped exception references are reclaimed at invocation teardown, while
 escaped references publish atomically into the instance's precise-GC root
 list. A 512-handler unwind, allocation-failure injection, and eight concurrent
 publishers pass in both normal and ThreadSanitizer runs: **8/8 tests, 0 failed,
-0 skipped, 0 leaked** in each. The JavaScript `WebAssembly.Tag`/`Exception`
-boundary remains [#291](https://github.com/zig-utils/zig-js/issues/291), and the
-complete proposal score remains [#292](https://github.com/zig-utils/zig-js/issues/292).
+0 skipped, 0 leaked** in each. The JavaScript boundary now includes branded
+`WebAssembly.Tag` and `WebAssembly.Exception` constructors, `JSTag`, typed
+payload reflection, exact import/export and rethrow identity, arbitrary
+JavaScript throws through `JSTag`, async rejection, precise-GC roots, and
+failure-atomic teardown. The broad API witness passes **34/34 tests, 0 failed,
+0 skipped, 0 leaked**, and all **10/10 equivalent public-API rows** match the
+macOS system JavaScriptCore with digest `1bb603912329d2e7`. The complete pinned
+proposal-script score remains [#292](https://github.com/zig-utils/zig-js/issues/292).
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -311,7 +316,7 @@ The configured test262 coverage for these surfaces is green.
 
 **Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, dynamic `import()`, dynamic-import catch-target behavior, `import defer` async-module behavior, and top-level-await graph ordering covered by the configured runner.
 
-**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal` and `Intl` coverage, plus the documented [WebAssembly MVP API](docs/wasm.md).
+**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal` and `Intl` coverage, plus the documented [WebAssembly API and feature profiles](docs/wasm.md).
 
 ## Using It
 
@@ -980,8 +985,8 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including the exception JavaScript host API
-  and exception/tail-call proposal corpus scoring, and
+  from the PR-249 reference corpus, including exact exception/tail-call proposal
+  corpus scoring and
   memory64/GC, plus terminal Threads host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
