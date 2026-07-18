@@ -15030,7 +15030,7 @@ pub const Interpreter = struct {
                     break;
                 }
                 if (c.getOwn(m)) |fv| {
-                    if (fv.isObject() and (fv.asObj().jsFunction() != null or (c == o and fv.asObj().native != null) or (o.temporalData() != null and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
+                    if (fv.isObject() and (fv.asObj().jsFunction() != null or (c == o and fv.asObj().native != null) or ((o.temporalData() != null or o.wasmGlobal() != null) and std.mem.eql(u8, m, "valueOf") and fv.asObj().native != null))) method = fv
                         // Primitive wrappers' native valueOf is a spec builtin that
                         // produces the boxed primitive at this position in the
                         // OrdinaryToPrimitive order, so do not continue to a later
@@ -17303,9 +17303,10 @@ fn host262IsHTMLDDACallFn(ctx: *anyopaque, this: Value, args: []const Value) val
 /// `$262.detachArrayBuffer(buffer)` — detach an ArrayBuffer's backing store.
 fn host262DetachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
-    _ = ctx;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const v = if (args.len > 0) args[0] else Value.undef();
     if (v.isObject()) if (v.asObj().arrayBuffer()) |ab| {
+        if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be detached");
         ab.setDetached(true);
     };
     return Value.undef();
@@ -21867,6 +21868,7 @@ fn arrayBufferTransferToImmutableFn(ctx: *anyopaque, this: Value, args: []const 
     if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transferToImmutable called on a non-ArrayBuffer");
     const ab = this.asObj().arrayBuffer().?;
     if (ab.is_shared) return self.throwError("TypeError", "transferToImmutable cannot be called on a SharedArrayBuffer");
+    if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
     const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (ab.immutable) return self.throwError("TypeError", "ArrayBuffer is already immutable");
@@ -21963,6 +21965,7 @@ fn arrayBufferTransferFn(comptime fixed: bool) value.NativeFn {
             if (!this.isObject() or this.asObj().arrayBuffer() == null) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a non-ArrayBuffer");
             const ab = this.asObj().arrayBuffer().?;
             if (ab.is_shared) return self.throwError("TypeError", "ArrayBuffer.prototype.transfer called on a SharedArrayBuffer");
+            if (ab.is_wasm_memory) return self.throwError("TypeError", "WebAssembly.Memory buffers cannot be transferred");
             const new_len: usize = if (args.len > 0 and !args[0].isUndefined()) @intCast(try toIndexArg(self, args[0])) else ab.bytes().len;
             if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
             if (ab.immutable) return self.throwError("TypeError", "an immutable ArrayBuffer cannot be transferred");
@@ -28469,6 +28472,7 @@ fn structuredCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
                 if (ab.is_shared) return self.throwDOMException("DataCloneError", "a SharedArrayBuffer is not transferable");
                 if (ab.isDetached()) return self.throwDOMException("DataCloneError", "cannot transfer a detached ArrayBuffer");
                 if (ab.immutable) return self.throwDOMException("DataCloneError", "cannot transfer an immutable ArrayBuffer");
+                if (ab.is_wasm_memory) return self.throwDOMException("DataCloneError", "cannot transfer a WebAssembly.Memory buffer");
                 for (transfer.items) |seen| if (seen == entry.asObj())
                     return self.throwDOMException("DataCloneError", "duplicate transferable");
                 try transfer.append(self.arena, entry.asObj());

@@ -13293,7 +13293,11 @@ export fn JSC__IDLArrayBufferRef__convertToExtern(
     const backing = privateArrayBufferBacking(input) orelse return null;
     // The pinned IDL converter is explicitly unshared and rejects detached
     // ArrayBuffers/views before ExternTraits transfers the RefPtr.
-    if (backing.is_shared or backing.isDetached()) return null;
+    // A Memory.grow replaces and detaches the JS wrapper's current backing.
+    // The generated native handle currently models stable ordinary/shared
+    // backings, so rejecting Memory buffers avoids publishing a handle whose
+    // pointer could be retired by a later grow.
+    if (backing.is_shared or backing.is_wasm_memory or backing.isDetached()) return null;
     return privateEnsureNativeArrayBufferHandle(context, backing);
 }
 

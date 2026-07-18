@@ -387,6 +387,9 @@ pub const ArrayBufferData = struct {
     /// An immutable ArrayBuffer (from `transferToImmutable`/`sliceToImmutable`):
     /// fixed-length, never detaches, and rejects every write.
     immutable: bool = false,
+    /// The live buffer exposed by a WebAssembly.Memory. Ordinary JS transfer
+    /// operations must not detach it; only Memory.grow may replace/detach it.
+    is_wasm_memory: bool = false,
 
     /// The buffer's live bytes: the shared storage's published slice for a
     /// SharedArrayBuffer (always current, even after another realm grows it),
@@ -1006,15 +1009,15 @@ pub const ObjectRareState = union(ObjectRareTag) {
     sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
     js_function: struct { ptr: ?*anyopaque = null },
     regex: ObjectRegexState,
-    // WebAssembly JS API (issue #141). Native payloads are type-erased
-    // (*wasm/types.Module, *wasm/exec.Instance/MemoryInst/TableInst/GlobalInst/
-    // FuncInst); a context-level registry owns their memory, so these slots are
-    // weak views — only the Object edges below participate in GC tracing.
+    // WebAssembly JS API (issue #141). Native payloads are type-erased module,
+    // instance, store-object owner, or function records. A context-level
+    // registry owns their memory, so these slots are weak views — only the
+    // Object edges below participate in GC tracing.
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
     wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null },
-    wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null },
+    wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
     wasm_table: struct { table: ?*anyopaque = null, owner_obj: ?*Object = null },
-    wasm_global: struct { glob: ?*anyopaque = null, owner_obj: ?*Object = null },
+    wasm_global: struct { glob: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.FuncInst
 };
 

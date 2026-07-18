@@ -38,6 +38,13 @@ pub const MemoryInst = struct {
     bytes: []u8,
     limits: types.Limits,
     gpa: Allocator,
+    /// Host hook (WebAssembly JS API, issue #141): when set, `memoryGrow`
+    /// calls it after the new bytes are in place and before the old bytes are
+    /// freed, so the host can re-expose the grown buffer (e.g. swap a JS
+    /// ArrayBuffer onto the fresh allocation). Returning false rolls the grow
+    /// back failure-atomically. Null on the pure-wasm path.
+    on_grow: ?*const fn (ctx: *anyopaque, mem: *MemoryInst) bool = null,
+    on_grow_ctx: ?*anyopaque = null,
 
     pub fn pages(self: *const MemoryInst) u32 {
         return @intCast(self.bytes.len / types.PAGE_SIZE);
@@ -109,6 +116,23 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
     if (old_pages >= limit) return -1;
     if (delta > limit - old_pages) return -1;
     const new_len = @as(usize, old_pages + delta) * types.PAGE_SIZE;
+    if (mem.on_grow) |cb| {
+        // Host-observed grow: `realloc` may release the old bytes before the
+        // hook could observe the grown buffer, so allocate fresh, publish the
+        // new bytes, run the hook, and only then free the old slab.
+        const fresh = mem.gpa.alloc(u8, new_len) catch return -1;
+        @memcpy(fresh[0..mem.bytes.len], mem.bytes);
+        @memset(fresh[mem.bytes.len..], 0);
+        const old = mem.bytes;
+        mem.bytes = fresh;
+        if (!cb(mem.on_grow_ctx orelse @ptrCast(mem), mem)) {
+            mem.bytes = old;
+            mem.gpa.free(fresh);
+            return -1;
+        }
+        mem.gpa.free(old);
+        return @intCast(old_pages);
+    }
     mem.bytes = mem.gpa.realloc(mem.bytes, new_len) catch return -1;
     @memset(mem.bytes[@as(usize, old_pages) * types.PAGE_SIZE ..], 0);
     return @intCast(old_pages);

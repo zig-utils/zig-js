@@ -2201,9 +2201,9 @@ pub fn enableParallelSync() void {
 
 /// One native WebAssembly allocation owned by a Context's wasm store (issue
 /// #141). The payload is type-erased per tag: `*wasm/types.Module`,
-/// `*wasm/exec.Instance`, `*wasm/exec.MemoryInst`, `*wasm/exec.TableInst`,
-/// `*wasm/exec.GlobalInst`. Freed by `wasm/api.zig`'s `teardownWasmStore` at
-/// context teardown.
+/// `*wasm/exec.Instance`, or API-owned Memory/Table/Global records that carry
+/// the native store object and its JS bridge state. Freed by `wasm/api.zig`'s
+/// `teardownWasmStore` at context teardown.
 pub const WasmOwned = union(enum) {
     module: *anyopaque,
     instance: *anyopaque,
