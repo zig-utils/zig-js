@@ -30,12 +30,12 @@ BASE_ITERATIONS = {
 JOBS = {
     "wasm_integer_simd": 200,
     "wasm_integer_scalar": 160,
-    "wasm_float_simd": 150,
+    "wasm_float_simd": 180,
     "wasm_float_scalar": 180,
-    "wasm_shuffle_simd": 600,
-    "wasm_shuffle_scalar": 25,
+    "wasm_shuffle_simd": 800,
+    "wasm_shuffle_scalar": 35,
     "wasm_memory_simd": 180,
-    "wasm_memory_scalar": 100,
+    "wasm_memory_scalar": 120,
 }
 FAMILIES = tuple(BASE_ITERATIONS)
 KINDS = ("simd", "scalar")
