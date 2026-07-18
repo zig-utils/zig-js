@@ -770,6 +770,11 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
         switch (entry.desc) {
             .func => |type_index| {
                 if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", link_proto);
+                if (imported.isObject()) if (imported.asObj().wasmFunction()) |state| {
+                    const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", link_proto)));
+                    if (owner.store != store or !types.funcTypeEql(owner.function_type, module.types[type_index]))
+                        return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", link_proto);
+                };
                 bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index] };
                 funcs[fi] = .{ .ctx = @ptrCast(&bridges[fi]), .type = module.types[type_index], .call = jsImportCall };
                 fi += 1;
