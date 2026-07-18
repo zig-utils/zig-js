@@ -141,7 +141,8 @@ function __same(actual, expected) {
   return false;
 }
 __registry.spectest = {
-  print() {}, print_i32() {}, print_i32_f32() {}, print_f64_f64() {},
+  print() {}, print_i32() {}, print_f32() {}, print_f64() {},
+  print_i32_f32() {}, print_f64_f64() {},
   global_i32: 666,
   global_i64: 666n,
   global_f32: 666,
