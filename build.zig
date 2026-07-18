@@ -406,6 +406,21 @@ pub fn build(b: *std.Build) void {
     const c_api_jsc_diff_step = b.step("c-api-jsc-diff", "Compare the completed value C API against pinned system JSC");
     c_api_jsc_diff_step.dependOn(&c_api_jsc_diff_cmd.step);
 
+    const wasm_exception_jsc_diff = b.addExecutable(.{
+        .name = "wasm-exception-jsc-diff-zig-js",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    wasm_exception_jsc_diff.root_module.addCSourceFile(.{ .file = b.path("tests/wasm_exception_jsc_diff.c") });
+    wasm_exception_jsc_diff.root_module.addIncludePath(b.path("include"));
+    wasm_exception_jsc_diff.root_module.linkLibrary(lib);
+    const wasm_exception_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/wasm-exception-jsc-diff.py" });
+    wasm_exception_jsc_diff_cmd.addArtifactArg(wasm_exception_jsc_diff);
+    const wasm_exception_jsc_diff_step = b.step(
+        "wasm-exception-jsc-diff",
+        "Compare the WebAssembly exception JavaScript API with system JSC",
+    );
+    wasm_exception_jsc_diff_step.dependOn(&wasm_exception_jsc_diff_cmd.step);
+
     // Unit tests over the root module (engine core + C-API).
     // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
     // the agent/worker/waiter machinery (issue #1).

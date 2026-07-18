@@ -1254,6 +1254,11 @@ fn tagType(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value
     return result;
 }
 
+fn jsTagGetter(ctx: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    return Value.obj(@ptrCast(@alignCast(self.active_native.?.private_data.?)));
+}
+
 fn exceptionFromThis(self: *Interpreter, this: Value, what: []const u8) value.HostError!*value.WasmException {
     const object = languageObject(this) orelse return self.throwError("TypeError", what);
     const state = object.wasmException() orelse return self.throwError("TypeError", what);
@@ -2068,6 +2073,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     tag_descriptor.* = .{ .proto = tag_pair.proto };
     tag_pair.ctor.private_data = tag_descriptor;
     try installMethod(env.arena, rs, tag_pair.proto, "type", 0, tagType);
+    try tag_pair.proto.setAttr(env.arena, "type", .{ .writable = true, .enumerable = true, .configurable = true });
     try setData(env.arena, rs, namespace, "Tag", Value.obj(tag_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
     // The built-in JS-exception tag has the proposal-fixed `(externref) -> ()`
@@ -2079,7 +2085,11 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     js_tag.* = .{ .proto = tag_pair.proto };
     const js_tag_state = try js_tag.wasmTagState(env.arena);
     js_tag_state.tag = @ptrCast(js_tag_native);
-    try setData(env.arena, rs, namespace, "JSTag", Value.obj(js_tag), .{ .writable = false, .enumerable = false, .configurable = false });
+    const js_tag_getter = try gc.allocObj(env.arena);
+    js_tag_getter.* = .{ .native = jsTagGetter, .private_data = @ptrCast(js_tag) };
+    try interpreter.installNativeProps(env.arena, rs, js_tag_getter, "get JSTag", 0);
+    try namespace.setAccessor(env.arena, "JSTag", Value.obj(js_tag_getter), null);
+    try namespace.setAttr(env.arena, "JSTag", .{ .enumerable = true, .configurable = true });
 
     const exception_pair = try constructorPair(env, rs, "Exception", 1, exceptionConstructor, object_proto, function_proto);
     const exception_roots = try gc.allocObj(env.arena);
@@ -2091,6 +2101,9 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try installMethod(env.arena, rs, exception_pair.proto, "getArg", 2, exceptionGetArg);
     try installMethod(env.arena, rs, exception_pair.proto, "is", 1, exceptionIs);
     try installAccessor(env.arena, rs, exception_pair.proto, "stack", exceptionStackGetter, null);
+    try exception_pair.proto.setAttr(env.arena, "getArg", .{ .writable = true, .enumerable = true, .configurable = true });
+    try exception_pair.proto.setAttr(env.arena, "is", .{ .writable = true, .enumerable = true, .configurable = true });
+    try exception_pair.proto.setAttr(env.arena, "stack", .{ .enumerable = true, .configurable = true });
     try setData(env.arena, rs, namespace, "Exception", Value.obj(exception_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
     const instance_pair = try constructorPair(env, rs, "Instance", 1, instanceConstructor, object_proto, function_proto);
@@ -2412,6 +2425,8 @@ test "wasm api constructs and links exception tags by identity" {
         \\const defined = instance.exports.d;
         \\const linked = new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: defined } });
         \\const reflected = defined.type();
+        \\const jsTagDescriptor = Object.getOwnPropertyDescriptor(WebAssembly, 'JSTag');
+        \\const typeDescriptor = Object.getOwnPropertyDescriptor(WebAssembly.Tag.prototype, 'type');
         \\let callError = false, brandError = false, linkError = false;
         \\try { WebAssembly.Tag({ parameters: [] }); } catch (error) { callError = error instanceof TypeError; }
         \\try { WebAssembly.Tag.prototype.type.call({}); } catch (error) { brandError = error instanceof TypeError; }
@@ -2423,6 +2438,8 @@ test "wasm api constructs and links exception tags by identity" {
         \\  Object.prototype.toString.call(defined) === '[object WebAssembly.Tag]' &&
         \\  reflected.parameters.length === 1 && reflected.parameters[0] === 'i32' &&
         \\  WebAssembly.JSTag instanceof WebAssembly.Tag && WebAssembly.JSTag.type().parameters[0] === 'externref' &&
+        \\  typeof jsTagDescriptor.get === 'function' && jsTagDescriptor.set === undefined && jsTagDescriptor.enumerable && jsTagDescriptor.configurable &&
+        \\  typeDescriptor.writable && typeDescriptor.enumerable && typeDescriptor.configurable &&
         \\  callError && brandError && linkError;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
@@ -2441,6 +2458,8 @@ test "wasm api constructs branded typed exceptions" {
         \\const tag = new WebAssembly.Tag({ parameters: ['i32', 'i64', 'f32', 'f64', 'externref'] });
         \\const other = new WebAssembly.Tag({ parameters: ['i32', 'i64', 'f32', 'f64', 'externref'] });
         \\const exception = new WebAssembly.Exception(tag, [4294967295, -1n, 1.337, NaN, marker], { traceStack: true });
+        \\const getArgDescriptor = Object.getOwnPropertyDescriptor(WebAssembly.Exception.prototype, 'getArg');
+        \\const isDescriptor = Object.getOwnPropertyDescriptor(WebAssembly.Exception.prototype, 'is');
         \\let mismatch = false, bounds = false, invalidIndex = true, brand = false, jsTag = false, badPayload = false;
         \\try { exception.getArg(other, 0); } catch (error) { mismatch = error instanceof TypeError; }
         \\try { exception.getArg(tag, 5); } catch (error) { bounds = error instanceof RangeError; }
@@ -2455,7 +2474,8 @@ test "wasm api constructs branded typed exceptions" {
         \\  exception.getArg(tag, 1) === -1n && exception.getArg(tag, 2) === Math.fround(1.337) &&
         \\  Number.isNaN(exception.getArg(tag, 3)) && exception.getArg(tag, 4) === marker && exception.stack === undefined &&
         \\  WebAssembly.Exception.length === 1 && WebAssembly.Exception.prototype.getArg.length === 2 &&
-        \\  WebAssembly.Exception.prototype.is.length === 1 && mismatch && bounds && invalidIndex && brand && jsTag && badPayload;
+        \\  WebAssembly.Exception.prototype.is.length === 1 && mismatch && bounds && invalidIndex && brand && jsTag && badPayload &&
+        \\  getArgDescriptor.enumerable && isDescriptor.enumerable;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
