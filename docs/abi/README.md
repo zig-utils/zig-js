@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (286 implemented, 145 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (288 implemented, 143 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 286 private entries are implemented; the other 145 remain pending
+The first 288 private entries are implemented; the other 143 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 288/288 compiled fixture additionally
+sibling realms, GC, and reentry; the 290/290 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -618,6 +618,26 @@ supplies the default zone for `Intl.DateTimeFormat` — and therefore
 precedence; foreign context groups observe the same process-wide zone, and the
 pinned date-cache reset is vacuous because zig-js caches none. zig-js `Date`
 local-time methods remain UTC-coincident by engine design.
+
+The VM trap-notification slice adds the two pinned `VMTraps` notifies that
+have zig-js consumers. `JSC__VM__notifyNeedWatchdogCheck` sets a VM-wide trap
+bit that the running interpreter consumes at its next step checkpoint,
+re-checking the armed execution deadline on the executing thread and
+terminating once it has elapsed — the synchronous half of the watchdog,
+intentionally redundant with the host-watchdog thread exactly like JSC's trap
+bit and `Watchdog` timer. Consumed with no armed limit or a future deadline
+the trap is a no-op, so bounded evaluation is never disturbed.
+`JSC__VM__notifyNeedDebuggerBreak` requests a debugger pause with reason
+"pause" at the next statement boundary on every realm of the VM with an
+enabled debugger session — the same path as CDP `Debugger.pause`, with
+continuation ownership still chosen per pause — and stays inert while no
+debugger is attached, matching a JSC trap without one. The inspector's
+pause-request word is atomic end-to-end so a cross-thread notify cannot race
+the runtime thread's consume, both exports tolerate a null VM, and the
+fixture covers disarmed, future, and elapsed trap consumption against bounded
+and unbounded loops plus termination attribution. The third pinned notify,
+`JSC__VM__notifyNeedShellTimeoutCheck`, stays rejected: it is jsc-shell
+`--timeout` machinery with no possible zig-js consumer.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -774,7 +794,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 288-symbol
+the same frame/script identity and own every returned string. The 290-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -819,7 +839,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (278 implemented, 143 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (280 implemented, 141 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
