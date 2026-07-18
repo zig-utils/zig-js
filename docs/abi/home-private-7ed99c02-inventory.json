@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 270,
-      "pending": 176
+      "implemented": 274,
+      "pending": 172
     }
   },
   "declarations": [
@@ -242,10 +242,10 @@
       "line": 277,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn Bun__CreateFFIFunctionValue( globalObject: *JSGlobalObject, symbolName: ?*const ZigString, argCount: u32, function: *const JSHostFn, add_ptr_field: bool, inputFunctionPtr: ?*anyopaque, ) JSValue;",
       "declaration_sha256": "57a72c7532f77f0dede7e0ad05c2b034c43358ada2f02c13a54030d4566736bd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__CreateFFIFunctionWithDataValue",
@@ -253,10 +253,10 @@
       "line": 269,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn Bun__CreateFFIFunctionWithDataValue( *JSGlobalObject, ?*const ZigString, argCount: u32, function: *const JSHostFn, data: *anyopaque, ) JSValue;",
       "declaration_sha256": "a2ec3de18e377cf4780c6f8350a6182d93bcdf2ff463f47e20bff385d546a292",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__EventLoopTaskNoContext__createdInBunVm",
@@ -286,10 +286,10 @@
       "line": 286,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn Bun__FFIFunction_getDataPtr(JSValue) ?*anyopaque;",
       "declaration_sha256": "b46606dfc2b8519ddf037270cf00551fcaee2f085e74246c6b7705c385f970af",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__FFIFunction_setDataPtr",
@@ -297,10 +297,10 @@
       "line": 287,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn Bun__FFIFunction_setDataPtr(JSValue, ?*anyopaque) void;",
       "declaration_sha256": "2e1ce4fccdf98b321186f9a411bd7840e54484ba5492497415481221bf80c3ec",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__HTTPServerAgent__notifyBodyChunkReceived",

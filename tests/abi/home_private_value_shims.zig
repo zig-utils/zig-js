@@ -263,6 +263,10 @@ extern "c" fn JSFunction__createFromZig(JSContextRef, BunString, ?*const JSHostF
 extern "c" fn Bun__CallFrame__getCallerSrcLoc(?*const PrivateCallFrame, JSContextRef, *BunString, *c_uint, *c_uint) void;
 extern "c" fn Bun__CallFrame__isFromBunMain(?*const PrivateCallFrame, ?*const anyopaque) bool;
 extern "c" fn Bun__CallFrame__describeFrame(?*const PrivateCallFrame) [*:0]const u8;
+extern "c" fn Bun__CreateFFIFunctionValue(JSContextRef, ?*const ZigString, u32, ?*const JSHostFn, bool, ?*anyopaque) EncodedValue;
+extern "c" fn Bun__CreateFFIFunctionWithDataValue(JSContextRef, ?*const ZigString, u32, ?*const JSHostFn, ?*anyopaque) EncodedValue;
+extern "c" fn Bun__FFIFunction_getDataPtr(EncodedValue) ?*anyopaque;
+extern "c" fn Bun__FFIFunction_setDataPtr(EncodedValue, ?*anyopaque) void;
 extern "c" fn StringBuilder__init(*anyopaque) void;
 extern "c" fn StringBuilder__deinit(*anyopaque) void;
 extern "c" fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;
@@ -578,6 +582,22 @@ const HostFunctionFixtureState = struct {
 var host_function_fixture = HostFunctionFixtureState{};
 var host_function_foreign_result: EncodedValue = .empty;
 
+const FFIFunctionFixtureState = struct {
+    global: JSContextRef = null,
+    function: EncodedValue = .empty,
+    expected_this: ?EncodedValue = null,
+    args: [2]EncodedValue = @splat(.undefined),
+    arg_count: usize = 0,
+    expected_data: ?*anyopaque = null,
+    observed_data: ?*anyopaque = null,
+    calls: usize = 0,
+    constructs: usize = 0,
+    reenter: bool = false,
+    reentry_ok: bool = false,
+};
+
+var ffi_function_fixture = FFIFunctionFixtureState{};
+
 fn callFrameSlots(frame: *PrivateCallFrame) [*]const EncodedValue {
     return @ptrCast(@alignCast(frame));
 }
@@ -667,6 +687,62 @@ fn hostFunctionForeign(global: JSContextRef, frame: *PrivateCallFrame) callconv(
     _ = global;
     _ = frame;
     return host_function_foreign_result;
+}
+
+fn ffiFunctionCallback(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    const slots = callFrameSlots(frame);
+    if (global != ffi_function_fixture.global or
+        !JSC__JSValue__isStrictEqual(slots[3], ffi_function_fixture.function, global) or
+        callFrameArgumentCount(slots) != @as(u32, @intCast(ffi_function_fixture.arg_count + 1)))
+        fail("private FFI CallFrame metadata mismatch");
+    if (ffi_function_fixture.expected_this) |expected| {
+        if (!JSC__JSValue__isStrictEqual(slots[5], expected, global))
+            fail("private FFI CallFrame this mismatch");
+    }
+    for (ffi_function_fixture.args[0..ffi_function_fixture.arg_count], slots[6 .. 6 + ffi_function_fixture.arg_count]) |expected, actual| {
+        if (expected != actual) fail("private FFI CallFrame argument mismatch");
+    }
+    ffi_function_fixture.observed_data = Bun__FFIFunction_getDataPtr(slots[3]);
+    if (ffi_function_fixture.observed_data != ffi_function_fixture.expected_data)
+        fail("private FFI callback data mismatch");
+
+    const constructing = JSC__JSValue__isStrictEqual(slots[5], slots[3], global);
+    if (ffi_function_fixture.reenter) {
+        ffi_function_fixture.reenter = false;
+        const saved_args = ffi_function_fixture.args;
+        const saved_count = ffi_function_fixture.arg_count;
+        const saved_this = ffi_function_fixture.expected_this;
+        ffi_function_fixture.args = .{ EncodedValue.fromInt32(1), EncodedValue.fromInt32(2) };
+        ffi_function_fixture.arg_count = 2;
+        ffi_function_fixture.expected_this = null;
+        const nested = evaluate(global, "__private_ffi_function_252(1, 2)");
+        ffi_function_fixture.args = saved_args;
+        ffi_function_fixture.arg_count = saved_count;
+        ffi_function_fixture.expected_this = saved_this;
+        ffi_function_fixture.reentry_ok = JSC__JSValue__isStrictEqual(nested, EncodedValue.fromInt32(3), global) and
+            Bun__FFIFunction_getDataPtr(slots[3]) == ffi_function_fixture.expected_data;
+    }
+    ffi_function_fixture.calls += 1;
+
+    if (constructing) {
+        ffi_function_fixture.constructs += 1;
+        const instance = JSC__JSValue__createEmptyObject(global, 1);
+        const key_bytes = "constructed";
+        const key = ZigString{ .tagged_ptr = @intFromPtr(key_bytes.ptr), .len = key_bytes.len };
+        JSC__JSValue__put(instance, global, &key, if (ffi_function_fixture.arg_count > 0) slots[6] else .undefined);
+        return instance;
+    }
+
+    var total: i32 = 0;
+    for (slots[6 .. 6 + ffi_function_fixture.arg_count]) |argument|
+        total += JSC__JSValue__toInt32(argument);
+    return EncodedValue.fromInt32(total);
+}
+
+fn ffiFunctionThrow(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    _ = frame;
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(2521));
+    return .empty;
 }
 
 fn fail(message: []const u8) noreturn {
@@ -2588,6 +2664,141 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_host_exception.cellPointer()) != EncodedValue.fromInt32(2482))
         fail("private JSFunction replaced a pending exception");
 
+    var ffi_data_a: u64 = 0x252a;
+    var ffi_data_b: u64 = 0x252b;
+    var ffi_name_bytes = [_]u8{ 'f', 'f', 'i', 'A', 'd', 'd' };
+    const ffi_name = ZigString{ .tagged_ptr = @intFromPtr(&ffi_name_bytes), .len = ffi_name_bytes.len };
+    const ffi_function = Bun__CreateFFIFunctionWithDataValue(
+        context,
+        &ffi_name,
+        2,
+        ffiFunctionCallback,
+        @ptrCast(&ffi_data_a),
+    );
+    if (ffi_function == .empty or Bun__FFIFunction_getDataPtr(ffi_function) != @as(*anyopaque, @ptrCast(&ffi_data_a)))
+        fail("private FFI function creation/data mismatch");
+    ffi_name_bytes[0] = 'X';
+    exposeCell(context, "__private_ffi_function_252", ffi_function);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "typeof __private_ffi_function_252 === 'function' && __private_ffi_function_252.name === 'ffiAdd' && __private_ffi_function_252.length === 2")))
+        fail("private FFI function metadata/name ownership mismatch");
+
+    const ffi_receiver = evaluate(context, "({ ffiReceiver: 252 })");
+    exposeCell(context, "__private_ffi_receiver_252", ffi_receiver);
+    ffi_function_fixture = .{
+        .global = context,
+        .function = ffi_function,
+        .expected_this = ffi_receiver,
+        .args = .{ EncodedValue.fromInt32(10), EncodedValue.fromInt32(20) },
+        .arg_count = 2,
+        .expected_data = @ptrCast(&ffi_data_a),
+    };
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(context, "__private_ffi_function_252.call(__private_ffi_receiver_252, 10, 20)"),
+        EncodedValue.fromInt32(30),
+        context,
+    ) or ffi_function_fixture.calls != 1)
+        fail("private FFI function call mismatch");
+
+    Bun__FFIFunction_setDataPtr(ffi_function, @ptrCast(&ffi_data_b));
+    ffi_function_fixture.expected_data = @ptrCast(&ffi_data_b);
+    ffi_function_fixture.args = .{ EncodedValue.fromInt32(2), EncodedValue.fromInt32(3) };
+    _ = JSC__VM__runGC(vm, true);
+    if (Bun__FFIFunction_getDataPtr(ffi_function) != @as(*anyopaque, @ptrCast(&ffi_data_b)) or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_ffi_function_252.call(__private_ffi_receiver_252, 2, 3)"), EncodedValue.fromInt32(5), context))
+        fail("private FFI data mutation/GC mismatch");
+
+    exposeCell(sibling_context, "__private_sibling_ffi_function_252", ffi_function);
+    const sibling_ffi_receiver = evaluate(sibling_context, "({ siblingFFI: 252 })");
+    exposeCell(sibling_context, "__private_sibling_ffi_receiver_252", sibling_ffi_receiver);
+    ffi_function_fixture.expected_this = sibling_ffi_receiver;
+    ffi_function_fixture.args = .{ EncodedValue.fromInt32(4), EncodedValue.fromInt32(5) };
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(sibling_context, "__private_sibling_ffi_function_252.call(__private_sibling_ffi_receiver_252, 4, 5)"),
+        EncodedValue.fromInt32(9),
+        sibling_context,
+    )) fail("private FFI sibling-realm call mismatch");
+
+    ffi_function_fixture.expected_this = null;
+    ffi_function_fixture.args = .{ EncodedValue.fromInt32(41), .undefined };
+    ffi_function_fixture.arg_count = 1;
+    if (!JSC__JSValue__toBoolean(evaluate(context, "new __private_ffi_function_252(41).constructed === 41")) or
+        ffi_function_fixture.constructs != 1)
+        fail("private FFI constructor callback mismatch");
+
+    ffi_function_fixture.expected_this = ffi_receiver;
+    ffi_function_fixture.args = .{ EncodedValue.fromInt32(7), EncodedValue.fromInt32(8) };
+    ffi_function_fixture.arg_count = 2;
+    ffi_function_fixture.reenter = true;
+    ffi_function_fixture.reentry_ok = false;
+    if (!JSC__JSValue__isStrictEqual(
+        evaluate(context, "__private_ffi_function_252.call(__private_ffi_receiver_252, 7, 8)"),
+        EncodedValue.fromInt32(15),
+        context,
+    ) or !ffi_function_fixture.reentry_ok)
+        fail("private FFI nested/reentrant call mismatch");
+
+    Bun__FFIFunction_setDataPtr(ffi_function, null);
+    ffi_function_fixture.expected_data = null;
+    ffi_function_fixture.args = .{ EncodedValue.fromInt32(6), EncodedValue.fromInt32(7) };
+    if (Bun__FFIFunction_getDataPtr(ffi_function) != null or
+        !JSC__JSValue__isStrictEqual(evaluate(context, "__private_ffi_function_252.call(__private_ffi_receiver_252, 6, 7)"), EncodedValue.fromInt32(13), context))
+        fail("private FFI null data mismatch");
+
+    var dynamic_library_token: u8 = 0;
+    const ffi_ptr_function = Bun__CreateFFIFunctionValue(
+        context,
+        null,
+        0,
+        ffiFunctionCallback,
+        true,
+        &dynamic_library_token,
+    );
+    exposeCell(context, "__private_ffi_ptr_function_252", ffi_ptr_function);
+    const ffi_ptr_number = Bun__JSValue__toNumber(getProperty(context, ffi_ptr_function, "ptr"), context);
+    if (@as(u64, @bitCast(ffi_ptr_number)) != @intFromPtr(&ffiFunctionCallback) or
+        Bun__FFIFunction_getDataPtr(ffi_ptr_function) != null or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_ffi_ptr_function_252.name === '' && __private_ffi_ptr_function_252.length === 0 && (() => { const d = Object.getOwnPropertyDescriptor(__private_ffi_ptr_function_252, 'ptr'); return d.writable === false && d.enumerable === true && d.configurable === true; })()")))
+        fail("private FFI ptr property mismatch");
+    Bun__FFIFunction_setDataPtr(ffi_ptr_function, @ptrCast(&ffi_data_a));
+    if (Bun__FFIFunction_getDataPtr(ffi_ptr_function) != @as(*anyopaque, @ptrCast(&ffi_data_a)))
+        fail("private FFI ptr/data field separation mismatch");
+
+    if (Bun__FFIFunction_getDataPtr(host_function) != null or Bun__FFIFunction_getDataPtr(.undefined) != null) {
+        fail("private FFI getter accepted a non-FFI value");
+    }
+    Bun__FFIFunction_setDataPtr(host_function, @ptrCast(&ffi_data_b));
+    if (Bun__FFIFunction_getDataPtr(host_function) != null)
+        fail("private FFI setter mutated an ordinary host function");
+
+    const foreign_ffi = Bun__CreateFFIFunctionWithDataValue(
+        foreign_context,
+        null,
+        0,
+        ffiFunctionCallback,
+        @ptrCast(&ffi_data_a),
+    );
+    if (Bun__FFIFunction_getDataPtr(foreign_ffi) != @as(*anyopaque, @ptrCast(&ffi_data_a)))
+        fail("private FFI VM-independent cell downcast mismatch");
+    Bun__FFIFunction_setDataPtr(foreign_ffi, @ptrCast(&ffi_data_b));
+    if (Bun__FFIFunction_getDataPtr(foreign_ffi) != @as(*anyopaque, @ptrCast(&ffi_data_b)))
+        fail("private FFI foreign-cell data mutation mismatch");
+
+    const throwing_ffi = Bun__CreateFFIFunctionWithDataValue(context, null, 0, ffiFunctionThrow, null);
+    exposeCell(context, "__private_throwing_ffi_252", throwing_ffi);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "try { __private_throwing_ffi_252(); false } catch (error) { error === 2521 }")))
+        fail("private FFI pending exception translation mismatch");
+
+    if (Bun__CreateFFIFunctionWithDataValue(context, null, 0, null, null) != .empty or
+        !JSGlobalObject__hasException(context))
+        fail("private FFI null callback was accepted");
+    JSGlobalObject__clearException(context);
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2522));
+    if (Bun__CreateFFIFunctionValue(context, null, 0, ffiFunctionCallback, false, null) != .empty)
+        fail("private FFI creation ignored a pending exception");
+    const preserved_ffi_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_ffi_exception.cellPointer()) != EncodedValue.fromInt32(2522))
+        fail("private FFI creation replaced a pending exception");
+
     const sibling_type_error = ZigString__toTypeErrorInstance(&latin1_string.value.zig_string, sibling_context);
     exposeCell(sibling_context, "__private_sibling_type_error", sibling_type_error);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_type_error) === TypeError.prototype && __private_sibling_type_error.message === 'café'")))
@@ -4167,5 +4378,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 254/254 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 258/258 symbols linked; runtime matrix passed\n", .{});
 }

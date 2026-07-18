@@ -236,12 +236,17 @@ const PrivateIntrinsic = enum(u8) {
 };
 
 const PrivateHostFunctionRecord = struct {
+    const Kind = enum { zig_host, ffi };
+
     context: *Context,
     implementation: *const PrivateJSHostFn,
     constructor: ?*const PrivateJSHostFn,
     name: []const u8,
     implementation_visibility: PrivateImplementationVisibility,
     intrinsic: PrivateIntrinsic,
+    kind: Kind = .zig_host,
+    data_ptr: std.atomic.Value(?*anyopaque) = .init(null),
+    symbol_from_dynamic_library: ?*anyopaque = null,
 };
 
 const PrivateActiveCallFrame = struct {
@@ -1804,6 +1809,20 @@ fn privateJSHostFunctionNative(
     return internal;
 }
 
+fn privateHostFunctionRecord(encoded: EncodedValue) ?*PrivateHostFunctionRecord {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    const object = boxed.value.asObj();
+    const native = object.native orelse return null;
+    if (@intFromPtr(native) != @intFromPtr(&privateJSHostFunctionNative)) return null;
+    return @ptrCast(@alignCast(object.private_data orelse return null));
+}
+
+fn privateFFIFunctionRecord(encoded: EncodedValue) ?*PrivateHostFunctionRecord {
+    const record = privateHostFunctionRecord(encoded) orelse return null;
+    return if (record.kind == .ffi) record else null;
+}
+
 fn privateActiveCallFrame(frame: ?*const PrivateCallFrame) ?*const PrivateActiveCallFrame {
     const active = private_active_call_frame orelse return null;
     if (frame == null or active.frame != frame.?) return null;
@@ -1950,6 +1969,104 @@ export fn JSFunction__createFromZig(
         return .empty;
     };
     return privateEncodeResult(context, &machine, Value.obj(object));
+}
+
+fn privateFFIFunctionName(symbol_name: ?*const PrivateZigString) PrivateBunString {
+    const name = symbol_name orelse return .empty();
+    return .{ .tag = .zig_string, .value = .{ .zig_string = name.* } };
+}
+
+fn privateCreateFFIFunction(
+    global: JSContextRef,
+    symbol_name: ?*const PrivateZigString,
+    arg_count: u32,
+    function: ?*const PrivateJSHostFn,
+    data: ?*anyopaque,
+    add_ptr_field: bool,
+    symbol_from_dynamic_library: ?*anyopaque,
+) EncodedValue {
+    const callback = function orelse return JSFunction__createFromZig(
+        global,
+        privateFFIFunctionName(symbol_name),
+        null,
+        arg_count,
+        .public,
+        .none,
+        null,
+    );
+    const encoded = JSFunction__createFromZig(
+        global,
+        privateFFIFunctionName(symbol_name),
+        callback,
+        arg_count,
+        .public,
+        .none,
+        callback,
+    );
+    if (encoded == .empty) return .empty;
+
+    const record = privateHostFunctionRecord(encoded) orelse return .empty;
+    record.kind = .ffi;
+    record.data_ptr.store(data, .release);
+    record.symbol_from_dynamic_library = symbol_from_dynamic_library;
+    if (!add_ptr_field) return encoded;
+
+    const boxed = privateBoxedFrom(encoded) orelse return .empty;
+    const context = boxed.owner;
+    const object = boxed.value.asObj();
+    const pointer_bits: u64 = @intFromPtr(callback);
+    object.setOwn(context.arena(), context.root_shape, "ptr", Value.num(@bitCast(pointer_bits))) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    object.setAttr(context.arena(), "ptr", .{
+        .writable = false,
+        .enumerable = true,
+        .configurable = true,
+    }) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    return encoded;
+}
+
+export fn Bun__CreateFFIFunctionValue(
+    global: JSContextRef,
+    symbol_name: ?*const PrivateZigString,
+    arg_count: u32,
+    function: ?*const PrivateJSHostFn,
+    add_ptr_field: bool,
+    input_function_ptr: ?*anyopaque,
+) callconv(.c) EncodedValue {
+    return privateCreateFFIFunction(
+        global,
+        symbol_name,
+        arg_count,
+        function,
+        null,
+        add_ptr_field,
+        input_function_ptr,
+    );
+}
+
+export fn Bun__CreateFFIFunctionWithDataValue(
+    global: JSContextRef,
+    symbol_name: ?*const PrivateZigString,
+    arg_count: u32,
+    function: ?*const PrivateJSHostFn,
+    data: ?*anyopaque,
+) callconv(.c) EncodedValue {
+    return privateCreateFFIFunction(global, symbol_name, arg_count, function, data, false, null);
+}
+
+export fn Bun__FFIFunction_getDataPtr(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    const record = privateFFIFunctionRecord(encoded) orelse return null;
+    return record.data_ptr.load(.acquire);
+}
+
+export fn Bun__FFIFunction_setDataPtr(encoded: EncodedValue, data: ?*anyopaque) callconv(.c) void {
+    const record = privateFFIFunctionRecord(encoded) orelse return;
+    record.data_ptr.store(data, .release);
 }
 
 fn privateBigIntModuloU64(object: *Object) u64 {
