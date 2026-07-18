@@ -185,10 +185,12 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
             return -1;
         }
         mem.gpa.free(old);
+        mem.limits.min = old_pages + delta;
         return @intCast(old_pages);
     }
     mem.bytes = mem.gpa.realloc(mem.bytes, new_len) catch return -1;
     @memset(mem.bytes[@as(usize, old_pages) * types.PAGE_SIZE ..], 0);
+    mem.limits.min = old_pages + delta;
     return @intCast(old_pages);
 }
 
@@ -233,6 +235,7 @@ pub fn tableGrowWith(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
     if (delta > limit - old) return -1;
     tab.elems = tab.gpa.realloc(tab.elems, old + delta) catch return -1;
     @memset(tab.elems[old..], fill);
+    tab.limits.min = old + delta;
     return @intCast(old);
 }
 
@@ -255,6 +258,7 @@ fn tableGrowObserved(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
     };
     const retired = tab.elems;
     tab.elems = fresh;
+    tab.limits.min = old + delta;
     if (tab.host) |host| host.sync(host.ctx, tab, old, delta);
     tab.gpa.free(retired);
     return @intCast(old);
@@ -2957,7 +2961,8 @@ test "wasm.exec reference instructions and table operations" {
         i32c(0) ++ "\xD0\x70" ++ i32c(1) ++ "\xFC\x11\x00" ++ // fill slot 0 with null
         i32c(0) ++ "\x25\x00\xD1\x6A"; // ref.is_null(table[0]) => 1
     const bytes = comptime hdr ++
-        typesSec(&.{ft("", I32)}) ++ funcSec(&.{0}) ++ tableSec(2, 4) ++ codeSec(&.{body});
+        typesSec(&.{ft("", I32)}) ++ funcSec(&.{0}) ++ tableSec(2, 4) ++
+        elemSec0(1, &.{0}) ++ codeSec(&.{body});
     try expectResultsWithFeatures(bytes, .{ .reference_types = true }, 0, &.{}, &.{4});
 }
 

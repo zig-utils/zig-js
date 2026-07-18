@@ -141,6 +141,21 @@ fn checkConstExpr(
     }
 }
 
+fn isDeclaredFunction(mod: *const types.Module, funcidx: u32) bool {
+    for (mod.exports) |exported|
+        if (exported.kind == .func and exported.index == funcidx) return true;
+    for (mod.globals) |global| switch (global.init) {
+        .ref_func => |declared| if (declared == funcidx) return true,
+        else => {},
+    };
+    for (mod.elems) |elem|
+        for (elem.init) |init| switch (init) {
+            .ref_func => |declared| if (declared == funcidx) return true,
+            else => {},
+        };
+    return false;
+}
+
 /// Abstract operand: a concrete numeric type or `unknown`, the bottom type
 /// produced by the polymorphic stack after `unreachable`/branches.
 const StackVal = enum { unknown, i32, i64, f32, f64, funcref, externref };
@@ -485,6 +500,7 @@ const FuncValidator = struct {
                 },
                 .ref_func => {
                     if (instr.imm.idx >= self.mod.totalFuncs()) return self.fail("unknown function");
+                    if (!isDeclaredFunction(self.mod, instr.imm.idx)) return self.fail("undeclared function reference");
                     self.push(.funcref);
                 },
                 .table_grow => {
@@ -1041,6 +1057,22 @@ test "wasm.validate reference instruction types and indices" {
         0,
         3,
         "type mismatch",
+    );
+}
+
+test "wasm.validate ref.func requires a module-level declaration" {
+    const body = comptime code1("\xD2\x00\x1A\x0B");
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ body,
+        .{ .reference_types = true },
+        0,
+        0,
+        "undeclared function reference",
+    );
+    try expectValidWithFeatures(
+        hdr ++ type_void ++ func0 ++ table1 ++
+            sec(9, "\x01\x00\x41\x00\x0B\x01\x00") ++ body,
+        .{ .reference_types = true },
     );
 }
 
