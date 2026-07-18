@@ -276,10 +276,41 @@ published rather than hidden by one aggregate; the report records timing
 boundaries, dispersion, checksums, environment, exact module hash, and full
 reproduction.
 
+### WebAssembly Threads foundation
+
+The Phase-4 Threads proposal is pinned separately at
+`WebAssembly/threads@979d0fcb994439423d63b2f0a8a7332d6285dd84`. Its checked-in
+[67-opcode inventory](.data/wasm-atomic-opcodes.json) records the complete
+`0xfe` surface from `memory.atomic.notify` through
+`i64.atomic.rmw32.cmpxchg_u`, the reserved `0x04–0x0f` gap, all immediate
+forms, natural alignments, stack shapes, and the exact 13-file proposal corpus.
+The registry verifier compares that inventory directly with
+[`src/wasm/atomic.zig`](../src/wasm/atomic.zig).
+
+At checkpoint `040d0c00`, shared memory flags decode only when the `threads`
+feature is selected, the validator requires every shared memory to declare a
+maximum, atomic memory instructions require exact natural alignment, and all 67
+instructions have proposal-exact operand/result signatures. Atomic fence keeps
+its specified zero reserved byte and remains valid without a memory. Atomic
+access and notify are valid on ordinary memories; wait-on-unshared is correctly
+reserved for a runtime trap rather than misclassified as a validation failure.
+
+This is a binary/validation foundation, not an executable-profile claim.
+Execution currently traps deterministically instead of exposing partial atomic
+semantics. Stable shared backing and JavaScript API ownership are tracked by
+[#285](https://github.com/zig-utils/zig-js/issues/285), atomic execution and
+wait/notify by [#286](https://github.com/zig-utils/zig-js/issues/286), and
+upstream/TSan/scaling evidence by
+[#287](https://github.com/zig-utils/zig-js/issues/287). Parent
+[#265](https://github.com/zig-utils/zig-js/issues/265) closes only after all
+three are complete.
+
 Zig embedders opt into an exact feature set per realm; module bytes never
-self-enable proposals. Invalid dependency sets fail during Context creation,
-while a selected but unfinished feature produces a deterministic
-`WebAssembly.CompileError` identifying it:
+self-enable proposals. Invalid dependency sets fail during Context creation.
+A selected feature with no landed binary foundation produces a deterministic
+`WebAssembly.CompileError` identifying it; the explicitly documented Threads
+foundation above instead decodes and validates before its deterministic runtime
+trap until #285/#286 complete the profile:
 
 ```zig
 const ctx = try js.Context.createWith(gpa, .{

@@ -111,6 +111,17 @@ paths or unsupported-target gaps. Exact pins, bounded CI witnesses, the full
 reproduction command, and performance evidence are in
 [WebAssembly status](docs/wasm.md).
 
+The Phase-4 WebAssembly Threads profile now has its exact pinned binary and
+validator foundation. The checked-in [67-opcode `0xfe` inventory](docs/.data/wasm-atomic-opcodes.json)
+locks the 13-file proposal corpus, reserved opcode gap, immediates, natural
+alignments, and stack shapes. Shared memory limits decode behind the `threads`
+feature and require a maximum; every atomic instruction and fence validates
+with proposal-exact signatures. Shared backing/API ownership, execution and
+wait/notify, and terminal TSan/corpus/performance evidence remain explicitly
+tracked by [#285](https://github.com/zig-utils/zig-js/issues/285) through
+[#287](https://github.com/zig-utils/zig-js/issues/287); the profile is not yet
+presented as executable.
+
 ## Performance
 
 `zig build bench` currently times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
