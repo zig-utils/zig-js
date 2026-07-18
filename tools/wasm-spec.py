@@ -178,8 +178,10 @@ PROFILES = {
         "repository": "https://github.com/WebAssembly/gc.git",
         "tag": "proposal-revision",
         "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
-        "wabt_version": "1.0.39",
-        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "converter_kind": "wasm-tools",
+        "converter_repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "converter_version": "1.253.0",
+        "converter_commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
         "evaluator_profile": "gc",
         "features": ["typed_function_references", "gc"],
         "corpus_glob": "test/core/gc/*.wast",
@@ -191,7 +193,7 @@ PROFILES = {
             "i31.wast", "ref_cast.wast", "ref_eq.wast", "ref_test.wast",
             "struct.wast", "type-subtyping-invalid.wast", "type-subtyping.wast",
         ],
-        "converter_args": ["--enable-function-references", "--enable-gc"],
+        "converter_args": [],
     },
 }
 
@@ -208,6 +210,33 @@ def checked_output(command: list[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def converter_metadata(profile: dict) -> dict[str, str]:
+    kind = profile.get("converter_kind", "wabt")
+    if kind == "wasm-tools":
+        return {
+            "kind": kind,
+            "repository": profile["converter_repository"],
+            "version": profile["converter_version"],
+            "commit": profile["converter_commit"],
+        }
+    return {
+        "kind": kind,
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": profile["wabt_version"],
+        "commit": profile["wabt_commit"],
+    }
+
+
+def converter_command(profile: dict, converter: Path, source: Path, output: Path) -> list[str]:
+    metadata = converter_metadata(profile)
+    if metadata["kind"] == "wasm-tools":
+        return [
+            str(converter), "json-from-wast", *profile.get("converter_args", []),
+            str(source), "-o", str(output), "--wasm-dir", str(output.parent),
+        ]
+    return [str(converter), *profile.get("converter_args", []), str(source), "-o", str(output)]
+
+
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     corpus_root = spec_root / Path(profile["corpus_glob"]).parent
     if not corpus_root.is_dir():
@@ -215,17 +244,25 @@ def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) 
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
     if actual_spec != profile["commit"]:
         fail(f"wasm-spec pin drift: expected {profile['commit']}, found {actual_spec}")
+    metadata = converter_metadata(profile)
     if not converter.is_file():
-        fail(
-            f"missing wast2json at {converter}; build WABT {profile['wabt_version']} "
-            f"({profile['wabt_commit']}) and pass --wast2json"
-        )
-    if profile["wabt_version"] != WABT_VERSION:
+        fail(f"missing {metadata['kind']} converter at {converter}; pass --converter")
+    if metadata["kind"] == "wasm-tools":
         version = checked_output([str(converter), "--version"])
-        if version != profile["wabt_version"]:
+        if version != f"wasm-tools {metadata['version']}":
             fail(
-                f"wast2json version drift: expected {profile['wabt_version']} "
-                f"({profile['wabt_commit']}), found {version}"
+                f"converter version drift: expected wasm-tools {metadata['version']} "
+                f"({metadata['commit']}), found {version}"
+            )
+        if not engine.is_file():
+            fail(f"missing evaluator at {engine}; run `zig build wasm-spec-eval`")
+        return
+    if metadata["version"] != WABT_VERSION:
+        version = checked_output([str(converter), "--version"])
+        if version != metadata["version"]:
+            fail(
+                f"wast2json version drift: expected {metadata['version']} "
+                f"({metadata['commit']}), found {version}"
             )
         if not engine.is_file():
             fail(f"missing evaluator at {engine}; run `zig build wasm-spec-eval`")
@@ -529,7 +566,7 @@ def value_expression(value: dict) -> str:
         if value["value"].startswith("nan:"):
             return "NaN"
         return f"__f64({raw})"
-    if kind == "externref":
+    if kind in ("externref", "anyref"):
         return f"__externref({raw})"
     if kind == "funcref" and value["value"] == "null":
         return "null"
@@ -643,7 +680,12 @@ function __sameOne(actual, item) {
   if (item.type === 'i64') return actual === BigInt.asIntN(64, BigInt(item.value));
   if (item.type === 'f32') return item.value.startsWith('nan:') ? Number.isNaN(actual) : __f32bits(actual) === Number(item.value);
   if (item.type === 'f64') return item.value.startsWith('nan:') ? Number.isNaN(actual) : __f64bits(actual) === BigInt(item.value);
-  if (item.type === 'externref') return actual === __externref(item.value);
+  if (item.type === 'externref' || item.type === 'anyref') {
+    if (!Object.prototype.hasOwnProperty.call(item, 'value')) return actual !== null && actual !== undefined;
+    return actual === __externref(item.value);
+  }
+  if (item.type === 'i31ref') return typeof actual === 'number';
+  if (item.type === 'structref' || item.type === 'arrayref') return actual !== null && typeof actual === 'object';
   if (item.type === 'funcref' && item.value === 'null') return actual === null;
   return false;
 }
@@ -995,6 +1037,7 @@ def run_file(
     spec_root: Path,
     evaluator_profile: str | None,
     converter_args: list[str],
+    converter_profile: dict,
     command_shard_count: int,
 ) -> dict:
     stem = wast.stem
@@ -1030,7 +1073,7 @@ def run_file(
             converter_input = directory / wast.name
             converter_input.write_text(source.replace("(module definition", "(module           "))
         converted = subprocess.run(
-            [str(converter), *converter_args, str(converter_input), "-o", str(json_path)],
+            converter_command(converter_profile, converter, converter_input, json_path),
             text=True,
             capture_output=True,
         )
@@ -1172,7 +1215,8 @@ def main() -> int:
     parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
     parser.add_argument("--spec-root", type=Path)
     parser.add_argument(
-        "--wast2json",
+        "--converter", "--wast2json",
+        dest="converter",
         type=Path,
         default=Path(os.environ.get("WAST2JSON", shutil.which("wast2json") or "wast2json")),
     )
@@ -1201,7 +1245,7 @@ def main() -> int:
         600.0 if args.profile == "core-2-structural" else 120.0
     )
     spec_root = (args.spec_root or ROOT / "wasm-spec").resolve()
-    converter = args.wast2json.resolve()
+    converter = args.converter.resolve()
     engine = args.engine.resolve()
     default_inventories = {
         "mvp": ROOT / "docs/.data/wasm-spec-inventory.json",
@@ -1249,6 +1293,7 @@ def main() -> int:
             spec_root,
             profile["evaluator_profile"],
             profile.get("converter_args", []),
+            profile,
             args.command_shards,
         )
         area = feature_area(args.profile, wast.name)
@@ -1291,11 +1336,7 @@ def main() -> int:
                 [path.name for path in all_wast],
             ),
         },
-        "converter": {
-            "repository": "https://github.com/WebAssembly/wabt.git",
-            "version": profile["wabt_version"],
-            "commit": profile["wabt_commit"],
-        },
+        "converter": converter_metadata(profile),
         "engine_commit": engine_commit,
         "command_shards": args.command_shards,
         "totals": totals,
