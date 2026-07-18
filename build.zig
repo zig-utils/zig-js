@@ -218,10 +218,9 @@ pub fn build(b: *std.Build) void {
         objc_lifetime_step.dependOn(&run_objc_lifetime_stress.step);
 
         const objc_sanitized_stress = b.addSystemCommand(&.{
-            "xcrun", "--sdk", "macosx", "clang",
-            "-fobjc-arc", "-fblocks", "-Wno-arc-retain-cycles",
-            "-Wno-objc-circular-container", "-Wno-incomplete-implementation",
-            "-fsanitize=address,undefined",
+            "xcrun",                          "--sdk",                        "macosx",                 "clang",
+            "-fobjc-arc",                     "-fblocks",                     "-Wno-arc-retain-cycles", "-Wno-objc-circular-container",
+            "-Wno-incomplete-implementation", "-fsanitize=address,undefined",
         });
         objc_sanitized_stress.addPrefixedDirectoryArg("-I", b.path("include"));
         objc_sanitized_stress.addFileArg(b.path("tests/objc_api_lifetime_stress.m"));
@@ -229,7 +228,7 @@ pub fn build(b: *std.Build) void {
         objc_sanitized_stress.addArtifactArg(lib);
         objc_sanitized_stress.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
         const objc_sanitized_executable = objc_sanitized_stress.addOutputFileArg("objc-api-lifetime-sanitized");
-        const run_objc_sanitized_stress = b.addSystemCommand(&.{ "env" });
+        const run_objc_sanitized_stress = b.addSystemCommand(&.{"env"});
         run_objc_sanitized_stress.addFileArg(objc_sanitized_executable);
         const objc_sanitize_step = b.step("test-objc-api-sanitize", "Run Objective-C lifetime stress under ASan and UBSan");
         objc_sanitize_step.dependOn(&run_objc_sanitized_stress.step);
@@ -241,7 +240,7 @@ pub fn build(b: *std.Build) void {
         objc_leak_step.dependOn(&objc_leak_stress.step);
 
         const objc_fault_injection = b.addSystemCommand(&.{
-            "xcrun", "--sdk", "macosx", "clang", "-fobjc-arc", "-fblocks",
+            "xcrun",                          "--sdk",                               "macosx", "clang", "-fobjc-arc", "-fblocks",
             "-Wno-incomplete-implementation", "-DZJS_OBJC_BRIDGE_FAULT_INJECTION=1",
         });
         objc_fault_injection.addPrefixedDirectoryArg("-I", b.path("include"));
@@ -250,7 +249,7 @@ pub fn build(b: *std.Build) void {
         objc_fault_injection.addArtifactArg(lib);
         objc_fault_injection.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
         const objc_fault_executable = objc_fault_injection.addOutputFileArg("objc-api-fault-injection");
-        const run_objc_fault_injection = b.addSystemCommand(&.{ "env" });
+        const run_objc_fault_injection = b.addSystemCommand(&.{"env"});
         run_objc_fault_injection.addFileArg(objc_fault_executable);
         const objc_fault_step = b.step("test-objc-api-faults", "Inject Objective-C bridge allocation and registration failures");
         objc_fault_step.dependOn(&run_objc_fault_injection.step);
@@ -482,6 +481,38 @@ pub fn build(b: *std.Build) void {
     const run_conformance = b.addRunArtifact(conformance);
     const conformance_step = b.step("conformance", "Run the JS conformance suite");
     conformance_step.dependOn(&run_conformance.step);
+
+    // Upstream WebAssembly wg-1.0 corpus evaluator. `tools/wasm-spec.py`
+    // converts each pinned WAST file with the revision-matched WABT tool and
+    // invokes this executable in an isolated Context. Keeping conversion in the
+    // orchestrator makes every command and non-applicable text-format assertion
+    // visible in the checked-in machine-readable inventory.
+    const wasm_spec_eval = b.addExecutable(.{
+        .name = "wasm-spec-eval",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/wasm_spec_eval.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    const wasm_spec_eval_install = b.addInstallArtifact(wasm_spec_eval, .{});
+    const wasm_spec_eval_step = b.step("wasm-spec-eval", "Build the upstream WebAssembly corpus evaluator");
+    wasm_spec_eval_step.dependOn(&wasm_spec_eval_install.step);
+    const wasm_spec_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/wasm-spec.py",
+        "--wast2json",
+        b.option([]const u8, "wast2json", "Path to WABT 1.0.12 wast2json") orelse "wast2json",
+        "--spec-root",
+        b.option([]const u8, "wasm-spec-root", "Path to the pinned WebAssembly specification checkout") orelse "wasm-spec",
+        "--engine",
+    });
+    wasm_spec_cmd.addArtifactArg(wasm_spec_eval);
+    if (b.option([]const u8, "wasm-spec-filter", "Run only upstream WebAssembly files containing this text")) |filter|
+        wasm_spec_cmd.addArgs(&.{ "--filter", filter });
+    const wasm_spec_step = b.step("wasm-spec", "Run and inventory the pinned WebAssembly wg-1.0 core corpus");
+    wasm_spec_step.dependOn(&wasm_spec_cmd.step);
 
     // Threads corpus: `zig build threads-test` runs the vendored WebKit
     // PR-249 thread tests (the green allowlist) against the Phase-6 API.
