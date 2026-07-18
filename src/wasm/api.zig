@@ -111,9 +111,13 @@ const InstanceOwner = struct {
     store: *context.Context,
     inst: *exec.Instance,
     bridges: []JsImportBridge,
+    coerced_globals: []?*exec.GlobalInst,
 
     fn deinit(self: *InstanceOwner) void {
         exec.destroyInstance(self.store.gpa, self.inst);
+        for (self.coerced_globals) |maybe_global|
+            if (maybe_global) |global| exec.destroyGlobal(self.store.gpa, global);
+        self.store.gpa.free(self.coerced_globals);
         self.store.gpa.free(self.bridges);
         self.store.gpa.destroy(self);
     }
@@ -721,6 +725,7 @@ const ResolvedImports = struct {
     mems: []*exec.MemoryInst,
     globals: []*exec.GlobalInst,
     bridges: []JsImportBridge,
+    coerced_globals: []?*exec.GlobalInst,
     values: []Value,
     table_values: []Value,
     mem_values: []Value,
@@ -753,6 +758,13 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
     errdefer store.gpa.free(globals);
     const bridges = try store.gpa.alloc(JsImportBridge, module.imported_funcs);
     errdefer store.gpa.free(bridges);
+    const coerced_globals = try store.gpa.alloc(?*exec.GlobalInst, module.imported_globals);
+    @memset(coerced_globals, null);
+    errdefer {
+        for (coerced_globals) |maybe_global|
+            if (maybe_global) |global| exec.destroyGlobal(store.gpa, global);
+        store.gpa.free(coerced_globals);
+    }
     const values = try self.arena.alloc(Value, module.imports.len);
     const table_values = try self.arena.alloc(Value, module.imported_tables);
     const mem_values = try self.arena.alloc(Value, module.imported_mems);
@@ -798,13 +810,34 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 mem_values[mi] = imported;
                 mi += 1;
             },
-            .global => {
-                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is not a Global", link_proto);
-                const state = object.wasmGlobal() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is not a Global", link_proto);
-                const owner: *GlobalOwner = @ptrCast(@alignCast(state.glob orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is unavailable", link_proto)));
-                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly global import belongs to another store", link_proto);
-                globals[gi] = owner.glob;
-                global_values[gi] = imported;
+            .global => |global_type| {
+                if (languageObject(imported)) |object| {
+                    if (object.wasmGlobal()) |state| {
+                        const owner: *GlobalOwner = @ptrCast(@alignCast(state.glob orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is unavailable", link_proto)));
+                        if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly global import belongs to another store", link_proto);
+                        globals[gi] = owner.glob;
+                        global_values[gi] = imported;
+                        gi += 1;
+                        continue;
+                    }
+                }
+                if (global_type.mutable)
+                    return throwWasmWithProto(self, "LinkError", "mutable WebAssembly global import requires a Global", link_proto);
+                const primitive_matches = switch (global_type.val) {
+                    .i32, .f32, .f64 => imported.isNumber(),
+                    .i64 => imported.isObject() and imported.asObj().is_bigint,
+                    .funcref => false,
+                };
+                if (!primitive_matches)
+                    return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", link_proto);
+                const global = try exec.createGlobal(
+                    store.gpa,
+                    global_type,
+                    try coerceGlobalBits(self, global_type.val, imported),
+                );
+                coerced_globals[gi] = global;
+                globals[gi] = global;
+                global_values[gi] = Value.undef();
                 gi += 1;
             },
         }
@@ -816,6 +849,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
         .mems = mems,
         .globals = globals,
         .bridges = bridges,
+        .coerced_globals = coerced_globals,
         .values = values,
         .table_values = table_values,
         .mem_values = mem_values,
@@ -981,6 +1015,12 @@ fn instantiateModuleObject(
     defer resolved.deinitTemps();
     var bridges_owned = false;
     defer if (!bridges_owned) store.gpa.free(resolved.bridges);
+    var coerced_globals_owned = false;
+    defer if (!coerced_globals_owned) {
+        for (resolved.coerced_globals) |maybe_global|
+            if (maybe_global) |global| exec.destroyGlobal(store.gpa, global);
+        store.gpa.free(resolved.coerced_globals);
+    };
 
     try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
     var diag: types.Diagnostic = .{};
@@ -1004,7 +1044,12 @@ fn instantiateModuleObject(
     const owner = try store.gpa.create(InstanceOwner);
     var owner_registered = false;
     defer if (!owner_registered) store.gpa.destroy(owner);
-    owner.* = .{ .store = store, .inst = inst, .bridges = resolved.bridges };
+    owner.* = .{
+        .store = store,
+        .inst = inst,
+        .bridges = resolved.bridges,
+        .coerced_globals = resolved.coerced_globals,
+    };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = prototype };
     const state = try object.wasmInstanceState(self.arena);
@@ -1016,6 +1061,7 @@ fn instantiateModuleObject(
     owner_registered = true;
     inst_transferred = true;
     bridges_owned = true;
+    coerced_globals_owned = true;
 
     const function_cache = try self.arena.alloc(Value, module.totalFuncs());
     const table_cache = try self.arena.alloc(Value, module.totalTables());
