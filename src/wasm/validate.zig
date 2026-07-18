@@ -50,6 +50,8 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     for (mod.elems) |e| {
         if (e.table >= mod.totalTables())
             return failModFmt(diag, "unknown table {d}", .{e.table});
+        if (mod.tableType(e.table).elem != .funcref)
+            return failMod(diag, "type mismatch");
         try checkConstExpr(mod, e.offset, .i32, diag);
         for (e.funcs) |f|
             if (f >= mod.totalFuncs()) return failMod(diag, "unknown function");

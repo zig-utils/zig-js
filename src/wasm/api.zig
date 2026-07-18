@@ -490,16 +490,17 @@ fn memoryGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
 
 const TableRef = struct {
     value: Value,
-    func: ?*exec.FuncInst,
+    slot: exec.ValueSlot,
 };
 
-fn tableRefFromValue(self: *Interpreter, store: *context.Context, input: Value) value.HostError!TableRef {
-    if (input.isNull()) return .{ .value = Value.nul(), .func = null };
+fn tableRefFromValue(self: *Interpreter, store: *context.Context, elem_type: types.ValType, input: Value) value.HostError!TableRef {
+    if (elem_type == .externref) return .{ .value = input, .slot = .{ .externref = input } };
+    if (input.isNull()) return .{ .value = Value.nul(), .slot = .{ .funcref = null } };
     const object = languageObject(input) orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
     const state = object.wasmFunction() orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
     const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return self.throwError("TypeError", "WebAssembly function is unavailable")));
     if (owner.store != store) return self.throwError("TypeError", "WebAssembly function belongs to a different store");
-    return .{ .value = input, .func = owner.func };
+    return .{ .value = input, .slot = .{ .funcref = @ptrCast(owner.func) } };
 }
 
 fn tableFromThis(self: *Interpreter, this: Value, operation: []const u8) value.HostError!*TableOwner {
@@ -520,18 +521,23 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Table must be called with new");
     const descriptor = try requireDescriptor(self, args, "WebAssembly.Table requires a descriptor object");
     const element = try self.toStringV(try self.getProperty(Value.obj(descriptor), "element"));
-    if (!std.mem.eql(u8, element, "anyfunc")) return self.throwError("TypeError", "WebAssembly.Table MVP element type must be anyfunc");
+    const store = try storeFor(self);
+    const elem_type: types.ValType = if (std.mem.eql(u8, element, "anyfunc") or std.mem.eql(u8, element, "funcref"))
+        .funcref
+    else if (std.mem.eql(u8, element, "externref") and store.wasm_features.reference_types)
+        .externref
+    else
+        return self.throwError("TypeError", "WebAssembly.Table descriptor has an unsupported element type");
     const raw_initial = try self.getProperty(Value.obj(descriptor), "initial");
     if (raw_initial.isUndefined()) return self.throwError("TypeError", "WebAssembly.Table descriptor requires initial");
     const initial = try toIndexU32(self, raw_initial, std.math.maxInt(u32), "WebAssembly.Table initial is out of range");
     const maximum = try optionalMaximum(self, descriptor, initial, std.math.maxInt(u32), "WebAssembly.Table maximum is out of range");
     const proto = try constructedPrototype(self, native.proto);
-    const store = try storeFor(self);
-    const fill = try tableRefFromValue(self, store, if (args.len > 1) args[1] else Value.nul());
+    const fill = try tableRefFromValue(self, store, elem_type, if (args.len > 1) args[1] else Value.nul());
 
-    const table = try exec.createTable(store.gpa, initial, maximum);
+    const table = try exec.createTableTyped(store.gpa, elem_type, initial, maximum);
     errdefer exec.destroyTable(store.gpa, table);
-    if (fill.func != null) @memset(table.elems, fill.func);
+    @memset(table.elems, fill.slot);
     const refs = try allocateTableRefs(store, initial, fill.value);
     errdefer store.gpa.free(refs);
     const object = try gc.allocObj(self.arena);
@@ -573,11 +579,11 @@ fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const in_bounds = index < owner.refs.len;
     owner.unlockOwner();
     if (!in_bounds) return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
-    const replacement = try tableRefFromValue(self, owner.store, if (args.len > 1) args[1] else Value.nul());
+    const replacement = try tableRefFromValue(self, owner.store, owner.table.type, if (args.len > 1) args[1] else Value.nul());
     owner.lockOwner();
     defer owner.unlockOwner();
     owner.table.lockTable();
-    owner.table.elems[index] = replacement.func;
+    owner.table.elems[index] = replacement.slot;
     owner.table.unlockTable();
     owner.refs[index].store(replacement.value.bits, .release);
     gc.barrierValueFrom(owner.wrapper, replacement.value);
@@ -588,7 +594,7 @@ fn tableGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.grow requires a Table");
     const delta = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table grow delta is out of range");
-    const fill = try tableRefFromValue(self, owner.store, if (args.len > 1) args[1] else Value.nul());
+    const fill = try tableRefFromValue(self, owner.store, owner.table.type, if (args.len > 1) args[1] else Value.nul());
     owner.lockOwner();
     defer owner.unlockOwner();
     const old_len: u32 = @intCast(owner.refs.len);
@@ -601,7 +607,7 @@ fn tableGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     errdefer owner.store.gpa.free(fresh);
     for (owner.refs, 0..) |*old, i| fresh[i].store(old.load(.acquire), .monotonic);
     try owner.retired_refs.ensureUnusedCapacity(owner.store.gpa, 1);
-    if (exec.tableGrowWith(owner.table, delta, fill.func) < 0)
+    if (exec.tableGrowWith(owner.table, delta, fill.slot) < 0)
         return self.throwError("RangeError", "WebAssembly.Table could not grow");
     owner.retired_refs.appendAssumeCapacity(owner.refs);
     owner.refs = fresh;
@@ -616,7 +622,17 @@ fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostE
     inline for ([_]types.ValType{ .i32, .i64, .f32, .f64 }) |kind| {
         if (std.mem.eql(u8, name, kind.name())) return kind;
     }
+    if (std.mem.eql(u8, name, "externref") and (try storeFor(self)).wasm_features.reference_types)
+        return .externref;
     return self.throwError("TypeError", "WebAssembly.Global descriptor has an unsupported value type");
+}
+
+fn coerceGlobalSlot(self: *Interpreter, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    return switch (kind) {
+        .externref => .{ .externref = input },
+        .funcref => unreachable,
+        else => .{ .numeric = try coerceGlobalBits(self, kind, input) },
+    };
 }
 
 fn coerceGlobalBits(self: *Interpreter, kind: types.ValType, input: Value) value.HostError!u64 {
@@ -756,13 +772,13 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
 }
 
 fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value {
-    const bits = glob.value.numericBits();
     return switch (glob.type.val) {
-        .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(bits)))))),
-        .i64 => try self.makeBigInt(@as(i64, @bitCast(bits))),
-        .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
-        .f64 => Value.num(@bitCast(bits)),
-        .funcref, .externref => unreachable,
+        .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(glob.value.numericBits())))))),
+        .i64 => try self.makeBigInt(@as(i64, @bitCast(glob.value.numericBits()))),
+        .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value.numericBits()))))),
+        .f64 => Value.num(@bitCast(glob.value.numericBits())),
+        .externref => glob.value.externref,
+        .funcref => unreachable,
     };
 }
 
@@ -781,12 +797,13 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     const mutable = (try self.getProperty(Value.obj(descriptor), "mutable")).toBoolean();
     const initial = if (args.len > 1) args[1] else switch (kind) {
         .i64 => try self.makeBigInt(0),
+        .externref => Value.nul(),
         else => Value.num(0),
     };
-    const bits = try coerceGlobalBits(self, kind, initial);
+    const slot = try coerceGlobalSlot(self, kind, initial);
     const proto = try constructedPrototype(self, native.proto);
     const store = try storeFor(self);
-    const glob = try exec.createGlobal(store.gpa, .{ .val = kind, .mutable = mutable }, bits);
+    const glob = try exec.createGlobalSlot(store.gpa, .{ .val = kind, .mutable = mutable }, slot);
     errdefer exec.destroyGlobal(store.gpa, glob);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
@@ -811,7 +828,7 @@ fn globalValueSetter(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const self = activeInterpreter(ctx);
     const owner = try globalFromThis(self, this, "WebAssembly.Global.prototype.value setter requires a Global");
     if (!owner.glob.type.mutable) return self.throwError("TypeError", "WebAssembly.Global is immutable");
-    exec.setGlobalValue(owner.glob, .{ .numeric = try coerceGlobalBits(self, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef()) });
+    exec.setGlobalValue(owner.glob, try coerceGlobalSlot(self, owner.glob.type.val, if (args.len > 0) args[0] else Value.undef()));
     return Value.undef();
 }
 
@@ -928,14 +945,15 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 const primitive_matches = switch (global_type.val) {
                     .i32, .f32, .f64 => imported.isNumber(),
                     .i64 => imported.isObject() and imported.asObj().is_bigint,
-                    .funcref, .externref => false,
+                    .externref => true,
+                    .funcref => false,
                 };
                 if (!primitive_matches)
                     return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", link_proto);
-                const global = try exec.createGlobal(
+                const global = try exec.createGlobalSlot(
                     store.gpa,
                     global_type,
-                    try coerceGlobalBits(self, global_type.val, imported),
+                    try coerceGlobalSlot(self, global_type.val, imported),
                 );
                 coerced_globals[gi] = global;
                 globals[gi] = global;
@@ -1037,16 +1055,21 @@ fn wrapDefinedTable(
 ) value.HostError!Value {
     const refs = try allocateTableRefs(store, table.elems.len, Value.nul());
     errdefer store.gpa.free(refs);
-    for (table.elems, 0..) |func, i| if (func) |entry| {
-        var func_index: ?u32 = null;
-        for (inst.funcs, 0..) |candidate, index| if (candidate == entry) {
-            func_index = @intCast(index);
-            break;
-        };
-        if (func_index) |index| {
-            const exported = try functionValueFor(self, descriptor, store, instance_object, inst, function_cache, index, "wasm-function");
-            refs[i].store(exported.bits, .monotonic);
-        }
+    for (table.elems, 0..) |slot, i| switch (slot) {
+        .externref => |ref| refs[i].store(ref.bits, .monotonic),
+        .funcref => |raw_func| if (raw_func) |raw| {
+            const entry: *exec.FuncInst = @ptrCast(@alignCast(raw));
+            var func_index: ?u32 = null;
+            for (inst.funcs, 0..) |candidate, index| if (candidate == entry) {
+                func_index = @intCast(index);
+                break;
+            };
+            if (func_index) |index| {
+                const exported = try functionValueFor(self, descriptor, store, instance_object, inst, function_cache, index, "wasm-function");
+                refs[i].store(exported.bits, .monotonic);
+            }
+        },
+        .numeric => unreachable,
     };
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = descriptor.table_proto };
@@ -1074,7 +1097,7 @@ fn syncImportedTables(
         const table_object = table_value.asObj();
         const owner: *TableOwner = @ptrCast(@alignCast(table_object.wasmTable().?.table.?));
         owner.lockOwner();
-        const native_snapshot = store.gpa.alloc(?*exec.FuncInst, owner.table.elems.len) catch {
+        const native_snapshot = store.gpa.alloc(exec.ValueSlot, owner.table.elems.len) catch {
             owner.unlockOwner();
             return error.OutOfMemory;
         };
@@ -1083,8 +1106,17 @@ fn syncImportedTables(
         owner.table.unlockTable();
         owner.unlockOwner();
         defer store.gpa.free(native_snapshot);
-        for (native_snapshot, 0..) |maybe_func, element_index| {
-            const func = maybe_func orelse continue;
+        for (native_snapshot, 0..) |slot, element_index| {
+            if (slot == .externref) {
+                owner.lockOwner();
+                if (element_index < owner.refs.len)
+                    owner.refs[element_index].store(slot.externref.bits, .release);
+                owner.unlockOwner();
+                gc.barrierValueFrom(table_object, slot.externref);
+                continue;
+            }
+            const raw_func = slot.funcref orelse continue;
+            const func: *exec.FuncInst = @ptrCast(@alignCast(raw_func));
             var function_index: ?u32 = null;
             for (inst.funcs, 0..) |candidate, index| if (candidate == func) {
                 function_index = @intCast(index);
@@ -1094,7 +1126,9 @@ fn syncImportedTables(
             const function_value = try functionValueFor(self, descriptor, store, instance_object, inst, function_cache, index, "wasm-function");
             owner.lockOwner();
             owner.table.lockTable();
-            const still_current = element_index < owner.table.elems.len and owner.table.elems[element_index] == func;
+            const still_current = element_index < owner.table.elems.len and
+                owner.table.elems[element_index] == .funcref and
+                owner.table.elems[element_index].funcref == raw_func;
             owner.table.unlockTable();
             if (still_current and element_index < owner.refs.len)
                 owner.refs[element_index].store(function_value.bits, .release);
@@ -1888,6 +1922,41 @@ test "wasm api Table preserves null references across set and grow" {
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
     store.collectGarbage();
+}
+
+test "wasm api externref Table and Global preserve identity and reclaim exactly" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{ .reference_types = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\globalThis.externTarget = { tag: 73 };
+        \\globalThis.externWeak = new WeakRef(externTarget);
+        \\globalThis.externTable = new WebAssembly.Table(
+        \\  { element: 'externref', initial: 2, maximum: 4 }, externTarget);
+        \\globalThis.externGlobal = new WebAssembly.Global(
+        \\  { value: 'externref', mutable: true }, externTarget);
+        \\const previous = externTable.grow(1, externTarget);
+        \\const same = previous === 2 && externTable.get(0) === externTarget &&
+        \\  externTable.get(2) === externTarget && externGlobal.value === externTarget;
+        \\externTable.set(1, 42);
+        \\externTable.get(1) === 42 && same;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+
+    _ = try store.evaluate("globalThis.externTarget = undefined");
+    store.collectGarbage();
+    try std.testing.expect((try store.evaluate("externWeak.deref()?.tag === 73")).asBool());
+
+    _ = try store.evaluate(
+        \\externTable.set(0, undefined);
+        \\externTable.set(2, undefined);
+        \\externGlobal.value = undefined;
+        \\0;
+    );
+    store.collectGarbage();
+    try std.testing.expect((try store.evaluate("externWeak.deref() === undefined")).asBool());
 }
 
 test "wasm api Instance exports callable functions and preserves Table identity" {
