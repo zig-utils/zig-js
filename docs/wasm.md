@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing slices on main through `0835f411` provide:
+The JS-facing slices on main through `2374c537` provide:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -40,7 +40,11 @@ The JS-facing slices on main through `0835f411` provide:
   active element/data segments, start functions, imported-store identity, and
   immutable null-prototype exports;
 - callable exported functions with i32/i64/f32/f64 conversion, JS import calls,
-  exception identity, indirect calls, and `RuntimeError` traps; and
+  exception identity, indirect calls, and `RuntimeError` traps;
+- `WebAssembly.compile` and both `WebAssembly.instantiate` Promise overloads,
+  including synchronous byte snapshots, queued work, asynchronous rejection,
+  exact error classes, and the specified Module-versus-bytes result shapes;
+  and
 - `WebAssembly`, `Module`, `Instance`, `Memory`, `Table`, and `Global` branding
   and derived constructor prototypes.
 
@@ -51,11 +55,13 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 118/118 at `0835f411`, covering the
+The focused WebAssembly unit suite passes 120/120 at `2374c537`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
-traps, imported/defined identity, and precise-GC retention. The batched full
-engine suite passes 998/998 at the same runtime checkpoint. Both runs report
-zero failures, skips, and leaks.
+traps, imported/defined identity, precise-GC retention, stable asynchronous
+compilation inputs, Promise timing, overload result shapes, and rejection
+classes. The most recent batched full engine suite passes 998/998 at `0835f411`.
+Both runs report zero failures, skips, and leaks; the complete suite will be
+rerun after the corpus slice instead of once per small WebAssembly checkpoint.
 
 Run the focused suite with:
 
@@ -65,10 +71,9 @@ zig build test -Dtest-filter=wasm
 
 ## Still open
 
-The following remain required before #141 can close:
+The remaining gate before #141 can close is tracked by
+[#260](https://github.com/zig-utils/zig-js/issues/260):
 
-- `WebAssembly.compile` and both `WebAssembly.instantiate` overloads with
-  Promise semantics; and
 - a pinned upstream MVP specification corpus plus a machine-readable
   pass/fail/skip inventory with no hidden exclusions.
 

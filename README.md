@@ -138,7 +138,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly API changes through `0835f411` do not execute in these
+The ABI and WebAssembly API changes through `2374c537` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store APIs.
@@ -832,12 +832,11 @@ and the final evidence-backed removal of this section is tracked by
 [issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
-- the remaining async WebAssembly compile/instantiate surface, upstream spec
-  inventory, and WebAssembly/JIT shell hooks from the PR-249 reference corpus
-  (the implemented
-  decoder, validator, executor, `Module`, `Instance`, `Memory`, `Table`,
-  `Global`, exported functions, linking, reflection, and error surface are
-  documented in [WebAssembly status](docs/wasm.md));
+- the upstream WebAssembly specification inventory and WebAssembly/JIT shell
+  hooks from the PR-249 reference corpus (the implemented decoder, validator,
+  executor, Promise compile/instantiate APIs, `Module`, `Instance`, `Memory`,
+  `Table`, `Global`, exported functions, linking, reflection, and error surface
+  are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
 ## Used By
