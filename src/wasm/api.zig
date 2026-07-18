@@ -299,7 +299,7 @@ fn compileModuleObject(
     const owner = self.wasm_store_ctx orelse return self.throwError("TypeError", "WebAssembly store is unavailable");
     const store: *context.Context = @ptrCast(@alignCast(owner));
     var diag: types.Diagnostic = .{};
-    const module = decode.decode(store.gpa, copy.bytes, &diag) catch |err| switch (err) {
+    const module = decode.decodeWithFeatures(store.gpa, copy.bytes, store.wasm_features, &diag) catch |err| switch (err) {
         error.Malformed => return throwCompileError(self, descriptor.compile_error_proto, &diag),
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -326,9 +326,10 @@ fn validate(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Valu
     if (args.len == 0) return self.throwError("TypeError", "WebAssembly.validate requires a BufferSource");
     const copy = try copyBufferSource(self, args[0]);
     defer copy.deinit();
-    const allocator = if (self.wasm_store_ctx) |store_ptr| (@as(*context.Context, @ptrCast(@alignCast(store_ptr)))).gpa else self.arena;
+    const store = if (self.wasm_store_ctx) |store_ptr| @as(?*context.Context, @ptrCast(@alignCast(store_ptr))) else null;
+    const allocator = if (store) |owner| owner.gpa else self.arena;
     var diag: types.Diagnostic = .{};
-    const module = decode.decode(allocator, copy.bytes, &diag) catch |err| return switch (err) {
+    const module = decode.decodeWithFeatures(allocator, copy.bytes, if (store) |owner| owner.wasm_features else .{}, &diag) catch |err| return switch (err) {
         error.Malformed => Value.boolVal(false),
         error.OutOfMemory => error.OutOfMemory,
     };
@@ -1492,6 +1493,32 @@ test "wasm api corpus harness invokes float functions bit-exactly" {
         \\var exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
         \\__wasmSpecInvokeBits(exports.f32, '2143289345') === '2143289345' &&
         \\__wasmSpecInvokeBits(exports.f64, '9221120237041090561') === '9221120237041090561';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api Context options gate post-MVP features explicitly" {
+    try std.testing.expectError(
+        error.InvalidWasmFeatures,
+        context.Context.createWith(std.testing.allocator, .{ .wasm_features = .{ .gc = true } }),
+    );
+
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .multi_value = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\var bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,0,2,127,127
+        \\]);
+        \\try {
+        \\  new WebAssembly.Module(bytes);
+        \\  false;
+        \\} catch (error) {
+        \\  error instanceof WebAssembly.CompileError &&
+        \\  error.message.includes('multi-value is enabled but not implemented');
+        \\}
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }

@@ -25,6 +25,7 @@ const object_profile = @import("object_profile.zig");
 const structured_clone = @import("structured_clone.zig");
 const jit = @import("jit.zig");
 const wasm_api = @import("wasm/api.zig");
+const wasm_types = @import("wasm/types.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -2363,6 +2364,9 @@ pub const Context = struct {
     /// `teardownWasmStore` can free them (with `gpa`, never the arena) at
     /// context teardown.
     wasm_registry: std.ArrayListUnmanaged(WasmOwned) = .empty,
+    /// Explicit WebAssembly proposal gates for every module compiled in this
+    /// realm. MVP is the empty/default set; module bytes never enable features.
+    wasm_features: wasm_types.Features = .{},
     /// The interpreter most recently executing WebAssembly JS-API work on this
     /// context (type-erased `*interp.Interpreter`), used by wasm↔JS callbacks.
     wasm_active_interp: ?*anyopaque = null,
@@ -2644,6 +2648,9 @@ pub const Context = struct {
         /// Context allocator. Null means unbounded aside from the embedder
         /// allocator.
         heap_limit_bytes: ?usize = null,
+        /// Explicit post-MVP WebAssembly gates. All are disabled by default;
+        /// enabling an unfinished feature produces an implementation diagnostic.
+        wasm_features: wasm_types.Features = .{},
     };
 
     /// Test/conformance-only creation knobs. These model harness flags such as
@@ -2676,6 +2683,7 @@ pub const Context = struct {
         /// of public Options and normal realms because it intentionally bypasses
         /// the JavaScript Number boundary for exact f32/f64 payload assertions.
         wasm_spec_bit_exact: bool = false,
+        wasm_features: wasm_types.Features = .{},
         /// Experimental GIL-removal vertical slice (test-only): requires
         /// `enable_threads`, `enable_gc`, and `parallel_gc`. JS execution does
         /// not hold the context GIL; legacy blocking/result bookkeeping still
@@ -2777,6 +2785,7 @@ pub const Context = struct {
             .parallel_gc = want_parallel,
             .parallel_js = want_parallel,
             .heap_limit_bytes = options.heap_limit_bytes,
+            .wasm_features = options.wasm_features,
         });
     }
 
@@ -2809,6 +2818,7 @@ pub const Context = struct {
             .main_can_block = primary.main_can_block,
             .max_js_threads = 0,
             .parallel_js = false,
+            .wasm_features = primary.wasm_features,
         };
         errdefer self.jit_owner.deinit();
 
@@ -2881,6 +2891,8 @@ pub const Context = struct {
             return error.InvalidThreadTestingOptions;
         if (options.parallel_midscript_gc and !options.parallel_js)
             return error.InvalidThreadTestingOptions;
+        if (options.wasm_features.missingDependency() != null)
+            return error.InvalidWasmFeatures;
         var host_allocator_lock: ?*SerializedAllocator = null;
         errdefer if (host_allocator_lock) |lock| gpa.destroy(lock);
         const serialized_gpa = if (options.parallel_gc) blk: {
@@ -2944,6 +2956,7 @@ pub const Context = struct {
             .main_can_block = options.main_can_block,
             .max_js_threads = options.max_js_threads,
             .parallel_js = options.parallel_js,
+            .wasm_features = options.wasm_features,
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
         self.gc_cooperative_enabled = options.enable_gc and options.parallel_js and !options.parallel_midscript_gc;
@@ -12548,6 +12561,7 @@ test "Context public Options expose only stable thread controls" {
     try std.testing.expect(@hasField(Context.Options, "enable_threads"));
     try std.testing.expect(@hasField(Context.Options, "gil"));
     try std.testing.expect(@hasField(Context.Options, "heap_limit_bytes"));
+    try std.testing.expect(@hasField(Context.Options, "wasm_features"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_js"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_midscript_gc"));
     try std.testing.expect(!@hasField(Context.Options, "parallel_gc"));

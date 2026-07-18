@@ -13,13 +13,21 @@ const Allocator = std.mem.Allocator;
 pub const DecodeError = error{ OutOfMemory, Malformed };
 
 pub fn decode(gpa: Allocator, bytes: []const u8, diag: *types.Diagnostic) DecodeError!*types.Module {
+    return decodeWithFeatures(gpa, bytes, .{}, diag);
+}
+
+pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Features, diag: *types.Diagnostic) DecodeError!*types.Module {
+    if (features.missingDependency()) |failure| {
+        diag.set(0, "WebAssembly feature {s} requires {s}", .{ failure.feature.name(), failure.required.name() });
+        return error.Malformed;
+    }
     const mod = try gpa.create(types.Module);
     errdefer gpa.destroy(mod);
-    mod.* = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+    mod.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .features = features };
     errdefer mod.deinit();
     const a = mod.arena.allocator();
 
-    var r: Reader = .{ .bytes = bytes, .limit = bytes.len, .diag = diag };
+    var r: Reader = .{ .bytes = bytes, .limit = bytes.len, .diag = diag, .features = features };
 
     // Header: magic + version.
     const magic = try r.readBytes(4);
@@ -52,7 +60,7 @@ pub fn decode(gpa: Allocator, bytes: []const u8, diag: *types.Diagnostic) Decode
             try custom.append(a, .{ .name = name, .bytes = rest, .offset = sec_off });
         } else {
             if (id > 12) return r.failAt(sec_off, "invalid section id", .{});
-            if (id == 12) return r.failAt(sec_off, "unsupported datacount section", .{});
+            if (id == 12) return r.unsupportedFeature(sec_off, .bulk_memory);
             if (id <= last_id) return r.failAt(sec_off, "unexpected content after last section", .{});
             last_id = id;
             switch (id) {
@@ -102,6 +110,7 @@ const Reader = struct {
     pos: usize = 0,
     limit: usize,
     diag: *types.Diagnostic,
+    features: types.Features,
 
     fn offset(self: *const Reader) u32 {
         return @intCast(@min(self.pos, std.math.maxInt(u32)));
@@ -119,6 +128,13 @@ const Reader = struct {
     fn failAt(self: *Reader, off: u32, comptime fmt: []const u8, args: anytype) DecodeError {
         self.diag.set(off, fmt, args);
         return error.Malformed;
+    }
+
+    fn unsupportedFeature(self: *Reader, off: u32, feature: types.Feature) DecodeError {
+        return if (self.features.enabled(feature))
+            self.failAt(off, "WebAssembly feature {s} is enabled but not implemented", .{feature.name()})
+        else
+            self.failAt(off, "WebAssembly feature {s} is disabled", .{feature.name()});
     }
 
     fn readU8(self: *Reader) DecodeError!u8 {
@@ -232,8 +248,7 @@ const Reader = struct {
         const off = self.offset();
         const v = try self.readS33();
         if (v == -64) return .empty;
-        if (v >= 0)
-            return self.failAt(off, "unsupported block type (multi-value proposal)", .{});
+        if (v >= 0) return self.unsupportedFeature(off, .multi_value);
         return switch (v) {
             -1 => .{ .value = .i32 },
             -2 => .{ .value = .i64 },
@@ -270,8 +285,16 @@ const Reader = struct {
                     return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
                 return .{ .min = min, .max = max };
             },
-            // 0x02/0x03 (shared, memory64) are threads/memory64 proposals.
-            else => return self.failAt(flag_off, "unsupported limits flag", .{}),
+            else => {
+                if (kind == .memory and flag >= 0x02 and flag <= 0x07) {
+                    if (flag & 0x02 != 0 and !self.features.threads)
+                        return self.unsupportedFeature(flag_off, .threads);
+                    if (flag & 0x04 != 0 and !self.features.memory64)
+                        return self.unsupportedFeature(flag_off, .memory64);
+                    return self.unsupportedFeature(flag_off, if (flag & 0x04 != 0) .memory64 else .threads);
+                }
+                return self.failAt(flag_off, "unsupported limits flag", .{});
+            },
         }
     }
 
@@ -329,7 +352,7 @@ fn parseTypeSection(r: *Reader, a: Allocator) DecodeError![]const types.FuncType
         const results = try a.alloc(types.ValType, rn);
         for (results) |*p| p.* = try r.readValType();
         // Multiple results are the multi-value proposal.
-        if (rn > 1) return r.failAt(res_off, "multiple results not supported", .{});
+        if (rn > 1) return r.unsupportedFeature(res_off, .multi_value);
         t.* = .{ .params = params, .results = results };
     }
     return ts;
@@ -502,8 +525,21 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
         const instr_off = r.offset();
         const b = try r.readU8();
         const op = types.Op.fromByte(b) orelse {
-            if (b >= 0xFB and b <= 0xFE)
-                return r.failAt(instr_off, "unsupported proposal opcode 0x{x:0>2}", .{b});
+            if (b == 0xFB) return r.unsupportedFeature(instr_off, .gc);
+            if (b == 0xFC) {
+                const subopcode = try r.readU32Leb();
+                if (subopcode <= 7) return r.unsupportedFeature(instr_off, .nontrapping_float_to_int);
+                if (subopcode <= 14) return r.unsupportedFeature(instr_off, .bulk_memory);
+                if (subopcode <= 17) return r.unsupportedFeature(instr_off, .reference_types);
+                return r.failAt(instr_off, "invalid 0xfc subopcode {d}", .{subopcode});
+            }
+            if (b == 0xFD) return r.unsupportedFeature(instr_off, .fixed_width_simd);
+            if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
+            if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
+            if (b == 0x12 or b == 0x13) return r.unsupportedFeature(instr_off, .tail_calls);
+            if (b == 0x14 or b == 0x15) return r.unsupportedFeature(instr_off, .typed_function_references);
+            if (b == 0x06 or b == 0x07 or b == 0x08 or b == 0x09 or b == 0x18 or b == 0x19)
+                return r.unsupportedFeature(instr_off, .exception_handling);
             return r.failAt(instr_off, "invalid opcode 0x{x:0>2}", .{b});
         };
         var instr: types.Instr = .{ .op = op };
@@ -609,8 +645,12 @@ const hdr = "\x00asm\x01\x00\x00\x00";
 const func_sec_1 = "\x03\x02\x01\x00";
 
 fn expectMalformed(bytes: []const u8, off: u32, msg: []const u8) !void {
+    return expectMalformedWithFeatures(bytes, .{}, off, msg);
+}
+
+fn expectMalformedWithFeatures(bytes: []const u8, features: types.Features, off: u32, msg: []const u8) !void {
     var diag: types.Diagnostic = .{};
-    if (decode(std.testing.allocator, bytes, &diag)) |mod| {
+    if (decodeWithFeatures(std.testing.allocator, bytes, features, &diag)) |mod| {
         destroyModule(std.testing.allocator, mod);
         return error.TestUnexpectedResult;
     } else |err| {
@@ -824,7 +864,7 @@ test "wasm.decode malformed leb128" {
 
 test "wasm.decode malformed section framing" {
     try expectMalformed(hdr ++ "\x0D\x00", 8, "invalid section id");
-    try expectMalformed(hdr ++ "\x0C\x01\x00", 8, "unsupported datacount section");
+    try expectMalformed(hdr ++ "\x0C\x01\x00", 8, "WebAssembly feature bulk-memory is disabled");
     try expectMalformed(hdr ++ "\x01\x01\x00" ++ "\x01\x01\x00", 11, "unexpected content after last section");
     try expectMalformed(hdr ++ "\x03\x01\x00" ++ "\x01\x01\x00", 11, "unexpected content after last section");
     try expectMalformed(hdr ++ "\x01\x7F\x00", 9, "section size mismatch");
@@ -838,7 +878,7 @@ test "wasm.decode malformed declarations" {
     // Type section: 0x7B is not a value type.
     try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x7B\x00", 13, "invalid value type");
     // Two results = multi-value proposal.
-    try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "multiple results not supported");
+    try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "WebAssembly feature multi-value is disabled");
     // Import kind 4.
     try expectMalformed(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", 15, "invalid import kind");
     // Export kind 4.
@@ -847,8 +887,8 @@ test "wasm.decode malformed declarations" {
     try expectMalformed(hdr ++ "\x06\x06\x01\x7F\x02\x41\x00\x0B", 12, "malformed mutability");
     // Table element type 0x6F.
     try expectMalformed(hdr ++ "\x02\x09\x01\x01\x61\x01\x74\x01\x6F\x00\x01", 16, "invalid element type");
-    // Limits flag 0x03 (shared/memory64).
-    try expectMalformed(hdr ++ "\x05\x02\x01\x03", 11, "unsupported limits flag");
+    // Limits flag 0x03 is shared memory with a maximum.
+    try expectMalformed(hdr ++ "\x05\x02\x01\x03", 11, "WebAssembly feature threads is disabled");
     // Memory min 65537 pages.
     try expectMalformed(hdr ++ "\x05\x05\x01\x00\x81\x80\x04", 12, "memory size must be at most 65536 pages (4GiB)");
     // Memory max < min.
@@ -863,17 +903,17 @@ test "wasm.decode malformed declarations" {
 }
 
 test "wasm.decode malformed code bodies" {
-    // 0x06 is not an MVP opcode.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x06", 17, "invalid opcode 0x06");
+    // 0x06 is an exception-handling proposal opcode.
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x06", 17, "WebAssembly feature exception-handling is disabled");
     // Proposal prefixes.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\xFC", 17, "unsupported proposal opcode 0xfc");
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\xFD", 17, "unsupported proposal opcode 0xfd");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x00\x0B", 17, "WebAssembly feature nontrapping-float-to-int is disabled");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\xFD", 17, "WebAssembly feature fixed-width-simd is disabled");
     // call_indirect reserved byte must be zero.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\x11\x00\x01", 19, "zero byte expected");
     // memory.grow reserved byte must be zero.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x40\x01", 18, "zero byte expected");
     // Non-negative block type = type index (multi-value proposal).
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x01", 18, "unsupported block type (multi-value proposal)");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x01", 18, "WebAssembly feature multi-value is disabled");
     // funcref is not an MVP block type.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x70", 18, "invalid block type");
     // else with an empty control stack.
@@ -886,6 +926,28 @@ test "wasm.decode malformed code bodies" {
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x0B\x01", 18, "junk after last expression");
     // Two local groups of 0xFFFFFFFF each overflow the u32 locals range.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x0F\x01\x0D\x02\xFF\xFF\xFF\xFF\x0F\x7F\xFF\xFF\xFF\xFF\x0F\x7F", 23, "too many locals");
+}
+
+test "wasm.decode feature gates distinguish disabled dependency and pending implementation" {
+    const multi_result = hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F";
+    try expectMalformedWithFeatures(
+        multi_result,
+        .{ .multi_value = true },
+        13,
+        "WebAssembly feature multi-value is enabled but not implemented",
+    );
+    try expectMalformedWithFeatures(
+        hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x08\x0B",
+        .{ .bulk_memory = true },
+        17,
+        "WebAssembly feature bulk-memory is enabled but not implemented",
+    );
+    try expectMalformedWithFeatures(
+        hdr,
+        .{ .gc = true },
+        0,
+        "WebAssembly feature gc requires typed-function-references",
+    );
 }
 
 test "wasm.decode malformed constant expressions" {

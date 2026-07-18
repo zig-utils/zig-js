@@ -22,6 +22,7 @@ pub const HostError = @import("value.zig").HostError;
 pub const strictEquals = @import("value.zig").strictEquals;
 pub const looseEquals = @import("value.zig").looseEquals;
 pub const Context = @import("context.zig").Context;
+pub const WasmFeatures = @import("wasm/types.zig").Features;
 pub const Interpreter = @import("interpreter.zig").Interpreter;
 pub const Environment = @import("interpreter.zig").Environment;
 pub const Lexer = @import("lexer.zig").Lexer;

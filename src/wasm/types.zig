@@ -7,6 +7,74 @@ const std = @import("std");
 pub const PAGE_SIZE: u32 = 65536;
 pub const MAX_PAGES: u32 = 65536; // 4 GiB
 
+pub const Feature = enum {
+    sign_extension_ops,
+    nontrapping_float_to_int,
+    multi_value,
+    reference_types,
+    bulk_memory,
+    fixed_width_simd,
+    threads,
+    tail_calls,
+    typed_function_references,
+    gc,
+    exception_handling,
+    memory64,
+
+    pub fn name(self: Feature) []const u8 {
+        return switch (self) {
+            .sign_extension_ops => "sign-extension-ops",
+            .nontrapping_float_to_int => "nontrapping-float-to-int",
+            .multi_value => "multi-value",
+            .reference_types => "reference-types",
+            .bulk_memory => "bulk-memory",
+            .fixed_width_simd => "fixed-width-simd",
+            .threads => "threads",
+            .tail_calls => "tail-calls",
+            .typed_function_references => "typed-function-references",
+            .gc => "gc",
+            .exception_handling => "exception-handling",
+            .memory64 => "memory64",
+        };
+    }
+};
+
+pub const Features = struct {
+    sign_extension_ops: bool = false,
+    nontrapping_float_to_int: bool = false,
+    multi_value: bool = false,
+    reference_types: bool = false,
+    bulk_memory: bool = false,
+    fixed_width_simd: bool = false,
+    threads: bool = false,
+    tail_calls: bool = false,
+    typed_function_references: bool = false,
+    gc: bool = false,
+    exception_handling: bool = false,
+    memory64: bool = false,
+
+    pub const DependencyFailure = struct {
+        feature: Feature,
+        required: Feature,
+    };
+
+    pub fn enabled(self: Features, feature: Feature) bool {
+        return switch (feature) {
+            inline else => |tag| @field(self, @tagName(tag)),
+        };
+    }
+
+    pub fn missingDependency(self: Features) ?DependencyFailure {
+        if (self.typed_function_references and !self.reference_types)
+            return .{ .feature = .typed_function_references, .required = .reference_types };
+        if (self.gc and !self.typed_function_references)
+            return .{ .feature = .gc, .required = .typed_function_references };
+        if (self.exception_handling and !self.reference_types)
+            return .{ .feature = .exception_handling, .required = .reference_types };
+        return null;
+    }
+};
+
 /// Deterministic diagnostic channel for decode/validate/link failures. The
 /// message lives in a fixed buffer so error paths never allocate; `offset`
 /// is the byte offset in the module binary (or `no_offset` for link-time).
@@ -433,6 +501,7 @@ pub const FuncBody = struct {
 
 pub const Module = struct {
     arena: std.heap.ArenaAllocator,
+    features: Features = .{},
 
     types: []const FuncType = &.{},
     imports: []const Import = &.{},
@@ -504,6 +573,23 @@ pub const Module = struct {
         return self.globals[i].type;
     }
 };
+
+test "wasm feature dependency validation is deterministic" {
+    try std.testing.expectEqual(@as(?Features.DependencyFailure, null), (Features{}).missingDependency());
+    try std.testing.expectEqualDeep(
+        Features.DependencyFailure{ .feature = .gc, .required = .typed_function_references },
+        (Features{ .reference_types = true, .gc = true }).missingDependency().?,
+    );
+    try std.testing.expectEqualDeep(
+        Features.DependencyFailure{ .feature = .typed_function_references, .required = .reference_types },
+        (Features{ .typed_function_references = true }).missingDependency().?,
+    );
+    try std.testing.expectEqual(@as(?Features.DependencyFailure, null), (Features{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    }).missingDependency());
+}
 
 test "op encoding is total over MVP bytes" {
     // Spot-check encodings that matter for a total decoder map.
