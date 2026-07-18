@@ -60,7 +60,6 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
             r.pos = r.limit;
             try custom.append(a, .{ .name = name, .bytes = rest, .offset = sec_off });
         } else {
-            if (id == 13) return r.unsupportedFeature(sec_off, .exception_handling);
             const order = sectionOrder(id) orelse return r.failAt(sec_off, "invalid section id", .{});
             if (order <= last_order) return r.failAt(sec_off, "unexpected content after last section", .{});
             last_order = order;
@@ -73,6 +72,10 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
                 },
                 4 => mod.tables = try parseTableSection(&r, a),
                 5 => mod.mems = try parseMemorySection(&r, a),
+                13 => {
+                    if (!features.exception_handling) return r.unsupportedFeature(sec_off, .exception_handling);
+                    mod.tags = try parseTagSection(&r, a);
+                },
                 6 => mod.globals = try parseGlobalSection(&r, a),
                 7 => mod.exports = try parseExportSection(&r, a),
                 8 => mod.start = try r.readU32Leb(),
@@ -105,10 +108,12 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
 
 fn sectionOrder(id: u8) ?u8 {
     return switch (id) {
-        1...9 => id,
-        12 => 10,
-        10 => 11,
-        11 => 12,
+        1...5 => id,
+        13 => 6,
+        6...9 => id + 1,
+        12 => 11,
+        10 => 12,
+        11 => 13,
         else => null,
     };
 }
@@ -261,6 +266,13 @@ const Reader = struct {
         if (value_type == .v128 and !self.features.fixed_width_simd)
             return self.unsupportedFeature(off, .fixed_width_simd);
         return value_type;
+    }
+
+    fn readTag(self: *Reader) DecodeError!types.Tag {
+        const attribute_off = self.offset();
+        if (try self.readU8() != 0)
+            return self.failAt(attribute_off, "malformed tag attribute", .{});
+        return .{ .type_index = try self.readU32Leb() };
     }
 
     fn readBlockType(self: *Reader) DecodeError!types.BlockType {
@@ -473,7 +485,11 @@ fn parseImportSection(r: *Reader, a: Allocator, mod: *types.Module) DecodeError!
                 mod.imported_globals += 1;
                 break :blk .{ .global = try r.readGlobalType() };
             },
-            4 => return r.unsupportedFeature(kind_off, .exception_handling),
+            4 => blk: {
+                if (!r.features.exception_handling) return r.unsupportedFeature(kind_off, .exception_handling);
+                mod.imported_tags += 1;
+                break :blk .{ .tag = try r.readTag() };
+            },
             else => return r.failAt(kind_off, "invalid import kind", .{}),
         };
         imp.* = .{ .module = module, .name = name, .desc = desc };
@@ -502,6 +518,13 @@ fn parseMemorySection(r: *Reader, a: Allocator) DecodeError![]const types.MemTyp
     return mems;
 }
 
+fn parseTagSection(r: *Reader, a: Allocator) DecodeError![]const types.Tag {
+    const n = try r.readCount();
+    const tags = try a.alloc(types.Tag, n);
+    for (tags) |*tag| tag.* = try r.readTag();
+    return tags;
+}
+
 fn parseGlobalSection(r: *Reader, a: Allocator) DecodeError![]const types.Global {
     const n = try r.readCount();
     const globals = try a.alloc(types.Global, n);
@@ -520,7 +543,7 @@ fn parseExportSection(r: *Reader, a: Allocator) DecodeError![]const types.Export
             1 => .table,
             2 => .mem,
             3 => .global,
-            4 => return r.unsupportedFeature(kind_off, .exception_handling),
+            4 => if (r.features.exception_handling) .tag else return r.unsupportedFeature(kind_off, .exception_handling),
             else => return r.failAt(kind_off, "invalid export kind", .{}),
         };
         e.* = .{ .name = name, .kind = kind, .index = try r.readU32Leb() };
@@ -1393,13 +1416,35 @@ test "wasm.decode feature gates distinguish disabled features and dependencies" 
         .exception_handling = true,
     };
     const pending = "WebAssembly feature exception-handling is enabled but not implemented";
-    try expectMalformedWithFeatures(hdr ++ "\x0D\x00", exceptions, 8, pending);
     try expectMalformedWithFeatures(hdr ++ "\x01\x05\x01\x60\x01\x69\x00", exceptions, 13, pending);
-    try expectMalformedWithFeatures(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", exceptions, 15, pending);
-    try expectMalformedWithFeatures(hdr ++ "\x07\x05\x01\x01\x65\x04\x00", exceptions, 13, pending);
     try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x08", exceptions, 17, pending);
     try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x0A", exceptions, 17, pending);
     try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x1F", exceptions, 17, pending);
+}
+
+test "wasm.decode exception tags sections imports and exports" {
+    const bytes = comptime (hdr ++
+        testSection(1, "\x02\x60\x02\x7F\x7D\x00\x60\x00\x01\x7F") ++
+        testSection(2, "\x01\x01m\x01t\x04\x00\x00") ++
+        testSection(13, "\x01\x00\x00") ++
+        testSection(7, "\x02\x01i\x04\x00\x01d\x04\x01"));
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    try std.testing.expectEqual(@as(u32, 1), mod.imported_tags);
+    try std.testing.expectEqual(@as(usize, 1), mod.tags.len);
+    try std.testing.expectEqual(@as(u32, 0), mod.tags[0].type_index);
+    try std.testing.expectEqualDeep(types.ImportDesc{ .tag = .{ .type_index = 0 } }, mod.imports[0].desc);
+    try std.testing.expectEqual(types.ExternalKind.tag, mod.exports[0].kind);
+    try std.testing.expectEqual(@as(u32, 1), mod.exports[1].index);
+    try std.testing.expectEqual(@as(u32, 2), mod.totalTags());
+    try std.testing.expectEqualSlices(types.ValType, &.{ .i32, .f32 }, mod.tagType(0).params);
+    try std.testing.expectEqualSlices(types.ValType, &.{ .i32, .f32 }, mod.tagType(1).params);
+
+    const malformed_attribute = comptime (hdr ++ testSection(13, "\x01\x01\x00"));
+    try expectMalformedWithFeatures(malformed_attribute, features, 11, "malformed tag attribute");
 }
 
 test "wasm.decode bulk memory segment forms DataCount order and immediates" {

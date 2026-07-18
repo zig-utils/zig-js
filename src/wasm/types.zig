@@ -176,6 +176,13 @@ pub const GlobalType = struct {
     mutable: bool,
 };
 
+/// A tag declaration references a function type whose results must be empty;
+/// its parameters are the exception payload types. The leading binary
+/// attribute byte is fixed at zero and is therefore not retained in the IR.
+pub const Tag = struct {
+    type_index: u32,
+};
+
 pub const TableType = struct {
     elem: ValType = .funcref,
     limits: Limits,
@@ -191,6 +198,7 @@ pub const ImportDesc = union(enum) {
     table: TableType,
     mem: MemType,
     global: GlobalType,
+    tag: Tag,
 
     pub fn kind(self: ImportDesc) ExternalKind {
         return switch (self) {
@@ -198,6 +206,7 @@ pub const ImportDesc = union(enum) {
             .table => .table,
             .mem => .mem,
             .global => .global,
+            .tag => .tag,
         };
     }
 };
@@ -207,6 +216,7 @@ pub const ExternalKind = enum(u8) {
     table = 1,
     mem = 2,
     global = 3,
+    tag = 4,
 
     pub fn name(self: ExternalKind) []const u8 {
         return switch (self) {
@@ -214,6 +224,7 @@ pub const ExternalKind = enum(u8) {
             .table => "table",
             .mem => "memory",
             .global => "global",
+            .tag => "tag",
         };
     }
 };
@@ -622,6 +633,7 @@ pub const Module = struct {
     funcs: []const u32 = &.{},
     tables: []const TableType = &.{},
     mems: []const MemType = &.{},
+    tags: []const Tag = &.{},
     globals: []const Global = &.{},
     exports: []const Export = &.{},
     start: ?u32 = null,
@@ -635,6 +647,7 @@ pub const Module = struct {
     imported_funcs: u32 = 0,
     imported_tables: u32 = 0,
     imported_mems: u32 = 0,
+    imported_tags: u32 = 0,
     imported_globals: u32 = 0,
 
     pub fn deinit(self: *Module) void {
@@ -655,6 +668,23 @@ pub const Module = struct {
 
     pub fn totalGlobals(self: *const Module) u32 {
         return self.imported_globals + @as(u32, @intCast(self.globals.len));
+    }
+
+    pub fn totalTags(self: *const Module) u32 {
+        return self.imported_tags + @as(u32, @intCast(self.tags.len));
+    }
+
+    /// Type of any tag in the index space (imports precede definitions).
+    pub fn tagType(self: *const Module, tagidx: u32) FuncType {
+        var i: u32 = tagidx;
+        for (self.imports) |imp| switch (imp.desc) {
+            .tag => |tag| {
+                if (i == 0) return self.types[tag.type_index];
+                i -= 1;
+            },
+            else => {},
+        };
+        return self.types[self.tags[i].type_index];
     }
 
     /// Type of any function in the index space (imported or defined).

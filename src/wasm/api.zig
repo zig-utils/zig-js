@@ -1095,6 +1095,7 @@ const ResolvedImports = struct {
     tables: []*exec.TableInst,
     mems: []*exec.MemoryInst,
     globals: []*exec.GlobalInst,
+    tags: []*exec.TagInst,
     bridges: []JsImportBridge,
     coerced_globals: []?*exec.GlobalInst,
     values: []Value,
@@ -1107,6 +1108,7 @@ const ResolvedImports = struct {
         self.store.gpa.free(self.tables);
         self.store.gpa.free(self.mems);
         self.store.gpa.free(self.globals);
+        self.store.gpa.free(self.tags);
     }
 };
 
@@ -1127,6 +1129,8 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
     errdefer store.gpa.free(mems);
     const globals = try store.gpa.alloc(*exec.GlobalInst, module.imported_globals);
     errdefer store.gpa.free(globals);
+    const tags = try store.gpa.alloc(*exec.TagInst, module.imported_tags);
+    errdefer store.gpa.free(tags);
     const bridges = try store.gpa.alloc(JsImportBridge, module.imported_funcs);
     errdefer store.gpa.free(bridges);
     const coerced_globals = try store.gpa.alloc(?*exec.GlobalInst, module.imported_globals);
@@ -1217,6 +1221,12 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 global_values[gi] = Value.undef();
                 gi += 1;
             },
+            .tag => return throwWasmWithProto(
+                self,
+                "LinkError",
+                "WebAssembly tag imports require the WebAssembly.Tag API",
+                link_proto,
+            ),
         }
     }
     return .{
@@ -1225,6 +1235,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
         .tables = tables,
         .mems = mems,
         .globals = globals,
+        .tags = tags,
         .bridges = bridges,
         .coerced_globals = coerced_globals,
         .values = values,
@@ -1427,6 +1438,7 @@ fn instantiateModuleObject(
         .tables = resolved.tables,
         .mems = resolved.mems,
         .globals = resolved.globals,
+        .tags = resolved.tags,
     }, &diag) catch |err| {
         return switch (err) {
             error.Link => throwWasmWithProto(self, "LinkError", diag.message(), descriptor.link_error_proto),
@@ -1530,6 +1542,12 @@ fn instantiateModuleObject(
                     global_cache[entry.index] = try wrapDefinedGlobal(self, descriptor, store, object, inst.globals[entry.index]);
                 break :blk global_cache[entry.index];
             },
+            .tag => return throwWasmWithProto(
+                self,
+                "LinkError",
+                "WebAssembly tag exports require the WebAssembly.Tag API",
+                descriptor.link_error_proto,
+            ),
         };
         try setData(self.arena, self.root_shape, exports, entry.name, exported, .{ .writable = false, .enumerable = true, .configurable = false });
     }
@@ -2001,6 +2019,34 @@ test "wasm api executes opted-in bounded tail recursion" {
         \\stable;
     );
     try std.testing.expect(executed.isBoolean() and executed.asBool());
+}
+
+test "wasm api reflects opted-in exception tag imports and exports" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,5,1,96,1,127,0,
+        \\  2,8,1,1,109,1,116,4,0,0,
+        \\  13,3,1,0,0,
+        \\  7,9,2,1,105,4,0,1,100,4,1
+        \\]);
+        \\const module = new WebAssembly.Module(bytes);
+        \\const imports = WebAssembly.Module.imports(module);
+        \\const exports = WebAssembly.Module.exports(module);
+        \\WebAssembly.validate(bytes) &&
+        \\  imports.length === 1 && imports[0].module === 'm' &&
+        \\  imports[0].name === 't' && imports[0].kind === 'tag' &&
+        \\  exports.length === 2 && exports[0].kind === 'tag' &&
+        \\  exports[1].kind === 'tag';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api returns opted-in multi-value exports as arrays" {

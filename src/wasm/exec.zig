@@ -187,6 +187,12 @@ pub const GlobalInst = struct {
     barrier: ?*const fn (*anyopaque, ValueSlot) void = null,
 };
 
+/// Runtime tag identity. Imported aliases point at the same TagInst; defined
+/// tags allocate distinct store objects even when their payload types match.
+pub const TagInst = struct {
+    type: types.FuncType,
+};
+
 pub const ElemSegmentInst = struct {
     elems: []const ValueSlot,
     dropped: bool,
@@ -202,6 +208,7 @@ pub const Imports = struct {
     tables: []const *TableInst = &.{},
     mems: []const *MemoryInst = &.{},
     globals: []const *GlobalInst = &.{},
+    tags: []const *TagInst = &.{},
 };
 
 pub const LinkError = error{ OutOfMemory, Link, Trap, Host };
@@ -216,6 +223,7 @@ pub const Instance = struct {
     tables: []*TableInst,
     mems: []*MemoryInst,
     globals: []*GlobalInst,
+    tags: []*TagInst,
     elem_segments: []ElemSegmentInst,
     data_segments: []DataSegmentInst,
     gpa: Allocator,
@@ -423,6 +431,16 @@ pub fn destroyGlobal(gpa: Allocator, g: *GlobalInst) void {
     gpa.destroy(g);
 }
 
+pub fn createTag(gpa: Allocator, tag_type: types.FuncType) error{OutOfMemory}!*TagInst {
+    const tag = try gpa.create(TagInst);
+    tag.* = .{ .type = tag_type };
+    return tag;
+}
+
+pub fn destroyTag(gpa: Allocator, tag: *TagInst) void {
+    gpa.destroy(tag);
+}
+
 // ---------------------------------------------------------------------------
 // Instantiation (wg-1.0)
 // ---------------------------------------------------------------------------
@@ -464,7 +482,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     if (imports.funcs.len != mod.imported_funcs or
         imports.tables.len != mod.imported_tables or
         imports.mems.len != mod.imported_mems or
-        imports.globals.len != mod.imported_globals)
+        imports.globals.len != mod.imported_globals or
+        imports.tags.len != mod.imported_tags)
     {
         diag.set(types.Diagnostic.no_offset, "inconsistent import count", .{});
         return error.Link;
@@ -473,6 +492,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         var ti: usize = 0;
         var mi: usize = 0;
         var gi: usize = 0;
+        var tag_i: usize = 0;
         for (mod.imports) |imp| {
             switch (imp.desc) {
                 .func => {},
@@ -502,6 +522,13 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                     }
                     gi += 1;
                 },
+                .tag => |tag_decl| {
+                    if (!types.funcTypeEql(imports.tags[tag_i].type, mod.types[tag_decl.type_index])) {
+                        diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
+                        return error.Link;
+                    }
+                    tag_i += 1;
+                },
             }
         }
     }
@@ -513,6 +540,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         .tables = &.{},
         .mems = &.{},
         .globals = &.{},
+        .tags = &.{},
         .elem_segments = &.{},
         .data_segments = &.{},
         .gpa = gpa,
@@ -521,10 +549,16 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     var created_tables: usize = 0;
     var created_mems: usize = 0;
     var created_globals: usize = 0;
+    var created_tags: usize = 0;
     errdefer {
-        for (inst.tables[inst.tables.len - created_tables ..]) |t| destroyTable(gpa, t);
-        for (inst.mems[inst.mems.len - created_mems ..]) |m| destroyMemory(gpa, m);
-        for (inst.globals[inst.globals.len - created_globals ..]) |g| destroyGlobal(gpa, g);
+        if (created_tables != 0)
+            for (inst.tables[mod.imported_tables..][0..created_tables]) |t| destroyTable(gpa, t);
+        if (created_mems != 0)
+            for (inst.mems[mod.imported_mems..][0..created_mems]) |m| destroyMemory(gpa, m);
+        if (created_globals != 0)
+            for (inst.globals[mod.imported_globals..][0..created_globals]) |g| destroyGlobal(gpa, g);
+        if (created_tags != 0)
+            for (inst.tags[mod.imported_tags..][0..created_tags]) |tag| destroyTag(gpa, tag);
         inst.arena.deinit();
         gpa.destroy(inst);
     }
@@ -570,6 +604,14 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         const g = try createGlobalSlot(gpa, gd.type, evalConstExpr(inst, gd.init));
         created_globals += 1;
         inst.globals[mod.imported_globals + j] = g;
+    }
+
+    inst.tags = try a.alloc(*TagInst, mod.totalTags());
+    for (imports.tags, 0..) |tag, k| inst.tags[k] = tag;
+    for (mod.tags, 0..) |tag_decl, j| {
+        const tag = try createTag(gpa, mod.types[tag_decl.type_index]);
+        created_tags += 1;
+        inst.tags[mod.imported_tags + j] = tag;
     }
 
     inst.elem_segments = try a.alloc(ElemSegmentInst, mod.elems.len);
@@ -651,6 +693,7 @@ pub fn destroyInstance(gpa: Allocator, inst: *Instance) void {
     for (inst.tables[mod.imported_tables..]) |t| destroyTable(gpa, t);
     for (inst.mems[mod.imported_mems..]) |m| destroyMemory(gpa, m);
     for (inst.globals[mod.imported_globals..]) |g| destroyGlobal(gpa, g);
+    for (inst.tags[mod.imported_tags..]) |tag| destroyTag(gpa, tag);
     inst.arena.deinit();
     gpa.destroy(inst);
 }
@@ -4652,6 +4695,60 @@ test "wasm.exec tail calls keep deep mutual recursion storage bounded" {
     try std.testing.expectEqual(@as(usize, 0), state.frames.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.labels.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.locals.items.len);
+}
+
+test "wasm.exec exception tag imports preserve identity and reject mismatched types" {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const provider_bytes = comptime (hdr ++ typesSec(&.{ft(I32, "")}) ++
+        sec(13, "\x01\x00\x00"));
+    var diag: types.Diagnostic = .{};
+    const provider_mod = try buildModuleWithFeatures(provider_bytes, features, &diag);
+    defer decode.destroyModule(talloc, provider_mod);
+    const provider = try instantiate(talloc, provider_mod, .{}, &diag);
+    defer destroyInstance(talloc, provider);
+
+    const consumer_bytes = comptime (hdr ++ typesSec(&.{ft(I32, "")}) ++
+        sec(2, "\x01\x01m\x01t\x04\x00\x00") ++
+        sec(13, "\x01\x00\x00"));
+    const consumer_mod = try buildModuleWithFeatures(consumer_bytes, features, &diag);
+    defer decode.destroyModule(talloc, consumer_mod);
+    const consumer = try instantiate(talloc, consumer_mod, .{ .tags = &.{provider.tags[0]} }, &diag);
+    defer destroyInstance(talloc, consumer);
+
+    try std.testing.expectEqual(@as(usize, 2), consumer.tags.len);
+    try std.testing.expect(consumer.tags[0] == provider.tags[0]);
+    try std.testing.expect(consumer.tags[1] != provider.tags[0]);
+    try std.testing.expect(types.funcTypeEql(consumer.tags[0].type, consumer.tags[1].type));
+
+    const wrong = try createTag(talloc, .{ .params = &.{.i64}, .results = &.{} });
+    defer destroyTag(talloc, wrong);
+    try std.testing.expectError(
+        error.Link,
+        instantiate(talloc, consumer_mod, .{ .tags = &.{wrong} }, &diag),
+    );
+    try std.testing.expectEqualStrings("incompatible import type", diag.message());
+    try std.testing.expectError(error.Link, instantiate(talloc, consumer_mod, .{}, &diag));
+    try std.testing.expectEqualStrings("inconsistent import count", diag.message());
+}
+
+fn instantiateExceptionTagsWithFailingAllocator(gpa: std.mem.Allocator) !void {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const bytes = comptime (hdr ++ typesSec(&.{ft(I32, "")}) ++
+        sec(13, "\x03\x00\x00\x00\x00\x00\x00"));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(gpa, mod, .{}, &diag);
+    defer destroyInstance(gpa, inst);
+    try std.testing.expectEqual(@as(usize, 3), inst.tags.len);
+}
+
+test "wasm.exec exception tag instantiation is rollback-safe across allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        instantiateExceptionTagsWithFailingAllocator,
+        .{},
+    );
 }
 
 test "wasm.exec tail calls preserve indirect checks and host imports" {

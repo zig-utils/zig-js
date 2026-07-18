@@ -39,10 +39,12 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
         .global => |g| if (g.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types),
+        .tag => |tag| try validateTagType(mod, tag, diag),
         else => {},
     };
     for (mod.funcs) |t|
         if (t >= mod.types.len) return failMod(diag, "unknown type");
+    for (mod.tags) |tag| try validateTagType(mod, tag, diag);
 
     // 2. MVP allows at most one table and one memory (imports + defined).
     if (mod.totalTables() > 1 and !mod.features.reference_types) return failMod(diag, "multiple tables");
@@ -108,6 +110,8 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
                 return failModFmt(diag, "unknown memory {d}", .{e.index}),
             .global => if (e.index >= mod.totalGlobals())
                 return failMod(diag, "unknown global"),
+            .tag => if (e.index >= mod.totalTags())
+                return failMod(diag, "unknown tag"),
         }
         for (mod.exports[0..i]) |prev|
             if (std.mem.eql(u8, prev.name, e.name))
@@ -125,6 +129,13 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 8. Function bodies.
     for (mod.funcs, mod.code) |typeidx, body|
         try validateFunc(mod, diag, mod.types[typeidx], body);
+}
+
+fn validateTagType(mod: *const types.Module, tag: types.Tag, diag: *types.Diagnostic) Error!void {
+    if (!mod.features.exception_handling) return unsupportedFeature(mod, diag, .exception_handling);
+    if (tag.type_index >= mod.types.len) return failMod(diag, "unknown type");
+    if (mod.types[tag.type_index].results.len != 0)
+        return failMod(diag, "non-empty tag result type");
 }
 
 fn failMod(diag: *types.Diagnostic, comptime msg: []const u8) Error {
@@ -1559,6 +1570,33 @@ test "wasm.validate memory.grow and memory.size without memory" {
         code1("\x41\x01\x40\x00\x1A\x0B"), 0, 1, "unknown memory 0");
     try expectInvalidAt(hdr ++ type_void ++ func0 ++
         code1("\x3F\x00\x1A\x0B"), 0, 0, "unknown memory 0");
+}
+
+test "wasm.validate exception tag declarations imports and exports" {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const payload_type = comptime sec(1, "\x01\x60\x02\x7F\x7D\x00");
+    const valid = comptime (hdr ++ payload_type ++
+        sec(2, "\x01\x01m\x01t\x04\x00\x00") ++
+        sec(13, "\x01\x00\x00") ++
+        sec(7, "\x02\x01i\x04\x00\x01d\x04\x01"));
+    try expectValidWithFeatures(valid, features);
+
+    try expectInvalidWithFeatures(
+        hdr ++ payload_type ++ sec(13, "\x01\x00\x01"),
+        features,
+        "unknown type",
+    );
+    const result_type = comptime sec(1, "\x01\x60\x00\x01\x7F");
+    try expectInvalidWithFeatures(
+        hdr ++ result_type ++ sec(13, "\x01\x00\x00"),
+        features,
+        "non-empty tag result type",
+    );
+    try expectInvalidWithFeatures(
+        hdr ++ payload_type ++ sec(7, "\x01\x01t\x04\x00"),
+        features,
+        "unknown tag",
+    );
 }
 
 test "wasm.validate tail calls accept direct indirect and polymorphic stacks" {
