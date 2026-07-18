@@ -3154,7 +3154,7 @@ pub fn main() void {
         fail("SyntaxError ZigException projection mismatch");
     releaseZigException(&syntax_projection);
 
-    const line_script = JSStringCreateWithUTF8CString("const pre250 = 1;\nconst mid250 = 2;\nnew Error('lines-250');") orelse fail("source-line script creation failed");
+    const line_script = JSStringCreateWithUTF8CString("const pre250 = 1;\nconst mid250 = '💩';\nnew Error('lines-250');") orelse fail("source-line script creation failed");
     defer JSStringRelease(line_script);
     const line_url = JSStringCreateWithUTF8CString("lines-250.js") orelse fail("source-line URL creation failed");
     defer JSStringRelease(line_url);
@@ -3169,22 +3169,20 @@ pub fn main() void {
         .source_lines_ptr = &line_strings,
         .source_lines_numbers = &line_numbers,
         .source_lines_len = line_strings.len,
-        .source_lines_to_collect = line_strings.len,
+        .source_lines_to_collect = 2,
         .frames_ptr = &line_frames,
         .frames_len = 0,
         .frames_cap = line_frames.len,
     };
     JSC__JSValue__toZigException(line_error, context, &line_projection);
     ZigException__collectSourceLines(line_error, sibling_context, &line_projection);
-    if (line_projection.stack.source_lines_len != 3) fail("multi-line ZigException source count mismatch");
-    if (line_numbers[0] != 71 or line_numbers[1] != 70 or line_numbers[2] != 69)
+    if (line_projection.stack.source_lines_len != 2) fail("multi-line ZigException source count mismatch");
+    if (line_numbers[0] != 71 or line_numbers[1] != 70 or line_numbers[2] != -1)
         fail("multi-line ZigException source numbers mismatch");
     if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[0]), evaluate(context, "\"new Error('lines-250');\""), context))
         fail("multi-line ZigException current source mismatch");
-    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[1]), evaluate(context, "'const mid250 = 2;'"), context))
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[1]), evaluate(context, "\"const mid250 = '💩';\""), context))
         fail("multi-line ZigException previous source mismatch");
-    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[2]), evaluate(context, "'const pre250 = 1;'"), context))
-        fail("multi-line ZigException first source mismatch");
     releaseZigException(&line_projection);
 
     var rejected_projection = projected;
