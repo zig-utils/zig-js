@@ -128,10 +128,15 @@ result-code, trap, and SeqCst behavior. Blocking waits release serialized-mode
 GIL ownership, publish parked stack roots, and wake selectively on Worker or
 Context termination. Ordinary shared TypedArray, DataView, scalar/SIMD Wasm,
 and bulk-memory accesses use host atomics without strengthening permitted
-multi-byte tearing. The pinned executable `threads/atomic.wast` witness passes
-372/372; the complete 1,069-test root passes with zero skips, failures, or
-leaks, and focused overlapping-access TSan witnesses are clean. Terminal
-proposal-script, full TSan matrix, and scaling/JSC evidence remain tracked by
+multi-byte tearing. The complete pinned proposal profile now passes **551 / 551
+commands across all 13 files**, with **0 failures**, **0 not-applicable
+commands**, and **0 runner errors** in the production-default no-GIL mode. Its
+checked-in [inventory](docs/.data/wasm-threads-inventory.json) records 493
+JavaScript-API commands plus 29 proposal `(thread ...)` and 29 `(wait ...)`
+directives, including recursive nesting, shared module identity, litmus tests,
+and real wait/notify. The complete 1,069-test root also passes with zero skips,
+failures, or leaks, and focused overlapping-access TSan witnesses are clean.
+The terminal full TSan matrix and scaling/JSC evidence remain tracked by
 [#287](https://github.com/zig-utils/zig-js/issues/287).
 
 ## Performance
@@ -903,7 +908,7 @@ and the final evidence-backed removal of this section is tracked by
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
   from the PR-249 reference corpus, including exceptions/tail calls and
-  memory64/GC, plus terminal Threads proposal-script/TSan/scaling evidence
+  memory64/GC, plus terminal Threads TSan/scaling evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD

@@ -359,12 +359,45 @@ real cross-thread wait/notify, mismatch and timeout behavior, Worker termination
 waiter interruption/unlink, and a waiter surviving shared growth plus native
 Memory-owner destruction.
 
-This is an executable correctness claim, not the terminal Threads profile
-score. The pinned proposal also contains script-level `(thread ...)` litmus and
-wait/notify directives that the pinned WABT converter cannot lower; the runner
-records those conversions as errors rather than hidden skips. Implementing that
-script layer, running the complete proposal/TSan matrix, and publishing scaling
-and system-engine evidence are tracked by
+At checkpoint `d8319174`, the proposal script layer is complete too. The runner
+parses WAST S-expressions while preserving exact source spans and lines, handles
+strings plus nested comments, delegates ordinary commands to pinned WABT, and
+recursively lowers `(thread ...)`, `(shared (module ...))`, and `(wait ...)`.
+Child command reports merge at their upstream wait positions, `either` results
+retain their proposal meaning, and shared module instances cross Thread
+boundaries by identity. The evaluator deliberately selects zig-js's
+production-default true-parallel no-GIL configuration; serialized `.gil = true`
+contexts still hand off the legacy GIL at Wasm backedges under contention.
+
+The checked-in [complete Threads inventory](.data/wasm-threads-inventory.json)
+pins `WebAssembly/threads@979d0fcb994439423d63b2f0a8a7332d6285dd84`
+and WABT 1.0.39 commit
+`ad75c5edcdff96d73c245b57fbc07607aaca9f95`. All **551 / 551 commands**
+pass across all 13 files, with zero failures, zero not-applicable commands, and
+zero runner errors: 493 commands execute through the JavaScript API, 29 are
+proposal thread directives, and 29 are proposal waits. This includes all six
+ordinary/atomic LB, MP, and SB litmus files, recursive/deep nesting, shared
+registration, unlinkable imports, the real wait/notify loop, and all 372 atomic
+commands. There are no hidden exclusions or timing sleeps.
+
+Reproduce that terminal corpus score with exact checkouts:
+
+```sh
+git clone https://github.com/WebAssembly/threads.git /tmp/wasm-threads
+git -C /tmp/wasm-threads checkout 979d0fcb994439423d63b2f0a8a7332d6285dd84
+# Install/build WABT 1.0.39 commit ad75c5edcdff96d73c245b57fbc07607aaca9f95.
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py \
+  --profile threads \
+  --spec-root /tmp/wasm-threads \
+  --wast2json /path/to/wabt-1.0.39/wast2json \
+  --inventory docs/.data/wasm-threads-inventory.json
+```
+
+Ordinary CI pins the same source/tool revisions and runs parser regressions plus
+`simple.wast`, `deeply_nested.wast`, and `wait_notify.wast`; the deliberate
+command above owns the complete score. The remaining full TSan matrix and
+scaling/system-JSC evidence are tracked by
 [#287](https://github.com/zig-utils/zig-js/issues/287). Parent
 [#265](https://github.com/zig-utils/zig-js/issues/265) closes only after that
 evidence lands.
