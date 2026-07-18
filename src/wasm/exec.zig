@@ -1008,7 +1008,10 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const target = if (in_bounds) funcFromSlot(tab.elems[i]) else null;
                 tab.unlockTable();
                 if (!in_bounds) return s.trap("undefined element");
-                const callable = target orelse return s.trap("uninitialized element");
+                const callable = target orelse {
+                    s.diag.set(types.Diagnostic.no_offset, "uninitialized element {d}", .{i});
+                    return error.Trap;
+                };
                 const actual: types.FuncType = switch (callable.*) {
                     .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
                     .imported => |im| im.type,
@@ -1354,6 +1357,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
+            .simd => return s.trap("SIMD instruction execution not implemented"),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
             .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
                 const bu = popI32(s);

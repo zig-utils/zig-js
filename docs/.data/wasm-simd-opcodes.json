@@ -1,0 +1,1433 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_fixed_width_simd_opcode_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/simd.git",
+    "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+    "table": "interpreter/binary/decode.ml",
+    "corpus": "test/core/simd/*.wast",
+    "corpus_files": 56
+  },
+  "prefix": "0xfd",
+  "opcode_count": 236,
+  "opcodes": [
+    {
+      "subopcode": 0,
+      "hex": "0x00",
+      "name": "v128.load",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 1,
+      "hex": "0x01",
+      "name": "v128.load8x8_s",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 2,
+      "hex": "0x02",
+      "name": "v128.load8x8_u",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 3,
+      "hex": "0x03",
+      "name": "v128.load16x4_s",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 4,
+      "hex": "0x04",
+      "name": "v128.load16x4_u",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 5,
+      "hex": "0x05",
+      "name": "v128.load32x2_s",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 6,
+      "hex": "0x06",
+      "name": "v128.load32x2_u",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 7,
+      "hex": "0x07",
+      "name": "v128.load8_splat",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 8,
+      "hex": "0x08",
+      "name": "v128.load16_splat",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 9,
+      "hex": "0x09",
+      "name": "v128.load32_splat",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 10,
+      "hex": "0x0a",
+      "name": "v128.load64_splat",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 11,
+      "hex": "0x0b",
+      "name": "v128.store",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 12,
+      "hex": "0x0c",
+      "name": "v128.const",
+      "immediate": "v128"
+    },
+    {
+      "subopcode": 13,
+      "hex": "0x0d",
+      "name": "i8x16.shuffle",
+      "immediate": "lane16"
+    },
+    {
+      "subopcode": 14,
+      "hex": "0x0e",
+      "name": "i8x16.swizzle",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 15,
+      "hex": "0x0f",
+      "name": "i8x16.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 16,
+      "hex": "0x10",
+      "name": "i16x8.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 17,
+      "hex": "0x11",
+      "name": "i32x4.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 18,
+      "hex": "0x12",
+      "name": "i64x2.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 19,
+      "hex": "0x13",
+      "name": "f32x4.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 20,
+      "hex": "0x14",
+      "name": "f64x2.splat",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 21,
+      "hex": "0x15",
+      "name": "i8x16.extract_lane_s",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 22,
+      "hex": "0x16",
+      "name": "i8x16.extract_lane_u",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 23,
+      "hex": "0x17",
+      "name": "i8x16.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 24,
+      "hex": "0x18",
+      "name": "i16x8.extract_lane_s",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 25,
+      "hex": "0x19",
+      "name": "i16x8.extract_lane_u",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 26,
+      "hex": "0x1a",
+      "name": "i16x8.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 27,
+      "hex": "0x1b",
+      "name": "i32x4.extract_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 28,
+      "hex": "0x1c",
+      "name": "i32x4.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 29,
+      "hex": "0x1d",
+      "name": "i64x2.extract_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 30,
+      "hex": "0x1e",
+      "name": "i64x2.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 31,
+      "hex": "0x1f",
+      "name": "f32x4.extract_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 32,
+      "hex": "0x20",
+      "name": "f32x4.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 33,
+      "hex": "0x21",
+      "name": "f64x2.extract_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 34,
+      "hex": "0x22",
+      "name": "f64x2.replace_lane",
+      "immediate": "lane"
+    },
+    {
+      "subopcode": 35,
+      "hex": "0x23",
+      "name": "i8x16.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 36,
+      "hex": "0x24",
+      "name": "i8x16.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 37,
+      "hex": "0x25",
+      "name": "i8x16.lt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 38,
+      "hex": "0x26",
+      "name": "i8x16.lt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 39,
+      "hex": "0x27",
+      "name": "i8x16.gt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 40,
+      "hex": "0x28",
+      "name": "i8x16.gt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 41,
+      "hex": "0x29",
+      "name": "i8x16.le_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 42,
+      "hex": "0x2a",
+      "name": "i8x16.le_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 43,
+      "hex": "0x2b",
+      "name": "i8x16.ge_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 44,
+      "hex": "0x2c",
+      "name": "i8x16.ge_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 45,
+      "hex": "0x2d",
+      "name": "i16x8.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 46,
+      "hex": "0x2e",
+      "name": "i16x8.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 47,
+      "hex": "0x2f",
+      "name": "i16x8.lt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 48,
+      "hex": "0x30",
+      "name": "i16x8.lt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 49,
+      "hex": "0x31",
+      "name": "i16x8.gt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 50,
+      "hex": "0x32",
+      "name": "i16x8.gt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 51,
+      "hex": "0x33",
+      "name": "i16x8.le_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 52,
+      "hex": "0x34",
+      "name": "i16x8.le_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 53,
+      "hex": "0x35",
+      "name": "i16x8.ge_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 54,
+      "hex": "0x36",
+      "name": "i16x8.ge_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 55,
+      "hex": "0x37",
+      "name": "i32x4.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 56,
+      "hex": "0x38",
+      "name": "i32x4.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 57,
+      "hex": "0x39",
+      "name": "i32x4.lt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 58,
+      "hex": "0x3a",
+      "name": "i32x4.lt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 59,
+      "hex": "0x3b",
+      "name": "i32x4.gt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 60,
+      "hex": "0x3c",
+      "name": "i32x4.gt_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 61,
+      "hex": "0x3d",
+      "name": "i32x4.le_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 62,
+      "hex": "0x3e",
+      "name": "i32x4.le_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 63,
+      "hex": "0x3f",
+      "name": "i32x4.ge_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 64,
+      "hex": "0x40",
+      "name": "i32x4.ge_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 65,
+      "hex": "0x41",
+      "name": "f32x4.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 66,
+      "hex": "0x42",
+      "name": "f32x4.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 67,
+      "hex": "0x43",
+      "name": "f32x4.lt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 68,
+      "hex": "0x44",
+      "name": "f32x4.gt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 69,
+      "hex": "0x45",
+      "name": "f32x4.le",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 70,
+      "hex": "0x46",
+      "name": "f32x4.ge",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 71,
+      "hex": "0x47",
+      "name": "f64x2.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 72,
+      "hex": "0x48",
+      "name": "f64x2.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 73,
+      "hex": "0x49",
+      "name": "f64x2.lt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 74,
+      "hex": "0x4a",
+      "name": "f64x2.gt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 75,
+      "hex": "0x4b",
+      "name": "f64x2.le",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 76,
+      "hex": "0x4c",
+      "name": "f64x2.ge",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 77,
+      "hex": "0x4d",
+      "name": "v128.not",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 78,
+      "hex": "0x4e",
+      "name": "v128.and",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 79,
+      "hex": "0x4f",
+      "name": "v128.andnot",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 80,
+      "hex": "0x50",
+      "name": "v128.or",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 81,
+      "hex": "0x51",
+      "name": "v128.xor",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 82,
+      "hex": "0x52",
+      "name": "v128.bitselect",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 83,
+      "hex": "0x53",
+      "name": "v128.any_true",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 84,
+      "hex": "0x54",
+      "name": "v128.load8_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 85,
+      "hex": "0x55",
+      "name": "v128.load16_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 86,
+      "hex": "0x56",
+      "name": "v128.load32_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 87,
+      "hex": "0x57",
+      "name": "v128.load64_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 88,
+      "hex": "0x58",
+      "name": "v128.store8_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 89,
+      "hex": "0x59",
+      "name": "v128.store16_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 90,
+      "hex": "0x5a",
+      "name": "v128.store32_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 91,
+      "hex": "0x5b",
+      "name": "v128.store64_lane",
+      "immediate": "memarg_lane"
+    },
+    {
+      "subopcode": 92,
+      "hex": "0x5c",
+      "name": "v128.load32_zero",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 93,
+      "hex": "0x5d",
+      "name": "v128.load64_zero",
+      "immediate": "memarg"
+    },
+    {
+      "subopcode": 94,
+      "hex": "0x5e",
+      "name": "f32x4.demote_f64x2_zero",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 95,
+      "hex": "0x5f",
+      "name": "f64x2.promote_low_f32x4",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 96,
+      "hex": "0x60",
+      "name": "i8x16.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 97,
+      "hex": "0x61",
+      "name": "i8x16.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 98,
+      "hex": "0x62",
+      "name": "i8x16.popcnt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 99,
+      "hex": "0x63",
+      "name": "i8x16.all_true",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 100,
+      "hex": "0x64",
+      "name": "i8x16.bitmask",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 101,
+      "hex": "0x65",
+      "name": "i8x16.narrow_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 102,
+      "hex": "0x66",
+      "name": "i8x16.narrow_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 103,
+      "hex": "0x67",
+      "name": "f32x4.ceil",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 104,
+      "hex": "0x68",
+      "name": "f32x4.floor",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 105,
+      "hex": "0x69",
+      "name": "f32x4.trunc",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 106,
+      "hex": "0x6a",
+      "name": "f32x4.nearest",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 107,
+      "hex": "0x6b",
+      "name": "i8x16.shl",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 108,
+      "hex": "0x6c",
+      "name": "i8x16.shr_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 109,
+      "hex": "0x6d",
+      "name": "i8x16.shr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 110,
+      "hex": "0x6e",
+      "name": "i8x16.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 111,
+      "hex": "0x6f",
+      "name": "i8x16.add_sat_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 112,
+      "hex": "0x70",
+      "name": "i8x16.add_sat_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 113,
+      "hex": "0x71",
+      "name": "i8x16.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 114,
+      "hex": "0x72",
+      "name": "i8x16.sub_sat_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 115,
+      "hex": "0x73",
+      "name": "i8x16.sub_sat_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 116,
+      "hex": "0x74",
+      "name": "f64x2.ceil",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 117,
+      "hex": "0x75",
+      "name": "f64x2.floor",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 118,
+      "hex": "0x76",
+      "name": "i8x16.min_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 119,
+      "hex": "0x77",
+      "name": "i8x16.min_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 120,
+      "hex": "0x78",
+      "name": "i8x16.max_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 121,
+      "hex": "0x79",
+      "name": "i8x16.max_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 122,
+      "hex": "0x7a",
+      "name": "f64x2.trunc",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 123,
+      "hex": "0x7b",
+      "name": "i8x16.avgr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 124,
+      "hex": "0x7c",
+      "name": "i16x8.extadd_pairwise_i8x16_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 125,
+      "hex": "0x7d",
+      "name": "i16x8.extadd_pairwise_i8x16_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 126,
+      "hex": "0x7e",
+      "name": "i32x4.extadd_pairwise_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 127,
+      "hex": "0x7f",
+      "name": "i32x4.extadd_pairwise_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 128,
+      "hex": "0x80",
+      "name": "i16x8.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 129,
+      "hex": "0x81",
+      "name": "i16x8.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 130,
+      "hex": "0x82",
+      "name": "i16x8.q15mulr_sat_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 131,
+      "hex": "0x83",
+      "name": "i16x8.all_true",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 132,
+      "hex": "0x84",
+      "name": "i16x8.bitmask",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 133,
+      "hex": "0x85",
+      "name": "i16x8.narrow_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 134,
+      "hex": "0x86",
+      "name": "i16x8.narrow_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 135,
+      "hex": "0x87",
+      "name": "i16x8.extend_low_i8x16_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 136,
+      "hex": "0x88",
+      "name": "i16x8.extend_high_i8x16_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 137,
+      "hex": "0x89",
+      "name": "i16x8.extend_low_i8x16_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 138,
+      "hex": "0x8a",
+      "name": "i16x8.extend_high_i8x16_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 139,
+      "hex": "0x8b",
+      "name": "i16x8.shl",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 140,
+      "hex": "0x8c",
+      "name": "i16x8.shr_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 141,
+      "hex": "0x8d",
+      "name": "i16x8.shr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 142,
+      "hex": "0x8e",
+      "name": "i16x8.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 143,
+      "hex": "0x8f",
+      "name": "i16x8.add_sat_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 144,
+      "hex": "0x90",
+      "name": "i16x8.add_sat_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 145,
+      "hex": "0x91",
+      "name": "i16x8.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 146,
+      "hex": "0x92",
+      "name": "i16x8.sub_sat_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 147,
+      "hex": "0x93",
+      "name": "i16x8.sub_sat_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 148,
+      "hex": "0x94",
+      "name": "f64x2.nearest",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 149,
+      "hex": "0x95",
+      "name": "i16x8.mul",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 150,
+      "hex": "0x96",
+      "name": "i16x8.min_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 151,
+      "hex": "0x97",
+      "name": "i16x8.min_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 152,
+      "hex": "0x98",
+      "name": "i16x8.max_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 153,
+      "hex": "0x99",
+      "name": "i16x8.max_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 155,
+      "hex": "0x9b",
+      "name": "i16x8.avgr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 156,
+      "hex": "0x9c",
+      "name": "i16x8.extmul_low_i8x16_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 157,
+      "hex": "0x9d",
+      "name": "i16x8.extmul_high_i8x16_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 158,
+      "hex": "0x9e",
+      "name": "i16x8.extmul_low_i8x16_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 159,
+      "hex": "0x9f",
+      "name": "i16x8.extmul_high_i8x16_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 160,
+      "hex": "0xa0",
+      "name": "i32x4.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 161,
+      "hex": "0xa1",
+      "name": "i32x4.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 163,
+      "hex": "0xa3",
+      "name": "i32x4.all_true",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 164,
+      "hex": "0xa4",
+      "name": "i32x4.bitmask",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 167,
+      "hex": "0xa7",
+      "name": "i32x4.extend_low_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 168,
+      "hex": "0xa8",
+      "name": "i32x4.extend_high_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 169,
+      "hex": "0xa9",
+      "name": "i32x4.extend_low_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 170,
+      "hex": "0xaa",
+      "name": "i32x4.extend_high_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 171,
+      "hex": "0xab",
+      "name": "i32x4.shl",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 172,
+      "hex": "0xac",
+      "name": "i32x4.shr_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 173,
+      "hex": "0xad",
+      "name": "i32x4.shr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 174,
+      "hex": "0xae",
+      "name": "i32x4.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 177,
+      "hex": "0xb1",
+      "name": "i32x4.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 181,
+      "hex": "0xb5",
+      "name": "i32x4.mul",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 182,
+      "hex": "0xb6",
+      "name": "i32x4.min_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 183,
+      "hex": "0xb7",
+      "name": "i32x4.min_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 184,
+      "hex": "0xb8",
+      "name": "i32x4.max_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 185,
+      "hex": "0xb9",
+      "name": "i32x4.max_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 186,
+      "hex": "0xba",
+      "name": "i32x4.dot_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 188,
+      "hex": "0xbc",
+      "name": "i32x4.extmul_low_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 189,
+      "hex": "0xbd",
+      "name": "i32x4.extmul_high_i16x8_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 190,
+      "hex": "0xbe",
+      "name": "i32x4.extmul_low_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 191,
+      "hex": "0xbf",
+      "name": "i32x4.extmul_high_i16x8_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 192,
+      "hex": "0xc0",
+      "name": "i64x2.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 193,
+      "hex": "0xc1",
+      "name": "i64x2.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 195,
+      "hex": "0xc3",
+      "name": "i64x2.all_true",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 196,
+      "hex": "0xc4",
+      "name": "i64x2.bitmask",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 199,
+      "hex": "0xc7",
+      "name": "i64x2.extend_low_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 200,
+      "hex": "0xc8",
+      "name": "i64x2.extend_high_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 201,
+      "hex": "0xc9",
+      "name": "i64x2.extend_low_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 202,
+      "hex": "0xca",
+      "name": "i64x2.extend_high_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 203,
+      "hex": "0xcb",
+      "name": "i64x2.shl",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 204,
+      "hex": "0xcc",
+      "name": "i64x2.shr_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 205,
+      "hex": "0xcd",
+      "name": "i64x2.shr_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 206,
+      "hex": "0xce",
+      "name": "i64x2.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 209,
+      "hex": "0xd1",
+      "name": "i64x2.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 213,
+      "hex": "0xd5",
+      "name": "i64x2.mul",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 214,
+      "hex": "0xd6",
+      "name": "i64x2.eq",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 215,
+      "hex": "0xd7",
+      "name": "i64x2.ne",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 216,
+      "hex": "0xd8",
+      "name": "i64x2.lt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 217,
+      "hex": "0xd9",
+      "name": "i64x2.gt_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 218,
+      "hex": "0xda",
+      "name": "i64x2.le_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 219,
+      "hex": "0xdb",
+      "name": "i64x2.ge_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 220,
+      "hex": "0xdc",
+      "name": "i64x2.extmul_low_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 221,
+      "hex": "0xdd",
+      "name": "i64x2.extmul_high_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 222,
+      "hex": "0xde",
+      "name": "i64x2.extmul_low_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 223,
+      "hex": "0xdf",
+      "name": "i64x2.extmul_high_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 224,
+      "hex": "0xe0",
+      "name": "f32x4.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 225,
+      "hex": "0xe1",
+      "name": "f32x4.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 227,
+      "hex": "0xe3",
+      "name": "f32x4.sqrt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 228,
+      "hex": "0xe4",
+      "name": "f32x4.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 229,
+      "hex": "0xe5",
+      "name": "f32x4.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 230,
+      "hex": "0xe6",
+      "name": "f32x4.mul",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 231,
+      "hex": "0xe7",
+      "name": "f32x4.div",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 232,
+      "hex": "0xe8",
+      "name": "f32x4.min",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 233,
+      "hex": "0xe9",
+      "name": "f32x4.max",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 234,
+      "hex": "0xea",
+      "name": "f32x4.pmin",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 235,
+      "hex": "0xeb",
+      "name": "f32x4.pmax",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 236,
+      "hex": "0xec",
+      "name": "f64x2.abs",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 237,
+      "hex": "0xed",
+      "name": "f64x2.neg",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 239,
+      "hex": "0xef",
+      "name": "f64x2.sqrt",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 240,
+      "hex": "0xf0",
+      "name": "f64x2.add",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 241,
+      "hex": "0xf1",
+      "name": "f64x2.sub",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 242,
+      "hex": "0xf2",
+      "name": "f64x2.mul",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 243,
+      "hex": "0xf3",
+      "name": "f64x2.div",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 244,
+      "hex": "0xf4",
+      "name": "f64x2.min",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 245,
+      "hex": "0xf5",
+      "name": "f64x2.max",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 246,
+      "hex": "0xf6",
+      "name": "f64x2.pmin",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 247,
+      "hex": "0xf7",
+      "name": "f64x2.pmax",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 248,
+      "hex": "0xf8",
+      "name": "i32x4.trunc_sat_f32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 249,
+      "hex": "0xf9",
+      "name": "i32x4.trunc_sat_f32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 250,
+      "hex": "0xfa",
+      "name": "f32x4.convert_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 251,
+      "hex": "0xfb",
+      "name": "f32x4.convert_i32x4_u",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 252,
+      "hex": "0xfc",
+      "name": "i32x4.trunc_sat_f64x2_s_zero",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 253,
+      "hex": "0xfd",
+      "name": "i32x4.trunc_sat_f64x2_u_zero",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 254,
+      "hex": "0xfe",
+      "name": "f64x2.convert_low_i32x4_s",
+      "immediate": "none"
+    },
+    {
+      "subopcode": 255,
+      "hex": "0xff",
+      "name": "f64x2.convert_low_i32x4_u",
+      "immediate": "none"
+    }
+  ]
+}
+
+

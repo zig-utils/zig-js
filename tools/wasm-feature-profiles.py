@@ -33,6 +33,16 @@ def main() -> int:
         type=Path,
         default=ROOT / "src/wasm/types.zig",
     )
+    parser.add_argument(
+        "--simd-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-simd-opcodes.json",
+    )
+    parser.add_argument(
+        "--simd-source",
+        type=Path,
+        default=ROOT / "src/wasm/simd.zig",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -63,6 +73,30 @@ def main() -> int:
         require(feature_id not in dependencies, f"{feature_id}: self dependency")
         unknown = set(dependencies) - known
         require(not unknown, f"{feature_id}: unknown dependencies {sorted(unknown)}")
+
+    simd_feature = next(feature for feature in features if feature["id"] == "fixed_width_simd")
+    simd_inventory = json.loads(args.simd_inventory.read_text())
+    require(simd_inventory.get("schema_version") == 1, "SIMD inventory: unsupported schema version")
+    require(simd_inventory.get("kind") == "webassembly_fixed_width_simd_opcode_inventory", "SIMD inventory: invalid kind")
+    require(simd_inventory.get("prefix") == "0xfd", "SIMD inventory: invalid opcode prefix")
+    require(simd_inventory.get("source", {}).get("commit") == simd_feature["commit"], "SIMD inventory/registry commit drift")
+    require(simd_inventory.get("source", {}).get("corpus_files") == 56, "SIMD inventory: expected 56 corpus files")
+    simd_opcodes = simd_inventory.get("opcodes", [])
+    require(simd_inventory.get("opcode_count") == len(simd_opcodes) == 236, "SIMD inventory: expected 236 opcodes")
+    subopcodes = [entry.get("subopcode") for entry in simd_opcodes]
+    names = [entry.get("name") for entry in simd_opcodes]
+    require(len(subopcodes) == len(set(subopcodes)), "SIMD inventory: duplicate subopcode")
+    require(len(names) == len(set(names)), "SIMD inventory: duplicate instruction name")
+    require(all(isinstance(value, int) and 0 <= value <= 255 for value in subopcodes), "SIMD inventory: invalid subopcode")
+    require(all(entry.get("immediate") in {"none", "memarg", "v128", "lane16", "lane", "memarg_lane"} for entry in simd_opcodes), "SIMD inventory: invalid immediate kind")
+    simd_source = args.simd_source.read_text()
+    enum_body = simd_source.split("pub const Op = enum(u8) {", 1)[1].split("pub fn fromSubopcode", 1)[0]
+    runtime_simd = {
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{2}),$", enum_body, re.MULTILINE)
+    }
+    inventoried_simd = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(names, subopcodes)}
+    require(runtime_simd == inventoried_simd, "SIMD inventory/runtime opcode drift")
 
     profiles = document.get("profiles", [])
     profile_ids = [profile.get("id") for profile in profiles]

@@ -246,7 +246,7 @@ const Reader = struct {
         const raw = self.bytes[self.pos..][0..len];
         self.pos += len;
         if (!std.unicode.utf8ValidateSlice(raw))
-            return self.failAt(off, "malformed UTF-8 encoding", .{});
+            return self.failAt(off, "invalid UTF-8 encoding", .{});
         return try a.dupe(u8, raw);
     }
 
@@ -346,7 +346,7 @@ const Reader = struct {
         const mutable = switch (m) {
             0 => false,
             1 => true,
-            else => return self.failAt(mut_off, "malformed mutability", .{}),
+            else => return self.failAt(mut_off, "invalid mutability", .{}),
         };
         return .{ .val = val, .mutable = mutable };
     }
@@ -680,7 +680,11 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 }
                 return r.failAt(instr_off, "invalid 0xfc subopcode {d}", .{subopcode});
             }
-            if (b == 0xFD) return r.unsupportedFeature(instr_off, .fixed_width_simd);
+            if (b == 0xFD) {
+                if (!r.features.fixed_width_simd)
+                    return r.unsupportedFeature(instr_off, .fixed_width_simd);
+                break :proposal .simd;
+            }
             if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
             if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
             if (b == 0x12 or b == 0x13) return r.unsupportedFeature(instr_off, .tail_calls);
@@ -691,6 +695,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
         };
         if (b >= 0xC0 and b <= 0xC4 and !r.features.sign_extension_ops)
             return r.unsupportedFeature(instr_off, .sign_extension_ops);
+        if (op == .simd and !r.features.fixed_width_simd)
+            return r.unsupportedFeature(instr_off, .fixed_width_simd);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -782,7 +788,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 else blk: {
                     const z_off = r.offset();
                     if (try r.readU8() != 0x00)
-                        return r.failAt(z_off, "zero byte expected", .{});
+                        return r.failAt(z_off, "zero flag expected", .{});
                     break :blk 0;
                 };
                 instr.imm = .{ .call_indirect = .{ .type_index = typeidx, .table_index = tableidx } };
@@ -808,12 +814,39 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .memory_size, .memory_grow => {
                 const z_off = r.offset();
                 if (try r.readU8() != 0x00)
-                    return r.failAt(z_off, "zero byte expected", .{});
+                    return r.failAt(z_off, "zero flag expected", .{});
             },
             .i32_const => instr.imm = .{ .i32 = try r.readI32Leb() },
             .i64_const => instr.imm = .{ .i64 = try r.readI64Leb() },
             .f32_const => instr.imm = .{ .f32 = std.mem.readInt(u32, (try r.readBytes(4))[0..4], .little) },
             .f64_const => instr.imm = .{ .f64 = std.mem.readInt(u64, (try r.readBytes(8))[0..8], .little) },
+            .simd => {
+                const subopcode_off = r.offset();
+                const simd_op = @import("simd.zig").Op.fromSubopcode(try r.readU32Leb()) orelse
+                    return r.failAt(subopcode_off, "invalid 0xfd subopcode", .{});
+                switch (simd_op.immediate()) {
+                    .none => instr.imm = .{ .simd = simd_op },
+                    .memarg => instr.imm = .{ .simd_memarg = .{ .op = simd_op, .memarg = .{
+                        .align_ = try r.readU32Leb(),
+                        .offset = try r.readU32Leb(),
+                    } } },
+                    .v128 => instr.imm = .{ .simd_v128 = .{
+                        .op = simd_op,
+                        .bits = std.mem.readInt(u128, (try r.readBytes(16))[0..16], .little),
+                    } },
+                    .lane16 => {
+                        var lanes: [16]u8 = undefined;
+                        @memcpy(&lanes, try r.readBytes(16));
+                        instr.imm = .{ .simd_shuffle = .{ .op = simd_op, .lanes = lanes } };
+                    },
+                    .lane => instr.imm = .{ .simd_lane = .{ .op = simd_op, .lane = try r.readU8() } },
+                    .memarg_lane => instr.imm = .{ .simd_memarg_lane = .{
+                        .op = simd_op,
+                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU32Leb() },
+                        .lane = try r.readU8(),
+                    } },
+                }
+            },
             else => {
                 const v = @intFromEnum(op);
                 if (v >= 0x28 and v <= 0x3E) {
@@ -1116,7 +1149,7 @@ test "wasm.decode malformed declarations" {
     // Export kind 4.
     try expectMalformed(hdr ++ "\x07\x05\x01\x01\x65\x04\x00", 13, "invalid export kind");
     // Global mutability 2.
-    try expectMalformed(hdr ++ "\x06\x06\x01\x7F\x02\x41\x00\x0B", 12, "malformed mutability");
+    try expectMalformed(hdr ++ "\x06\x06\x01\x7F\x02\x41\x00\x0B", 12, "invalid mutability");
     // Table element type 0x6F.
     try expectMalformed(hdr ++ "\x02\x09\x01\x01\x61\x01\x74\x01\x6F\x00\x01", 16, "WebAssembly feature reference-types is disabled");
     // Limits flag 0x03 is shared memory with a maximum.
@@ -1128,7 +1161,7 @@ test "wasm.decode malformed declarations" {
     // Table max < min.
     try expectMalformed(hdr ++ "\x04\x05\x01\x70\x01\x02\x01", 14, "size minimum must not be greater than maximum");
     // Non-UTF-8 import module name.
-    try expectMalformed(hdr ++ "\x02\x07\x01\x01\xFF\x01\x62\x00\x00", 11, "malformed UTF-8 encoding");
+    try expectMalformed(hdr ++ "\x02\x07\x01\x01\xFF\x01\x62\x00\x00", 11, "invalid UTF-8 encoding");
     // Function/code section count mismatch, both directions.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x01\x00", 15, "function and code section have inconsistent lengths");
     try expectMalformed(hdr ++ "\x0A\x04\x01\x02\x00\x0B", 14, "function and code section have inconsistent lengths");
@@ -1141,9 +1174,9 @@ test "wasm.decode malformed code bodies" {
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x00\x0B", 17, "WebAssembly feature nontrapping-float-to-int is disabled");
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\xFD", 17, "WebAssembly feature fixed-width-simd is disabled");
     // call_indirect reserved byte must be zero.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\x11\x00\x01", 19, "zero byte expected");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\x11\x00\x01", 19, "zero flag expected");
     // memory.grow reserved byte must be zero.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x40\x01", 18, "zero byte expected");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x40\x01", 18, "zero flag expected");
     // Non-negative block type = type index (multi-value proposal).
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x02\x01", 18, "WebAssembly feature multi-value is disabled");
     // funcref is not an MVP block type.
@@ -1158,6 +1191,41 @@ test "wasm.decode malformed code bodies" {
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x05\x01\x03\x00\x0B\x01", 18, "junk after last expression");
     // Two local groups of 0xFFFFFFFF each overflow the u32 locals range.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x0F\x01\x0D\x02\xFF\xFF\xFF\xFF\x0F\x7F\xFF\xFF\xFF\xFF\x0F\x7F", 23, "too many locals");
+}
+
+test "wasm.decode fixed-width SIMD opcode inventory and immediates" {
+    const lanes = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x0C" ++ lanes ++ // v128.const
+        "\xFD\x00\x04\x07" ++ // v128.load align=4 offset=7
+        "\xFD\x15\x0F" ++ // i8x16.extract_lane_s 15
+        "\xFD\x54\x00\x00\x0F" ++ // v128.load8_lane 15
+        "\xFD\x0D" ++ lanes ++ // i8x16.shuffle identity
+        "\x0B"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .fixed_width_simd = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    const instrs = mod.code[0].instrs;
+    try std.testing.expectEqual(@as(usize, 6), instrs.len);
+    try std.testing.expectEqual(@as(u128, 0x0F0E0D0C0B0A09080706050403020100), instrs[0].imm.simd_v128.bits);
+    try std.testing.expectEqualDeep(types.Instr.MemArg{ .align_ = 4, .offset = 7 }, instrs[1].imm.simd_memarg.memarg);
+    try std.testing.expectEqual(@as(u8, 15), instrs[2].imm.simd_lane.lane);
+    try std.testing.expectEqual(@as(u8, 15), instrs[3].imm.simd_memarg_lane.lane);
+    try std.testing.expectEqualSlices(u8, lanes, &instrs[4].imm.simd_shuffle.lanes);
+}
+
+test "wasm.decode fixed-width SIMD rejects reserved and oversized subopcodes" {
+    try expectMalformedWithFeatures(
+        comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x9A\x01")),
+        .{ .fixed_width_simd = true },
+        18,
+        "invalid 0xfd subopcode",
+    );
+    try expectMalformedWithFeatures(
+        comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x80\x02")),
+        .{ .fixed_width_simd = true },
+        18,
+        "invalid 0xfd subopcode",
+    );
 }
 
 test "wasm.decode feature gates distinguish disabled features and dependencies" {

@@ -22,6 +22,8 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
     for (mod.types) |ft| {
+        // MVP function types have at most one result; multi-value is opt-in.
+        if (ft.results.len > 1 and !mod.features.multi_value) return failMod(diag, "invalid result arity");
         for (ft.params) |p| {
             if (p.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
             if (p == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
@@ -40,7 +42,7 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
         if (t >= mod.types.len) return failMod(diag, "unknown type");
 
     // 2. MVP allows at most one table and one memory (imports + defined).
-    if (mod.totalTables() > 1 and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+    if (mod.totalTables() > 1 and !mod.features.reference_types) return failMod(diag, "multiple tables");
     if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
 
     // 3. Global initializers: typed constant expressions.
@@ -143,7 +145,7 @@ fn checkConstExpr(
             if (gt.val != expected) return failMod(diag, "type mismatch");
         },
         .ref_func => |funcidx| {
-            if (funcidx >= mod.totalFuncs()) return failMod(diag, "unknown function");
+            if (funcidx >= mod.totalFuncs()) return failModFmt(diag, "unknown function {d}", .{funcidx});
             if (expected != .funcref) return failMod(diag, "type mismatch");
         },
         else => if (expr.valType() != expected)
@@ -635,6 +637,7 @@ const FuncValidator = struct {
                 .i64_const => self.push(.i64),
                 .f32_const => self.push(.f32),
                 .f64_const => self.push(.f64),
+                .simd => return self.fail("SIMD instruction validation not implemented"),
                 .i32_eqz => try self.testop(.i32),
                 .i64_eqz => try self.testop(.i64),
                 .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => try self.relop(.i32),

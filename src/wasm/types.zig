@@ -3,6 +3,7 @@
 //! decoded `Module` owns its memory through a single arena.
 
 const std = @import("std");
+const simd = @import("simd.zig");
 
 pub const PAGE_SIZE: u32 = 65536;
 pub const MAX_PAGES: u32 = 65536; // 4 GiB
@@ -315,6 +316,12 @@ pub const Instr = struct {
         block: Block,
         br_table: BrTable,
         indices: Indices,
+        simd: simd.Op,
+        simd_memarg: SimdMemArg,
+        simd_v128: SimdV128,
+        simd_shuffle: SimdShuffle,
+        simd_lane: SimdLane,
+        simd_memarg_lane: SimdMemArgLane,
     };
 
     pub const MemArg = struct {
@@ -331,6 +338,12 @@ pub const Instr = struct {
         first: u32,
         second: u32,
     };
+
+    pub const SimdMemArg = struct { op: simd.Op, memarg: MemArg };
+    pub const SimdV128 = struct { op: simd.Op, bits: u128 };
+    pub const SimdShuffle = struct { op: simd.Op, lanes: [16]u8 };
+    pub const SimdLane = struct { op: simd.Op, lane: u8 };
+    pub const SimdMemArgLane = struct { op: simd.Op, memarg: MemArg, lane: u8 };
 
     pub const Block = struct {
         type: BlockType,
@@ -550,6 +563,7 @@ pub const Op = enum(u16) {
     ref_null = 0xD0,
     ref_is_null = 0xD1,
     ref_func = 0xD2,
+    simd = 0xFD,
     // Nontrapping float-to-integer conversions (0xfc prefix)
     i32_trunc_sat_f32_s = 0xFC00,
     i32_trunc_sat_f32_u = 0xFC01,
