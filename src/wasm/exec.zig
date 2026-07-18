@@ -3267,6 +3267,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
+            .gc, .ref_eq, .ref_as_non_null => return s.trap("WebAssembly GC instruction is not implemented"),
             .simd => try executeSimd(s, inst, instr),
             .atomic => try executeAtomic(s, inst, instr),
             .i32_eqz => try pushBool(s, popI32(s) == 0),

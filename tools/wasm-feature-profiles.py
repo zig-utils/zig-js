@@ -162,6 +162,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-gc-binary-inventory.json",
     )
     parser.add_argument(
+        "--gc-source",
+        type=Path,
+        default=ROOT / "src/wasm/gc.zig",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -598,6 +603,20 @@ def main() -> int:
         "GC prefixed opcode drift",
     )
     require(len({entry.get("name") for entry in gc_opcodes}) == 33, "GC duplicate instruction name")
+    gc_runtime_source = args.gc_source.read_text()
+    gc_runtime_enum = gc_runtime_source.split("pub const Op = enum(u8) {", 1)[1].split("pub fn fromSubopcode", 1)[0]
+    runtime_gc_opcodes = [
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*) = 0x([0-9A-F]{2}),$", gc_runtime_enum, re.MULTILINE)
+    ]
+    require(
+        runtime_gc_opcodes == [(name.replace(".", "_"), subopcode) for subopcode, name in enumerate(expected_gc_prefixed_names)],
+        "GC inventory/runtime prefixed opcode drift",
+    )
+    require(
+        all(token in source for token in ("ref_eq = 0xD3", "ref_as_non_null = 0xD4", "gc = 0xFB")),
+        "GC inventory/runtime direct opcode drift",
+    )
     gc_corpus = gc_inventory.get("corpus", {})
     gc_files = gc_corpus.get("files", [])
     expected_gc_files = [

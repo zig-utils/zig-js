@@ -957,6 +957,7 @@ const FuncValidator = struct {
                 .i64_const => self.push(.i64),
                 .f32_const => self.push(.f32),
                 .f64_const => self.push(.f64),
+                .gc, .ref_eq, .ref_as_non_null => return unsupportedFeature(self.mod, self.diag, .gc),
                 .simd => try self.validateSimd(instr),
                 .atomic => try self.validateAtomic(instr),
                 .i32_eqz => try self.testop(.i32),

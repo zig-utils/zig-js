@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const atomic = @import("atomic.zig");
+const gc = @import("gc.zig");
 const simd = @import("simd.zig");
 
 pub const PAGE_SIZE: u32 = 65536;
@@ -559,6 +560,12 @@ pub const Instr = struct {
         simd_memarg_lane: SimdMemArgLane,
         atomic: atomic.Op,
         atomic_memarg: AtomicMemArg,
+        gc: gc.Op,
+        gc_type: GcType,
+        gc_type_field: GcTypeField,
+        gc_two_indices: GcTwoIndices,
+        gc_heap: GcHeap,
+        gc_cast_branch: GcCastBranch,
     };
 
     pub const MemArg = struct {
@@ -582,6 +589,18 @@ pub const Instr = struct {
     pub const SimdLane = struct { op: simd.Op, lane: u8 };
     pub const SimdMemArgLane = struct { op: simd.Op, memarg: MemArg, lane: u8 };
     pub const AtomicMemArg = struct { op: atomic.Op, memarg: MemArg };
+    pub const GcType = struct { op: gc.Op, type_index: u32 };
+    pub const GcTypeField = struct { op: gc.Op, type_index: u32, field_index: u32 };
+    pub const GcTwoIndices = struct { op: gc.Op, first: u32, second: u32 };
+    pub const GcHeap = struct { op: gc.Op, heap: HeapType };
+    pub const GcCastBranch = struct {
+        op: gc.Op,
+        source_nullable: bool,
+        target_nullable: bool,
+        label_index: u32,
+        source_heap: HeapType,
+        target_heap: HeapType,
+    };
 
     pub const Block = struct {
         type: BlockType,
@@ -830,6 +849,9 @@ pub const Op = enum(u16) {
     ref_null = 0xD0,
     ref_is_null = 0xD1,
     ref_func = 0xD2,
+    ref_eq = 0xD3,
+    ref_as_non_null = 0xD4,
+    gc = 0xFB,
     simd = 0xFD,
     atomic = 0xFE,
     // Nontrapping float-to-integer conversions (0xfc prefix)

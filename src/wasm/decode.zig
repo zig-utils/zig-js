@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const atomic = @import("atomic.zig");
+const wasm_gc = @import("gc.zig");
 const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -903,6 +904,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .tail_calls);
         if ((op == .throw or op == .throw_ref or op == .try_table) and !r.features.exception_handling)
             return r.unsupportedFeature(instr_off, .exception_handling);
+        if ((op == .gc or op == .ref_eq or op == .ref_as_non_null) and !r.features.gc)
+            return r.unsupportedFeature(instr_off, .gc);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -1077,6 +1080,45 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .i64_const => instr.imm = .{ .i64 = try r.readI64Leb() },
             .f32_const => instr.imm = .{ .f32 = std.mem.readInt(u32, (try r.readBytes(4))[0..4], .little) },
             .f64_const => instr.imm = .{ .f64 = std.mem.readInt(u64, (try r.readBytes(8))[0..8], .little) },
+            .gc => {
+                const subopcode_off = r.offset();
+                const gc_op = wasm_gc.Op.fromSubopcode(try r.readU32Leb()) orelse
+                    return r.failAt(subopcode_off, "invalid 0xfb subopcode", .{});
+                switch (gc_op.immediate()) {
+                    .none => instr.imm = .{ .gc = gc_op },
+                    .type_index => instr.imm = .{ .gc_type = .{
+                        .op = gc_op,
+                        .type_index = try r.readU32Leb(),
+                    } },
+                    .type_field => instr.imm = .{ .gc_type_field = .{
+                        .op = gc_op,
+                        .type_index = try r.readU32Leb(),
+                        .field_index = try r.readU32Leb(),
+                    } },
+                    .type_count, .two_indices => instr.imm = .{ .gc_two_indices = .{
+                        .op = gc_op,
+                        .first = try r.readU32Leb(),
+                        .second = try r.readU32Leb(),
+                    } },
+                    .heap_type => instr.imm = .{ .gc_heap = .{
+                        .op = gc_op,
+                        .heap = try r.readHeapType(),
+                    } },
+                    .cast_branch => {
+                        const flags_off = r.offset();
+                        const flags = try r.readU8();
+                        if (flags > 3) return r.failAt(flags_off, "malformed cast flags", .{});
+                        instr.imm = .{ .gc_cast_branch = .{
+                            .op = gc_op,
+                            .source_nullable = flags & 1 != 0,
+                            .target_nullable = flags & 2 != 0,
+                            .label_index = try r.readU32Leb(),
+                            .source_heap = try r.readHeapType(),
+                            .target_heap = try r.readHeapType(),
+                        } };
+                    },
+                }
+            },
             .simd => {
                 const subopcode_off = r.offset();
                 const simd_op = @import("simd.zig").Op.fromSubopcode(try r.readU32Leb()) orelse
@@ -1635,6 +1677,71 @@ test "wasm.decode GC type gates and malformed fields are deterministic" {
     try expectMalformedWithFeatures(bad_mutability, gc_features, 14, "malformed mutability");
     const bad_composite = comptime (hdr ++ testSection(1, "\x01\x50\x00\x5D"));
     try expectMalformedWithFeatures(bad_composite, gc_features, 13, "invalid composite type");
+}
+
+fn decodedGcOp(instr: types.Instr) wasm_gc.Op {
+    return switch (instr.imm) {
+        .gc => |op| op,
+        .gc_type => |value| value.op,
+        .gc_type_field => |value| value.op,
+        .gc_two_indices => |value| value.op,
+        .gc_heap => |value| value.op,
+        .gc_cast_branch => |value| value.op,
+        else => unreachable,
+    };
+}
+
+const gc_instruction_bytes =
+    "\xD3\xD4" ++
+    "\xFB\x00\x01\xFB\x01\x01" ++
+    "\xFB\x02\x01\x02\xFB\x03\x01\x02\xFB\x04\x01\x02\xFB\x05\x01\x02" ++
+    "\xFB\x06\x01\xFB\x07\x01\xFB\x08\x01\x03\xFB\x09\x01\x02\xFB\x0A\x01\x02" ++
+    "\xFB\x0B\x01\xFB\x0C\x01\xFB\x0D\x01\xFB\x0E\x01\xFB\x0F" ++
+    "\xFB\x10\x01\xFB\x11\x01\x02\xFB\x12\x01\x02\xFB\x13\x01\x02" ++
+    "\xFB\x14\x6E\xFB\x15\x6E\xFB\x16\x6D\xFB\x17\x6D" ++
+    "\xFB\x18\x03\x04\x6E\x6D\xFB\x19\x00\x05\x70\x73" ++
+    "\xFB\x1A\xFB\x1B\xFB\x1C\xFB\x1D\xFB\x1E\x0B";
+
+test "wasm.decode every pinned GC opcode and immediate" {
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode(gc_instruction_bytes));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, gc_features, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    const instrs = mod.code[0].instrs;
+    try std.testing.expectEqual(types.Op.ref_eq, instrs[0].op);
+    try std.testing.expectEqual(types.Op.ref_as_non_null, instrs[1].op);
+    for (instrs[2..33], 0..) |instr, subopcode| {
+        try std.testing.expectEqual(types.Op.gc, instr.op);
+        try std.testing.expectEqual(@as(u8, @intCast(subopcode)), @intFromEnum(decodedGcOp(instr)));
+    }
+    try std.testing.expectEqual(types.Op.end, instrs[33].op);
+    try std.testing.expectEqualDeep(
+        types.Instr.GcTypeField{ .op = .struct_get, .type_index = 1, .field_index = 2 },
+        instrs[4].imm.gc_type_field,
+    );
+    try std.testing.expectEqualDeep(
+        types.Instr.GcTwoIndices{ .op = .array_new_fixed, .first = 1, .second = 3 },
+        instrs[10].imm.gc_two_indices,
+    );
+    const cast = instrs[26].imm.gc_cast_branch;
+    try std.testing.expect(cast.source_nullable and cast.target_nullable);
+    try std.testing.expectEqual(@as(u32, 4), cast.label_index);
+    try std.testing.expectEqual(types.HeapType.any, cast.source_heap);
+    try std.testing.expectEqual(types.HeapType.eq, cast.target_heap);
+}
+
+test "wasm.decode GC opcode gates and malformed immediates are deterministic" {
+    const one = comptime (hdr ++ func_sec_1 ++ testCode("\xFB\x00\x00\x0B"));
+    try expectMalformedWithFeatures(
+        one,
+        .{ .reference_types = true, .typed_function_references = true },
+        17,
+        "WebAssembly feature gc is disabled",
+    );
+    const reserved = comptime (hdr ++ func_sec_1 ++ testCode("\xFB\x1F\x0B"));
+    try expectMalformedWithFeatures(reserved, gc_features, 18, "invalid 0xfb subopcode");
+    const cast_flags = comptime (hdr ++ func_sec_1 ++ testCode("\xFB\x18\x04\x00\x6E\x6D\x0B"));
+    try expectMalformedWithFeatures(cast_flags, gc_features, 19, "malformed cast flags");
 }
 
 test "wasm.decode malformed code bodies" {
