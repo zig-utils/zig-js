@@ -19,6 +19,7 @@ const js_value = @import("../value.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate = @import("validate.zig");
+const simd = @import("simd.zig");
 
 const Allocator = std.mem.Allocator;
 pub const ValueSlot = js_value.WasmSlot;
@@ -720,6 +721,124 @@ fn pushBool(s: *State, v: bool) ExecError!void {
     try push(s, @intFromBool(v));
 }
 
+fn pushVector(s: *State, bits: u128) ExecError!void {
+    try pushSlot(s, .{ .vector = bits });
+}
+
+fn popVector(s: *State) u128 {
+    return popSlot(s).vectorBits();
+}
+
+fn simdOp(instr: types.Instr) simd.Op {
+    return switch (instr.imm) {
+        .simd => |op| op,
+        .simd_memarg => |value| value.op,
+        .simd_v128 => |value| value.op,
+        .simd_shuffle => |value| value.op,
+        .simd_lane => |value| value.op,
+        .simd_memarg_lane => |value| value.op,
+        else => unreachable,
+    };
+}
+
+fn laneBits(vector: u128, lane: u8, width: u8) u64 {
+    const shift: u7 = @intCast(@as(u16, lane) * width);
+    const mask: u128 = (@as(u128, 1) << @intCast(width)) - 1;
+    return @truncate((vector >> shift) & mask);
+}
+
+fn replaceLaneBits(vector: u128, lane: u8, width: u8, value: u64) u128 {
+    const shift: u7 = @intCast(@as(u16, lane) * width);
+    const low_mask: u128 = (@as(u128, 1) << @intCast(width)) - 1;
+    const mask = low_mask << shift;
+    return (vector & ~mask) | ((@as(u128, value) & low_mask) << shift);
+}
+
+fn splatLaneBits(value: u64, width: u8, count: u8) u128 {
+    var vector: u128 = 0;
+    for (0..count) |lane| vector = replaceLaneBits(vector, @intCast(lane), width, value);
+    return vector;
+}
+
+fn executeSimdPure(s: *State, instr: types.Instr) ExecError!void {
+    const op = simdOp(instr);
+    switch (op) {
+        .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
+        .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
+        .i16x8_splat => try pushVector(s, splatLaneBits(popI32(s), 16, 8)),
+        .i32x4_splat, .f32x4_splat => try pushVector(s, splatLaneBits(popI32(s), 32, 4)),
+        .i64x2_splat, .f64x2_splat => try pushVector(s, splatLaneBits(pop(s), 64, 2)),
+        .i8x16_extract_lane_s => try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(@as(u8, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 8)))))))),
+        .i8x16_extract_lane_u => try pushI32(s, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 8))),
+        .i16x8_extract_lane_s => try pushI32(s, @bitCast(@as(i32, @as(i16, @bitCast(@as(u16, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 16)))))))),
+        .i16x8_extract_lane_u => try pushI32(s, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 16))),
+        .i32x4_extract_lane, .f32x4_extract_lane => try pushI32(s, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 32))),
+        .i64x2_extract_lane, .f64x2_extract_lane => try pushI64(s, laneBits(popVector(s), instr.imm.simd_lane.lane, 64)),
+        .i8x16_replace_lane => {
+            const value = popI32(s);
+            try pushVector(s, replaceLaneBits(popVector(s), instr.imm.simd_lane.lane, 8, value));
+        },
+        .i16x8_replace_lane => {
+            const value = popI32(s);
+            try pushVector(s, replaceLaneBits(popVector(s), instr.imm.simd_lane.lane, 16, value));
+        },
+        .i32x4_replace_lane, .f32x4_replace_lane => {
+            const value = popI32(s);
+            try pushVector(s, replaceLaneBits(popVector(s), instr.imm.simd_lane.lane, 32, value));
+        },
+        .i64x2_replace_lane, .f64x2_replace_lane => {
+            const value = pop(s);
+            try pushVector(s, replaceLaneBits(popVector(s), instr.imm.simd_lane.lane, 64, value));
+        },
+        .i8x16_shuffle => {
+            const right = popVector(s);
+            const left = popVector(s);
+            var result: u128 = 0;
+            for (instr.imm.simd_shuffle.lanes, 0..) |source, lane| {
+                const vector = if (source < 16) left else right;
+                result = replaceLaneBits(result, @intCast(lane), 8, laneBits(vector, source & 15, 8));
+            }
+            try pushVector(s, result);
+        },
+        .i8x16_swizzle => {
+            const indices = popVector(s);
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..16) |lane| {
+                const index: u8 = @truncate(laneBits(indices, @intCast(lane), 8));
+                const byte = if (index < 16) laneBits(source, index, 8) else 0;
+                result = replaceLaneBits(result, @intCast(lane), 8, byte);
+            }
+            try pushVector(s, result);
+        },
+        .v128_not => try pushVector(s, ~popVector(s)),
+        .v128_and => {
+            const right = popVector(s);
+            try pushVector(s, popVector(s) & right);
+        },
+        .v128_andnot => {
+            const right = popVector(s);
+            try pushVector(s, popVector(s) & ~right);
+        },
+        .v128_or => {
+            const right = popVector(s);
+            try pushVector(s, popVector(s) | right);
+        },
+        .v128_xor => {
+            const right = popVector(s);
+            try pushVector(s, popVector(s) ^ right);
+        },
+        .v128_bitselect => {
+            const mask = popVector(s);
+            const right = popVector(s);
+            const left = popVector(s);
+            try pushVector(s, (left & mask) | (right & ~mask));
+        },
+        .v128_any_true => try pushBool(s, popVector(s) != 0),
+        else => return s.trap("SIMD instruction execution not implemented"),
+    }
+}
+
 fn popI32(s: *State) u32 {
     return @truncate(pop(s));
 }
@@ -1358,7 +1477,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
-            .simd => return s.trap("SIMD instruction execution not implemented"),
+            .simd => try executeSimdPure(s, instr),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
             .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
                 const bu = popI32(s);
@@ -1628,6 +1747,7 @@ const I32 = "\x7F";
 const I64 = "\x7E";
 const F32 = "\x7D";
 const F64 = "\x7C";
+const V128 = "\x7B";
 
 const f32nan: u64 = 0x7FC00000;
 const f64nan: u64 = 0x7FF8000000000000;
@@ -3096,6 +3216,60 @@ test "wasm.exec v128 slots preserve all lane bits" {
     const slot: ValueSlot = .{ .vector = bits };
     try std.testing.expectEqual(bits, slot.vectorBits());
     try std.testing.expect(slot == .vector);
+}
+
+test "wasm.exec SIMD lane movement and bitwise operations" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            ft(V128 ++ V128, V128),
+            ft(V128 ++ V128 ++ V128, V128),
+            ft(V128, I32),
+            ft(I32, V128),
+            ft(V128 ++ I32, V128),
+            ft(V128, V128),
+        }) ++
+        funcSec(&.{ 0, 0, 1, 2, 3, 4, 2, 0, 5 }) ++
+        codeSec(&.{
+            "\x20\x00\x20\x01\xFD\x0D\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F",
+            "\x20\x00\x20\x01\xFD\x51",
+            "\x20\x00\x20\x01\x20\x02\xFD\x52",
+            "\x20\x00\xFD\x53",
+            "\x20\x00\xFD\x0F",
+            "\x20\x00\x20\x01\xFD\x17\x0F",
+            "\x20\x00\xFD\x15\x0F",
+            "\x20\x00\x20\x01\xFD\x0E",
+            "\x20\x00\xFD\x4D",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .fixed_width_simd = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    const left: u128 = 0x0F0E0D0C0B0A09080706050403020100;
+    const right: u128 = 0xF0E0D0C0B0A090807060504030201000;
+    var vector_result: [1]ValueSlot = undefined;
+    try invokeSlots(inst, 0, &.{ .{ .vector = left }, .{ .vector = right } }, &vector_result, &diag);
+    try std.testing.expectEqual(left, vector_result[0].vectorBits());
+    try invokeSlots(inst, 1, &.{ .{ .vector = left }, .{ .vector = right } }, &vector_result, &diag);
+    try std.testing.expectEqual(left ^ right, vector_result[0].vectorBits());
+    const mask: u128 = 0xFFFF0000FFFF0000FFFF0000FFFF0000;
+    try invokeSlots(inst, 2, &.{ .{ .vector = left }, .{ .vector = right }, .{ .vector = mask } }, &vector_result, &diag);
+    try std.testing.expectEqual((left & mask) | (right & ~mask), vector_result[0].vectorBits());
+
+    var scalar_result: [1]ValueSlot = undefined;
+    try invokeSlots(inst, 3, &.{.{ .vector = left }}, &scalar_result, &diag);
+    try std.testing.expectEqual(@as(u64, 1), scalar_result[0].numericBits());
+    try invokeSlots(inst, 4, &.{.{ .numeric = 0xAB }}, &vector_result, &diag);
+    try std.testing.expectEqual(@as(u128, 0xABABABABABABABABABABABABABABABAB), vector_result[0].vectorBits());
+    try invokeSlots(inst, 5, &.{ .{ .vector = left }, .{ .numeric = 0xFF } }, &vector_result, &diag);
+    try std.testing.expectEqual(replaceLaneBits(left, 15, 8, 0xFF), vector_result[0].vectorBits());
+    try invokeSlots(inst, 6, &.{.{ .vector = @as(u128, 0x80) << 120 }}, &scalar_result, &diag);
+    try std.testing.expectEqual(@as(u64, 0xFFFFFF80), scalar_result[0].numericBits());
+    try invokeSlots(inst, 7, &.{ .{ .vector = left }, .{ .vector = right } }, &vector_result, &diag);
+    try std.testing.expectEqual(@as(u128, 0), vector_result[0].vectorBits());
+    try invokeSlots(inst, 8, &.{.{ .vector = left }}, &vector_result, &diag);
+    try std.testing.expectEqual(~left, vector_result[0].vectorBits());
 }
 
 test "wasm.exec conversions trunc f32 to int" {
