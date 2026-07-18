@@ -99,6 +99,8 @@ test {
     _ = @import("root_handshake.zig");
     _ = @import("parallel_lock.zig");
     _ = @import("private_abi.zig");
+    _ = @import("wasm/decode.zig");
+    _ = @import("wasm/types.zig");
 }
 
 test "evalNumber convenience" {
