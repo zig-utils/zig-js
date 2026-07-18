@@ -260,9 +260,10 @@ const Reader = struct {
     fn readValType(self: *Reader) DecodeError!types.ValType {
         const off = self.offset();
         const b = try self.readU8();
-        if (b == 0x69) return self.unsupportedFeature(off, .exception_handling);
         const value_type = types.ValType.fromByte(b) orelse
             return self.failAt(off, "invalid value type", .{});
+        if (value_type == .exnref and !self.features.exception_handling)
+            return self.unsupportedFeature(off, .exception_handling);
         if (value_type == .v128 and !self.features.fixed_width_simd)
             return self.unsupportedFeature(off, .fixed_width_simd);
         return value_type;
@@ -293,6 +294,10 @@ const Reader = struct {
                 .{ .value = .v128 }
             else
                 self.unsupportedFeature(off, .fixed_width_simd),
+            -23 => if (self.features.exception_handling)
+                .{ .value = .exnref }
+            else
+                self.unsupportedFeature(off, .exception_handling),
             -16 => if (self.features.reference_types)
                 .{ .value = .funcref }
             else
@@ -381,6 +386,8 @@ const Reader = struct {
         const elem = types.ValType.fromByte(try self.readU8()) orelse
             return self.failAt(et_off, "invalid element type", .{});
         if (!elem.isReference()) return self.failAt(et_off, "invalid element type", .{});
+        if (elem == .exnref and !self.features.exception_handling)
+            return self.unsupportedFeature(et_off, .exception_handling);
         if (elem == .externref and !self.features.reference_types)
             return self.unsupportedFeature(et_off, .reference_types);
         return .{ .elem = elem, .limits = try self.readLimits(.table) };
@@ -708,7 +715,7 @@ fn decodeOneBody(r: *Reader, a: Allocator) DecodeError!types.FuncBody {
 }
 
 const ControlFrame = struct {
-    op: types.Op, // block / loop / if_
+    op: types.Op, // block / loop / if_ / try_table
     pc: u32, // instr index of the opening instruction
     seen_else: bool = false,
     else_pc: u32 = 0, // instr index of the else_ instruction
@@ -756,8 +763,6 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
             if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
             if (b == 0x14 or b == 0x15) return r.unsupportedFeature(instr_off, .typed_function_references);
-            if (b == 0x08 or b == 0x0A or b == 0x1F)
-                return r.unsupportedFeature(instr_off, .exception_handling);
             return r.failAt(instr_off, "invalid opcode 0x{x:0>2}", .{b});
         };
         if (b >= 0xC0 and b <= 0xC4 and !r.features.sign_extension_ops)
@@ -768,6 +773,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .threads);
         if ((op == .return_call or op == .return_call_indirect) and !r.features.tail_calls)
             return r.unsupportedFeature(instr_off, .tail_calls);
+        if ((op == .throw or op == .throw_ref or op == .try_table) and !r.features.exception_handling)
+            return r.unsupportedFeature(instr_off, .exception_handling);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -778,6 +785,32 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .block, .loop, .if_ => {
                 const bt = try r.readBlockType();
                 instr.imm = .{ .block = .{ .type = bt, .else_pc = 0, .end_pc = 0 } };
+                try ctrl.append(a, .{ .op = op, .pc = @intCast(instrs.items.len) });
+            },
+            .try_table => {
+                const block_type = try r.readBlockType();
+                const catch_count = try r.readCount();
+                const catches = try a.alloc(types.Instr.Catch, catch_count);
+                for (catches) |*catch_clause| {
+                    const kind_off = r.offset();
+                    catch_clause.* = switch (try r.readU8()) {
+                        0 => .{ .catch_tag = .{
+                            .tag_index = try r.readU32Leb(),
+                            .label_index = try r.readU32Leb(),
+                        } },
+                        1 => .{ .catch_ref = .{
+                            .tag_index = try r.readU32Leb(),
+                            .label_index = try r.readU32Leb(),
+                        } },
+                        2 => .{ .catch_all = try r.readU32Leb() },
+                        3 => .{ .catch_all_ref = try r.readU32Leb() },
+                        else => return r.failAt(kind_off, "invalid catch kind", .{}),
+                    };
+                }
+                instr.imm = .{ .try_table = .{
+                    .block = .{ .type = block_type, .else_pc = 0, .end_pc = 0 },
+                    .catches = catches,
+                } };
                 try ctrl.append(a, .{ .op = op, .pc = @intCast(instrs.items.len) });
             },
             .else_ => {
@@ -805,9 +838,13 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 const end_pc: u32 = @intCast(instrs.items.len);
                 const open = &instrs.items[frame.pc];
                 switch (frame.op) {
-                    .block => {
-                        open.imm.block.else_pc = end_pc;
-                        open.imm.block.end_pc = end_pc;
+                    .block, .try_table => {
+                        const block = if (frame.op == .block)
+                            &open.imm.block
+                        else
+                            &open.imm.try_table.block;
+                        block.else_pc = end_pc;
+                        block.end_pc = end_pc;
                     },
                     .loop => {
                         open.imm.block.else_pc = frame.pc + 1;
@@ -830,6 +867,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .br_if,
             .call,
             .return_call,
+            .throw,
             .local_get,
             .local_set,
             .local_tee,
@@ -1368,6 +1406,46 @@ test "wasm.decode tail-call opcodes feature gate and immediates" {
     );
 }
 
+test "wasm.decode modern exception instruction immediates and catches" {
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode(
+        "\x1F\x40\x04" ++ // try_table empty, four catches
+            "\x00\x81\x01\x01" ++ // catch tag 129 -> label 1
+            "\x01\x02\x03" ++ // catch_ref tag 2 -> label 3
+            "\x02\x04" ++ // catch_all -> label 4
+            "\x03\x05" ++ // catch_all_ref -> label 5
+            "\x08\x07" ++ // throw tag 7
+            "\x0A" ++ // throw_ref
+            "\x0B\x0B",
+    ));
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    const instrs = mod.code[0].instrs;
+    try std.testing.expectEqual(@as(usize, 5), instrs.len);
+    try std.testing.expectEqual(types.Op.try_table, instrs[0].op);
+    const try_table = instrs[0].imm.try_table;
+    try std.testing.expectEqual(types.BlockType.empty, try_table.block.type);
+    try std.testing.expectEqual(@as(u32, 4), try_table.block.end_pc);
+    try std.testing.expectEqual(@as(usize, 4), try_table.catches.len);
+    try std.testing.expectEqualDeep(
+        types.Instr.Catch{ .catch_tag = .{ .tag_index = 129, .label_index = 1 } },
+        try_table.catches[0],
+    );
+    try std.testing.expectEqualDeep(
+        types.Instr.Catch{ .catch_ref = .{ .tag_index = 2, .label_index = 3 } },
+        try_table.catches[1],
+    );
+    try std.testing.expectEqualDeep(types.Instr.Catch{ .catch_all = 4 }, try_table.catches[2]);
+    try std.testing.expectEqualDeep(types.Instr.Catch{ .catch_all_ref = 5 }, try_table.catches[3]);
+    try std.testing.expectEqualDeep(types.Instr.Imm{ .idx = 7 }, instrs[1].imm);
+    try std.testing.expectEqual(types.Op.throw_ref, instrs[2].op);
+
+    const malformed = comptime (hdr ++ func_sec_1 ++ testCode("\x1F\x40\x01\x04"));
+    try expectMalformedWithFeatures(malformed, features, 20, "invalid catch kind");
+}
+
 test "wasm.decode fixed-width SIMD opcode inventory and immediates" {
     const lanes = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
     const bytes = comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x0C" ++ lanes ++ // v128.const
@@ -1415,11 +1493,15 @@ test "wasm.decode feature gates distinguish disabled features and dependencies" 
         .reference_types = true,
         .exception_handling = true,
     };
-    const pending = "WebAssembly feature exception-handling is enabled but not implemented";
-    try expectMalformedWithFeatures(hdr ++ "\x01\x05\x01\x60\x01\x69\x00", exceptions, 13, pending);
-    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x08", exceptions, 17, pending);
-    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x0A", exceptions, 17, pending);
-    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x1F", exceptions, 17, pending);
+    var diag: types.Diagnostic = .{};
+    const exnref = try decodeWithFeatures(
+        std.testing.allocator,
+        hdr ++ "\x01\x05\x01\x60\x01\x69\x00",
+        exceptions,
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, exnref);
+    try std.testing.expectEqual(types.ValType.exnref, exnref.types[0].params[0]);
 }
 
 test "wasm.decode exception tags sections imports and exports" {

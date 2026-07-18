@@ -393,6 +393,7 @@ fn tableGrowObserved(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
 fn nullTableSlot(elem_type: types.ValType) ValueSlot {
     return switch (elem_type) {
         .funcref => .{ .funcref = null },
+        .exnref => .{ .exnref = null },
         .externref => .{ .externref = js_value.Value.nul() },
         .i32, .i64, .f32, .f64, .v128 => unreachable,
     };
@@ -416,7 +417,7 @@ pub fn createGlobalSlot(gpa: Allocator, gt: types.GlobalType, value: ValueSlot) 
 fn publishGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
     const bits = switch (slot) {
         .externref => |ref| ref.bits,
-        .numeric, .vector, .funcref => js_value.Value.undef().bits,
+        .numeric, .vector, .funcref, .exnref => js_value.Value.undef().bits,
     };
     global.ref_root.store(bits, .release);
     if (global.barrier) |barrier| barrier(global.barrier_ctx.?, slot);
@@ -467,6 +468,7 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
         .global => |k| inst.globals[k].value,
         .ref_null => |ref_type| switch (ref_type) {
             .funcref => .{ .funcref = null },
+            .exnref => .{ .exnref = null },
             .externref => .{ .externref = js_value.Value.nul() },
             else => unreachable,
         },
@@ -736,6 +738,7 @@ fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
         .i32, .i64, .f32, .f64 => slot == .numeric,
         .v128 => slot == .vector,
         .funcref => slot == .funcref,
+        .exnref => slot == .exnref,
         .externref => slot == .externref,
     };
 }
@@ -1926,6 +1929,7 @@ fn zeroSlot(val_type: types.ValType) WasmSlot {
         .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
         .v128 => .{ .vector = 0 },
         .funcref => .{ .funcref = null },
+        .exnref => .{ .exnref = null },
         .externref => .{ .externref = js_value.Value.nul() },
     };
 }
@@ -2413,6 +2417,12 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 .arity = instr.imm.block.type.funcType(mod).?.results.len,
                 .is_loop = false,
             }),
+            .try_table => try s.labels.append(s.alloc, .{
+                .target_pc = instr.imm.try_table.block.end_pc,
+                .stack_height = s.stack.items.len - instr.imm.try_table.block.type.funcType(mod).?.params.len,
+                .arity = instr.imm.try_table.block.type.funcType(mod).?.results.len,
+                .is_loop = false,
+            }),
             .loop => try s.labels.append(s.alloc, .{
                 .target_pc = instr.imm.block.else_pc,
                 .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
@@ -2459,6 +2469,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 branchTo(s, if (i < bt.targets.len) bt.targets[i] else bt.default);
             },
             .return_ => branchTo(s, @intCast(s.labels.items.len - 1 - fr.label_base)),
+            .throw, .throw_ref => return s.trap("exception execution not implemented"),
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
             .return_call => try tailCallFunc(s, inst.funcs[instr.imm.idx]),
             .call_indirect => {
@@ -2507,6 +2518,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             },
             .ref_null => try pushSlot(s, switch (instr.imm.type) {
                 .funcref => .{ .funcref = null },
+                .exnref => .{ .exnref = null },
                 .externref => .{ .externref = js_value.Value.nul() },
                 .i32, .i64, .f32, .f64, .v128 => unreachable,
             }),
@@ -2514,6 +2526,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const slot = popSlot(s);
                 try pushBool(s, switch (slot) {
                     .funcref => |func| func == null,
+                    .exnref => |exception| exception == null,
                     .externref => |ref| ref.isNull(),
                     .numeric, .vector => unreachable,
                 });

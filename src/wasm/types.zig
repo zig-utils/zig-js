@@ -107,6 +107,7 @@ pub const ValType = enum(u8) {
     f32 = 0x7D,
     f64 = 0x7C,
     v128 = 0x7B,
+    exnref = 0x69,
     externref = 0x6F,
     funcref = 0x70,
 
@@ -117,6 +118,7 @@ pub const ValType = enum(u8) {
             0x7D => .f32,
             0x7C => .f64,
             0x7B => .v128,
+            0x69 => .exnref,
             0x6F => .externref,
             0x70 => .funcref,
             else => null,
@@ -128,7 +130,7 @@ pub const ValType = enum(u8) {
     }
 
     pub fn isReference(self: ValType) bool {
-        return self == .funcref or self == .externref;
+        return self == .funcref or self == .exnref or self == .externref;
     }
 };
 
@@ -148,6 +150,7 @@ pub const BlockType = union(enum) {
                 .f32 => &.{.f32},
                 .f64 => &.{.f64},
                 .v128 => &.{.v128},
+                .exnref => &.{.exnref},
                 .externref => &.{.externref},
                 .funcref => &.{.funcref},
             } },
@@ -329,6 +332,7 @@ pub const Instr = struct {
         /// `if_`: else_pc = pc past `else` (or past `end` when no else),
         ///        end_pc = pc past `end`.
         block: Block,
+        try_table: TryTable,
         br_table: BrTable,
         indices: Indices,
         simd: simd.Op,
@@ -375,6 +379,30 @@ pub const Instr = struct {
         targets: []const u32,
         default: u32,
     };
+
+    pub const TaggedCatch = struct {
+        tag_index: u32,
+        label_index: u32,
+    };
+
+    pub const Catch = union(enum) {
+        catch_tag: TaggedCatch,
+        catch_ref: TaggedCatch,
+        catch_all: u32,
+        catch_all_ref: u32,
+
+        pub fn labelIndex(self: Catch) u32 {
+            return switch (self) {
+                .catch_tag, .catch_ref => |tagged| tagged.label_index,
+                .catch_all, .catch_all_ref => |label_index| label_index,
+            };
+        }
+    };
+
+    pub const TryTable = struct {
+        block: Block,
+        catches: []const Catch,
+    };
 };
 
 /// Every recognized opcode in the current binary and validation profiles.
@@ -389,6 +417,8 @@ pub const Op = enum(u16) {
     loop = 0x03,
     if_ = 0x04,
     else_ = 0x05,
+    throw = 0x08,
+    throw_ref = 0x0A,
     end = 0x0B,
     br = 0x0C,
     br_if = 0x0D,
@@ -398,6 +428,7 @@ pub const Op = enum(u16) {
     call_indirect = 0x11,
     return_call = 0x12,
     return_call_indirect = 0x13,
+    try_table = 0x1F,
     // Parametric
     drop = 0x1A,
     select = 0x1B,

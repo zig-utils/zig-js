@@ -197,7 +197,7 @@ fn tableHostSync(raw: *anyopaque, table: *exec.TableInst, start: usize, len: usi
             if (!mirroredFunctionMatches(current, func))
                 owner.refs[index].store(Value.nul().bits, .release);
         } else owner.refs[index].store(Value.nul().bits, .release),
-        .numeric, .vector => unreachable,
+        .numeric, .vector, .exnref => unreachable,
     };
 }
 
@@ -730,7 +730,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                     return resolved;
                 }
             },
-            .numeric, .vector => unreachable,
+            .numeric, .vector, .exnref => unreachable,
         }
     }
 }
@@ -795,6 +795,7 @@ fn coerceGlobalSlot(self: *Interpreter, kind: types.ValType, input: Value) value
     return switch (kind) {
         .externref => .{ .externref = input },
         .funcref => unreachable,
+        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
     };
@@ -813,7 +814,7 @@ fn coerceGlobalBits(self: *Interpreter, kind: types.ValType, input: Value) value
         },
         .f32 => @as(u64, @as(u32, @bitCast(@as(f32, @floatCast(try self.toNumberV(input)))))),
         .f64 => @bitCast(try self.toNumberV(input)),
-        .funcref, .externref, .v128 => unreachable,
+        .funcref, .exnref, .externref, .v128 => unreachable,
     };
 }
 
@@ -823,7 +824,7 @@ fn wasmBitsToJs(self: *Interpreter, kind: types.ValType, bits: u64) value.HostEr
         .i64 => try self.makeBigInt(@as(i64, @bitCast(bits))),
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
         .f64 => Value.num(@bitCast(bits)),
-        .funcref, .externref, .v128 => self.throwError("TypeError", "value type cannot cross this numeric function boundary"),
+        .funcref, .exnref, .externref, .v128 => self.throwError("TypeError", "value type cannot cross this numeric function boundary"),
     };
 }
 
@@ -838,6 +839,7 @@ fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, f
     return switch (kind) {
         .i32, .i64, .f32, .f64 => wasmBitsToJs(self, kind, slot.numericBits()),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
+        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
         .externref => slot.externref,
         .funcref => if (slot.funcref) |raw| blk: {
             const func: *exec.FuncInst = @ptrCast(@alignCast(raw));
@@ -854,6 +856,7 @@ fn jsToWasmSlot(self: *Interpreter, store: *context.Context, kind: types.ValType
     return switch (kind) {
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
         .v128 => return self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
+        .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
         .externref => .{ .externref = input },
         .funcref => (try tableRefFromValue(self, store, .funcref, input)).slot,
     };
@@ -959,7 +962,7 @@ fn rawSlotString(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot) 
         .i32, .f32 => @as(u32, @truncate(slot.numericBits())),
         .i64, .f64 => slot.numericBits(),
         .v128 => slot.vectorBits(),
-        .funcref, .externref => return self.throwError("TypeError", "reference value has no raw bit encoding"),
+        .funcref, .exnref, .externref => return self.throwError("TypeError", "reference value has no raw bit encoding"),
     };
     return Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{normalized}));
 }
@@ -970,7 +973,7 @@ fn rawSlotFromString(self: *Interpreter, kind: types.ValType, text: []const u8) 
             return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits") },
         .v128 => .{ .vector = std.fmt.parseInt(u128, text, 10) catch
             return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits") },
-        .funcref, .externref => self.throwError("TypeError", "reference value has no raw bit encoding"),
+        .funcref, .exnref, .externref => self.throwError("TypeError", "reference value has no raw bit encoding"),
     };
 }
 
@@ -1030,6 +1033,7 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .f64 => Value.num(@bitCast(glob.value.numericBits())),
         .externref => glob.value.externref,
         .funcref => unreachable,
+        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
     };
 }
@@ -1207,7 +1211,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                     .i32, .f32, .f64 => imported.isNumber(),
                     .i64 => imported.isObject() and imported.asObj().is_bigint,
                     .externref => true,
-                    .funcref, .v128 => false,
+                    .funcref, .exnref, .v128 => false,
                 };
                 if (!primitive_matches)
                     return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", link_proto);
@@ -1326,6 +1330,7 @@ fn wrapDefinedTable(
     errdefer store.gpa.free(refs);
     for (table.elems, 0..) |slot, i| switch (slot) {
         .externref => |ref| refs[i].store(ref.bits, .monotonic),
+        .exnref => return self.throwError("TypeError", "exnref table requires the WebAssembly.Exception API"),
         .funcref => |raw_func| if (raw_func) |raw| {
             const entry: *exec.FuncInst = @ptrCast(@alignCast(raw));
             var func_index: ?u32 = null;

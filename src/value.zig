@@ -48,6 +48,7 @@ pub const WasmSlot = union(enum) {
     numeric: u64,
     vector: u128,
     funcref: ?*anyopaque,
+    exnref: ?*anyopaque,
     externref: Value,
 
     pub fn numericBits(self: WasmSlot) u64 {

@@ -22,23 +22,26 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
         failModFmt(diag, "WebAssembly feature {s} is disabled", .{feature.name()});
 }
 
+fn validateValType(mod: *const types.Module, value_type: types.ValType, diag: *types.Diagnostic) Error!void {
+    if (value_type == .exnref and !mod.features.exception_handling)
+        return unsupportedFeature(mod, diag, .exception_handling);
+    if (value_type.isReference() and !mod.features.reference_types)
+        return unsupportedFeature(mod, diag, .reference_types);
+    if (value_type == .v128 and !mod.features.fixed_width_simd)
+        return unsupportedFeature(mod, diag, .fixed_width_simd);
+}
+
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
     for (mod.types) |ft| {
         // MVP function types have at most one result; multi-value is opt-in.
         if (ft.results.len > 1 and !mod.features.multi_value) return failMod(diag, "invalid result arity");
-        for (ft.params) |p| {
-            if (p.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
-            if (p == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
-        }
-        for (ft.results) |r| {
-            if (r.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
-            if (r == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
-        }
+        for (ft.params) |p| try validateValType(mod, p, diag);
+        for (ft.results) |r| try validateValType(mod, r, diag);
     }
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
-        .global => |g| if (g.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types),
+        .global => |g| try validateValType(mod, g.val, diag),
         .tag => |tag| try validateTagType(mod, tag, diag),
         else => {},
     };
@@ -49,6 +52,10 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 2. MVP allows at most one table and one memory (imports + defined).
     if (mod.totalTables() > 1 and !mod.features.reference_types) return failMod(diag, "multiple tables");
     if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
+    for (0..mod.totalTables()) |tableidx| {
+        const elem_type = mod.tableType(@intCast(tableidx)).elem;
+        if (elem_type != .funcref) try validateValType(mod, elem_type, diag);
+    }
     for (0..mod.totalMems()) |memidx| {
         const memory = mod.memoryType(@intCast(memidx));
         if (memory.shared and memory.limits.max == null)
@@ -57,15 +64,11 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
-        if (g.type.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
-        if (g.type.val == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
+        try validateValType(mod, g.type.val, diag);
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
     for (mod.code) |body| {
-        for (body.locals) |l| {
-            if (l.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
-            if (l == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
-        }
+        for (body.locals) |l| try validateValType(mod, l, diag);
     }
 
     // 4. Element segments.
@@ -189,7 +192,7 @@ fn isDeclaredFunction(mod: *const types.Module, funcidx: u32) bool {
 
 /// Abstract operand: a concrete numeric type or `unknown`, the bottom type
 /// produced by the polymorphic stack after `unreachable`/branches.
-const StackVal = enum { unknown, i32, i64, f32, f64, v128, funcref, externref };
+const StackVal = enum { unknown, i32, i64, f32, f64, v128, funcref, exnref, externref };
 
 fn stackVal(vt: types.ValType) StackVal {
     return switch (vt) {
@@ -199,11 +202,12 @@ fn stackVal(vt: types.ValType) StackVal {
         .f64 => .f64,
         .v128 => .v128,
         .funcref => .funcref,
+        .exnref => .exnref,
         .externref => .externref,
     };
 }
 
-const FrameKind = enum { block, loop, if_ };
+const FrameKind = enum { block, loop, if_, try_table };
 
 const Frame = struct {
     kind: FrameKind,
@@ -386,6 +390,32 @@ const FuncValidator = struct {
         const li = i - self.params.len;
         if (li < self.locals.len) return self.locals[li];
         return null;
+    }
+
+    fn catchTagType(self: *FuncValidator, tag_index: u32) Error!types.FuncType {
+        if (tag_index >= self.mod.totalTags()) return self.fail("unknown tag");
+        return self.mod.tagType(tag_index);
+    }
+
+    fn validateCatch(self: *FuncValidator, catch_clause: types.Instr.Catch) Error!void {
+        const target_frame = try self.target(catch_clause.labelIndex());
+        const target_types = target_frame.branchTypes();
+        switch (catch_clause) {
+            .catch_tag => |tagged| {
+                const tag_type = try self.catchTagType(tagged.tag_index);
+                if (!std.mem.eql(types.ValType, target_types, tag_type.params))
+                    return self.fail("type mismatch");
+            },
+            .catch_ref => |tagged| {
+                const tag_type = try self.catchTagType(tagged.tag_index);
+                if (target_types.len != tag_type.params.len + 1 or target_types[target_types.len - 1] != .exnref or
+                    !std.mem.eql(types.ValType, target_types[0..tag_type.params.len], tag_type.params))
+                    return self.fail("type mismatch");
+            },
+            .catch_all => if (target_types.len != 0) return self.fail("type mismatch"),
+            .catch_all_ref => if (target_types.len != 1 or target_types[0] != .exnref)
+                return self.fail("type mismatch"),
+        }
     }
 
     fn memAccess(self: *FuncValidator, memarg: types.Instr.MemArg, log2_bytes: u32) Error!void {
@@ -616,6 +646,14 @@ const FuncValidator = struct {
                     try self.popExpect(.i32);
                     try self.pushFrame(.if_, instr.imm.block.type.funcType(self.mod) orelse return self.fail("unknown type"));
                 },
+                .try_table => {
+                    const immediate = instr.imm.try_table;
+                    for (immediate.catches) |catch_clause| try self.validateCatch(catch_clause);
+                    try self.pushFrame(
+                        .try_table,
+                        immediate.block.type.funcType(self.mod) orelse return self.fail("unknown type"),
+                    );
+                },
                 .else_ => {
                     // The decoder guarantees structure; stay defensive.
                     if (self.fr_len == 0)
@@ -677,6 +715,16 @@ const FuncValidator = struct {
                 .return_ => {
                     // Branch to the outermost (function) frame.
                     try self.popTypes(self.frames[0].results);
+                    self.setUnreachable();
+                },
+                .throw => {
+                    const tag_index = instr.imm.idx;
+                    const tag_type = try self.catchTagType(tag_index);
+                    try self.popTypes(tag_type.params);
+                    self.setUnreachable();
+                },
+                .throw_ref => {
+                    try self.popExpect(.exnref);
                     self.setUnreachable();
                 },
                 .call => {
@@ -776,7 +824,7 @@ const FuncValidator = struct {
                 .ref_null => self.push(stackVal(instr.imm.type)),
                 .ref_is_null => {
                     const ref = try self.pop();
-                    if (ref != .unknown and ref != .funcref and ref != .externref)
+                    if (ref != .unknown and ref != .funcref and ref != .exnref and ref != .externref)
                         return self.fail("type mismatch");
                     self.push(.i32);
                 },
@@ -1597,6 +1645,82 @@ test "wasm.validate exception tag declarations imports and exports" {
         features,
         "unknown tag",
     );
+}
+
+test "wasm.validate modern exception instructions and catch branch types" {
+    const features: types.Features = .{ .reference_types = true, .exception_handling = true };
+    const type_and_function = comptime (sec(
+        1,
+        "\x02\x60\x01\x7F\x00\x60\x00\x01\x7F",
+    ) ++ sec(3, "\x01\x01"));
+    const tag = comptime sec(13, "\x01\x00\x00");
+    const caught_payload = comptime (hdr ++ type_and_function ++ tag ++ code1(
+        "\x1F\x40\x01\x00\x00\x00" ++ // catch tag 0 -> function label
+            "\x41\x07\x08\x00\x0B" ++ // throw tag 0 with i32 payload
+            "\x41\x09\x0B", // ordinary path result
+    ));
+    try expectValidWithFeatures(caught_payload, features);
+
+    const catch_ref_features: types.Features = .{
+        .multi_value = true,
+        .reference_types = true,
+        .exception_handling = true,
+    };
+    const caught_payload_ref = comptime (hdr ++
+        sec(1, "\x02\x60\x01\x7F\x00\x60\x00\x02\x7F\x69") ++
+        sec(3, "\x01\x01") ++ tag ++ code1(
+        "\x1F\x40\x01\x01\x00\x00" ++ // catch_ref tag 0 -> function label
+            "\x41\x07\x08\x00\x0B" ++
+            "\x41\x09\xD0\x69\x0B",
+    ));
+    try expectValidWithFeatures(caught_payload_ref, catch_ref_features);
+
+    const catch_all = comptime (hdr ++ type_void ++ func0 ++
+        sec(13, "\x01\x00\x00") ++ code1(
+        "\x1F\x40\x01\x02\x00\x08\x00\x0B\x0B",
+    ));
+    try expectValidWithFeatures(catch_all, features);
+
+    const catch_all_ref = comptime (hdr ++
+        sec(1, "\x02\x60\x00\x00\x60\x00\x01\x69") ++
+        sec(3, "\x01\x01") ++ sec(13, "\x01\x00\x00") ++ code1(
+        "\x1F\x40\x01\x03\x00\x08\x00\x0B\xD0\x69\x0B",
+    ));
+    try expectValidWithFeatures(catch_all_ref, features);
+
+    const inline_exnref_block = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x01\x69") ++ func0 ++
+        code1("\x1F\x69\x00\xD0\x69\x0B\x0B"));
+    try expectValidWithFeatures(inline_exnref_block, features);
+
+    const throw_ref = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x69\x00") ++ func0 ++
+        code1("\x20\x00\x0A\x0B"));
+    try expectValidWithFeatures(throw_ref, features);
+
+    const unknown_tag = comptime (hdr ++ type_and_function ++ tag ++ code1(
+        "\x1F\x40\x01\x00\x01\x00\x41\x00\x0B\x41\x00\x0B",
+    ));
+    try expectInvalidAtWithFeatures(unknown_tag, features, 0, 0, "unknown tag");
+
+    const unknown_label = comptime (hdr ++ type_and_function ++ tag ++ code1(
+        "\x1F\x40\x01\x00\x00\x01\x41\x00\x0B\x41\x00\x0B",
+    ));
+    try expectInvalidAtWithFeatures(unknown_label, features, 0, 0, "unknown label");
+
+    const bad_catch_ref_type = comptime (hdr ++ type_and_function ++ tag ++ code1(
+        "\x1F\x40\x01\x01\x00\x00\x41\x00\x0B\x41\x00\x0B",
+    ));
+    try expectInvalidAtWithFeatures(bad_catch_ref_type, features, 0, 0, "type mismatch");
+
+    const bad_throw_payload = comptime (hdr ++
+        sec(1, "\x02\x60\x01\x7F\x00\x60\x00\x00") ++ sec(3, "\x01\x01") ++
+        sec(13, "\x01\x00\x00") ++ code1("\x08\x00\x0B"));
+    try expectInvalidAtWithFeatures(bad_throw_payload, features, 0, 0, "type mismatch");
+
+    const bad_throw_ref = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x41\x00\x0A\x0B"));
+    try expectInvalidAtWithFeatures(bad_throw_ref, features, 0, 1, "type mismatch");
 }
 
 test "wasm.validate tail calls accept direct indirect and polymorphic stacks" {
