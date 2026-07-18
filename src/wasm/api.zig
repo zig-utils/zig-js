@@ -474,7 +474,20 @@ fn moduleCustomSections(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     return Value.obj(result);
 }
 
-fn makeMemoryBuffer(self: *Interpreter, store: *context.Context, bytes: []u8) value.HostError!*Object {
+fn makeMemoryBuffer(self: *Interpreter, store: *context.Context, mem: *exec.MemoryInst) value.HostError!*Object {
+    if (mem.shared_storage) |storage| {
+        const buffer = try interpreter.makeSharedArrayBufferWrapper(self, storage.retain());
+        const data = buffer.arrayBuffer().?;
+        // WebAssembly exposes a fixed-length SAB snapshot. A successful grow
+        // installs a fresh wrapper over this same storage; this wrapper keeps
+        // its present length forever and is never detached.
+        data.shared_fixed_byte_length = mem.bytes().len;
+        data.max_byte_length = null;
+        data.is_wasm_memory = true;
+        buffer.setExtensible(false);
+        return buffer;
+    }
+    const bytes = mem.bytes();
     const owner = try store.createExternalBufferOwner(
         if (bytes.len == 0) null else @ptrCast(bytes.ptr),
         null,
@@ -489,10 +502,18 @@ fn memoryDidGrow(raw: *anyopaque, mem: *exec.MemoryInst) bool {
     const owner: *MemoryOwner = @ptrCast(@alignCast(raw));
     if (owner.mem != mem) return false;
     const self: *Interpreter = @ptrCast(@alignCast(owner.store.wasm_active_interp orelse return false));
-    const fresh = makeMemoryBuffer(self, owner.store, mem.bytes) catch return false;
+    const fresh = makeMemoryBuffer(self, owner.store, mem) catch return false;
     const state = owner.wrapper.wasmMemory() orelse return false;
     const old_object = state.buffer_obj orelse return false;
     const old = old_object.arrayBuffer() orelse return false;
+    if (mem.isShared()) {
+        // Shared memory growth never detaches the historical buffer. The new
+        // fixed-length wrapper aliases the same Shared Data Block at the new
+        // length, exactly as the Threads JS API requires.
+        state.buffer_obj = fresh;
+        gc.barrierCellFrom(owner.wrapper, fresh);
+        return true;
+    }
     // Generated native handles promise stable backing ownership. The private
     // conversion rejects Memory buffers, but keep this defensive boundary so a
     // future caller cannot retire bytes underneath an already-issued handle.
@@ -524,17 +545,20 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     if (raw_initial.isUndefined()) return self.throwError("TypeError", "WebAssembly.Memory descriptor requires initial");
     const initial = try toIndexU32(self, raw_initial, types.MAX_PAGES, "WebAssembly.Memory initial is out of range");
     const maximum = try optionalMaximum(self, descriptor, initial, types.MAX_PAGES, "WebAssembly.Memory maximum is out of range");
+    const shared = (try self.getProperty(Value.obj(descriptor), "shared")).toBoolean();
+    if (shared and maximum == null)
+        return self.throwError("TypeError", "shared WebAssembly.Memory requires a maximum");
     const proto = try constructedPrototype(self, native.proto);
     const store = try storeFor(self);
 
-    const mem = try exec.createMemory(store.gpa, initial, maximum);
+    const mem = try exec.createMemoryTyped(store.gpa, initial, maximum, shared);
     errdefer exec.destroyMemory(store.gpa, mem);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
     const owner = try store.gpa.create(MemoryOwner);
     errdefer store.gpa.destroy(owner);
     owner.* = .{ .store = store, .mem = mem, .wrapper = object };
-    const buffer = try makeMemoryBuffer(self, store, mem.bytes);
+    const buffer = try makeMemoryBuffer(self, store, mem);
     const state = try object.wasmMemoryState(self.arena);
     state.mem = @ptrCast(owner);
     state.buffer_obj = buffer;
@@ -1226,7 +1250,7 @@ fn wrapDefinedMemory(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     const owner = try store.gpa.create(MemoryOwner);
     errdefer store.gpa.destroy(owner);
     owner.* = .{ .store = store, .mem = mem, .wrapper = object, .owns_native = false };
-    const buffer = try makeMemoryBuffer(self, store, mem.bytes);
+    const buffer = try makeMemoryBuffer(self, store, mem);
     const state = try object.wasmMemoryState(self.arena);
     state.mem = @ptrCast(owner);
     state.buffer_obj = buffer;
@@ -2112,6 +2136,83 @@ test "wasm api Memory grows failure-atomically and detaches the old buffer" {
         \\missing && ordering.join('') === 'imr' && derived instanceof DerivedMemory;
     );
     try std.testing.expect(boundaries.isBoolean() and boundaries.asBool());
+}
+
+test "wasm api shared Memory preserves fixed historical buffers and aliases backing" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .wasm_features = .{ .threads = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\let missingMaximum = false, order = [];
+        \\try { new WebAssembly.Memory({ initial: 1, shared: true }); }
+        \\catch (e) { missingMaximum = e instanceof TypeError; }
+        \\const memory = new WebAssembly.Memory({
+        \\  get initial() { order.push('initial'); return 1; },
+        \\  get maximum() { order.push('maximum'); return 2; },
+        \\  get shared() { order.push('shared'); return {}; },
+        \\});
+        \\const oldBuffer = memory.buffer;
+        \\const oldBytes = new Uint8Array(oldBuffer);
+        \\oldBytes[19] = 73;
+        \\const previous = memory.grow(1);
+        \\const newBuffer = memory.buffer;
+        \\const newBytes = new Uint8Array(newBuffer);
+        \\const identity = oldBuffer !== newBuffer && oldBuffer.byteLength === 65536 &&
+        \\  newBuffer.byteLength === 131072;
+        \\newBytes[19] = 91;
+        \\const oldClone = structuredClone(oldBuffer);
+        \\const newClone = structuredClone(newBuffer);
+        \\newBytes[20] = 37;
+        \\const thread = new Thread(buffer => {
+        \\  const bytes = new Uint8Array(buffer);
+        \\  bytes[21] = 55;
+        \\  return buffer.byteLength;
+        \\}, oldBuffer);
+        \\const threadVisible = thread.join() === 65536 && newBytes[21] === 55;
+        \\let cloneFixed = oldClone.byteLength === 65536 && newClone.byteLength === 131072 &&
+        \\  new Uint8Array(oldClone)[20] === 37;
+        \\try { oldClone.grow(131072); cloneFixed = false; }
+        \\catch (e) { cloneFixed = cloneFixed && e instanceof TypeError; }
+        \\let limit = false;
+        \\try { memory.grow(1); } catch (e) { limit = e instanceof RangeError; }
+        \\Number(missingMaximum) +
+        \\2 * Number(order.join(',') === 'initial,maximum,shared') +
+        \\4 * Number(previous === 1 && identity) +
+        \\8 * Number(oldBytes[19] === 91) +
+        \\16 * Number(Object.prototype.toString.call(oldBuffer) === '[object SharedArrayBuffer]') +
+        \\32 * Number(Object.isFrozen(oldBuffer) && Object.isFrozen(newBuffer)) +
+        \\64 * Number(limit) +
+        \\128 * Number(cloneFixed) +
+        \\256 * Number(threadVisible);
+    );
+    try std.testing.expectEqual(@as(f64, 511), result.asNum());
+
+    const defined_and_imported = try store.evaluate(
+        \\const definedBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  5,4,1,3,1,2,
+        \\  7,10,1,6,109,101,109,111,114,121,2,0,
+        \\]);
+        \\const importedBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  2,16,1,3,101,110,118,6,109,101,109,111,114,121,2,3,1,2,
+        \\]);
+        \\const defined = new WebAssembly.Instance(new WebAssembly.Module(definedBytes));
+        \\const shared = defined.exports.memory;
+        \\const linked = new WebAssembly.Instance(
+        \\  new WebAssembly.Module(importedBytes), { env: { memory: shared } });
+        \\let mismatch = false;
+        \\try {
+        \\  new WebAssembly.Instance(new WebAssembly.Module(importedBytes), {
+        \\    env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 2 }) },
+        \\  });
+        \\} catch (e) { mismatch = e instanceof WebAssembly.LinkError; }
+        \\linked instanceof WebAssembly.Instance &&
+        \\Object.prototype.toString.call(shared.buffer) === '[object SharedArrayBuffer]' && mismatch;
+    );
+    try std.testing.expect(defined_and_imported.isBoolean() and defined_and_imported.asBool());
 }
 
 test "wasm api Global converts numeric values and enforces mutability" {

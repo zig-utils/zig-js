@@ -102,6 +102,14 @@ pub const SharedBufferStorage = struct {
         return self.slab[0..self.len()];
     }
 
+    /// A fixed-length view into the shared slab. WebAssembly.Memory uses this
+    /// for buffers returned before a grow: the old SharedArrayBuffer keeps its
+    /// original byte length while continuing to alias the same data block.
+    pub fn fixedSlice(self: *const SharedBufferStorage, byte_len: usize) []u8 {
+        std.debug.assert(byte_len <= self.capacity);
+        return self.slab[0..byte_len];
+    }
+
     /// Grow the published length in place (SABs only ever grow). Racing
     /// growers are serialized by the CAS; a request below the current length
     /// or above capacity is the caller's RangeError.
@@ -113,6 +121,30 @@ pub const SharedBufferStorage = struct {
             if (new_len < cur) return error.OutOfRange;
             cur = self.byte_len.cmpxchgWeak(cur, new_len, .acq_rel, .acquire) orelse return;
         }
+    }
+
+    /// Atomically grow by a delta and return the previous byte length. This is
+    /// the primitive needed by racing WebAssembly.Memory.grow operations: each
+    /// successful caller observes a distinct previous size.
+    pub fn growBy(self: *SharedBufferStorage, delta: usize) error{ NotGrowable, OutOfRange }!usize {
+        if (!self.growable) return error.NotGrowable;
+        var cur = self.byte_len.load(.acquire);
+        while (true) {
+            if (delta > self.capacity - cur) return error.OutOfRange;
+            const next = cur + delta;
+            if (self.byte_len.cmpxchgWeak(cur, next, .acq_rel, .acquire)) |observed| {
+                cur = observed;
+                continue;
+            }
+            return cur;
+        }
+    }
+
+    /// Failure-atomic host glue for WebAssembly.Memory: undo a just-published
+    /// growth when allocating its replacement JS wrapper fails. The caller
+    /// serializes Wasm grows; a mismatch means another owner changed the slab.
+    pub fn rollbackGrow(self: *SharedBufferStorage, expected_len: usize, old_len: usize) bool {
+        return self.byte_len.cmpxchgStrong(expected_len, old_len, .acq_rel, .acquire) == null;
     }
 };
 

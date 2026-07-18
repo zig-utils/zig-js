@@ -397,6 +397,11 @@ pub const ArrayBufferData = struct {
     /// Non-null iff `is_shared`: the cross-agent backing storage. The wrapper
     /// holds one reference, tracked in the owning realm's `RetainList`.
     shared: ?*SharedBufferStorage = null,
+    /// Fixed byte length for a SharedArrayBuffer view over a larger shared
+    /// slab. WebAssembly.Memory replaces its buffer on grow without detaching
+    /// the old one, so every historical wrapper retains its creation length.
+    /// Null is the normal growable-SAB behavior: read the storage's live size.
+    shared_fixed_byte_length: ?usize = null,
     /// Metadata and `local_data` are owned by the GC finalizer rather than the
     /// arena. Shared buffers set this for the metadata only; their bytes are
     /// owned by `SharedBufferStorage`.
@@ -432,7 +437,7 @@ pub const ArrayBufferData = struct {
     /// (the Atomics paths) see a stable `resize_seq` and return on the first try —
     /// no re-entrancy, no deadlock.
     pub inline fn bytes(self: *const ArrayBufferData) []u8 {
-        if (self.shared) |s| return s.slice();
+        if (self.shared) |s| return if (self.shared_fixed_byte_length) |len| s.fixedSlice(len) else s.slice();
         if (@constCast(&self.native_handle).load(.acquire)) |handle| return handle.snapshotBytes();
         if (!Object.element_locks_enabled.load(.monotonic)) return self.local_data;
         // Seqlock read: ptr+len accessed with relaxed atomics (a plain mov each,

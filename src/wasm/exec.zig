@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const js_value = @import("../value.zig");
+const SharedBufferStorage = @import("../shared_buffer.zig").SharedBufferStorage;
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate = @import("validate.zig");
@@ -54,9 +55,13 @@ pub const FuncInst = union(enum) {
 };
 
 pub const MemoryInst = struct {
-    bytes: []u8,
+    /// Ordinary memories own this allocation. Shared memories leave it empty
+    /// and read their stable, process-wide slab through `shared_storage`.
+    local_bytes: []u8,
+    shared_storage: ?*SharedBufferStorage = null,
     limits: types.Limits,
     gpa: Allocator,
+    grow_lock: std.atomic.Mutex = .unlocked,
     /// Host hook (WebAssembly JS API, issue #141): when set, `memoryGrow`
     /// calls it after the new bytes are in place and before the old bytes are
     /// freed, so the host can re-expose the grown buffer (e.g. swap a JS
@@ -66,7 +71,15 @@ pub const MemoryInst = struct {
     on_grow_ctx: ?*anyopaque = null,
 
     pub fn pages(self: *const MemoryInst) u32 {
-        return @intCast(self.bytes.len / types.PAGE_SIZE);
+        return @intCast(self.bytes().len / types.PAGE_SIZE);
+    }
+
+    pub inline fn bytes(self: *const MemoryInst) []u8 {
+        return if (self.shared_storage) |storage| storage.slice() else self.local_bytes;
+    }
+
+    pub inline fn isShared(self: *const MemoryInst) bool {
+        return self.shared_storage != null;
     }
 };
 
@@ -145,19 +158,35 @@ pub const Instance = struct {
 // ---------------------------------------------------------------------------
 
 pub fn createMemory(gpa: Allocator, min_pages: u32, max_pages: ?u32) error{OutOfMemory}!*MemoryInst {
+    return createMemoryTyped(gpa, min_pages, max_pages, false);
+}
+
+pub fn createMemoryTyped(gpa: Allocator, min_pages: u32, max_pages: ?u32, shared: bool) error{OutOfMemory}!*MemoryInst {
     const m = try gpa.create(MemoryInst);
     errdefer gpa.destroy(m);
-    m.* = .{
-        .bytes = try gpa.alloc(u8, @as(usize, min_pages) * types.PAGE_SIZE),
-        .limits = .{ .min = min_pages, .max = max_pages },
-        .gpa = gpa,
-    };
-    @memset(m.bytes, 0);
+    const initial_len = @as(usize, min_pages) * types.PAGE_SIZE;
+    if (shared) {
+        const max = max_pages orelse return error.OutOfMemory;
+        const storage = try SharedBufferStorage.create(initial_len, @as(usize, max) * types.PAGE_SIZE);
+        m.* = .{
+            .local_bytes = &.{},
+            .shared_storage = storage,
+            .limits = .{ .min = min_pages, .max = max_pages },
+            .gpa = gpa,
+        };
+    } else {
+        m.* = .{
+            .local_bytes = try gpa.alloc(u8, initial_len),
+            .limits = .{ .min = min_pages, .max = max_pages },
+            .gpa = gpa,
+        };
+        @memset(m.local_bytes, 0);
+    }
     return m;
 }
 
 pub fn destroyMemory(gpa: Allocator, mem: *MemoryInst) void {
-    gpa.free(mem.bytes);
+    if (mem.shared_storage) |storage| storage.release() else gpa.free(mem.local_bytes);
     gpa.destroy(mem);
 }
 
@@ -165,23 +194,40 @@ pub fn destroyMemory(gpa: Allocator, mem: *MemoryInst) void {
 /// failure (limit exceeded or allocation failure); failure leaves the
 /// memory untouched.
 pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
+    while (!mem.grow_lock.tryLock()) std.atomic.spinLoopHint();
+    defer mem.grow_lock.unlock();
     const old_pages = mem.pages();
     if (delta == 0) return @intCast(old_pages);
     const limit = @min(mem.limits.max orelse types.MAX_PAGES, types.MAX_PAGES);
     if (old_pages >= limit) return -1;
     if (delta > limit - old_pages) return -1;
     const new_len = @as(usize, old_pages + delta) * types.PAGE_SIZE;
+    if (mem.shared_storage) |storage| {
+        const old_len = storage.growBy(@as(usize, delta) * types.PAGE_SIZE) catch return -1;
+        std.debug.assert(old_len / types.PAGE_SIZE == old_pages);
+        if (mem.on_grow) |cb| {
+            // The shared slab never moves. The hook only installs a new fixed
+            // SharedArrayBuffer view; historical views remain valid and keep
+            // their old lengths.
+            if (!cb(mem.on_grow_ctx orelse @ptrCast(mem), mem)) {
+                std.debug.assert(storage.rollbackGrow(new_len, old_len));
+                return -1;
+            }
+        }
+        mem.limits.min = old_pages + delta;
+        return @intCast(old_pages);
+    }
     if (mem.on_grow) |cb| {
         // Host-observed grow: `realloc` may release the old bytes before the
         // hook could observe the grown buffer, so allocate fresh, publish the
         // new bytes, run the hook, and only then free the old slab.
         const fresh = mem.gpa.alloc(u8, new_len) catch return -1;
-        @memcpy(fresh[0..mem.bytes.len], mem.bytes);
-        @memset(fresh[mem.bytes.len..], 0);
-        const old = mem.bytes;
-        mem.bytes = fresh;
+        @memcpy(fresh[0..mem.local_bytes.len], mem.local_bytes);
+        @memset(fresh[mem.local_bytes.len..], 0);
+        const old = mem.local_bytes;
+        mem.local_bytes = fresh;
         if (!cb(mem.on_grow_ctx orelse @ptrCast(mem), mem)) {
-            mem.bytes = old;
+            mem.local_bytes = old;
             mem.gpa.free(fresh);
             return -1;
         }
@@ -189,8 +235,8 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
         mem.limits.min = old_pages + delta;
         return @intCast(old_pages);
     }
-    mem.bytes = mem.gpa.realloc(mem.bytes, new_len) catch return -1;
-    @memset(mem.bytes[@as(usize, old_pages) * types.PAGE_SIZE ..], 0);
+    mem.local_bytes = mem.gpa.realloc(mem.local_bytes, new_len) catch return -1;
+    @memset(mem.local_bytes[@as(usize, old_pages) * types.PAGE_SIZE ..], 0);
     mem.limits.min = old_pages + delta;
     return @intCast(old_pages);
 }
@@ -369,7 +415,9 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                     ti += 1;
                 },
                 .mem => |mt| {
-                    if (!limitsCompatible(imports.mems[mi].limits, mt.limits)) {
+                    if (imports.mems[mi].isShared() != mt.shared or
+                        !limitsCompatible(imports.mems[mi].limits, mt.limits))
+                    {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
                         return error.Link;
                     }
@@ -440,7 +488,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.mems = try a.alloc(*MemoryInst, mod.totalMems());
     for (imports.mems, 0..) |m, k| inst.mems[k] = m;
     for (mod.mems, 0..) |mt, j| {
-        const m = try createMemory(gpa, mt.limits.min, mt.limits.max);
+        const m = try createMemoryTyped(gpa, mt.limits.min, mt.limits.max, mt.shared);
         created_mems += 1;
         inst.mems[mod.imported_mems + j] = m;
     }
@@ -504,14 +552,14 @@ pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}
         };
         const mem = inst.mems[active.mem];
         const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
-        const memory_len: u64 = @intCast(mem.bytes.len);
-        const available = if (start <= memory_len) mem.bytes.len - @as(usize, @intCast(start)) else 0;
+        const memory_len: u64 = @intCast(mem.bytes().len);
+        const available = if (start <= memory_len) mem.bytes().len - @as(usize, @intCast(start)) else 0;
         if (start > memory_len or d.bytes.len > available) {
             diag.set(types.Diagnostic.no_offset, "out of bounds memory index", .{});
             return error.Trap;
         }
         const lo: usize = @intCast(start);
-        @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
+        @memcpy(mem.bytes()[lo..][0..d.bytes.len], d.bytes);
     }
 }
 
@@ -779,11 +827,11 @@ fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size:
     const address: u64 = popI32(s);
     const start = address + @as(u64, memarg.offset);
     const mem = inst.mems[0];
-    const memory_len: u64 = @intCast(mem.bytes.len);
+    const memory_len: u64 = @intCast(mem.bytes().len);
     if (start > memory_len or @as(u64, @intCast(size)) > memory_len - start)
         return s.trap("out of bounds memory access");
     const offset: usize = @intCast(start);
-    return mem.bytes[offset..][0..size];
+    return mem.bytes()[offset..][0..size];
 }
 
 fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: bool) u128 {
@@ -1824,7 +1872,7 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
 
 fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u32, size: u64) ExecError!usize {
     const ea = @as(u64, addr) + offset;
-    if (ea + size > mem.bytes.len) return s.trap("out of bounds memory access");
+    if (ea + size > mem.bytes().len) return s.trap("out of bounds memory access");
     return @intCast(ea);
 }
 
@@ -2103,9 +2151,9 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const source_end = @as(u64, source) + count;
                 const dest_end = @as(u64, dest) + count;
                 const memory = inst.mems[immediate.second];
-                if (source_end > bytes.len or dest_end > memory.bytes.len)
+                if (source_end > bytes.len or dest_end > memory.bytes().len)
                     return s.trap("out of bounds memory access");
-                @memcpy(memory.bytes[dest..@intCast(dest_end)], bytes[source..@intCast(source_end)]);
+                @memcpy(memory.bytes()[dest..@intCast(dest_end)], bytes[source..@intCast(source_end)]);
             },
             .data_drop => inst.data_segments[instr.imm.idx].dropped = true,
             .memory_copy => {
@@ -2117,10 +2165,10 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const source_memory = inst.mems[immediate.second];
                 const source_end = @as(u64, source) + count;
                 const dest_end = @as(u64, dest) + count;
-                if (source_end > source_memory.bytes.len or dest_end > dest_memory.bytes.len)
+                if (source_end > source_memory.bytes().len or dest_end > dest_memory.bytes().len)
                     return s.trap("out of bounds memory access");
-                const dest_slice = dest_memory.bytes[dest..@intCast(dest_end)];
-                const source_slice = source_memory.bytes[source..@intCast(source_end)];
+                const dest_slice = dest_memory.bytes()[dest..@intCast(dest_end)];
+                const source_slice = source_memory.bytes()[source..@intCast(source_end)];
                 if (dest_memory != source_memory or dest <= source)
                     std.mem.copyForwards(u8, dest_slice, source_slice)
                 else
@@ -2132,8 +2180,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const dest = popI32(s);
                 const memory = inst.mems[instr.imm.idx];
                 const end = @as(u64, dest) + count;
-                if (end > memory.bytes.len) return s.trap("out of bounds memory access");
-                @memset(memory.bytes[dest..@intCast(end)], value);
+                if (end > memory.bytes().len) return s.trap("out of bounds memory access");
+                @memset(memory.bytes()[dest..@intCast(end)], value);
             },
             .table_init => {
                 const count = popI32(s);
@@ -2202,148 +2250,148 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI32(s, std.mem.readInt(u32, mem.bytes[ea..][0..4], .little));
+                try pushI32(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
             },
             .i64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                try pushI64(s, std.mem.readInt(u64, mem.bytes[ea..][0..8], .little));
+                try pushI64(s, std.mem.readInt(u64, mem.bytes()[ea..][0..8], .little));
             },
             .f32_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try push(s, std.mem.readInt(u32, mem.bytes[ea..][0..4], .little));
+                try push(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
             },
             .f64_load => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                try push(s, std.mem.readInt(u64, mem.bytes[ea..][0..8], .little));
+                try push(s, std.mem.readInt(u64, mem.bytes()[ea..][0..8], .little));
             },
             .i32_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(mem.bytes[ea])))));
+                try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(mem.bytes()[ea])))));
             },
             .i32_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI32(s, mem.bytes[ea]);
+                try pushI32(s, mem.bytes()[ea]);
             },
             .i32_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI32(s, @bitCast(@as(i32, std.mem.readInt(i16, mem.bytes[ea..][0..2], .little))));
+                try pushI32(s, @bitCast(@as(i32, std.mem.readInt(i16, mem.bytes()[ea..][0..2], .little))));
             },
             .i32_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI32(s, std.mem.readInt(u16, mem.bytes[ea..][0..2], .little));
+                try pushI32(s, std.mem.readInt(u16, mem.bytes()[ea..][0..2], .little));
             },
             .i64_load8_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI64(s, @bitCast(@as(i64, @as(i8, @bitCast(mem.bytes[ea])))));
+                try pushI64(s, @bitCast(@as(i64, @as(i8, @bitCast(mem.bytes()[ea])))));
             },
             .i64_load8_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                try pushI64(s, mem.bytes[ea]);
+                try pushI64(s, mem.bytes()[ea]);
             },
             .i64_load16_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i16, mem.bytes[ea..][0..2], .little))));
+                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i16, mem.bytes()[ea..][0..2], .little))));
             },
             .i64_load16_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                try pushI64(s, std.mem.readInt(u16, mem.bytes[ea..][0..2], .little));
+                try pushI64(s, std.mem.readInt(u16, mem.bytes()[ea..][0..2], .little));
             },
             .i64_load32_s => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i32, mem.bytes[ea..][0..4], .little))));
+                try pushI64(s, @bitCast(@as(i64, std.mem.readInt(i32, mem.bytes()[ea..][0..4], .little))));
             },
             .i64_load32_u => {
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                try pushI64(s, std.mem.readInt(u32, mem.bytes[ea..][0..4], .little));
+                try pushI64(s, std.mem.readInt(u32, mem.bytes()[ea..][0..4], .little));
             },
             .i32_store => {
                 const v = popI32(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes[ea..][0..4], v, .little);
+                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
             },
             .i64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                std.mem.writeInt(u64, mem.bytes[ea..][0..8], v, .little);
+                std.mem.writeInt(u64, mem.bytes()[ea..][0..8], v, .little);
             },
             .f32_store => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes[ea..][0..4], v, .little);
+                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
             },
             .f64_store => {
                 const v = pop(s);
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 8);
-                std.mem.writeInt(u64, mem.bytes[ea..][0..8], v, .little);
+                std.mem.writeInt(u64, mem.bytes()[ea..][0..8], v, .little);
             },
             .i32_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                mem.bytes[ea] = v;
+                mem.bytes()[ea] = v;
             },
             .i32_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                std.mem.writeInt(u16, mem.bytes[ea..][0..2], v, .little);
+                std.mem.writeInt(u16, mem.bytes()[ea..][0..2], v, .little);
             },
             .i64_store8 => {
                 const v = @as(u8, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 1);
-                mem.bytes[ea] = v;
+                mem.bytes()[ea] = v;
             },
             .i64_store16 => {
                 const v = @as(u16, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 2);
-                std.mem.writeInt(u16, mem.bytes[ea..][0..2], v, .little);
+                std.mem.writeInt(u16, mem.bytes()[ea..][0..2], v, .little);
             },
             .i64_store32 => {
                 const v = @as(u32, @truncate(pop(s)));
                 const m = instr.imm.memarg;
                 const mem = inst.mems[0];
                 const ea = try effAddr(s, mem, popI32(s), m.offset, 4);
-                std.mem.writeInt(u32, mem.bytes[ea..][0..4], v, .little);
+                std.mem.writeInt(u32, mem.bytes()[ea..][0..4], v, .little);
             },
             .memory_size => try pushI32(s, inst.mems[0].pages()),
             .memory_grow => {
@@ -3073,16 +3121,16 @@ fn runTrap(comptime nres: usize, inst: *Instance, funcidx: u32, args: []const u6
 test "wasm.exec host constructors memory table global" {
     const mem = try createMemory(talloc, 1, 2);
     defer destroyMemory(talloc, mem);
-    try std.testing.expectEqual(@as(usize, types.PAGE_SIZE), mem.bytes.len);
-    try std.testing.expectEqual(@as(u8, 0), mem.bytes[123]);
+    try std.testing.expectEqual(@as(usize, types.PAGE_SIZE), mem.bytes().len);
+    try std.testing.expectEqual(@as(u8, 0), mem.bytes()[123]);
     try std.testing.expectEqual(@as(u32, 1), mem.pages());
     try std.testing.expectEqual(@as(i32, 1), memoryGrow(mem, 1));
-    try std.testing.expectEqual(@as(usize, 2 * types.PAGE_SIZE), mem.bytes.len);
-    try std.testing.expectEqual(@as(u8, 0), mem.bytes[types.PAGE_SIZE + 5]);
+    try std.testing.expectEqual(@as(usize, 2 * types.PAGE_SIZE), mem.bytes().len);
+    try std.testing.expectEqual(@as(u8, 0), mem.bytes()[types.PAGE_SIZE + 5]);
     try std.testing.expectEqual(@as(i32, -1), memoryGrow(mem, 1)); // at max
     try std.testing.expectEqual(@as(i32, 2), memoryGrow(mem, 0));
     try std.testing.expectEqual(@as(i32, -1), memoryGrow(mem, std.math.maxInt(u32)));
-    try std.testing.expectEqual(@as(usize, 2 * types.PAGE_SIZE), mem.bytes.len); // unchanged
+    try std.testing.expectEqual(@as(usize, 2 * types.PAGE_SIZE), mem.bytes().len); // unchanged
 
     const tab = try createTable(talloc, 2, 3);
     defer destroyTable(talloc, tab);
@@ -3099,6 +3147,45 @@ test "wasm.exec host constructors memory table global" {
     try std.testing.expectEqual(@as(u64, 0xDEADBEEF), g.value.numericBits());
     setGlobalValue(g, .{ .numeric = 7 });
     try std.testing.expectEqual(@as(u64, 7), g.value.numericBits());
+}
+
+test "wasm.exec shared memory grows in place with unique concurrent results" {
+    const mem = try createMemoryTyped(talloc, 1, 9, true);
+    defer destroyMemory(talloc, mem);
+    const original_ptr = mem.bytes().ptr;
+    mem.bytes()[17] = 0x6d;
+
+    const Worker = struct {
+        fn run(memory: *MemoryInst, result: *i32) void {
+            result.* = memoryGrow(memory, 1);
+        }
+    };
+    var results: [8]i32 = undefined;
+    var threads: [8]std.Thread = undefined;
+    for (&threads, &results) |*thread, *result|
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{ mem, result });
+    for (&threads) |*thread| thread.join();
+
+    std.mem.sort(i32, &results, {}, std.sort.asc(i32));
+    for (results, 1..) |result, expected|
+        try std.testing.expectEqual(@as(i32, @intCast(expected)), result);
+    try std.testing.expectEqual(@as(u32, 9), mem.pages());
+    try std.testing.expectEqual(original_ptr, mem.bytes().ptr);
+    try std.testing.expectEqual(@as(u8, 0x6d), mem.bytes()[17]);
+    try std.testing.expectEqual(@as(u8, 0), mem.bytes()[8 * types.PAGE_SIZE + 17]);
+    try std.testing.expectEqual(@as(i32, -1), memoryGrow(mem, 1));
+}
+
+test "wasm.exec shared memory backing outlives its store owner" {
+    const mem = try createMemoryTyped(talloc, 1, 2, true);
+    const storage = mem.shared_storage.?;
+    _ = storage.retain(); // independent realm/Worker-style hold
+    try std.testing.expectEqual(@as(usize, 2), storage.retainCount());
+    mem.bytes()[31] = 0xa5;
+    destroyMemory(talloc, mem);
+    try std.testing.expectEqual(@as(usize, 1), storage.retainCount());
+    try std.testing.expectEqual(@as(u8, 0xa5), storage.fixedSlice(types.PAGE_SIZE)[31]);
+    storage.release();
 }
 
 // -- Instantiation: import resolution ----------------------------------------
@@ -3235,7 +3322,7 @@ test "wasm.exec instantiate resolves all import kinds" {
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(inst.funcs[1])), tab.elems[0].funcref.?);
 
     // Data wrote into the imported memory.
-    try std.testing.expectEqual(@as(u8, 'Z'), mem.bytes[2]);
+    try std.testing.expectEqual(@as(u8, 'Z'), mem.bytes()[2]);
 
     // Imported FuncInst is directly callable through callFuncInst.
     var diag2: types.Diagnostic = .{};
@@ -3298,7 +3385,7 @@ test "wasm.exec instantiate data out of bounds is a trap" {
 test "wasm.exec instantiate data at exact end succeeds" {
     const b = try build(hdr ++ memSec(1, null) ++ dataSec0(65535, "Q"));
     defer destroyBuilt(b);
-    try std.testing.expectEqual(@as(u8, 'Q'), b.inst.mems[0].bytes[65535]);
+    try std.testing.expectEqual(@as(u8, 'Q'), b.inst.mems[0].bytes()[65535]);
     // An empty segment at the exact end is in bounds.
     const b2 = try build(hdr ++ memSec(1, null) ++ dataSec0(65536, ""));
     defer destroyBuilt(b2);
@@ -3313,7 +3400,7 @@ test "wasm.exec instantiation trap retains earlier active segments" {
     const memory = try createMemory(talloc, 1, null);
     defer destroyMemory(talloc, memory);
     try std.testing.expectError(error.Trap, instantiate(talloc, memory_module, .{ .mems = &.{memory} }, &diag));
-    try std.testing.expectEqualStrings("abc", memory.bytes[0..3]);
+    try std.testing.expectEqualStrings("abc", memory.bytes()[0..3]);
 
     diag = .{};
     const table_module = try buildModule(comptime (hdr ++
@@ -4006,17 +4093,17 @@ test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {
     defer destroyInstance(talloc, inst);
 
     try invoke(inst, 0, &.{}, &.{}, &diag);
-    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes[10..17]);
-    try std.testing.expectEqualSlices(u8, "QQQ", inst.mems[0].bytes[20..23]);
+    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes()[10..17]);
+    try std.testing.expectEqualSlices(u8, "QQQ", inst.mems[0].bytes()[20..23]);
     try std.testing.expect(inst.data_segments[0].dropped);
     try invoke(inst, 1, &.{}, &.{}, &diag);
     try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &.{}, &diag));
     try std.testing.expectEqualStrings("out of bounds memory access", diag.message());
-    const before = inst.mems[0].bytes[65534];
+    const before = inst.mems[0].bytes()[65534];
     try std.testing.expectError(error.Trap, invoke(inst, 3, &.{}, &.{}, &diag));
-    try std.testing.expectEqual(before, inst.mems[0].bytes[65534]);
+    try std.testing.expectEqual(before, inst.mems[0].bytes()[65534]);
     try std.testing.expectError(error.Trap, invoke(inst, 0, &.{}, &.{}, &diag));
-    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes[10..17]);
+    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes()[10..17]);
 }
 
 test "wasm.exec bulk table operations preserve explicit indices and drop state" {
@@ -4174,7 +4261,7 @@ test "wasm.exec SIMD memory operations preserve bits and trap atomically" {
     const inst = try instantiate(talloc, mod, .{}, &diag);
     defer destroyInstance(talloc, inst);
 
-    for (0..16) |index| inst.mems[0].bytes[3 + index] = @intCast(index);
+    for (0..16) |index| inst.mems[0].bytes()[3 + index] = @intCast(index);
     var vector_result: [1]ValueSlot = undefined;
     try invokeSlots(inst, 0, &.{.{ .numeric = 2 }}, &vector_result, &diag);
     try std.testing.expectEqual(@as(u128, 0x0F0E0D0C0B0A09080706050403020100), vector_result[0].vectorBits());
@@ -4182,31 +4269,31 @@ test "wasm.exec SIMD memory operations preserve bits and trap atomically" {
     const stored: u128 = 0xFEDCBA98765432100123456789ABCDEF;
     var no_results: [0]ValueSlot = .{};
     try invokeSlots(inst, 1, &.{ .{ .numeric = 32 }, .{ .vector = stored } }, &no_results, &diag);
-    try std.testing.expectEqual(@as(u64, @truncate(stored)), readLittle(inst.mems[0].bytes[32..40]));
-    try std.testing.expectEqual(@as(u64, @truncate(stored >> 64)), readLittle(inst.mems[0].bytes[40..48]));
+    try std.testing.expectEqual(@as(u64, @truncate(stored)), readLittle(inst.mems[0].bytes()[32..40]));
+    try std.testing.expectEqual(@as(u64, @truncate(stored >> 64)), readLittle(inst.mems[0].bytes()[40..48]));
 
-    inst.mems[0].bytes[20] = 0xFE;
+    inst.mems[0].bytes()[20] = 0xFE;
     try invokeSlots(inst, 2, &.{ .{ .numeric = 20 }, .{ .vector = stored } }, &vector_result, &diag);
     try std.testing.expectEqual(replaceLaneBits(stored, 15, 8, 0xFE), vector_result[0].vectorBits());
 
     const signed_source = [_]u8{ 0x80, 0x7F, 0xFF, 0x01, 0x00, 0x81, 0x55, 0xAA };
-    @memcpy(inst.mems[0].bytes[48..56], &signed_source);
+    @memcpy(inst.mems[0].bytes()[48..56], &signed_source);
     try invokeSlots(inst, 3, &.{.{ .numeric = 48 }}, &vector_result, &diag);
     try std.testing.expectEqual(loadExtended(&signed_source, 8, 16, true), vector_result[0].vectorBits());
 
-    @memcpy(inst.mems[0].bytes[64..68], &[_]u8{ 0x78, 0x56, 0x34, 0x12 });
+    @memcpy(inst.mems[0].bytes()[64..68], &[_]u8{ 0x78, 0x56, 0x34, 0x12 });
     try invokeSlots(inst, 4, &.{.{ .numeric = 64 }}, &vector_result, &diag);
     try std.testing.expectEqual(@as(u128, 0x12345678), vector_result[0].vectorBits());
 
     try invokeSlots(inst, 5, &.{ .{ .numeric = 70 }, .{ .vector = stored } }, &no_results, &diag);
-    try std.testing.expectEqual(@as(u8, @truncate(stored >> 120)), inst.mems[0].bytes[70]);
+    try std.testing.expectEqual(@as(u8, @truncate(stored >> 120)), inst.mems[0].bytes()[70]);
 
     try std.testing.expectError(error.Trap, invokeSlots(inst, 0, &.{.{ .numeric = 65521 }}, &vector_result, &diag));
     try std.testing.expectEqualStrings("out of bounds memory access", diag.message());
     var before: [6]u8 = undefined;
-    @memcpy(&before, inst.mems[0].bytes[65530..65536]);
+    @memcpy(&before, inst.mems[0].bytes()[65530..65536]);
     try std.testing.expectError(error.Trap, invokeSlots(inst, 1, &.{ .{ .numeric = 65530 }, .{ .vector = 0 } }, &no_results, &diag));
-    try std.testing.expectEqualSlices(u8, &before, inst.mems[0].bytes[65530..65536]);
+    try std.testing.expectEqualSlices(u8, &before, inst.mems[0].bytes()[65530..65536]);
 }
 
 test "wasm.exec conversions trunc f32 to int" {

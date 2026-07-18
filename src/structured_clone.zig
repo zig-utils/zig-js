@@ -34,8 +34,9 @@ pub const SerializeLimitError = HostError || error{MessageTooLarge};
 
 const SharedRefToken = [16]u8;
 const wire_magic = "ZJSC".*;
-const wire_version: u8 = 1;
+const wire_version: u8 = 2;
 const wire_header_len = wire_magic.len + @sizeOf(u8) + @sizeOf(u32) + @sizeOf(u64);
+const shared_array_buffer_wire_len = 1 + @sizeOf(u32) + 2 * @sizeOf(u64);
 /// Root is depth zero. A payload may nest this many child values while keeping
 /// serializer, preflight, and deserializer recursion safely off the host stack
 /// limit. This is a wire-format complexity contract, not a JS call-stack cap.
@@ -417,6 +418,14 @@ const Serializer = struct {
                 };
                 try s.w.tag(.shared_array_buffer);
                 try s.w.int(u32, token_index);
+                try s.w.int(u64, if (ab.shared_fixed_byte_length) |len|
+                    try s.wireU64(len, "DataCloneError: SharedArrayBuffer length is too large")
+                else
+                    std.math.maxInt(u64));
+                try s.w.int(u64, if (ab.max_byte_length) |max|
+                    try s.wireU64(max, "DataCloneError: SharedArrayBuffer maximum is too large")
+                else
+                    std.math.maxInt(u64));
                 return;
             }
             if (ab.isDetached()) return s.throwClone("DataCloneError: detached ArrayBuffer cannot be cloned");
@@ -789,6 +798,8 @@ fn skipSerialized(r: *Reader, state: *SkipState, depth: u16) Reader.Error!void {
         },
         .shared_array_buffer => {
             try state.validateToken(try r.int(u32));
+            _ = try r.int(u64); // fixed view length, or sentinel
+            _ = try r.int(u64); // growable maximum, or sentinel
         },
         .array_buffer => {
             const max_raw = try r.int(u64);
@@ -1067,6 +1078,8 @@ const Deserializer = struct {
             },
             .shared_array_buffer => {
                 const index = d.r.int(u32) catch return d.fail();
+                const fixed_raw = d.r.int(u64) catch return d.fail();
+                const max_raw = d.r.int(u64) catch return d.fail();
                 const token_index = std.math.cast(usize, index) orelse return d.fail();
                 if (index != d.next_shared or token_index >= d.frame.tokenCount()) return d.fail();
                 d.next_shared = std.math.add(u32, d.next_shared, 1) catch return d.fail();
@@ -1075,6 +1088,19 @@ const Deserializer = struct {
                 // The consumed reference transfers to the wrapper. The wrapper
                 // constructor owns failure cleanup as part of that contract.
                 const o = try interpreter.makeSharedArrayBufferWrapper(d.self, storage);
+                const ab = o.arrayBuffer().?;
+                if (fixed_raw != std.math.maxInt(u64)) {
+                    const fixed = std.math.cast(usize, fixed_raw) orelse return d.fail();
+                    if (fixed > storage.len() or max_raw != std.math.maxInt(u64)) return d.fail();
+                    ab.shared_fixed_byte_length = fixed;
+                }
+                if (max_raw == std.math.maxInt(u64)) {
+                    ab.max_byte_length = null;
+                } else {
+                    const max = std.math.cast(usize, max_raw) orelse return d.fail();
+                    if (max != storage.capacity or !storage.growable) return d.fail();
+                    ab.max_byte_length = max;
+                }
                 try d.objs.append(a, o);
                 return Value.obj(o);
             },
@@ -1268,9 +1294,10 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
 
     const undef_frame = try encodeFrame(std.testing.allocator, &.{}, &.{@intFromEnum(Tag.undef)});
     defer std.testing.allocator.free(undef_frame);
-    var sab_payload: [1 + @sizeOf(u32)]u8 = undefined;
+    var sab_payload: [shared_array_buffer_wire_len]u8 = undefined;
     sab_payload[0] = @intFromEnum(Tag.shared_array_buffer);
     std.mem.writeInt(u32, sab_payload[1..][0..@sizeOf(u32)], 0, .little);
+    @memset(sab_payload[1 + @sizeOf(u32) ..], 0xff);
     const sab_frame = try encodeFrame(std.testing.allocator, &.{token}, &sab_payload);
     defer std.testing.allocator.free(sab_frame);
 
@@ -1285,12 +1312,14 @@ test "structured clone SAB release rejects replay and cleans valid trailing toke
     const still_live = try registerSharedRefToken(storage);
     const held = consumeSharedRefToken(already_consumed) orelse return error.TestUnexpectedResult;
     held.release();
-    var pair_payload: [2 * (1 + @sizeOf(u32))]u8 = undefined;
+    var pair_payload: [2 * shared_array_buffer_wire_len]u8 = undefined;
     pair_payload[0] = @intFromEnum(Tag.shared_array_buffer);
     std.mem.writeInt(u32, pair_payload[1..][0..@sizeOf(u32)], 0, .little);
-    const second_tag = 1 + @sizeOf(u32);
+    @memset(pair_payload[1 + @sizeOf(u32) .. shared_array_buffer_wire_len], 0xff);
+    const second_tag = shared_array_buffer_wire_len;
     pair_payload[second_tag] = @intFromEnum(Tag.shared_array_buffer);
     std.mem.writeInt(u32, pair_payload[second_tag + 1 ..][0..@sizeOf(u32)], 1, .little);
+    @memset(pair_payload[second_tag + 1 + @sizeOf(u32) ..], 0xff);
     const pair = try encodeFrame(std.testing.allocator, &.{ already_consumed, still_live }, &pair_payload);
     defer std.testing.allocator.free(pair);
     releaseSerialized(pair);
@@ -1324,11 +1353,12 @@ test "structured clone wire depth is bounded and rejected manifests clean up" {
     defer storage.release();
     const token = try registerSharedRefToken(storage);
     const rejected_wrappers = allowed_wrappers + 1;
-    const rejected_payload = try std.testing.allocator.alloc(u8, rejected_wrappers + 1 + @sizeOf(u32));
+    const rejected_payload = try std.testing.allocator.alloc(u8, rejected_wrappers + shared_array_buffer_wire_len);
     defer std.testing.allocator.free(rejected_payload);
     @memset(rejected_payload[0..rejected_wrappers], @intFromEnum(Tag.wrapper));
     rejected_payload[rejected_wrappers] = @intFromEnum(Tag.shared_array_buffer);
     std.mem.writeInt(u32, rejected_payload[rejected_wrappers + 1 ..][0..@sizeOf(u32)], 0, .little);
+    @memset(rejected_payload[rejected_wrappers + 1 + @sizeOf(u32) ..], 0xff);
     const rejected_frame_bytes = try encodeFrame(std.testing.allocator, &.{token}, rejected_payload);
     defer std.testing.allocator.free(rejected_frame_bytes);
     const rejected_frame = try readFrame(rejected_frame_bytes);

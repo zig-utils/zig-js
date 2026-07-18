@@ -1216,6 +1216,44 @@ test "workers: 4-way round trip, shared SAB counter, terminate mid-loop" {
     spinner.destroy();
 }
 
+test "worker preserves fixed WebAssembly shared-memory buffer views" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .threads = true },
+    });
+    defer ctx.destroy();
+    var machine = ctx.interpreter();
+    const old_buffer = try ctx.evaluate(
+        \\globalThis.__workerWasmMemory = new WebAssembly.Memory({
+        \\  initial: 1, maximum: 2, shared: true,
+        \\});
+        \\globalThis.__workerWasmOld = __workerWasmMemory.buffer;
+        \\__workerWasmMemory.grow(1);
+        \\__workerWasmOld;
+    );
+
+    const w = try Worker.spawn(
+        \\globalThis.onmessage = e => {
+        \\  const buffer = e.data;
+        \\  const bytes = new Uint8Array(buffer);
+        \\  bytes[29] = 84;
+        \\  let fixed = false;
+        \\  try { buffer.grow(131072); }
+        \\  catch (error) { fixed = error instanceof TypeError; }
+        \\  postMessage({ length: buffer.byteLength, fixed });
+        \\  close();
+        \\};
+    );
+    defer w.destroy();
+    try w.postMessage(&machine, old_buffer);
+    const reply = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 65536), (try machine.getProperty(reply, "length")).asNum());
+    try std.testing.expect((try machine.getProperty(reply, "fixed")).asBool());
+    w.join();
+    try std.testing.expect((try ctx.evaluate(
+        "new Uint8Array(__workerWasmMemory.buffer)[29] === 84",
+    )).asBool());
+}
+
 test "workers: inspector target ids are stable and lifecycle is atomic" {
     const first = try Worker.spawn("");
     defer {
