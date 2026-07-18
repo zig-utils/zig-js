@@ -9,9 +9,12 @@
 
 const std = @import("std");
 const atomic = @import("atomic.zig");
+const gc = @import("gc.zig");
 const types = @import("types.zig");
 const simd = @import("simd.zig");
 const simd_meta = @import("simd_validate.zig");
+
+const Allocator = std.mem.Allocator;
 
 pub const Error = error{Invalid};
 
@@ -25,20 +28,357 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
 fn validateValType(mod: *const types.Module, value_type: types.ValType, diag: *types.Diagnostic) Error!void {
     if (value_type == .exnref and !mod.features.exception_handling)
         return unsupportedFeature(mod, diag, .exception_handling);
-    if (value_type.isReference() and !mod.features.reference_types)
-        return unsupportedFeature(mod, diag, .reference_types);
     if (value_type == .v128 and !mod.features.fixed_width_simd)
         return unsupportedFeature(mod, diag, .fixed_width_simd);
+    const ref_type = value_type.refType() orelse return;
+    const explicit_reference = @intFromEnum(value_type) > std.math.maxInt(u32);
+    if ((explicit_reference or value_type == .nofuncref or value_type == .noexternref) and
+        !mod.features.typed_function_references)
+        return unsupportedFeature(mod, diag, .typed_function_references);
+    if (value_type.isGcReference()) {
+        if (!mod.features.gc) return unsupportedFeature(mod, diag, .gc);
+    } else if (!mod.features.reference_types) {
+        return unsupportedFeature(mod, diag, .reference_types);
+    }
+    if (ref_type.heap.concreteIndex()) |index|
+        if (index >= mod.types.len) return failMod(diag, "unknown type");
+}
+
+fn compositeKind(definition: types.DefType) enum { func, struct_, array } {
+    return switch (definition.subtype.composite) {
+        .func => .func,
+        .struct_ => .struct_,
+        .array => .array,
+    };
+}
+
+fn groupContains(group: types.RecGroup, index: u32) bool {
+    return index >= group.start and index - group.start < group.len;
+}
+
+fn heapTypeEquivalentInGroups(
+    mod: *const types.Module,
+    a: types.HeapType,
+    b: types.HeapType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    if (a.concreteIndex()) |a_index| {
+        const b_index = b.concreteIndex() orelse return false;
+        const a_internal = groupContains(a_group, a_index);
+        const b_internal = groupContains(b_group, b_index);
+        if (a_internal or b_internal)
+            return a_internal and b_internal and a_index - a_group.start == b_index - b_group.start;
+        return definedTypeEquivalentDepth(mod, a_index, b_index, depth + 1);
+    }
+    return a == b;
+}
+
+fn valTypeEquivalentInGroups(
+    mod: *const types.Module,
+    a: types.ValType,
+    b: types.ValType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    if (a == b) return true;
+    const a_ref = a.refType() orelse return false;
+    const b_ref = b.refType() orelse return false;
+    return a_ref.nullable == b_ref.nullable and
+        heapTypeEquivalentInGroups(mod, a_ref.heap, b_ref.heap, a_group, b_group, depth);
+}
+
+fn storageTypeEquivalentInGroups(
+    mod: *const types.Module,
+    a: types.StorageType,
+    b: types.StorageType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    return switch (a) {
+        .i8 => b == .i8,
+        .i16 => b == .i16,
+        .value => |a_value| switch (b) {
+            .value => |b_value| valTypeEquivalentInGroups(mod, a_value, b_value, a_group, b_group, depth),
+            else => false,
+        },
+    };
+}
+
+fn compositeTypeEquivalentInGroups(
+    mod: *const types.Module,
+    a: types.CompositeType,
+    b: types.CompositeType,
+    a_group: types.RecGroup,
+    b_group: types.RecGroup,
+    depth: usize,
+) bool {
+    return switch (a) {
+        .func => |a_func| switch (b) {
+            .func => |b_func| blk: {
+                if (a_func.params.len != b_func.params.len or a_func.results.len != b_func.results.len)
+                    break :blk false;
+                for (a_func.params, b_func.params) |a_param, b_param|
+                    if (!valTypeEquivalentInGroups(mod, a_param, b_param, a_group, b_group, depth)) break :blk false;
+                for (a_func.results, b_func.results) |a_result, b_result|
+                    if (!valTypeEquivalentInGroups(mod, a_result, b_result, a_group, b_group, depth)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        },
+        .struct_ => |a_struct| switch (b) {
+            .struct_ => |b_struct| blk: {
+                if (a_struct.fields.len != b_struct.fields.len) break :blk false;
+                for (a_struct.fields, b_struct.fields) |a_field, b_field| {
+                    if (a_field.mutable != b_field.mutable or
+                        !storageTypeEquivalentInGroups(mod, a_field.storage, b_field.storage, a_group, b_group, depth))
+                        break :blk false;
+                }
+                break :blk true;
+            },
+            else => false,
+        },
+        .array => |a_array| switch (b) {
+            .array => |b_array| a_array.field.mutable == b_array.field.mutable and
+                storageTypeEquivalentInGroups(mod, a_array.field.storage, b_array.field.storage, a_group, b_group, depth),
+            else => false,
+        },
+    };
+}
+
+fn definedTypeEquivalentDepth(mod: *const types.Module, a_index: u32, b_index: u32, depth: usize) bool {
+    if (a_index == b_index) return true;
+    if (a_index >= mod.types.len or b_index >= mod.types.len or depth > mod.rec_groups.len) return false;
+    const a_definition = mod.types[a_index];
+    const b_definition = mod.types[b_index];
+    if (a_definition.rec_group >= mod.rec_groups.len or b_definition.rec_group >= mod.rec_groups.len)
+        return false;
+    const a_group = mod.rec_groups[a_definition.rec_group];
+    const b_group = mod.rec_groups[b_definition.rec_group];
+    if (a_definition.rec_index != b_definition.rec_index or a_group.len != b_group.len) return false;
+
+    for (0..a_group.len) |rec_index| {
+        const a_subtype = mod.types[a_group.start + rec_index].subtype;
+        const b_subtype = mod.types[b_group.start + rec_index].subtype;
+        if (a_subtype.final != b_subtype.final or a_subtype.supertypes.len != b_subtype.supertypes.len)
+            return false;
+        for (a_subtype.supertypes, b_subtype.supertypes) |a_super, b_super|
+            if (!heapTypeEquivalentInGroups(
+                mod,
+                types.HeapType.concrete(a_super),
+                types.HeapType.concrete(b_super),
+                a_group,
+                b_group,
+                depth,
+            )) return false;
+        if (!compositeTypeEquivalentInGroups(
+            mod,
+            a_subtype.composite,
+            b_subtype.composite,
+            a_group,
+            b_group,
+            depth,
+        )) return false;
+    }
+    return true;
+}
+
+fn definedTypeEquivalent(mod: *const types.Module, a_index: u32, b_index: u32) bool {
+    return definedTypeEquivalentDepth(mod, a_index, b_index, 0);
+}
+
+/// Nominal heap matching from the pinned GC proposal. Concrete definitions
+/// follow their declared (earlier) supertype chain; abstract nodes form the
+/// three disjoint function, external, and internal hierarchies.
+fn heapTypeMatches(mod: *const types.Module, sub: types.HeapType, super: types.HeapType) bool {
+    if (sub == super) return true;
+
+    if (sub.concreteIndex()) |start| {
+        if (start >= mod.types.len) return false;
+        var index = start;
+        while (true) {
+            const definition = mod.types[index];
+            if (super.concreteIndex()) |wanted| {
+                if (definedTypeEquivalent(mod, index, wanted)) return true;
+            } else switch (compositeKind(definition)) {
+                .func => if (super == .func) return true,
+                .struct_ => if (super == .struct_ or super == .eq or super == .any) return true,
+                .array => if (super == .array or super == .eq or super == .any) return true,
+            }
+            if (definition.subtype.supertypes.len == 0) return false;
+            index = definition.subtype.supertypes[0];
+            if (index >= mod.types.len) return false;
+        }
+    }
+
+    if (super.concreteIndex()) |wanted| {
+        if (wanted >= mod.types.len) return false;
+        return switch (sub) {
+            .nofunc => compositeKind(mod.types[wanted]) == .func,
+            .none => compositeKind(mod.types[wanted]) != .func,
+            else => false,
+        };
+    }
+
+    return switch (sub) {
+        .nofunc => super == .func,
+        .noextern => super == .extern_,
+        .none => super == .i31 or super == .struct_ or super == .array or super == .eq or super == .any,
+        .i31 => super == .eq or super == .any,
+        .struct_, .array => super == .eq or super == .any,
+        .eq => super == .any,
+        else => false,
+    };
+}
+
+fn refTypeMatches(mod: *const types.Module, sub: types.RefType, super: types.RefType) bool {
+    if (sub.nullable and !super.nullable) return false;
+    return heapTypeMatches(mod, sub.heap, super.heap);
+}
+
+fn valTypeMatches(mod: *const types.Module, sub: types.ValType, super: types.ValType) bool {
+    if (sub == super) return true;
+    const sub_ref = sub.refType() orelse return false;
+    const super_ref = super.refType() orelse return false;
+    return refTypeMatches(mod, sub_ref, super_ref);
+}
+
+fn storageTypeMatches(mod: *const types.Module, sub: types.StorageType, super: types.StorageType) bool {
+    return switch (sub) {
+        .i8 => super == .i8,
+        .i16 => super == .i16,
+        .value => |sub_value| switch (super) {
+            .value => |super_value| valTypeMatches(mod, sub_value, super_value),
+            else => false,
+        },
+    };
+}
+
+fn fieldTypeMatches(mod: *const types.Module, sub: types.FieldType, super: types.FieldType) bool {
+    if (sub.mutable != super.mutable) return false;
+    if (!storageTypeMatches(mod, sub.storage, super.storage)) return false;
+    return !sub.mutable or storageTypeMatches(mod, super.storage, sub.storage);
+}
+
+fn compositeTypeMatches(mod: *const types.Module, sub: types.CompositeType, super: types.CompositeType) bool {
+    return switch (sub) {
+        .func => |sub_func| switch (super) {
+            .func => |super_func| blk: {
+                if (sub_func.params.len != super_func.params.len or sub_func.results.len != super_func.results.len)
+                    break :blk false;
+                // Function parameters are contravariant; results covariant.
+                for (sub_func.params, super_func.params) |sub_param, super_param|
+                    if (!valTypeMatches(mod, super_param, sub_param)) break :blk false;
+                for (sub_func.results, super_func.results) |sub_result, super_result|
+                    if (!valTypeMatches(mod, sub_result, super_result)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        },
+        .struct_ => |sub_struct| switch (super) {
+            .struct_ => |super_struct| blk: {
+                if (sub_struct.fields.len < super_struct.fields.len) break :blk false;
+                for (sub_struct.fields[0..super_struct.fields.len], super_struct.fields) |sub_field, super_field|
+                    if (!fieldTypeMatches(mod, sub_field, super_field)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        },
+        .array => |sub_array| switch (super) {
+            .array => |super_array| fieldTypeMatches(mod, sub_array.field, super_array.field),
+            else => false,
+        },
+    };
+}
+
+fn validateValTypeVisible(
+    mod: *const types.Module,
+    value_type: types.ValType,
+    visible_types: u32,
+    diag: *types.Diagnostic,
+) Error!void {
+    try validateValType(mod, value_type, diag);
+    if (value_type.refType()) |reference|
+        if (reference.heap.concreteIndex()) |index|
+            if (index >= visible_types) return failMod(diag, "unknown type");
+}
+
+fn validateStorageTypeVisible(
+    mod: *const types.Module,
+    storage: types.StorageType,
+    visible_types: u32,
+    diag: *types.Diagnostic,
+) Error!void {
+    switch (storage) {
+        .value => |value| try validateValTypeVisible(mod, value, visible_types, diag),
+        .i8, .i16 => {},
+    }
+}
+
+fn validateCompositeType(
+    mod: *const types.Module,
+    composite: types.CompositeType,
+    visible_types: u32,
+    diag: *types.Diagnostic,
+) Error!void {
+    switch (composite) {
+        .func => |function| {
+            if (function.results.len > 1 and !mod.features.multi_value)
+                return failMod(diag, "invalid result arity");
+            for (function.params) |param| try validateValTypeVisible(mod, param, visible_types, diag);
+            for (function.results) |result| try validateValTypeVisible(mod, result, visible_types, diag);
+        },
+        .struct_ => |structure| for (structure.fields) |field|
+            try validateStorageTypeVisible(mod, field.storage, visible_types, diag),
+        .array => |array| try validateStorageTypeVisible(mod, array.field.storage, visible_types, diag),
+    }
+}
+
+fn validateDefinedTypes(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
+    var next_definition: u32 = 0;
+    for (mod.rec_groups, 0..) |group, group_index| {
+        if (group.start != next_definition or group.start > mod.types.len or group.len > mod.types.len - group.start)
+            return failMod(diag, "invalid recursive type group");
+        for (0..group.len) |rec_index| {
+            const definition = mod.types[group.start + rec_index];
+            if (definition.rec_group != group_index or definition.rec_index != rec_index)
+                return failMod(diag, "invalid recursive type group");
+        }
+        next_definition += group.len;
+    }
+    if (next_definition != mod.types.len) return failMod(diag, "invalid recursive type group");
+    for (mod.types, 0..) |definition, index_usize| {
+        const index: u32 = @intCast(index_usize);
+        if (!mod.features.gc and (definition.funcType() == null or definition.subtype.supertypes.len != 0))
+            return unsupportedFeature(mod, diag, .gc);
+        const group = mod.rec_groups[definition.rec_group];
+        try validateCompositeType(mod, definition.subtype.composite, group.start + group.len, diag);
+        if (definition.subtype.supertypes.len > 1)
+            return failMod(diag, "multiple supertypes");
+        for (definition.subtype.supertypes) |super_index| {
+            if (super_index >= index or super_index >= mod.types.len)
+                return failMod(diag, "invalid supertype index");
+            const super = mod.types[super_index];
+            if (super.subtype.final) return failMod(diag, "cannot subtype final type");
+            if (!compositeTypeMatches(mod, definition.subtype.composite, super.subtype.composite))
+                return failMod(diag, "type mismatch");
+        }
+    }
 }
 
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
-    // 1. Type indices must resolve; reference value positions are opt-in.
-    for (mod.types) |definition| if (definition.funcType()) |ft| {
-        // MVP function types have at most one result; multi-value is opt-in.
-        if (ft.results.len > 1 and !mod.features.multi_value) return failMod(diag, "invalid result arity");
-        for (ft.params) |p| try validateValType(mod, p, diag);
-        for (ft.results) |r| try validateValType(mod, r, diag);
+    validateWithAllocator(mod, diag, std.heap.page_allocator) catch |err| switch (err) {
+        error.OutOfMemory => return failMod(diag, "out of memory"),
+        error.Invalid => return error.Invalid,
     };
+}
+
+fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allocator: Allocator) (Error || Allocator.Error)!void {
+    // 1. Type indices must resolve; reference value positions are opt-in.
+    try validateDefinedTypes(mod, diag);
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| {
             if (t >= mod.types.len) return failMod(diag, "unknown type");
@@ -78,13 +418,14 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 4. Element segments.
     for (mod.elems) |e| {
-        if (e.type.isReference() and !mod.features.reference_types and e.type != .funcref)
-            return unsupportedFeature(mod, diag, .reference_types);
+        // MVP element segments use the implicit funcref type without opting
+        // into the later reference-types feature.
+        if (e.type != .funcref) try validateValType(mod, e.type, diag);
         switch (e.mode) {
             .active => |active| {
                 if (active.table >= mod.totalTables())
                     return failModFmt(diag, "unknown table {d}", .{active.table});
-                if (mod.tableType(active.table).elem != e.type)
+                if (!valTypeMatches(mod, e.type, mod.tableType(active.table).elem))
                     return failMod(diag, "type mismatch");
                 try checkConstExpr(mod, active.offset, mod.tableType(active.table).address.valType(), diag);
             },
@@ -136,7 +477,7 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 8. Function bodies.
     for (mod.funcs, mod.code) |typeidx, body|
-        try validateFunc(mod, diag, mod.funcTypeAt(typeidx).?, body);
+        try validateFunc(mod, diag, mod.funcTypeAt(typeidx).?, body, allocator);
 }
 
 fn validateTagType(mod: *const types.Module, tag: types.Tag, diag: *types.Diagnostic) Error!void {
@@ -170,13 +511,13 @@ fn checkConstExpr(
             if (gi >= mod.imported_globals) return failMod(diag, "unknown global");
             const gt = mod.globalType(gi);
             if (gt.mutable) return failMod(diag, "constant expression required");
-            if (gt.val != expected) return failMod(diag, "type mismatch");
+            if (!valTypeMatches(mod, gt.val, expected)) return failMod(diag, "type mismatch");
         },
         .ref_func => |funcidx| {
             if (funcidx >= mod.totalFuncs()) return failModFmt(diag, "unknown function {d}", .{funcidx});
-            if (expected != .funcref) return failMod(diag, "type mismatch");
+            if (!valTypeMatches(mod, .funcref, expected)) return failMod(diag, "type mismatch");
         },
-        else => if (expr.valType() != expected)
+        else => if (!valTypeMatches(mod, expr.valType(), expected))
             return failMod(diag, "type mismatch"),
     }
 }
@@ -327,7 +668,8 @@ const FuncValidator = struct {
 
     fn popExpect(self: *FuncValidator, t: types.ValType) Error!void {
         const v = try self.pop();
-        if (v != .unknown and v != stackVal(t)) return self.fail("type mismatch");
+        if (v != .unknown and !valTypeMatches(self.mod, @enumFromInt(@intFromEnum(v)), t))
+            return self.fail("type mismatch");
     }
 
     fn popTypes(self: *FuncValidator, values: []const types.ValType) Error!void {
@@ -354,7 +696,7 @@ const FuncValidator = struct {
                 cursor -= 1;
                 break :blk self.opds[cursor];
             };
-            if (actual != .unknown and actual != stackVal(values[i]))
+            if (actual != .unknown and !valTypeMatches(self.mod, @enumFromInt(@intFromEnum(actual)), values[i]))
                 return self.fail("type mismatch");
         }
     }
@@ -480,6 +822,291 @@ const FuncValidator = struct {
     fn cvtop(self: *FuncValidator, from: types.ValType, to: types.ValType) Error!void {
         try self.popExpect(from);
         self.push(stackVal(to));
+    }
+
+    fn concreteRef(index: u32, nullable: bool) types.ValType {
+        return types.ValType.fromRef(.{ .nullable = nullable, .heap = types.HeapType.concrete(index) });
+    }
+
+    fn structType(self: *FuncValidator, index: u32) Error!types.StructType {
+        if (index >= self.mod.types.len) return self.fail("unknown type");
+        return switch (self.mod.types[index].subtype.composite) {
+            .struct_ => |structure| structure,
+            else => self.fail("type mismatch"),
+        };
+    }
+
+    fn arrayType(self: *FuncValidator, index: u32) Error!types.ArrayType {
+        if (index >= self.mod.types.len) return self.fail("unknown type");
+        return switch (self.mod.types[index].subtype.composite) {
+            .array => |array| array,
+            else => self.fail("type mismatch"),
+        };
+    }
+
+    fn requireDefaultable(self: *FuncValidator, value_type: types.ValType) Error!void {
+        if (value_type.refType()) |reference| {
+            if (!reference.nullable) return self.fail("type is not defaultable");
+        }
+    }
+
+    fn requireNumericOrVector(self: *FuncValidator, value_type: types.ValType) Error!void {
+        switch (value_type) {
+            .i32, .i64, .f32, .f64, .v128 => {},
+            else => return self.fail("type mismatch"),
+        }
+    }
+
+    fn requirePlainOrPacked(self: *FuncValidator, op: gc.Op, storage: types.StorageType) Error!void {
+        const is_packed = storage == .i8 or storage == .i16;
+        const extended = switch (op) {
+            .struct_get_s, .struct_get_u, .array_get_s, .array_get_u => true,
+            else => false,
+        };
+        if (is_packed != extended) return self.fail("type mismatch");
+    }
+
+    fn popReference(self: *FuncValidator) Error!?types.RefType {
+        const value = try self.pop();
+        if (value == .unknown) return null;
+        const value_type: types.ValType = @enumFromInt(@intFromEnum(value));
+        return value_type.refType() orelse self.fail("type mismatch");
+    }
+
+    fn validateRefEq(self: *FuncValidator) Error!void {
+        const eqref = types.ValType.fromRef(.{ .nullable = true, .heap = .eq });
+        try self.popExpect(eqref);
+        try self.popExpect(eqref);
+        self.push(.i32);
+    }
+
+    fn validateRefAsNonNull(self: *FuncValidator) Error!void {
+        const reference = try self.popReference() orelse {
+            self.push(.unknown);
+            return;
+        };
+        self.push(stackVal(types.ValType.fromRef(.{ .nullable = false, .heap = reference.heap })));
+    }
+
+    fn validateGc(self: *FuncValidator, instr: types.Instr) Error!void {
+        const op: gc.Op = switch (instr.imm) {
+            .gc => |value| value,
+            .gc_type => |value| value.op,
+            .gc_type_field => |value| value.op,
+            .gc_two_indices => |value| value.op,
+            .gc_heap => |value| value.op,
+            .gc_cast_branch => |value| value.op,
+            else => unreachable,
+        };
+        switch (op) {
+            .struct_new, .struct_new_default => {
+                const type_index = instr.imm.gc_type.type_index;
+                const structure = try self.structType(type_index);
+                if (op == .struct_new) {
+                    var index = structure.fields.len;
+                    while (index > 0) {
+                        index -= 1;
+                        try self.popExpect(structure.fields[index].storage.unpacked());
+                    }
+                } else for (structure.fields) |field| {
+                    try self.requireDefaultable(field.storage.unpacked());
+                }
+                self.push(stackVal(concreteRef(type_index, false)));
+            },
+            .struct_get, .struct_get_s, .struct_get_u => {
+                const immediate = instr.imm.gc_type_field;
+                const structure = try self.structType(immediate.type_index);
+                if (immediate.field_index >= structure.fields.len) return self.fail("unknown field");
+                const field = structure.fields[immediate.field_index];
+                try self.requirePlainOrPacked(op, field.storage);
+                try self.popExpect(concreteRef(immediate.type_index, true));
+                self.push(stackVal(field.storage.unpacked()));
+            },
+            .struct_set => {
+                const immediate = instr.imm.gc_type_field;
+                const structure = try self.structType(immediate.type_index);
+                if (immediate.field_index >= structure.fields.len) return self.fail("unknown field");
+                const field = structure.fields[immediate.field_index];
+                if (!field.mutable) return self.fail("field is immutable");
+                try self.popExpect(field.storage.unpacked());
+                try self.popExpect(concreteRef(immediate.type_index, true));
+            },
+            .array_new, .array_new_default, .array_new_fixed => {
+                const immediate = if (op == .array_new_fixed)
+                    instr.imm.gc_two_indices
+                else
+                    types.Instr.GcTwoIndices{ .op = op, .first = instr.imm.gc_type.type_index, .second = 0 };
+                const array = try self.arrayType(immediate.first);
+                switch (op) {
+                    .array_new => {
+                        try self.popExpect(.i32);
+                        try self.popExpect(array.field.storage.unpacked());
+                    },
+                    .array_new_default => {
+                        try self.requireDefaultable(array.field.storage.unpacked());
+                        try self.popExpect(.i32);
+                    },
+                    .array_new_fixed => {
+                        var count = immediate.second;
+                        while (count > 0) : (count -= 1)
+                            try self.popExpect(array.field.storage.unpacked());
+                    },
+                    else => unreachable,
+                }
+                self.push(stackVal(concreteRef(immediate.first, false)));
+            },
+            .array_new_data, .array_new_elem => {
+                const immediate = instr.imm.gc_two_indices;
+                const array = try self.arrayType(immediate.first);
+                if (op == .array_new_data) {
+                    try self.requireNumericOrVector(array.field.storage.unpacked());
+                    if (immediate.second >= self.mod.datas.len) return self.fail("unknown data segment");
+                } else {
+                    const field_value = switch (array.field.storage) {
+                        .value => |value| value,
+                        else => return self.fail("type mismatch"),
+                    };
+                    if (immediate.second >= self.mod.elems.len) return self.fail("unknown element segment");
+                    if (!valTypeMatches(self.mod, self.mod.elems[immediate.second].type, field_value))
+                        return self.fail("type mismatch");
+                }
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                self.push(stackVal(concreteRef(immediate.first, false)));
+            },
+            .array_get, .array_get_s, .array_get_u => {
+                const immediate = instr.imm.gc_type;
+                const array = try self.arrayType(immediate.type_index);
+                try self.requirePlainOrPacked(op, array.field.storage);
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.type_index, true));
+                self.push(stackVal(array.field.storage.unpacked()));
+            },
+            .array_set => {
+                const immediate = instr.imm.gc_type;
+                const array = try self.arrayType(immediate.type_index);
+                if (!array.field.mutable) return self.fail("field is immutable");
+                try self.popExpect(array.field.storage.unpacked());
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.type_index, true));
+            },
+            .array_len => {
+                try self.popExpect(types.ValType.fromRef(.{ .nullable = true, .heap = .array }));
+                self.push(.i32);
+            },
+            .array_fill => {
+                const immediate = instr.imm.gc_type;
+                const array = try self.arrayType(immediate.type_index);
+                if (!array.field.mutable) return self.fail("field is immutable");
+                try self.popExpect(.i32);
+                try self.popExpect(array.field.storage.unpacked());
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.type_index, true));
+            },
+            .array_copy => {
+                const immediate = instr.imm.gc_two_indices;
+                const destination = try self.arrayType(immediate.first);
+                const source = try self.arrayType(immediate.second);
+                if (!destination.field.mutable) return self.fail("field is immutable");
+                if (!storageTypeMatches(self.mod, source.field.storage, destination.field.storage))
+                    return self.fail("type mismatch");
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.second, true));
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.first, true));
+            },
+            .array_init_data, .array_init_elem => {
+                const immediate = instr.imm.gc_two_indices;
+                const array = try self.arrayType(immediate.first);
+                if (!array.field.mutable) return self.fail("field is immutable");
+                if (op == .array_init_data) {
+                    try self.requireNumericOrVector(array.field.storage.unpacked());
+                    if (immediate.second >= self.mod.datas.len) return self.fail("unknown data segment");
+                } else {
+                    const field_value = switch (array.field.storage) {
+                        .value => |value| value,
+                        else => return self.fail("type mismatch"),
+                    };
+                    if (immediate.second >= self.mod.elems.len) return self.fail("unknown element segment");
+                    if (!valTypeMatches(self.mod, self.mod.elems[immediate.second].type, field_value))
+                        return self.fail("type mismatch");
+                }
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                try self.popExpect(concreteRef(immediate.first, true));
+            },
+            .ref_test, .ref_test_null, .ref_cast, .ref_cast_null => {
+                const immediate = instr.imm.gc_heap;
+                if (immediate.heap.concreteIndex()) |index|
+                    if (index >= self.mod.types.len) return self.fail("unknown type");
+                const target_ref = types.RefType{
+                    .nullable = op == .ref_test_null or op == .ref_cast_null,
+                    .heap = immediate.heap,
+                };
+                const source = try self.popReference();
+                if (source) |source_ref|
+                    if (!refTypeMatches(self.mod, target_ref, source_ref)) return self.fail("type mismatch");
+                if (op == .ref_test or op == .ref_test_null) {
+                    self.push(.i32);
+                } else {
+                    self.push(stackVal(types.ValType.fromRef(target_ref)));
+                }
+            },
+            .br_on_cast, .br_on_cast_fail => {
+                const immediate = instr.imm.gc_cast_branch;
+                if (immediate.source_heap.concreteIndex()) |index|
+                    if (index >= self.mod.types.len) return self.fail("unknown type");
+                if (immediate.target_heap.concreteIndex()) |index|
+                    if (index >= self.mod.types.len) return self.fail("unknown type");
+                const source_ref: types.RefType = .{
+                    .nullable = immediate.source_nullable,
+                    .heap = immediate.source_heap,
+                };
+                const target_ref: types.RefType = .{
+                    .nullable = immediate.target_nullable,
+                    .heap = immediate.target_heap,
+                };
+                if (!refTypeMatches(self.mod, target_ref, source_ref)) return self.fail("type mismatch");
+
+                const branch_frame = try self.target(immediate.label_index);
+                const branch_types = branch_frame.branchTypes();
+                if (branch_types.len == 0) return self.fail("type mismatch");
+                const branch_reference = branch_types[branch_types.len - 1].refType() orelse
+                    return self.fail("type mismatch");
+                const difference_ref: types.RefType = .{
+                    .nullable = source_ref.nullable and !target_ref.nullable,
+                    .heap = source_ref.heap,
+                };
+                const value_on_branch = if (op == .br_on_cast) target_ref else difference_ref;
+                if (!refTypeMatches(self.mod, value_on_branch, branch_reference))
+                    return self.fail("type mismatch");
+
+                try self.popExpect(types.ValType.fromRef(source_ref));
+                try self.checkTypes(branch_types[0 .. branch_types.len - 1]);
+                const fallthrough = if (op == .br_on_cast) difference_ref else target_ref;
+                self.push(stackVal(types.ValType.fromRef(fallthrough)));
+            },
+            .any_convert_extern, .extern_convert_any => {
+                const source = try self.popReference() orelse {
+                    self.push(.unknown);
+                    return;
+                };
+                const expected: types.HeapType = if (op == .any_convert_extern) .extern_ else .any;
+                if (!heapTypeMatches(self.mod, source.heap, expected)) return self.fail("type mismatch");
+                const result: types.HeapType = if (op == .any_convert_extern) .any else .extern_;
+                self.push(stackVal(types.ValType.fromRef(.{ .nullable = source.nullable, .heap = result })));
+            },
+            .ref_i31 => {
+                try self.popExpect(.i32);
+                self.push(stackVal(types.ValType.fromRef(.{ .nullable = false, .heap = .i31 })));
+            },
+            .i31_get_s, .i31_get_u => {
+                try self.popExpect(types.ValType.fromRef(.{ .nullable = true, .heap = .i31 }));
+                self.push(.i32);
+            },
+        }
     }
 
     fn validateSimd(self: *FuncValidator, instr: types.Instr) Error!void {
@@ -790,8 +1417,10 @@ const FuncValidator = struct {
                     if (t1 != .unknown and t2 != .unknown and t1 != t2)
                         return self.fail("type mismatch");
                     const selected = if (t1 != .unknown) t1 else t2;
-                    if (selected == .funcref or selected == .externref)
-                        return self.fail("type mismatch");
+                    if (selected != .unknown) {
+                        const selected_type: types.ValType = @enumFromInt(@intFromEnum(selected));
+                        if (selected_type.isReference()) return self.fail("type mismatch");
+                    }
                     self.push(selected);
                 },
                 .typed_select => {
@@ -845,8 +1474,10 @@ const FuncValidator = struct {
                 .ref_null => self.push(stackVal(instr.imm.type)),
                 .ref_is_null => {
                     const ref = try self.pop();
-                    if (ref != .unknown and ref != .funcref and ref != .exnref and ref != .externref)
-                        return self.fail("type mismatch");
+                    if (ref != .unknown) {
+                        const ref_type: types.ValType = @enumFromInt(@intFromEnum(ref));
+                        if (!ref_type.isReference()) return self.fail("type mismatch");
+                    }
                     self.push(.i32);
                 },
                 .ref_func => {
@@ -911,7 +1542,7 @@ const FuncValidator = struct {
                     const immediate = instr.imm.indices;
                     if (immediate.first >= self.mod.elems.len) return self.fail("unknown element segment");
                     if (immediate.second >= self.mod.totalTables()) return self.fail("unknown table");
-                    if (self.mod.elems[immediate.first].type != self.mod.tableType(immediate.second).elem)
+                    if (!valTypeMatches(self.mod, self.mod.elems[immediate.first].type, self.mod.tableType(immediate.second).elem))
                         return self.fail("type mismatch");
                     try self.popExpect(.i32);
                     try self.popExpect(.i32);
@@ -924,7 +1555,7 @@ const FuncValidator = struct {
                     const immediate = instr.imm.indices;
                     if (immediate.first >= self.mod.totalTables() or immediate.second >= self.mod.totalTables())
                         return self.fail("unknown table");
-                    if (self.mod.tableType(immediate.first).elem != self.mod.tableType(immediate.second).elem)
+                    if (!valTypeMatches(self.mod, self.mod.tableType(immediate.second).elem, self.mod.tableType(immediate.first).elem))
                         return self.fail("type mismatch");
                     const destination = self.mod.tableType(immediate.first).address;
                     const source = self.mod.tableType(immediate.second).address;
@@ -957,7 +1588,9 @@ const FuncValidator = struct {
                 .i64_const => self.push(.i64),
                 .f32_const => self.push(.f32),
                 .f64_const => self.push(.f64),
-                .gc, .ref_eq, .ref_as_non_null => return unsupportedFeature(self.mod, self.diag, .gc),
+                .gc => try self.validateGc(instr),
+                .ref_eq => try self.validateRefEq(),
+                .ref_as_non_null => try self.validateRefAsNonNull(),
                 .simd => try self.validateSimd(instr),
                 .atomic => try self.validateAtomic(instr),
                 .i32_eqz => try self.testop(.i32),
@@ -1008,24 +1641,21 @@ fn validateFunc(
     diag: *types.Diagnostic,
     ft: types.FuncType,
     body: types.FuncBody,
-) Error!void {
+    allocator: Allocator,
+) (Error || Allocator.Error)!void {
     // Both stacks are bounded by the instruction count: each instruction
     // pushes at most one operand and opens at most one control frame. The
-    // validate() signature carries no allocator, so use the page allocator;
-    // OOM surfaces as Invalid only on truly pathological modules.
     const n = body.instrs.len + 1;
     var max_arity: usize = 1;
     for (mod.types) |definition| {
         if (definition.funcType()) |signature|
             max_arity = @max(max_arity, signature.params.len, signature.results.len);
     }
-    const operand_slots = std.math.mul(usize, n, max_arity) catch
-        return failMod(diag, "out of memory");
-    const alloc = std.heap.page_allocator;
-    const opds = alloc.alloc(StackVal, operand_slots) catch return failMod(diag, "out of memory");
-    defer alloc.free(opds);
-    const frames = alloc.alloc(Frame, n) catch return failMod(diag, "out of memory");
-    defer alloc.free(frames);
+    const operand_slots = std.math.mul(usize, n, max_arity) catch return error.OutOfMemory;
+    const opds = try allocator.alloc(StackVal, operand_slots);
+    defer allocator.free(opds);
+    const frames = try allocator.alloc(Frame, n);
+    defer allocator.free(frames);
 
     var v: FuncValidator = .{
         .mod = mod,
@@ -1925,4 +2555,212 @@ test "wasm.validate tail calls enforce results operands tables and indices" {
 
 test "wasm.validate unknown function call" {
     try expectInvalidAt(hdr ++ type_void ++ func0 ++ code1("\x10\x03\x0B"), 0, 0, "unknown function");
+}
+
+const gc_validation_features: types.Features = .{
+    .reference_types = true,
+    .typed_function_references = true,
+    .gc = true,
+};
+
+const gc_validation_allocation_bytes = hdr ++
+    sec(1, "\x02\x5E\x7F\x01\x60\x00\x00") ++
+    sec(3, "\x01\x01") ++
+    code1("\x41\x01\xFB\x07\x00\xFB\x0F\x1A\x0B");
+
+fn validateGcWithFailingAllocator(allocator: Allocator) !void {
+    var diag: types.Diagnostic = .{};
+    const mod = try decode.decodeWithFeatures(
+        std.testing.allocator,
+        gc_validation_allocation_bytes,
+        gc_validation_features,
+        &diag,
+    );
+    defer decode.destroyModule(std.testing.allocator, mod);
+    try validateWithAllocator(mod, &diag, allocator);
+}
+
+test "wasm.validate GC allocation failures are rollback safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        validateGcWithFailingAllocator,
+        .{},
+    );
+}
+
+test "wasm.validate GC subtype chains are iterative and bounded" {
+    const depth = 512;
+    var definitions: [depth]types.DefType = undefined;
+    var supertype_storage: [depth - 1][1]u32 = undefined;
+    var groups: [depth]types.RecGroup = undefined;
+    for (&definitions, 0..) |*definition, index| {
+        const supertypes: []const u32 = if (index == 0)
+            &.{}
+        else blk: {
+            supertype_storage[index - 1][0] = @intCast(index - 1);
+            break :blk &supertype_storage[index - 1];
+        };
+        definition.* = .{
+            .rec_group = @intCast(index),
+            .rec_index = 0,
+            .subtype = .{
+                .final = false,
+                .supertypes = supertypes,
+                .composite = .{ .struct_ = .{ .fields = &.{} } },
+            },
+        };
+        groups[index] = .{ .start = @intCast(index), .len = 1 };
+    }
+    var mod: types.Module = .{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
+        .features = gc_validation_features,
+        .types = &definitions,
+        .rec_groups = &groups,
+    };
+    defer mod.deinit();
+    var diag: types.Diagnostic = .{};
+    try validateDefinedTypes(&mod, &diag);
+    try std.testing.expect(heapTypeMatches(&mod, types.HeapType.concrete(depth - 1), types.HeapType.concrete(0)));
+}
+
+test "wasm.validate GC aggregate scalar cast and conversion signatures" {
+    const type_section = comptime sec(1, "\x03" ++
+        // type 0: (struct (field i32 const) (field i8 var))
+        "\x5F\x02\x7F\x00\x78\x01" ++
+        // type 1: (array (field i32 var))
+        "\x5E\x7F\x01" ++
+        // type 2: () -> ()
+        "\x60\x00\x00");
+    const function_section = comptime sec(3, "\x01\x02");
+    const body =
+        // struct.new, struct.new_default, packed struct.get_s, struct.set
+        "\x41\x00\x41\x01\xFB\x00\x00\x1A" ++
+        "\xFB\x01\x00\x1A" ++
+        "\x41\x00\x41\x01\xFB\x00\x00\xFB\x03\x00\x01\x1A" ++
+        "\x41\x00\x41\x01\xFB\x00\x00\x41\x02\xFB\x05\x00\x01" ++
+        // array.new/default/fixed, array.get/set/len/fill
+        "\x41\x07\x41\x03\xFB\x06\x01\x1A" ++
+        "\x41\x03\xFB\x07\x01\x1A" ++
+        "\x41\x01\x41\x02\xFB\x08\x01\x02\x1A" ++
+        "\x41\x01\xFB\x07\x01\x41\x00\xFB\x0B\x01\x1A" ++
+        "\x41\x01\xFB\x07\x01\x41\x00\x41\x09\xFB\x0E\x01" ++
+        "\x41\x01\xFB\x07\x01\xFB\x0F\x1A" ++
+        "\x41\x03\xFB\x07\x01\x41\x00\x41\x09\x41\x02\xFB\x10\x01" ++
+        // i31, equality, non-null assertion, tests/casts, extern conversions
+        "\x41\x7F\xFB\x1C\xFB\x1D\x1A" ++
+        "\x41\x00\xFB\x1C\x41\x01\xFB\x1C\xD3\x1A" ++
+        "\xD0\x6E\xD4\x1A" ++
+        "\x41\x00\xFB\x1C\xFB\x14\x6C\x1A" ++
+        "\x41\x00\xFB\x1C\xFB\x16\x6C\x1A" ++
+        "\xD0\x6F\xFB\x1A\x1A" ++
+        "\xD0\x6E\xFB\x1B\x1A\x0B";
+    const bytes = comptime (hdr ++ type_section ++ function_section ++ code1(body));
+    try expectValidWithFeatures(bytes, gc_validation_features);
+}
+
+test "wasm.validate GC array segment copy and initialization signatures" {
+    const type_section = comptime sec(1, "\x03" ++
+        "\x5E\x7F\x01" ++ // type 0: mutable i32 array
+        "\x5E\x70\x01" ++ // type 1: mutable funcref array
+        "\x60\x00\x00"); // type 2: () -> ()
+    const function_section = comptime sec(3, "\x01\x02");
+    const element_section = comptime sec(9, "\x01\x01\x00\x01\x00");
+    const data_section = comptime sec(11, "\x01\x01\x01A");
+    const body =
+        // array.new_data and array.new_elem
+        "\x41\x00\x41\x01\xFB\x09\x00\x00\x1A" ++
+        "\x41\x00\x41\x01\xFB\x0A\x01\x00\x1A" ++
+        // array.copy dst/dst-offset/src/src-offset/length
+        "\x41\x01\xFB\x07\x00\x41\x00" ++
+        "\x41\x01\xFB\x07\x00\x41\x00\x41\x01\xFB\x11\x00\x00" ++
+        // array.init_data and array.init_elem
+        "\x41\x01\xFB\x07\x00\x41\x00\x41\x00\x41\x01\xFB\x12\x00\x00" ++
+        "\x41\x01\xFB\x07\x01\x41\x00\x41\x00\x41\x01\xFB\x13\x01\x00\x0B";
+    const bytes = comptime (hdr ++ type_section ++ function_section ++ element_section ++
+        code1(body) ++ data_section);
+    var features = gc_validation_features;
+    features.bulk_memory = true;
+    try expectValidWithFeatures(bytes, features);
+}
+
+test "wasm.validate GC nominal subtypes finality and field variance" {
+    const valid = comptime (hdr ++ sec(1, "\x02" ++
+        "\x50\x00\x5F\x01\x7F\x00" ++
+        "\x50\x01\x00\x5F\x02\x7F\x00\x7F\x00"));
+    try expectValidWithFeatures(valid, gc_validation_features);
+
+    const final_parent = comptime (hdr ++ sec(1, "\x02" ++
+        "\x4F\x00\x5F\x00" ++
+        "\x50\x01\x00\x5F\x00"));
+    try expectInvalidWithFeatures(final_parent, gc_validation_features, "cannot subtype final type");
+
+    const future_parent = comptime (hdr ++ sec(1, "\x01\x50\x01\x00\x5F\x00"));
+    try expectInvalidWithFeatures(future_parent, gc_validation_features, "invalid supertype index");
+
+    const mutable_mismatch = comptime (hdr ++ sec(1, "\x02" ++
+        "\x50\x00\x5F\x01\x7F\x01" ++
+        "\x50\x01\x00\x5F\x01\x7E\x01"));
+    try expectInvalidWithFeatures(mutable_mismatch, gc_validation_features, "type mismatch");
+}
+
+test "wasm.validate GC canonical recursive type identity" {
+    const equivalent_types = comptime sec(1, "\x03" ++
+        // Separate singleton recursive groups with the same closed shape.
+        "\x5F\x01\x63\x00\x00" ++
+        "\x5F\x01\x63\x01\x00" ++
+        "\x60\x00\x00");
+    const function_section = comptime sec(3, "\x01\x02");
+    const equivalent_cast = comptime (hdr ++ equivalent_types ++ function_section ++
+        code1("\xD0\x00\xFB\x00\x00\xFB\x16\x01\x1A\x0B"));
+    try expectValidWithFeatures(equivalent_cast, gc_validation_features);
+
+    const distinct_types = comptime sec(1, "\x03" ++
+        "\x5F\x01\x63\x00\x00" ++
+        "\x5F\x01\x7F\x00" ++
+        "\x60\x00\x00");
+    const distinct_cast = comptime (hdr ++ distinct_types ++ function_section ++
+        code1("\xD0\x00\xFB\x00\x00\xFB\x16\x01\x1A\x0B"));
+    try expectInvalidAtWithFeatures(distinct_cast, gc_validation_features, 0, 2, "type mismatch");
+
+    const illegal_forward_reference = comptime (hdr ++ sec(1, "\x02" ++
+        "\x5F\x01\x63\x01\x00" ++
+        "\x5F\x00"));
+    try expectInvalidWithFeatures(illegal_forward_reference, gc_validation_features, "unknown type");
+
+    const legal_group_reference = comptime (hdr ++ sec(1, "\x01\x4E\x02" ++
+        "\x5F\x01\x63\x01\x00" ++
+        "\x5F\x00"));
+    try expectValidWithFeatures(legal_group_reference, gc_validation_features);
+}
+
+test "wasm.validate GC packed access mutability and defaultability" {
+    const struct_types = comptime sec(1, "\x02\x5F\x01\x7F\x00\x60\x00\x00");
+    const struct_function = comptime sec(3, "\x01\x01");
+    const packed_get = comptime (hdr ++ struct_types ++ struct_function ++
+        code1("\x41\x00\xFB\x00\x00\xFB\x03\x00\x00\x1A\x0B"));
+    try expectInvalidAtWithFeatures(packed_get, gc_validation_features, 0, 2, "type mismatch");
+
+    const immutable_set = comptime (hdr ++ struct_types ++ struct_function ++
+        code1("\x41\x00\xFB\x00\x00\x41\x01\xFB\x05\x00\x00\x0B"));
+    try expectInvalidAtWithFeatures(immutable_set, gc_validation_features, 0, 3, "field is immutable");
+
+    const array_types = comptime sec(1, "\x02\x5E\x64\x00\x01\x60\x00\x00");
+    const array_function = comptime sec(3, "\x01\x01");
+    const nondefaultable = comptime (hdr ++ array_types ++ array_function ++
+        code1("\x41\x00\xFB\x07\x00\x1A\x0B"));
+    try expectInvalidAtWithFeatures(nondefaultable, gc_validation_features, 0, 1, "type is not defaultable");
+}
+
+test "wasm.validate GC cast branches refine fallthrough types" {
+    const br_on_cast = comptime (hdr ++ type_void ++ func0 ++ code1("\x02\x6D" ++
+        "\x41\x00\xFB\x1C" ++
+        "\xFB\x18\x00\x00\x6C\x6C" ++
+        "\x0B\x1A\x0B"));
+    try expectValidWithFeatures(br_on_cast, gc_validation_features);
+
+    const br_on_cast_fail = comptime (hdr ++ type_void ++ func0 ++ code1("\x02\x6E" ++
+        "\xD0\x6C" ++
+        "\xFB\x19\x01\x00\x6C\x6C" ++
+        "\x0B\x1A\x0B"));
+    try expectValidWithFeatures(br_on_cast_fail, gc_validation_features);
 }
