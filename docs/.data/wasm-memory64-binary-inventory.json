@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_memory64_binary_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/memory64.git",
+    "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+    "overview": "proposals/memory64/Overview.md",
+    "binary_type_document": "document/core/binary/types.rst",
+    "binary_instruction_document": "document/core/binary/instructions.rst",
+    "validation_type_document": "document/core/valid/types.rst",
+    "validation_instruction_document": "document/core/valid/instructions.rst",
+    "corpus_root": "test/core",
+    "document_license": "W3C Software and Document Notice and License",
+    "corpus_license": "Apache-2.0"
+  },
+  "standardization": "finished",
+  "edition": "3.0",
+  "dependencies": [],
+  "hosts": [
+    "pointer_width_64"
+  ],
+  "address_types": [
+    {
+      "name": "i32",
+      "bits": 32,
+      "memory_max_pages": 65536,
+      "table_max_elements": 4294967295
+    },
+    {
+      "name": "i64",
+      "bits": 64,
+      "memory_max_pages": 281474976710656,
+      "table_max_elements": 18446744073709551615
+    }
+  ],
+  "limit_flags": [
+    {
+      "flag": 0,
+      "address_type": "i32",
+      "minimum": "u32",
+      "maximum": null,
+      "shared": false
+    },
+    {
+      "flag": 1,
+      "address_type": "i32",
+      "minimum": "u32",
+      "maximum": "u32",
+      "shared": false
+    },
+    {
+      "flag": 2,
+      "address_type": "i32",
+      "minimum": "u32",
+      "maximum": null,
+      "shared": true
+    },
+    {
+      "flag": 3,
+      "address_type": "i32",
+      "minimum": "u32",
+      "maximum": "u32",
+      "shared": true
+    },
+    {
+      "flag": 4,
+      "address_type": "i64",
+      "minimum": "u64",
+      "maximum": null,
+      "shared": false
+    },
+    {
+      "flag": 5,
+      "address_type": "i64",
+      "minimum": "u64",
+      "maximum": "u64",
+      "shared": false
+    },
+    {
+      "flag": 6,
+      "address_type": "i64",
+      "minimum": "u64",
+      "maximum": null,
+      "shared": true
+    },
+    {
+      "flag": 7,
+      "address_type": "i64",
+      "minimum": "u64",
+      "maximum": "u64",
+      "shared": true
+    }
+  ],
+  "binary_changes": {
+    "new_opcodes": [],
+    "memory_type": "limits carries address type and shared bit",
+    "table_type": "reference type followed by limits carrying address type",
+    "memarg_fields": [
+      "align:u32",
+      "offset:u64"
+    ],
+    "memory_index": "u32",
+    "table_index": "u32"
+  },
+  "address_typed_instruction_families": [
+    {
+      "family": "load/store",
+      "address_operands": [
+        "memory.address_type"
+      ],
+      "results": "loaded value or empty",
+      "immediates": [
+        "memory_index:u32",
+        "align:u32",
+        "offset:u64"
+      ]
+    },
+    {
+      "family": "memory.size/grow",
+      "address_operands": "grow uses memory.address_type",
+      "results": "memory.address_type",
+      "immediates": [
+        "memory_index:u32"
+      ]
+    },
+    {
+      "family": "memory.fill",
+      "address_operands": [
+        "memory.address_type",
+        "i32",
+        "memory.address_type"
+      ],
+      "results": "empty",
+      "immediates": [
+        "memory_index:u32"
+      ]
+    },
+    {
+      "family": "memory.copy",
+      "address_operands": [
+        "destination.address_type",
+        "source.address_type",
+        "min(destination.address_type,source.address_type)"
+      ],
+      "results": "empty",
+      "immediates": [
+        "destination_memory_index:u32",
+        "source_memory_index:u32"
+      ]
+    },
+    {
+      "family": "memory.init",
+      "address_operands": [
+        "memory.address_type",
+        "i32",
+        "i32"
+      ],
+      "results": "empty",
+      "immediates": [
+        "data_index:u32",
+        "memory_index:u32"
+      ]
+    },
+    {
+      "family": "call_indirect/table.get/table.set/table.size/table.grow/table.fill",
+      "address_operands": "selected table.address_type",
+      "results": "instruction-specific; table size/grow return table.address_type",
+      "immediates": [
+        "table_index:u32"
+      ]
+    },
+    {
+      "family": "table.copy",
+      "address_operands": [
+        "destination.address_type",
+        "source.address_type",
+        "min(destination.address_type,source.address_type)"
+      ],
+      "results": "empty",
+      "immediates": [
+        "destination_table_index:u32",
+        "source_table_index:u32"
+      ]
+    },
+    {
+      "family": "table.init",
+      "address_operands": [
+        "table.address_type",
+        "i32",
+        "i32"
+      ],
+      "results": "empty",
+      "immediates": [
+        "element_index:u32",
+        "table_index:u32"
+      ]
+    }
+  ],
+  "validation_rules": [
+    "memory32 limits are at most 2^16 pages",
+    "memory64 limits are at most 2^48 pages",
+    "table limits fit the selected address type",
+    "maximum is not smaller than minimum",
+    "shared limits require a maximum",
+    "memory and table imports match address type exactly",
+    "memory and table instructions consume the selected address type",
+    "memarg offset fits the selected address type",
+    "active data offsets have the selected memory address type",
+    "active element offsets have the selected table address type"
+  ],
+  "corpus": {
+    "selection": "top-level test/core/*.wast files containing a textual i64 memory or table declaration",
+    "files_available": 120,
+    "files_declared": 23,
+    "top_level_commands": 13918,
+    "memory64_declarations": 824,
+    "table64_declarations": 151,
+    "files": [
+      {
+        "path": "test/core/address64.wast",
+        "top_level_commands": 242,
+        "memory64_declarations": 4,
+        "table64_declarations": 0,
+        "commands": { "module": 4, "assert_return": 206, "assert_trap": 32 }
+      },
+      {
+        "path": "test/core/align64.wast",
+        "top_level_commands": 156,
+        "memory64_declarations": 108,
+        "table64_declarations": 0,
+        "commands": { "module": 25, "assert_return": 47, "assert_trap": 1, "assert_malformed": 46, "assert_invalid": 37 }
+      },
+      {
+        "path": "test/core/call_indirect.wast",
+        "top_level_commands": 171,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 3, "assert_return": 115, "assert_trap": 18, "assert_exhaustion": 2, "assert_malformed": 11, "assert_invalid": 22 }
+      },
+      {
+        "path": "test/core/endianness64.wast",
+        "top_level_commands": 69,
+        "memory64_declarations": 1,
+        "table64_declarations": 0,
+        "commands": { "module": 1, "assert_return": 68 }
+      },
+      {
+        "path": "test/core/float_memory64.wast",
+        "top_level_commands": 90,
+        "memory64_declarations": 6,
+        "table64_declarations": 0,
+        "commands": { "module": 6, "invoke": 24, "assert_return": 60 }
+      },
+      {
+        "path": "test/core/imports.wast",
+        "top_level_commands": 259,
+        "memory64_declarations": 33,
+        "table64_declarations": 23,
+        "commands": { "module": 83, "register": 2, "assert_return": 26, "assert_trap": 8, "assert_malformed": 16, "assert_invalid": 1, "assert_unlinkable": 123 }
+      },
+      {
+        "path": "test/core/load64.wast",
+        "top_level_commands": 97,
+        "memory64_declarations": 62,
+        "table64_declarations": 0,
+        "commands": { "module": 1, "assert_return": 37, "assert_malformed": 13, "assert_invalid": 46 }
+      },
+      {
+        "path": "test/core/memory64.wast",
+        "top_level_commands": 69,
+        "memory64_declarations": 14,
+        "table64_declarations": 0,
+        "commands": { "module": 10, "assert_return": 45, "assert_invalid": 14 }
+      },
+      {
+        "path": "test/core/memory_copy.wast",
+        "top_level_commands": 8900,
+        "memory64_declarations": 333,
+        "table64_declarations": 0,
+        "commands": { "module": 66, "invoke": 30, "assert_return": 8640, "assert_trap": 36, "assert_invalid": 128 }
+      },
+      {
+        "path": "test/core/memory_fill.wast",
+        "top_level_commands": 200,
+        "memory64_declarations": 115,
+        "table64_declarations": 0,
+        "commands": { "module": 22, "invoke": 10, "assert_return": 28, "assert_trap": 12, "assert_invalid": 128 }
+      },
+      {
+        "path": "test/core/memory_grow64.wast",
+        "top_level_commands": 49,
+        "memory64_declarations": 4,
+        "table64_declarations": 0,
+        "commands": { "module": 4, "assert_return": 39, "assert_trap": 6 }
+      },
+      {
+        "path": "test/core/memory_init.wast",
+        "top_level_commands": 480,
+        "memory64_declarations": 141,
+        "table64_declarations": 0,
+        "commands": { "module": 48, "invoke": 18, "assert_return": 252, "assert_trap": 28, "assert_invalid": 134 }
+      },
+      {
+        "path": "test/core/memory_redundancy64.wast",
+        "top_level_commands": 8,
+        "memory64_declarations": 1,
+        "table64_declarations": 0,
+        "commands": { "module": 1, "invoke": 3, "assert_return": 4 }
+      },
+      {
+        "path": "test/core/memory_trap64.wast",
+        "top_level_commands": 172,
+        "memory64_declarations": 2,
+        "table64_declarations": 0,
+        "commands": { "module": 2, "assert_return": 4, "assert_trap": 166 }
+      },
+      {
+        "path": "test/core/table.wast",
+        "top_level_commands": 60,
+        "memory64_declarations": 0,
+        "table64_declarations": 15,
+        "commands": { "module": 30, "register": 1, "assert_return": 5, "assert_malformed": 3, "assert_invalid": 21 }
+      },
+      {
+        "path": "test/core/table_copy.wast",
+        "top_level_commands": 1772,
+        "memory64_declarations": 0,
+        "table64_declarations": 66,
+        "commands": { "module": 74, "register": 1, "invoke": 34, "assert_return": 443, "assert_trap": 1220 }
+      },
+      {
+        "path": "test/core/table_copy_mixed.wast",
+        "top_level_commands": 4,
+        "memory64_declarations": 0,
+        "table64_declarations": 7,
+        "commands": { "module": 1, "assert_invalid": 3 }
+      },
+      {
+        "path": "test/core/table_fill.wast",
+        "top_level_commands": 80,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 1, "assert_return": 64, "assert_trap": 6, "assert_invalid": 9 }
+      },
+      {
+        "path": "test/core/table_get.wast",
+        "top_level_commands": 17,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 1, "invoke": 1, "assert_return": 6, "assert_trap": 4, "assert_invalid": 5 }
+      },
+      {
+        "path": "test/core/table_grow.wast",
+        "top_level_commands": 79,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 8, "register": 2, "assert_return": 50, "assert_trap": 12, "assert_invalid": 7 }
+      },
+      {
+        "path": "test/core/table_init.wast",
+        "top_level_commands": 876,
+        "memory64_declarations": 0,
+        "table64_declarations": 34,
+        "commands": { "module": 38, "register": 1, "invoke": 18, "assert_return": 120, "assert_trap": 632, "assert_invalid": 67 }
+      },
+      {
+        "path": "test/core/table_set.wast",
+        "top_level_commands": 28,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 1, "assert_return": 12, "assert_trap": 8, "assert_invalid": 7 }
+      },
+      {
+        "path": "test/core/table_size.wast",
+        "top_level_commands": 40,
+        "memory64_declarations": 0,
+        "table64_declarations": 1,
+        "commands": { "module": 1, "assert_return": 37, "assert_invalid": 2 }
+      }
+    ]
+  }
+}

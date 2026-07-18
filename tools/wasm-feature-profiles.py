@@ -152,6 +152,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-exception-handling-inventory.json",
     )
     parser.add_argument(
+        "--memory64-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-memory64-binary-inventory.json",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -463,6 +468,64 @@ def main() -> int:
         features=["multi_value", "reference_types", "bulk_memory", "tail_calls", "exception_handling"],
         files=[("tag.wast", 4, 0), ("throw.wast", 13, 0), ("throw_ref.wast", 15, 0), ("try_table.wast", 52, 2)],
     )
+    memory64_feature = next(feature for feature in features if feature["id"] == "memory64")
+    memory64 = json.loads(args.memory64_inventory.read_text())
+    require(memory64.get("schema_version") == 1, "memory64 inventory: unsupported schema version")
+    require(memory64.get("kind") == "webassembly_memory64_binary_inventory", "memory64 inventory: invalid kind")
+    memory64_source = memory64.get("source", {})
+    require(memory64_source.get("repository") == memory64_feature["repository"], "memory64 inventory/registry repository drift")
+    require(memory64_source.get("commit") == memory64_feature["commit"], "memory64 inventory/registry commit drift")
+    require(memory64.get("dependencies") == memory64_feature["dependencies"], "memory64 inventory dependency drift")
+    require(memory64.get("hosts") == memory64_feature["hosts"] == ["pointer_width_64"], "memory64 inventory host drift")
+    require(
+        memory64.get("address_types") == [
+            {"name": "i32", "bits": 32, "memory_max_pages": 65536, "table_max_elements": 4294967295},
+            {"name": "i64", "bits": 64, "memory_max_pages": 281474976710656, "table_max_elements": 18446744073709551615},
+        ],
+        "memory64 inventory address-type drift",
+    )
+    require(
+        [
+            (entry.get("flag"), entry.get("address_type"), entry.get("minimum"), entry.get("maximum"), entry.get("shared"))
+            for entry in memory64.get("limit_flags", [])
+        ] == [
+            (0, "i32", "u32", None, False),
+            (1, "i32", "u32", "u32", False),
+            (2, "i32", "u32", None, True),
+            (3, "i32", "u32", "u32", True),
+            (4, "i64", "u64", None, False),
+            (5, "i64", "u64", "u64", False),
+            (6, "i64", "u64", None, True),
+            (7, "i64", "u64", "u64", True),
+        ],
+        "memory64 inventory limits encoding drift",
+    )
+    memory64_binary = memory64.get("binary_changes", {})
+    require(memory64_binary.get("new_opcodes") == [], "memory64 inventory must not declare new opcodes")
+    require(memory64_binary.get("memarg_fields") == ["align:u32", "offset:u64"], "memory64 inventory memarg drift")
+    memory64_corpus = memory64.get("corpus", {})
+    memory64_files = memory64_corpus.get("files", [])
+    expected_memory64_files = [
+        ("address64.wast", 242), ("align64.wast", 156), ("call_indirect.wast", 171),
+        ("endianness64.wast", 69), ("float_memory64.wast", 90), ("imports.wast", 259),
+        ("load64.wast", 97), ("memory64.wast", 69), ("memory_copy.wast", 8900),
+        ("memory_fill.wast", 200), ("memory_grow64.wast", 49), ("memory_init.wast", 480),
+        ("memory_redundancy64.wast", 8), ("memory_trap64.wast", 172), ("table.wast", 60),
+        ("table_copy.wast", 1772), ("table_copy_mixed.wast", 4), ("table_fill.wast", 80),
+        ("table_get.wast", 17), ("table_grow.wast", 79), ("table_init.wast", 876),
+        ("table_set.wast", 28), ("table_size.wast", 40),
+    ]
+    require(
+        [(Path(entry.get("path", "")).name, entry.get("top_level_commands")) for entry in memory64_files]
+        == expected_memory64_files,
+        "memory64 inventory corpus file/count drift",
+    )
+    require(memory64_corpus.get("files_available") == 120, "memory64 inventory available-file drift")
+    require(memory64_corpus.get("files_declared") == len(expected_memory64_files) == 23, "memory64 inventory declared-file drift")
+    require(memory64_corpus.get("top_level_commands") == 13918, "memory64 inventory command total drift")
+    require(sum(sum(entry.get("commands", {}).values()) for entry in memory64_files) == 13918, "memory64 inventory command breakdown drift")
+    require(sum(entry.get("memory64_declarations", 0) for entry in memory64_files) == 824, "memory64 inventory declaration drift")
+    require(sum(entry.get("table64_declarations", 0) for entry in memory64_files) == 151, "table64 inventory declaration drift")
 
     movement = json.loads(args.simd_movement_inventory.read_text())
     require(movement.get("schema_version") == 2, "SIMD movement inventory: unsupported schema version")
