@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 262 implemented / 169 pending under #163. The generated
+private imports are now 263 implemented / 168 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -277,8 +277,12 @@ owned BunStrings and exact zero-based positions through Home's pinned
 `ZigStackTrace`/`ZigStackFrame` layouts; it never parses the mutable `.stack`
 string. Full `ZigException` conversion adds the exact 216-byte layout, owned
 error/system fields, cause type, stable exception-cell identity, and a capped
-second pass over current/preceding source lines by retained script ID. The
-258-symbol combined
+second pass over current/preceding source lines by retained script ID.
+`Bun__attachAsyncStackFromPromise` complements creation-time traces for
+stackless native errors by walking pending await/transparent-forwarding links,
+with exact suspension positions, a per-segment 32-hop guard, realm stack limits,
+precise GC
+retention, and existing/materialized-stack preservation. The 262-symbol combined
 fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only

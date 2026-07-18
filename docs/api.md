@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 262
-private exports and 169 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 263
+private exports and 168 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 262 cover JSC64 identity, cell equality,
+The 263 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -298,12 +298,20 @@ classifies Error, DOMException, primitive, and system-like values; owns its
 strings; preserves the stable exception cell; and reports the cause runtime
 type. The second pass resolves the retained script identity and copies the
 current source line plus capped preceding lines with exact zero-based numbers,
-including through a sibling realm. The combined 258-symbol fixture also covers
+including through a sibling realm. The combined 262-symbol fixture also covers
 foreign-VM failures, exception clearing, callback reentrancy, and already-settled
 targets.
 
+`Bun__attachAsyncStackFromPromise` reconstructs stackless native Errors from
+pending async-await chains. Promise links retain only suspended activations,
+survive GC and settlement-to-microtask handoff, follow each transparent
+return/then forwarding segment for at most 32 hops, and stop at combinators or
+settled/invalid links.
+It preserves existing/materialized stacks and pending exceptions while honoring
+the selected realm's `Error.stackTraceLimit`.
+
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 253 shims are implemented and 168 remain pending. Its
+of which 257 shims are implemented and 164 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
