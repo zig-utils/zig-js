@@ -8380,6 +8380,15 @@ export fn JSC__JSGlobalObject__vm(global: JSContextRef) callconv(.c) ?*anyopaque
     return context.c_api_group;
 }
 
+/// Bun's pinned bridge returns the `VirtualMachine` registered in the realm's
+/// WebCore client data. zig-js's context group is both the JSC VM and the
+/// embedding VM, so this publishes the exact same ownership identity as
+/// `JSC__JSGlobalObject__vm` without allocating or touching pending state.
+export fn JSC__JSGlobalObject__bunVM(global: JSContextRef) callconv(.c) ?*anyopaque {
+    const context = ctxForHandleInspection(global) orelse return null;
+    return context.c_api_group;
+}
+
 export fn JSGlobalObject__hasException(global: JSContextRef) callconv(.c) bool {
     const context = ctxForHandleInspection(global) orelse return false;
     const opaque_group = context.c_api_group orelse return false;

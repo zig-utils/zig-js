@@ -498,6 +498,7 @@ extern "c" fn JSC__JSValue__toISOString(JSContextRef, EncodedValue, *[28]u8) c_i
 // The pinned Zig declaration is stale; this is Bun's executable wrapper/C++ ABI.
 extern "c" fn JSC__JSValue__DateNowISOString(JSContextRef, *[28]u8) c_int;
 extern "c" fn JSC__JSGlobalObject__vm(JSContextRef) ?*anyopaque;
+extern "c" fn JSC__JSGlobalObject__bunVM(JSContextRef) ?*anyopaque;
 extern "c" fn JSC__VM__throwError(?*anyopaque, JSContextRef, EncodedValue) void;
 extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
 extern "c" fn JSGlobalObject__clearException(JSContextRef) void;
@@ -3770,6 +3771,15 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_system_error) === Error.prototype && __private_sibling_system_error.code === 'ENOENT' && __private_sibling_system_error.errno === -2")))
         fail("SystemError bridge selected-realm prototype/field mismatch");
 
+    if (JSC__JSGlobalObject__bunVM(context) == null or
+        JSC__JSGlobalObject__bunVM(context) != JSC__JSGlobalObject__vm(context) or
+        JSC__JSGlobalObject__bunVM(sibling_context) != JSC__JSGlobalObject__bunVM(context) or
+        JSC__JSGlobalObject__bunVM(sibling_context) != JSC__JSGlobalObject__vm(sibling_context) or
+        JSC__JSGlobalObject__bunVM(foreign_context) == JSC__JSGlobalObject__bunVM(context) or
+        JSC__JSGlobalObject__bunVM(foreign_context) != JSC__JSGlobalObject__vm(foreign_context) or
+        JSC__JSGlobalObject__bunVM(null) != null)
+        fail("private bunVM ownership identity mismatch");
+
     const atom_bytes = "shared-atom";
     const atom_string = ZigString{ .tagged_ptr = @intFromPtr(atom_bytes.ptr), .len = atom_bytes.len };
     const sibling_atom = ZigString__toAtomicValue(&atom_string, sibling_context);
@@ -5181,5 +5191,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 280/280 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 281/281 symbols linked; runtime matrix passed\n", .{});
 }

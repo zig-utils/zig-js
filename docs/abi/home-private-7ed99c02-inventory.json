@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 293,
-      "pending": 153
+      "implemented": 294,
+      "pending": 152
     }
   },
   "declarations": [
@@ -1276,10 +1276,10 @@
       "line": 852,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__bunVM(*JSGlobalObject) *VM;",
       "declaration_sha256": "db26694aa0f6bc509a9db199a8667e32f6b3f0213302c5b15a56e78e9c334be6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__createAggregateError",
