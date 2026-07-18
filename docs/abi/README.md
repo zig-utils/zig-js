@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (250 implemented, 181 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (252 implemented, 179 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -493,6 +493,19 @@ remain empty and no source provider is retained. The consumer fixture covers a
 line-41 named script, nested function/global frames, same-VM sibling access,
 foreign rejection, capacity truncation, and explicit string release.
 
+The complete exception-projection slice pins the 216-byte `ZigException`
+record and implements both inventoried follow-up exports plus the adjacent
+`JSC__JSValue__toZigException` entry used by the native binding. It projects
+owned name/message/system fields, exact error code and cause runtime type,
+stable exception-cell identity, and the retained frame buffer without invoking
+user getters. `ZigException__collectSourceLines` performs the second upstream
+pass against the exact retained script ID, copying a capped current/preceding
+source window into caller storage with zero-based numbers. Owned line strings
+make the provider pointer deliberately null while preserving the consumer's
+normal per-string deinit contract. The fixture covers Error, SyntaxError,
+DOMException, primitive and system-like values, one- and three-line windows,
+sibling lookup, foreign rejection, by-value conversion, and release.
+
 The top-exception/termination slice adds all six pinned scope operations in the
 caller-provided 8-byte release or 56-byte verification buffer, both 8-aligned.
 Pure reads never process a termination request; trap-aware reads materialize one
@@ -634,7 +647,8 @@ owned names and exact call/construct `CallFrame` delivery.
 `JSC__Exception__getStackTrace` fills the caller-owned exact-layout frame buffer
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
-provider. The 249-symbol
+provider. Full `ZigException` projection and its second source-line pass retain
+the same frame/script identity and own every returned string. The 251-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -678,7 +692,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (244 implemented, 177 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (246 implemented, 175 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
