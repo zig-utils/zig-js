@@ -12906,7 +12906,13 @@ fn privateDuplicateSharedMemfd(fd: i64) ?std.posix.fd_t {
 
 fn privateSharedMemfdHasSize(fd: std.posix.fd_t, total_size: usize) bool {
     if (comptime builtin.os.tag == .windows) return false;
-    const fstat_fn = if (std.posix.lfs64_abi) std.posix.system.fstat64 else std.posix.system.fstat;
+    // Zig dev.1417 removed the redundant Linux `fstat64` declaration while
+    // retaining `lfs64_abi`. Keep compatibility with both toolchain shapes:
+    // newer libc ABIs expose the wide layout through ordinary `fstat`.
+    const fstat_fn = if (std.posix.lfs64_abi and @hasDecl(std.posix.system, "fstat64"))
+        std.posix.system.fstat64
+    else
+        std.posix.system.fstat;
     var stat = std.mem.zeroes(std.posix.Stat);
     while (true) switch (std.posix.errno(fstat_fn(fd, &stat))) {
         .SUCCESS => break,
