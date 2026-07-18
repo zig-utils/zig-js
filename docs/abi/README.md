@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (263 implemented, 168 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (264 implemented, 167 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 263 private entries are implemented; the other 168 remain pending
+The first 264 private entries are implemented; the other 167 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -297,6 +297,19 @@ zero-length object. Caller callbacks, including null callbacks, use the same
 idempotent owner record and run at most once; invalid tags and non-empty null
 pointers fail atomically and release transferred input before publishing the
 private pending exception.
+
+`ArrayBuffer__fromSharedMemfd` imports one caller-owned descriptor without
+copying or consuming it. It duplicates the descriptor to close the validation/
+mapping race, requires a regular file large enough for the declared total,
+maps that complete extent read/write and `MAP_PRIVATE`, and exposes only the
+overflow-checked requested slice as the profile-selected ArrayBuffer or
+Uint8Array type. The short-lived duplicate closes after mapping; GC, arena
+teardown, and every later construction failure converge on one idempotent owner
+that unmaps the complete original extent exactly once. Unsupported platforms,
+invalid descriptors/ranges/sizes, and every other JSType fail empty without a
+partial JS value or pending exception. Focused tests cover nonzero slices,
+write isolation from the file, caller-fd survival, GC, teardown, and invalid
+inputs; the compiled consumer exercises both result types.
 
 The JSValue ArrayBuffer projection fills Home's exact 40-byte borrowed-view
 record for ArrayBuffer, every numeric TypedArray, and DataView. It reports the
@@ -681,7 +694,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 262-symbol
+the same frame/script identity and own every returned string. The 263-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -725,7 +738,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (257 implemented, 164 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (258 implemented, 163 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -742,5 +755,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 164
+not claim complete Bun runtime compatibility; #164 remains open for the 163
 pending core entries and later wider/generated profiles.

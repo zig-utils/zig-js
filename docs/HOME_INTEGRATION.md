@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 263 implemented / 168 pending under #163. The generated
+private imports are now 264 implemented / 167 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -237,7 +237,14 @@ maximum u32 length. Two contiguous-vector shims expose stable encoded snapshots
 only for safe packed arrays, then revalidate vector identity, length, backing,
 elements, shape, and prototype safety before each direct read. Concurrent
 snapshots remain independent; mutation and exotic/indexed interception fall
-back safely. The ToNumber shim adds primitive and full object coercion,
+back safely. The shared-memfd importer duplicates but never consumes the
+caller descriptor, validates the complete regular-file extent plus an
+overflow-safe slice, and exposes that slice without copying as the exact Home
+ArrayBuffer or Uint8Array type over a writable `MAP_PRIVATE` mapping. The
+duplicate closes immediately after mmap; construction failure, GC, or context
+teardown unmaps the complete original extent exactly once. Invalid descriptors,
+ranges, sizes, result tags, and unsupported platforms fail empty without a
+partial owner or pending exception. The ToNumber shim adds primitive and full object coercion,
 spec-ordered user hooks, Symbol/BigInt TypeError behavior, ordinary-versus-
 exceptional NaN distinction, same-VM sibling values, and first-exception
 preservation. Two predicates add JSC-exact internal has-instance prechecks and
@@ -282,7 +289,7 @@ second pass over current/preceding source lines by retained script ID.
 stackless native errors by walking pending await/transparent-forwarding links,
 with exact suspension positions, a per-segment 32-hop guard, realm stack limits,
 precise GC retention, and existing/materialized-stack preservation. The
-262-symbol combined fixture covers sibling realms, foreign VMs, callback
+263-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 263
-private exports and 168 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 264
+private exports and 167 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 263 cover JSC64 identity, cell equality,
+The 264 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -230,6 +230,15 @@ packed arrays and require exact array/vector/length/backing/element
 revalidation before direct reads. Multiple snapshots coexist; GC preserves
 them, while mutation, holes, accessors, double/undecided storage, and indexed
 prototype pollution force the consumer back to ordinary indexed Get.
+`ArrayBuffer__fromSharedMemfd` validates and temporarily duplicates a caller
+descriptor, maps the declared complete regular-file extent read/write with
+`MAP_PRIVATE`, and exposes one overflow-checked subrange without copying as the
+profile-selected ArrayBuffer or Uint8Array type. Only the duplicate is closed;
+the caller descriptor remains owned by the caller. The mapping's idempotent
+owner unmaps the complete extent exactly once on failed construction, precise
+collection, or context teardown. Invalid descriptors, undersized files,
+ranges, and result tags return empty without publishing a partial value or
+pending exception.
 Private ToNumber performs the complete number-hint object coercion path,
 including user hooks and thrown conversions, preserves primitive and ordinary
 NaN behavior, throws for Symbol/BigInt, and retains the first VM exception.
@@ -298,7 +307,7 @@ classifies Error, DOMException, primitive, and system-like values; owns its
 strings; preserves the stable exception cell; and reports the cause runtime
 type. The second pass resolves the retained script identity and copies the
 current source line plus capped preceding lines with exact zero-based numbers,
-including through a sibling realm. The combined 262-symbol fixture also covers
+including through a sibling realm. The combined 263-symbol fixture also covers
 foreign-VM failures, exception clearing, callback reentrancy, and already-settled
 targets.
 
@@ -310,7 +319,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 257 shims are implemented and 164 remain pending. Its
+of which 258 shims are implemented and 163 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

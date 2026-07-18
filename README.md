@@ -236,7 +236,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**263 implemented / 168 pending**), 15
+files**, classified as 431 private (**264 implemented / 167 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -247,7 +247,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 263 private exports—encoded identity/cell equality, truthiness,
+The first 264 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -270,6 +270,7 @@ five WTF parsing, CPU, allocator-release, and HTTP-date helpers,
 five live Uint8Array/Buffer constructors plus exact Bun Buffer identity,
 one explicit uninitialized Uint8Array allocator,
 two generic no-copy ArrayBuffer/TypedArray adopters,
+one validated no-copy shared-memfd ArrayBuffer/Uint8Array importer,
 one exact JSValue-to-ArrayBuffer view projection,
 one VM-owned exact `typeof`-string projection,
 seven array/index operations, including revalidated contiguous vectors, and
@@ -353,6 +354,14 @@ shape, prototype chain, and element encodings before every fast read. It keeps
 simultaneous iterators independent, survives GC, and invalidates to ordinary
 indexed Get after replacement, growth, holes, accessors, double/undecided
 storage, or prototype pollution without observing pending exceptions. The
+shared-memfd boundary duplicates the caller descriptor only long enough to
+validate and map it, verifies the complete regular-file extent and requested
+slice without overflow, and exposes the selected profile's exact ArrayBuffer or
+Uint8Array tag over a writable `MAP_PRIVATE` view. It never consumes the caller
+descriptor, never copies the slice, and unmaps the complete original region
+exactly once on construction failure, precise collection, or realm teardown.
+Invalid descriptors, ranges, sizes, and result tags return empty without a
+partial owner or a replacement exception. The
 ToNumber boundary preserves all primitive conversions, runs ordinary
 object-to-primitive hooks in spec order, distinguishes ordinary NaN from
 exceptional NaN, throws for Symbol/BigInt, accepts same-VM sibling values, and
@@ -576,7 +585,7 @@ Promise await and transparent forwarding chains. The walker preserves existing
 or materialized stacks, honors the selected realm's `Error.stackTraceLimit`,
 stops at combinators/settled links or after 32 transparent hops per frame, and
 keeps activation links precise across GC without retaining completed work. The
-262-symbol combined fixture covers sibling realms, foreign-VM rejection,
+263-symbol combined fixture covers sibling realms, foreign-VM rejection,
 callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
@@ -589,12 +598,12 @@ constructors return real context-owned BigInt cells.
 The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
-separately compiled fixtures pass 20 real cell kinds for each. All 263
+separately compiled fixtures pass 20 real cell kinds for each. All 264
 private exports remain excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**257 implemented / 164
+437 symbols from 54 `src/jsc` files: 421 private (**258 implemented / 163
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
