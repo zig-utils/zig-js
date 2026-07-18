@@ -1158,11 +1158,17 @@ fn f64Lane(vector: u128, lane: u8) f64 {
 }
 
 fn replaceF32Lane(vector: u128, lane: u8, value: f32) u128 {
-    return replaceLaneBits(vector, lane, 32, @as(u32, @bitCast(value)));
+    var bits: u32 = @bitCast(value);
+    if (bits & 0x7F800000 == 0x7F800000 and bits & 0x007FFFFF != 0)
+        bits |= 0x00400000;
+    return replaceLaneBits(vector, lane, 32, bits);
 }
 
 fn replaceF64Lane(vector: u128, lane: u8, value: f64) u128 {
-    return replaceLaneBits(vector, lane, 64, @bitCast(value));
+    var bits: u64 = @bitCast(value);
+    if (bits & 0x7FF0000000000000 == 0x7FF0000000000000 and bits & 0x000FFFFFFFFFFFFF != 0)
+        bits |= 0x0008000000000000;
+    return replaceLaneBits(vector, lane, 64, bits);
 }
 
 fn executeSimdFloatComparison(s: *State, op: simd.Op) ExecError!bool {
@@ -1208,27 +1214,40 @@ fn executeSimdFloatComparison(s: *State, op: simd.Op) ExecError!bool {
 
 fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
     const width: u8 = switch (op) {
-        .f32x4_abs, .f32x4_neg, .f32x4_sqrt => 32,
-        .f64x2_abs, .f64x2_neg, .f64x2_sqrt => 64,
+        .f32x4_abs, .f32x4_neg, .f32x4_sqrt, .f32x4_ceil, .f32x4_floor, .f32x4_trunc, .f32x4_nearest => 32,
+        .f64x2_abs, .f64x2_neg, .f64x2_sqrt, .f64x2_ceil, .f64x2_floor, .f64x2_trunc, .f64x2_nearest => 64,
         else => return false,
     };
     const source = popVector(s);
     var result: u128 = 0;
     for (0..128 / width) |lane| {
+        const bits = laneBits(source, @intCast(lane), width);
+        if (op == .f32x4_abs or op == .f64x2_abs) {
+            result = replaceLaneBits(result, @intCast(lane), width, bits & ~(@as(u64, 1) << @intCast(width - 1)));
+            continue;
+        }
+        if (op == .f32x4_neg or op == .f64x2_neg) {
+            result = replaceLaneBits(result, @intCast(lane), width, bits ^ (@as(u64, 1) << @intCast(width - 1)));
+            continue;
+        }
         if (width == 32) {
             const value = f32Lane(source, @intCast(lane));
             result = replaceF32Lane(result, @intCast(lane), switch (op) {
-                .f32x4_abs => @abs(value),
-                .f32x4_neg => -value,
                 .f32x4_sqrt => @sqrt(value),
+                .f32x4_ceil => @ceil(value),
+                .f32x4_floor => @floor(value),
+                .f32x4_trunc => @trunc(value),
+                .f32x4_nearest => nearestF32(value),
                 else => unreachable,
             });
         } else {
             const value = f64Lane(source, @intCast(lane));
             result = replaceF64Lane(result, @intCast(lane), switch (op) {
-                .f64x2_abs => @abs(value),
-                .f64x2_neg => -value,
                 .f64x2_sqrt => @sqrt(value),
+                .f64x2_ceil => @ceil(value),
+                .f64x2_floor => @floor(value),
+                .f64x2_trunc => @trunc(value),
+                .f64x2_nearest => nearestF64(value),
                 else => unreachable,
             });
         }
@@ -1239,8 +1258,8 @@ fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
 
 fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
     const width: u8 = switch (op) {
-        .f32x4_add, .f32x4_sub, .f32x4_mul, .f32x4_div, .f32x4_min, .f32x4_max => 32,
-        .f64x2_add, .f64x2_sub, .f64x2_mul, .f64x2_div, .f64x2_min, .f64x2_max => 64,
+        .f32x4_add, .f32x4_sub, .f32x4_mul, .f32x4_div, .f32x4_min, .f32x4_max, .f32x4_pmin, .f32x4_pmax => 32,
+        .f64x2_add, .f64x2_sub, .f64x2_mul, .f64x2_div, .f64x2_min, .f64x2_max, .f64x2_pmin, .f64x2_pmax => 64,
         else => return false,
     };
     const right = popVector(s);
@@ -1250,6 +1269,12 @@ fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
         if (width == 32) {
             const a = f32Lane(left, @intCast(lane));
             const b = f32Lane(right, @intCast(lane));
+            if (op == .f32x4_pmin or op == .f32x4_pmax) {
+                const choose_right = if (op == .f32x4_pmin) b < a else a < b;
+                const chosen = if (choose_right) right else left;
+                result = replaceLaneBits(result, @intCast(lane), 32, laneBits(chosen, @intCast(lane), 32));
+                continue;
+            }
             result = replaceF32Lane(result, @intCast(lane), switch (op) {
                 .f32x4_add => a + b,
                 .f32x4_sub => a - b,
@@ -1262,6 +1287,12 @@ fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
         } else {
             const a = f64Lane(left, @intCast(lane));
             const b = f64Lane(right, @intCast(lane));
+            if (op == .f64x2_pmin or op == .f64x2_pmax) {
+                const choose_right = if (op == .f64x2_pmin) b < a else a < b;
+                const chosen = if (choose_right) right else left;
+                result = replaceLaneBits(result, @intCast(lane), 64, laneBits(chosen, @intCast(lane), 64));
+                continue;
+            }
             result = replaceF64Lane(result, @intCast(lane), switch (op) {
                 .f64x2_add => a + b,
                 .f64x2_sub => a - b,
@@ -1302,6 +1333,46 @@ fn executeSimdFloatConversion(s: *State, op: simd.Op) ExecError!bool {
                 else
                     @floatFromInt(bits);
                 result = replaceF32Lane(result, @intCast(lane), converted);
+            }
+            try pushVector(s, result);
+        },
+        .f32x4_demote_f64x2_zero => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..2) |lane|
+                result = replaceF32Lane(result, @intCast(lane), @floatCast(f64Lane(source, @intCast(lane))));
+            try pushVector(s, result);
+        },
+        .f64x2_promote_low_f32x4 => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..2) |lane|
+                result = replaceF64Lane(result, @intCast(lane), f32Lane(source, @intCast(lane)));
+            try pushVector(s, result);
+        },
+        .i32x4_trunc_sat_f64x2_s_zero, .i32x4_trunc_sat_f64x2_u_zero => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..2) |lane| {
+                const value = f64Lane(source, @intCast(lane));
+                const converted: u32 = if (op == .i32x4_trunc_sat_f64x2_s_zero)
+                    @bitCast(truncSatI32S(value))
+                else
+                    truncSatI32U(value);
+                result = replaceLaneBits(result, @intCast(lane), 32, converted);
+            }
+            try pushVector(s, result);
+        },
+        .f64x2_convert_low_i32x4_s, .f64x2_convert_low_i32x4_u => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..2) |lane| {
+                const bits: u32 = @truncate(laneBits(source, @intCast(lane), 32));
+                const converted: f64 = if (op == .f64x2_convert_low_i32x4_s)
+                    @floatFromInt(@as(i32, @bitCast(bits)))
+                else
+                    @floatFromInt(bits);
+                result = replaceF64Lane(result, @intCast(lane), converted);
             }
             try pushVector(s, result);
         },
