@@ -608,6 +608,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             f.unlockSlots(held);
         }
     }
+    for (machine.gc_wasm_roots.items) |roots|
+        for (roots.values) |root| markValue(v, root);
     if (machine.microtasks) |q| {
         machine.lockMicrotasks();
         for (q.pendingItems()) |mt| traceMicrotask(mt, v);

@@ -14,6 +14,7 @@
 //! and f64 use all 64 bits.
 
 const std = @import("std");
+const js_value = @import("../value.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate = @import("validate.zig");
@@ -21,6 +22,13 @@ const validate = @import("validate.zig");
 const Allocator = std.mem.Allocator;
 
 pub const ExecError = error{ OutOfMemory, Trap, Host };
+
+pub const RootHooks = struct {
+    ctx: *anyopaque,
+    enter: *const fn (*anyopaque, *js_value.WasmExecutionRoots) error{OutOfMemory}!void,
+    leave: *const fn (*anyopaque, *js_value.WasmExecutionRoots) void,
+    checkpoint: *const fn (*anyopaque, *js_value.WasmExecutionRoots) void,
+};
 
 /// Host-imported function. `ctx` is host-owned (traced/freed by the host).
 pub const ImportFunc = struct {
@@ -92,6 +100,7 @@ pub const Instance = struct {
     globals: []*GlobalInst,
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
+    root_hooks: ?RootHooks = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -436,7 +445,11 @@ fn runDefined(f: *const FuncInst, args: []const u64, results: []u64, diag: *type
     // back into wasm gets a fresh arena, stack, and frame set).
     var arena = std.heap.ArenaAllocator.init(def.inst.gpa);
     defer arena.deinit();
-    var s: State = .{ .alloc = arena.allocator(), .diag = diag };
+    var s: State = .{ .alloc = arena.allocator(), .diag = diag, .root_hooks = def.inst.root_hooks };
+    if (s.root_hooks) |hooks| {
+        try hooks.enter(hooks.ctx, &s.roots);
+        defer hooks.leave(hooks.ctx, &s.roots);
+    }
     try execute(&s, f, args, results);
 }
 
@@ -470,12 +483,18 @@ const State = struct {
     locals: std.ArrayListUnmanaged(u64) = .empty,
     frames: std.ArrayListUnmanaged(Frame) = .empty,
     labels: std.ArrayListUnmanaged(Label) = .empty,
+    roots: js_value.WasmExecutionRoots = .{},
+    root_hooks: ?RootHooks = null,
 
     fn trap(s: *State, comptime msg: []const u8) error{Trap} {
         s.diag.set(types.Diagnostic.no_offset, msg, .{});
         return error.Trap;
     }
 };
+
+fn checkpoint(s: *State) void {
+    if (s.root_hooks) |hooks| hooks.checkpoint(hooks.ctx, &s.roots);
+}
 
 fn push(s: *State, v: u64) ExecError!void {
     if (s.stack.items.len >= MAX_OPERAND_SLOTS) return s.trap("operand stack exhausted");
@@ -578,6 +597,7 @@ fn branchTo(s: *State, depth: u32) void {
     } else if (lab.is_loop) {
         s.labels.items.len = li + 1;
         fr.pc = lab.target_pc;
+        checkpoint(s);
     } else {
         s.labels.items.len = li;
         fr.pc = lab.target_pc;
@@ -585,6 +605,7 @@ fn branchTo(s: *State, depth: u32) void {
 }
 
 fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
+    checkpoint(s);
     switch (f.*) {
         .defined => try pushFrame(s, f),
         .imported => |*imp| {
@@ -1230,6 +1251,30 @@ const F64 = "\x7C";
 
 const f32nan: u64 = 0x7FC00000;
 const f64nan: u64 = 0x7FF8000000000000;
+
+const RootHookProbe = struct {
+    enters: usize = 0,
+    leaves: usize = 0,
+    checkpoints: usize = 0,
+
+    fn enter(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) error{OutOfMemory}!void {
+        const self: *RootHookProbe = @ptrCast(@alignCast(raw));
+        self.enters += 1;
+        std.debug.assert(roots.values.len == 0);
+    }
+
+    fn leave(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
+        const self: *RootHookProbe = @ptrCast(@alignCast(raw));
+        self.leaves += 1;
+        std.debug.assert(roots.values.len == 0);
+    }
+
+    fn checkpoint(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
+        const self: *RootHookProbe = @ptrCast(@alignCast(raw));
+        self.checkpoints += 1;
+        std.debug.assert(roots.values.len == 0);
+    }
+};
 
 fn leb(comptime v: u64) []const u8 {
     comptime {
@@ -2414,6 +2459,32 @@ test "wasm.exec multi-value branches calls and implicit else" {
 
     const return_ = comptime arithModule("", I32 ++ I64, "\x41\x07\x42\x09\x0F\x00");
     try expectResultsWithFeatures(return_, features, 0, &.{}, &.{ 7, 9 });
+}
+
+test "wasm.exec execution root hooks balance across checkpoints and traps" {
+    const loop = comptime arithModule(I32, "", "\x03\x40\x20\x00\x41\x01\x6B\x22\x00\x0D\x00\x0B");
+    var built = try build(loop);
+    defer destroyBuilt(built);
+    var probe: RootHookProbe = .{};
+    built.inst.root_hooks = .{
+        .ctx = @ptrCast(&probe),
+        .enter = RootHookProbe.enter,
+        .leave = RootHookProbe.leave,
+        .checkpoint = RootHookProbe.checkpoint,
+    };
+    var diag: types.Diagnostic = .{};
+    try invoke(built.inst, 0, &.{2}, &.{}, &diag);
+    try std.testing.expectEqual(@as(usize, 1), probe.enters);
+    try std.testing.expectEqual(@as(usize, 1), probe.leaves);
+    try std.testing.expectEqual(@as(usize, 1), probe.checkpoints);
+
+    const trap = comptime arithModule("", "", "\x00");
+    var trapping = try build(trap);
+    defer destroyBuilt(trapping);
+    trapping.inst.root_hooks = built.inst.root_hooks;
+    try std.testing.expectError(error.Trap, invoke(trapping.inst, 0, &.{}, &.{}, &diag));
+    try std.testing.expectEqual(@as(usize, 2), probe.enters);
+    try std.testing.expectEqual(@as(usize, 2), probe.leaves);
 }
 
 test "wasm.exec conversions trunc f32 to int" {

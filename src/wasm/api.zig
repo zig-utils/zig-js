@@ -21,6 +21,24 @@ const Interpreter = interpreter.Interpreter;
 const Environment = interpreter.Environment;
 const Shape = shape.Shape;
 
+fn enterExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) error{OutOfMemory}!void {
+    const store: *context.Context = @ptrCast(@alignCast(raw));
+    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    try machine.pushWasmRoots(roots);
+}
+
+fn leaveExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) void {
+    const store: *context.Context = @ptrCast(@alignCast(raw));
+    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    machine.popWasmRoots(roots);
+}
+
+fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void {
+    const store: *context.Context = @ptrCast(@alignCast(raw));
+    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    machine.serviceGcSafepoint();
+}
+
 const ErrorDescriptor = struct { name: []const u8, proto: *Object };
 const ModuleDescriptor = struct { proto: *Object, compile_error_proto: *Object };
 const MemoryDescriptor = struct { proto: *Object };
@@ -1111,6 +1129,12 @@ fn instantiateModuleObject(
             error.Link => throwWasmWithProto(self, "LinkError", diag.message(), descriptor.link_error_proto),
             error.OutOfMemory => error.OutOfMemory,
         };
+    };
+    inst.root_hooks = .{
+        .ctx = @ptrCast(store),
+        .enter = enterExecutionRoots,
+        .leave = leaveExecutionRoots,
+        .checkpoint = checkpointExecutionRoots,
     };
     var inst_transferred = false;
     defer if (!inst_transferred) exec.destroyInstance(store.gpa, inst);

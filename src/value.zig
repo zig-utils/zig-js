@@ -40,6 +40,14 @@ pub const HostError = error{ OutOfMemory, Throw, OptShortCircuit };
 /// engine builtins and the conformance harness's `assert`.
 pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Value) HostError!Value;
 
+/// Live JavaScript references held only by an active WebAssembly invocation.
+/// The Wasm executor refreshes this stable descriptor before every GC
+/// checkpoint; the active Interpreter then publishes it through the same
+/// precise-root path as VM operand stacks and frame locals.
+pub const WasmExecutionRoots = struct {
+    values: []const Value = &.{},
+};
+
 pub const HostClassGetResult = union(enum) {
     unhandled,
     value: Value,

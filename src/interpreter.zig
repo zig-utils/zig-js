@@ -1189,6 +1189,10 @@ pub const Interpreter = struct {
     /// during a mid-script collection. Populated only when the GC is on; the
     /// list itself is gpa-backed and freed on interpreter teardown.
     gc_execs: std.ArrayListUnmanaged(*vm.Exec) = .empty,
+    /// Active WebAssembly invocation roots. Descriptors live in the native
+    /// invocation frames; registration is scoped to the call and the same
+    /// safepoint/park rules that protect `gc_execs` protect these slices.
+    gc_wasm_roots: std.ArrayListUnmanaged(*value.WasmExecutionRoots) = .empty,
     /// Tree-walker temporaries that must survive calls/checkpoints while they
     /// live only in Zig locals. VM values are covered by `gc_execs`; this stack
     /// covers interpreter paths such as iterator records/results in `for...of`.
@@ -7322,6 +7326,23 @@ pub const Interpreter = struct {
             i -= 1;
             if (self.gc_execs.items[i] == exec) {
                 _ = self.gc_execs.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    pub fn pushWasmRoots(self: *Interpreter, roots: *value.WasmExecutionRoots) error{OutOfMemory}!void {
+        if (self.gc == null) return;
+        try self.gc_wasm_roots.append(self.arena, roots);
+    }
+
+    pub fn popWasmRoots(self: *Interpreter, roots: *value.WasmExecutionRoots) void {
+        if (self.gc == null) return;
+        var i = self.gc_wasm_roots.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.gc_wasm_roots.items[i] == roots) {
+                _ = self.gc_wasm_roots.orderedRemove(i);
                 return;
             }
         }
