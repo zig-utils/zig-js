@@ -480,6 +480,7 @@ extern "c" fn JSC__JSPromise__wrap(JSContextRef, *anyopaque, PromiseWrapCallback
 extern "c" fn JSC__JSValue__asInternalPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__asPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__createInternalPromise(JSContextRef) EncodedValue;
+extern "c" fn JSC__JSValue___then(EncodedValue, JSContextRef, EncodedValue, ?*const JSHostFn, ?*const JSHostFn) void;
 extern "c" fn JSC__JSMap__create(JSContextRef) ?*anyopaque;
 extern "c" fn JSC__JSMap__set(?*anyopaque, JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__JSMap__get(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
@@ -598,6 +599,19 @@ const FFIFunctionFixtureState = struct {
 
 var ffi_function_fixture = FFIFunctionFixtureState{};
 
+const PromiseThenFixtureState = struct {
+    expected_global: JSContextRef = null,
+    expected_value: EncodedValue = .empty,
+    contexts: [8]EncodedValue = @splat(.empty),
+    fulfilled: usize = 0,
+    rejected: usize = 0,
+    reenter: bool = false,
+    reentry_promise: EncodedValue = .empty,
+    reentry_context: EncodedValue = .empty,
+};
+
+var promise_then_fixture = PromiseThenFixtureState{};
+
 fn callFrameSlots(frame: *PrivateCallFrame) [*]const EncodedValue {
     return @ptrCast(@alignCast(frame));
 }
@@ -605,6 +619,47 @@ fn callFrameSlots(frame: *PrivateCallFrame) [*]const EncodedValue {
 fn callFrameArgumentCount(slots: [*]const EncodedValue) u32 {
     const bits: u64 = @bitCast(@intFromEnum(slots[4]));
     return @truncate(bits);
+}
+
+fn capturePromiseThenCallback(global: JSContextRef, frame: *PrivateCallFrame, fulfilled: bool) EncodedValue {
+    const slots = callFrameSlots(frame);
+    const index = promise_then_fixture.fulfilled + promise_then_fixture.rejected;
+    if (global != promise_then_fixture.expected_global or
+        callFrameArgumentCount(slots) != 3 or
+        index >= promise_then_fixture.contexts.len or
+        !JSC__JSValue__isStrictEqual(slots[5], .undefined, global) or
+        !JSC__JSValue__isStrictEqual(slots[6], promise_then_fixture.expected_value, global))
+        fail("private Promise JSHostFn CallFrame mismatch");
+    promise_then_fixture.contexts[index] = slots[7];
+    if (fulfilled)
+        promise_then_fixture.fulfilled += 1
+    else
+        promise_then_fixture.rejected += 1;
+    if (promise_then_fixture.reenter) {
+        promise_then_fixture.reenter = false;
+        JSC__JSValue___then(
+            promise_then_fixture.reentry_promise,
+            global,
+            promise_then_fixture.reentry_context,
+            promiseThenResolve,
+            promiseThenReject,
+        );
+    }
+    return .undefined;
+}
+
+fn promiseThenResolve(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    return capturePromiseThenCallback(global, frame, true);
+}
+
+fn promiseThenReject(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    return capturePromiseThenCallback(global, frame, false);
+}
+
+fn promiseThenThrow(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
+    _ = capturePromiseThenCallback(global, frame, true);
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(2538));
+    return .empty;
 }
 
 fn captureCallFrame(frame: *PrivateCallFrame) void {
@@ -3926,6 +3981,112 @@ pub fn main() void {
     expectPromise(context, rejected_promise, .rejected, EncodedValue.fromInt32(321));
     expectPromise(sibling_context, rejected_value_promise, .rejected, direct_value);
 
+    promise_then_fixture = .{
+        .expected_global = context,
+        .expected_value = direct_value,
+    };
+    JSC__JSValue___then(
+        resolved_value_promise,
+        context,
+        EncodedValue.fromInt32(2531),
+        promiseThenResolve,
+        promiseThenReject,
+    );
+    if (promise_then_fixture.fulfilled != 0 or promise_then_fixture.rejected != 0)
+        fail("private Promise reaction ran inline");
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 1 or
+        promise_then_fixture.rejected != 0 or
+        promise_then_fixture.contexts[0] != EncodedValue.fromInt32(2531))
+        fail("private fulfilled Promise reaction mismatch");
+
+    promise_then_fixture = .{
+        .expected_global = sibling_context,
+        .expected_value = direct_value,
+    };
+    JSC__JSValue___then(
+        rejected_value_promise,
+        sibling_context,
+        EncodedValue.fromInt32(2532),
+        promiseThenResolve,
+        promiseThenReject,
+    );
+    if (JSC__JSGlobalObject__drainMicrotasks(sibling_context) != 0 or
+        promise_then_fixture.fulfilled != 0 or
+        promise_then_fixture.rejected != 1 or
+        promise_then_fixture.contexts[0] != EncodedValue.fromInt32(2532))
+        fail("private rejected sibling Promise reaction mismatch");
+
+    const pending_then = JSC__JSValue__createInternalPromise(context);
+    const retained_then_context = evaluate(context, "globalThis.__private_then_context_253 = { retained: true }; __private_then_context_253");
+    promise_then_fixture = .{
+        .expected_global = context,
+        .expected_value = direct_value,
+    };
+    JSC__JSValue___then(pending_then, context, retained_then_context, promiseThenResolve, promiseThenReject);
+    _ = JSC__VM__runGC(vm, true);
+    var settle_then_state = PromiseCallbackState{ .value = direct_value };
+    JSC__AnyPromise__wrap(context, pending_then, &settle_then_state, promiseCallback);
+    if (promise_then_fixture.fulfilled != 0 or
+        JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 1 or
+        !JSC__JSValue__isStrictEqual(promise_then_fixture.contexts[0], retained_then_context, context))
+        fail("private pending Promise reaction rooting mismatch");
+
+    promise_then_fixture = .{
+        .expected_global = context,
+        .expected_value = direct_value,
+        .reenter = true,
+        .reentry_promise = resolved_value_promise,
+        .reentry_context = EncodedValue.fromInt32(2534),
+    };
+    JSC__JSValue___then(resolved_value_promise, context, EncodedValue.fromInt32(2533), promiseThenResolve, promiseThenReject);
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 2 or
+        promise_then_fixture.rejected != 0 or
+        promise_then_fixture.contexts[0] != EncodedValue.fromInt32(2533) or
+        promise_then_fixture.contexts[1] != EncodedValue.fromInt32(2534))
+        fail("private Promise reaction reentry/FIFO mismatch");
+
+    promise_then_fixture = .{
+        .expected_global = context,
+        .expected_value = direct_value,
+    };
+    JSC__JSValue___then(resolved_value_promise, context, EncodedValue.fromInt32(2536), promiseThenThrow, promiseThenReject);
+    JSC__JSValue___then(resolved_value_promise, context, EncodedValue.fromInt32(2537), promiseThenResolve, promiseThenReject);
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        !JSGlobalObject__hasException(context) or
+        promise_then_fixture.fulfilled != 1 or
+        promise_then_fixture.contexts[0] != EncodedValue.fromInt32(2536))
+        fail("private Promise throwing reaction boundary mismatch");
+    const promise_then_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(promise_then_exception.cellPointer()) != EncodedValue.fromInt32(2538) or
+        JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 2 or
+        promise_then_fixture.contexts[1] != EncodedValue.fromInt32(2537))
+        fail("private Promise post-throw FIFO preservation mismatch");
+
+    promise_then_fixture = .{
+        .expected_global = context,
+        .expected_value = direct_value,
+    };
+    JSC__JSValue___then(encoded_object, context, .true, promiseThenResolve, promiseThenReject);
+    JSC__JSValue___then(.undefined, context, .true, promiseThenResolve, promiseThenReject);
+    JSC__JSValue___then(resolved_value_promise, context, .true, null, promiseThenReject);
+    JSC__JSValue___then(resolved_value_promise, context, .true, promiseThenResolve, null);
+    if (JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 0 or promise_then_fixture.rejected != 0 or
+        JSGlobalObject__hasException(context))
+        fail("private Promise reaction invalid-input no-op mismatch");
+
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2535));
+    JSC__JSValue___then(resolved_value_promise, context, .true, promiseThenResolve, promiseThenReject);
+    const preserved_then_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_then_exception.cellPointer()) != EncodedValue.fromInt32(2535) or
+        JSC__JSGlobalObject__drainMicrotasks(context) != 0 or
+        promise_then_fixture.fulfilled != 0)
+        fail("private Promise reaction replaced a pending exception");
+
     const foreign_promise = JSC__JSValue__createInternalPromise(foreign_context);
     if (JSC__JSValue__asPromise(foreign_promise) != foreign_promise.cellPointer())
         fail("private Promise downcast rejected another live VM");
@@ -4378,5 +4539,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 258/258 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 259/259 symbols linked; runtime matrix passed\n", .{});
 }

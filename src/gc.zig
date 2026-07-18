@@ -441,6 +441,8 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
 
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValueOpt(v, r.handler);
+    markValueOpt(v, r.extra_argument);
+    if (r.detached) return;
     if (r.result) |result| {
         markManaged(v, result);
     } else {

@@ -32,6 +32,13 @@ pub const State = enum { pending, fulfilled, rejected };
 /// outcome resolves/rejects `result` (the promise `.then` returned).
 pub const Reaction = struct {
     handler: ?Value,
+    /// Optional second argument supplied after the settlement value. Private
+    /// Home/Bun Promise bridges use this to retain and deliver their opaque
+    /// context JSValue without allocating a closure per registration.
+    extra_argument: ?Value = null,
+    /// Host-only reactions have no result capability. Their callback result is
+    /// discarded; an abrupt callback still escapes the microtask checkpoint.
+    detached: bool = false,
     /// Intrinsic `.then` fast path: settle this result promise directly instead
     /// of allocating native resolve/reject capability closures. Custom species
     /// capabilities keep using `resolve`/`reject` below.
@@ -681,6 +688,15 @@ pub fn performThenResult(self: *Interpreter, p: *Promise, on_f: Value, on_r: Val
     try performThenReactions(self, p, react_f, react_r);
 }
 
+/// Register host callbacks without creating a dependent Promise. Both handlers
+/// receive `(settlement_value, context)` in their CallFrame, matching Bun's
+/// private `JSC__JSValue___then` bridge.
+pub fn performThenDetached(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value, context: Value) EvalError!void {
+    const react_f = Reaction{ .handler = on_f, .extra_argument = context, .detached = true };
+    const react_r = Reaction{ .handler = on_r, .extra_argument = context, .detached = true };
+    try performThenReactions(self, p, react_f, react_r);
+}
+
 pub fn then(self: *Interpreter, p: *Promise, on_f: Value, on_r: Value) EvalError!Value {
     const result = try newPromise(self);
     const rp: *Promise = @ptrCast(@alignCast(result.promiseData().?));
@@ -885,9 +901,15 @@ pub fn runJob(self: *Interpreter, task: Microtask) EvalError!void {
     promise_profile.recordMicrotaskRun(false);
     const r = task.reaction;
     if (r.handler) |h| {
-        if (self.callValueWithThis(h, &.{task.argument}, Value.undef())) |res| {
+        const result = if (r.extra_argument) |extra|
+            self.callValueWithThis(h, &.{ task.argument, extra }, Value.undef())
+        else
+            self.callValueWithThis(h, &.{task.argument}, Value.undef());
+        if (result) |res| {
+            if (r.detached) return;
             try settleReaction(self, r, true, res);
         } else |err| {
+            if (r.detached) return err;
             if (err == error.Throw) {
                 const reason = self.exception;
                 self.exception = Value.undef();

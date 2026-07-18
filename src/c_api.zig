@@ -8996,6 +8996,71 @@ export fn JSC__JSPromise__rejectedPromiseValue(
     return privateCreateNativePromise(global, .rejected, encoded);
 }
 
+/// Register the pinned Home/Bun fulfillment and rejection callbacks on a
+/// native Promise. The selected JSHostFn runs from the Promise microtask queue
+/// with `(settlement_value, context_value)` as its two ordinary arguments.
+export fn JSC__JSValue___then(
+    encoded_promise: EncodedValue,
+    global: JSContextRef,
+    encoded_context: EncodedValue,
+    resolve: ?*const PrivateJSHostFn,
+    reject: ?*const PrivateJSHostFn,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+
+    const promise_box = privateBoxedFrom(encoded_promise) orelse return;
+    if (promise_box.private_kind != .value or promise_box.owner.c_api_group != opaque_group) return;
+    const native_promise = promise.promiseOf(promise_box.value) orelse return;
+    const retained_context = privateValueFrom(global, encoded_context) orelse return;
+    const resolve_callback = resolve orelse return;
+    const reject_callback = reject orelse return;
+
+    const empty_name = PrivateBunString.empty();
+    const resolve_encoded = JSFunction__createFromZig(
+        global,
+        empty_name,
+        resolve_callback,
+        2,
+        .public,
+        .none,
+        null,
+    );
+    if (resolve_encoded == .empty) return;
+    const reject_encoded = JSFunction__createFromZig(
+        global,
+        empty_name,
+        reject_callback,
+        2,
+        .public,
+        .none,
+        null,
+    );
+    if (reject_encoded == .empty) return;
+    const resolve_value = privateValueFrom(global, resolve_encoded) orelse return;
+    const reject_value = privateValueFrom(global, reject_encoded) orelse return;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    promise.performThenDetached(
+        &machine,
+        native_promise,
+        resolve_value,
+        reject_value,
+        retained_context,
+    ) catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
 export fn JSC__JSPromise__wrap(
     global: JSContextRef,
     callback_context: *anyopaque,
