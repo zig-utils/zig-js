@@ -1,4 +1,4 @@
-# WebAssembly MVP Status
+# WebAssembly Status
 
 WebAssembly support is being landed as independently verified slices under
 [issue #141](https://github.com/zig-utils/zig-js/issues/141). The MVP binary
@@ -56,11 +56,11 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 133/133 at `f30577b2`, covering the
+The focused WebAssembly unit suite passes 141/141 at `27eafb9d`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
-classes, the opt-in Core 2.0 numeric operations, and the test-only bit-exact
+classes, the opt-in Core 2.0 numeric and multi-value operations, and the test-only bit-exact
 corpus boundary. The most recent batched
 full engine checkpoint passes 1,002/1,002 at `af689c4a`. Both runs report zero
 failures, skips, and leaks.
@@ -133,15 +133,22 @@ const ctx = try js.Context.createWith(gpa, .{
 
 The five sign-extension instructions and eight nontrapping float-to-integer
 conversions are implemented behind their independent `sign_extension_ops` and
-`nontrapping_float_to_int` switches. They decode, validate, instantiate, and
-execute through the public JavaScript API; neither switch is enabled by
-default, and enabling them does not imply that the remaining Core 2.0 profile
-is complete.
+`nontrapping_float_to_int` switches, and multi-result functions and type-index
+control signatures are implemented behind `multi_value`. They decode,
+validate, instantiate, and execute through the public JavaScript API.
+Multi-value exports return ordered JavaScript arrays; imports consume general
+iterables and require the exact result arity. No post-MVP switch is enabled by
+default, and enabling these switches does not imply that the remaining Core
+2.0 profile is complete.
 
 Implementation is split into the shared gating foundation
 [#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
 operations [#269](https://github.com/zig-utils/zig-js/issues/269), the structural core 2.0 baseline
-[#263](https://github.com/zig-utils/zig-js/issues/263), SIMD
+[#263](https://github.com/zig-utils/zig-js/issues/263), including multi-value
+[#270](https://github.com/zig-utils/zig-js/issues/270), reference types
+[#271](https://github.com/zig-utils/zig-js/issues/271), bulk memory
+[#272](https://github.com/zig-utils/zig-js/issues/272), and its exact score
+[#273](https://github.com/zig-utils/zig-js/issues/273); SIMD is tracked in
 [#264](https://github.com/zig-utils/zig-js/issues/264), Threads
 [#265](https://github.com/zig-utils/zig-js/issues/265), exceptions/tail calls
 [#266](https://github.com/zig-utils/zig-js/issues/266), memory64/GC
