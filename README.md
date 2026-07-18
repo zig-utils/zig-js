@@ -111,14 +111,19 @@ paths or unsupported-target gaps. Exact pins, bounded CI witnesses, the full
 reproduction command, and performance evidence are in
 [WebAssembly status](docs/wasm.md).
 
-The Phase-4 WebAssembly Threads profile now has its exact pinned binary and
-validator foundation. The checked-in [67-opcode `0xfe` inventory](docs/.data/wasm-atomic-opcodes.json)
+The Phase-4 WebAssembly Threads profile now has its exact pinned binary,
+validator, and shared-memory embedding foundation. The checked-in [67-opcode `0xfe` inventory](docs/.data/wasm-atomic-opcodes.json)
 locks the 13-file proposal corpus, reserved opcode gap, immediates, natural
 alignments, and stack shapes. Shared memory limits decode behind the `threads`
 feature and require a maximum; every atomic instruction and fence validates
-with proposal-exact signatures. Shared backing/API ownership, execution and
-wait/notify, and terminal TSan/corpus/performance evidence remain explicitly
-tracked by [#285](https://github.com/zig-utils/zig-js/issues/285) through
+with proposal-exact signatures. `WebAssembly.Memory({shared:true})`, defined
+and imported shared memories, and `Memory.grow` use one stable refcounted slab.
+Each successful grow returns a fresh fixed-length `SharedArrayBuffer`; old
+buffers keep their original length without detaching and continue to alias the
+same bytes across imports, shared-realm `Thread`, structured clone, and isolated
+`Worker` boundaries. Atomic execution and wait/notify, followed by terminal
+TSan/corpus/performance evidence, remain tracked by
+[#286](https://github.com/zig-utils/zig-js/issues/286) and
 [#287](https://github.com/zig-utils/zig-js/issues/287); the profile is not yet
 presented as executable.
 

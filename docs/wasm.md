@@ -295,12 +295,35 @@ its specified zero reserved byte and remains valid without a memory. Atomic
 access and notify are valid on ordinary memories; wait-on-unshared is correctly
 reserved for a runtime trap rather than misclassified as a validation failure.
 
-This is a binary/validation foundation, not an executable-profile claim.
-Execution currently traps deterministically instead of exposing partial atomic
-semantics. Stable shared backing and JavaScript API ownership are tracked by
-[#285](https://github.com/zig-utils/zig-js/issues/285), atomic execution and
-wait/notify by [#286](https://github.com/zig-utils/zig-js/issues/286), and
-upstream/TSan/scaling evidence by
+At checkpoint `a62e0c55`, the shared-memory host boundary is complete.
+`MemoryInst` owns either an ordinary allocation or a refcounted stable shared
+slab reserved to the declared maximum. Shared growth is serialized and
+failure-atomic, does not move the slab, and returns unique previous page counts
+to racing callers. The JavaScript descriptor reads `initial`, `maximum`, then
+`shared`; shared memories require a maximum and link only to shared imports.
+
+The `Memory.buffer` contract follows the pinned Threads JS API rather than
+growable-SAB shortcuts: every successful grow publishes a new fixed-length
+`SharedArrayBuffer`, while historical buffers retain their old byte length,
+never detach, and alias the same data block. Wrapper references and the native
+memory owner independently retain the slab, so Context/registry/GC teardown
+cannot free bytes still held by another realm. Structured-clone wire version 2
+also carries each SAB wrapper's fixed/growable view metadata, preserving the
+same semantics through isolated Workers without serializing a store or native
+Memory owner.
+
+Focused witnesses cover eight racing native grows, constructor evaluation and
+error order, defined/exported/imported identity and sharedness mismatch,
+historical-buffer aliasing, precise ownership after native owner destruction,
+a real shared-realm `Thread`, and an isolated `Worker` that mutates an old
+64-KiB view after the live memory has grown to 128 KiB. The batched WebAssembly
+suite passes 176/176, Worker filters pass 33/33, and structured-clone filters
+pass 11/11 at this checkpoint, all with zero failures, skips, or leaks.
+
+This is a binary/validation/embedding foundation, not an executable-profile
+claim. Atomic instructions still trap deterministically instead of exposing
+partial semantics. Atomic execution and wait/notify are tracked by
+[#286](https://github.com/zig-utils/zig-js/issues/286), and upstream/TSan/scaling evidence by
 [#287](https://github.com/zig-utils/zig-js/issues/287). Parent
 [#265](https://github.com/zig-utils/zig-js/issues/265) closes only after all
 three are complete.
@@ -309,8 +332,8 @@ Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation.
 A selected feature with no landed binary foundation produces a deterministic
 `WebAssembly.CompileError` identifying it; the explicitly documented Threads
-foundation above instead decodes and validates before its deterministic runtime
-trap until #285/#286 complete the profile:
+foundation above instead decodes, validates, and supplies the shared-memory JS
+boundary before its deterministic runtime trap until #286 completes execution:
 
 ```zig
 const ctx = try js.Context.createWith(gpa, .{

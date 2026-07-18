@@ -68,6 +68,12 @@ ownership manifest and payloads reference them by canonical index, so rejected
 payload cleanup does not depend on recursive payload parsing. Unknown,
 out-of-order, duplicate, and replayed references, as well as trailing payloads,
 fail closed.
+The same frame carries the SharedArrayBuffer wrapper's fixed-length or growable
+view metadata. This matters for shared `WebAssembly.Memory`: growth creates a
+new fixed-length wrapper over one stable slab, while an old wrapper keeps its
+original length. Sending either wrapper to an isolated Worker preserves that
+exact length and aliasing without sending the `Memory`, its Context store, or a
+native owner pointer. Shared-realm `Thread`s keep the wrapper itself by identity.
 Resizable `ArrayBuffer` storage is in this engine-state category even when the
 JavaScript program intentionally races view operations with resize. Typed-array
 and `DataView` helpers borrow the live byte slice through the buffer lock when a
