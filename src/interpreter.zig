@@ -37,6 +37,7 @@ const cldr_locale = @import("cldr_locale.zig");
 const cldr_plurals = @import("cldr_plurals.zig");
 const cldr_timedata = @import("cldr_timedata.zig");
 const cldr_tzalias = @import("cldr_tzalias.zig");
+const wasm_api = @import("wasm/api.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -1138,6 +1139,12 @@ pub const Interpreter = struct {
     gc_checkpoint_ctx: ?*anyopaque = null,
     gc_checkpoint_fn: ?*const fn (ctx: *anyopaque) void = null,
     gc_recover_allocation_fn: ?*const fn (ctx: *anyopaque) bool = null,
+    /// Opaque owning `Context` for the WebAssembly JS API store (issue #141):
+    /// wasm natives register and look up context-owned native wasm allocations
+    /// through it. Null in isolated interpreter unit helpers — the wasm API
+    /// then reports the store unavailable. Mirrors the type-erased
+    /// `gc_checkpoint_ctx` back-pointer above.
+    wasm_store_ctx: ?*anyopaque = null,
     /// Optional Context callback invoked at the engine step checkpoints
     /// (`(steps & 1023) == 0`) to run a guarded mid-script collection. Set only
     /// when the GC is on; null = zero cost. The callback owns the safety policy
@@ -2314,7 +2321,7 @@ pub const Interpreter = struct {
         return true;
     }
 
-    fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
+    pub fn makeErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: ?*value.Object) EvalError!Value {
         const obj = try gc_mod.allocObj(self.arena);
         obj.* = .{ .behavior = .{ .is_error = true } };
         try obj.setErrorName(self.arena, name);
@@ -2434,6 +2441,16 @@ pub const Interpreter = struct {
     /// `error.Throw` (or `error.OutOfMemory` if the error object can't be built).
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
+        try self.notifyDebuggerException(false);
+        return error.Throw;
+    }
+
+    /// Like `throwError`, but the error object's [[Prototype]] is given
+    /// explicitly instead of being recovered from the realm's `<name>` binding.
+    /// Used by the WebAssembly error classes, whose constructors live on the
+    /// WebAssembly namespace rather than as global bindings (issue #141).
+    pub fn throwErrorWithProto(self: *Interpreter, name: []const u8, message: []const u8, proto: *value.Object) EvalError {
+        self.exception = try self.makeErrorWithProto(name, message, proto);
         try self.notifyDebuggerException(false);
         return error.Throw;
     }
@@ -29884,6 +29901,10 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
 
     // The test262 `$262` host object (its `global` is set by the realm owner).
     try install262(env, root_shape, object_proto);
+
+    // The WebAssembly JS API (issue #141, part 1): the WebAssembly namespace,
+    // its CompileError/LinkError/RuntimeError constructors, and Module.
+    try wasm_api.installWebAssembly(env, root_shape);
 }
 
 /// `next()` for a `makeCursorIterator` object: yields successive elements of the

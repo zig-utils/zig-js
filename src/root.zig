@@ -103,6 +103,7 @@ test {
     _ = @import("wasm/exec.zig");
     _ = @import("wasm/types.zig");
     _ = @import("wasm/validate.zig");
+    _ = @import("wasm/api.zig");
 }
 
 test "evalNumber convenience" {

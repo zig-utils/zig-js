@@ -24,6 +24,7 @@ const parser_mod = @import("parser.zig");
 const object_profile = @import("object_profile.zig");
 const structured_clone = @import("structured_clone.zig");
 const jit = @import("jit.zig");
+const wasm_api = @import("wasm/api.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -2198,6 +2199,19 @@ pub fn enableParallelSync() void {
     @import("bytecode.zig").ic_seqlock_enabled.store(true, .release);
 }
 
+/// One native WebAssembly allocation owned by a Context's wasm store (issue
+/// #141). The payload is type-erased per tag: `*wasm/types.Module`,
+/// `*wasm/exec.Instance`, `*wasm/exec.MemoryInst`, `*wasm/exec.TableInst`,
+/// `*wasm/exec.GlobalInst`. Freed by `wasm/api.zig`'s `teardownWasmStore` at
+/// context teardown.
+pub const WasmOwned = union(enum) {
+    module: *anyopaque,
+    instance: *anyopaque,
+    memory: *anyopaque,
+    table: *anyopaque,
+    global: *anyopaque,
+};
+
 /// `JSGlobalContextRef`. Owns an arena for all interpreter-lived allocations
 /// (AST, strings, objects, boxed values) and a persistent global environment
 /// so variables survive across `evaluate` calls, like a real global context.
@@ -2344,6 +2358,14 @@ pub const Context = struct {
     /// may finish a record early; teardown finishes arena-mode survivors and
     /// destroys every record after all object cells are gone.
     c_api_object_owners: std.ArrayListUnmanaged(*value.CApiObjectOwner) = .empty,
+    /// WebAssembly native allocations owned by this context (issue #141).
+    /// Every decoded module / instance / host-created store object goes here so
+    /// `teardownWasmStore` can free them (with `gpa`, never the arena) at
+    /// context teardown.
+    wasm_registry: std.ArrayListUnmanaged(WasmOwned) = .empty,
+    /// The interpreter most recently executing WebAssembly JS-API work on this
+    /// context (type-erased `*interp.Interpreter`), used by wasm↔JS callbacks.
+    wasm_active_interp: ?*anyopaque = null,
     /// Shared automatic JSClassRef prototypes. These are explicit GC roots and
     /// each record retains its class until Context teardown.
     c_api_class_prototypes: std.ArrayListUnmanaged(*value.CApiClassPrototypeOwner) = .empty,
@@ -3118,6 +3140,7 @@ pub const Context = struct {
             .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
             .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
             .private_name_serial = &self.private_name_serial,
+            .wasm_store_ctx = self,
             .dyn_import = if (self.mod_host != null) dynImportHook else null,
             .dyn_import_ctx = if (self.mod_host != null) self else null,
             .defer_trigger = if (self.mod_host != null) deferTriggerHook else null,
@@ -3263,6 +3286,11 @@ pub const Context = struct {
             self.gpa.destroy(la);
             self.locked_arena = null;
         }
+        // Free every WebAssembly native allocation while the arena (which may
+        // still hold JS wrappers pointing at them) is alive; idempotent, and
+        // the registry list itself is gpa-owned (issue #141).
+        wasm_api.teardownWasmStore(self);
+        self.wasm_registry.deinit(self.gpa);
         self.sab_retains.deinit();
         self.jit_owner.deinit();
         self.arena_state.deinit();
@@ -3313,6 +3341,8 @@ pub const Context = struct {
         self.module_loader_sources.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
         self.handled_rejections.deinit(self.arena());
+        wasm_api.teardownWasmStore(self);
+        self.wasm_registry.deinit(self.gpa);
         self.sab_retains.deinit();
         self.jit_owner.deinit();
         self.gpa.destroy(self);
