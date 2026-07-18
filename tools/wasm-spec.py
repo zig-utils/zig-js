@@ -107,6 +107,19 @@ def action_expression(action: dict) -> str:
     raise ValueError(f"unknown action type {action['type']}")
 
 
+def raw_action_expression(action: dict) -> str:
+    instance = instance_expression(action)
+    target = f"{instance}.exports[{js_string(action['field'])}]"
+    if action["type"] == "get":
+        return f"__wasmSpecInvokeBits({target})"
+    if action["type"] == "invoke":
+        args = "".join(
+            f",{js_string(value['value'])}" for value in action.get("args", [])
+        )
+        return f"__wasmSpecInvokeBits({target}{args})"
+    raise ValueError(f"unknown raw action type {action['type']}")
+
+
 def is_nan_bits(value: dict) -> bool:
     kind = value.get("type")
     raw = int(value.get("value", "0"), 0)
@@ -136,8 +149,8 @@ function __f32(bits) { __view.setUint32(0, Number(bits), true); return __view.ge
 function __f64(bits) { __view.setBigUint64(0, BigInt(bits), true); return __view.getFloat64(0, true); }
 function __f32bits(value) { __view.setFloat32(0, value, true); return __view.getUint32(0, true); }
 function __f64bits(value) { __view.setFloat64(0, value, true); return __view.getBigUint64(0, true); }
-function __record(index, line, type, status, detail) {
-  const entry = { index, line, type, status };
+function __record(index, line, type, status, detail, mode) {
+  const entry = { index, line, type, status, mode: mode || 'javascript_api' };
   if (detail) entry.detail = detail;
   __report.commands.push(entry);
 }
@@ -171,10 +184,17 @@ __registry.spectest = {
 """
 
 
-def record_line(index: int, command: dict, status: str, detail: str = "") -> str:
+def record_line(
+    index: int,
+    command: dict,
+    status: str,
+    detail: str = "",
+    mode: str = "javascript_api",
+) -> str:
     return (
         f"__record({index},{int(command.get('line', 0))},"
-        f"{js_string(command['type'])},{js_string(status)},{js_string(detail)});"
+        f"{js_string(command['type'])},{js_string(status)},{js_string(detail)},"
+        f"{js_string(mode)});"
     )
 
 
@@ -234,11 +254,23 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
             )
         if kind == "assert_return":
             if requires_bit_exact_nan(command):
-                return record_line(
-                    index,
-                    command,
-                    "not_applicable",
-                    "exact NaN payload/sign is not observable through JavaScript Number; tracked by #261",
+                expected = command.get("expected", [])
+                if len(expected) != 1:
+                    return record_line(
+                        index,
+                        command,
+                        "runner_error",
+                        "bit-exact MVP assertion must have one result",
+                        "bit_exact",
+                    )
+                expression = raw_action_expression(command["action"])
+                expected_bits = js_string(expected[0]["value"])
+                return (
+                    f"{{try{{const __actual={expression};if(__actual==={expected_bits}){{"
+                    f"{record_line(index, command, 'pass', mode='bit_exact')}"
+                    f"}}else{{{record_line(index, command, 'fail', 'raw result mismatch', 'bit_exact')}}}"
+                    f"}}catch(__error){{__record({index},{int(command.get('line', 0))},"
+                    f"{js_string(kind)},'fail',__message(__error),'bit_exact');}}}}"
                 )
             expression = action_expression(command["action"])
             expected = json.dumps(command.get("expected", []), separators=(",", ":"))
@@ -272,6 +304,7 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                     command,
                     "not_applicable",
                     "text-format syntax is not exposed by the JavaScript binary API",
+                    "not_applicable",
                 )
             binary = binary_expression(directory / command["filename"])
             return expected_exception(
@@ -437,7 +470,7 @@ def main() -> int:
     totals = counts(all_commands)
     engine_commit = checked_output(["git", "rev-parse", "HEAD"], ROOT)
     inventory = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "webassembly_wg_1_0_core_inventory",
         "spec": {
             "repository": "https://github.com/WebAssembly/spec.git",
