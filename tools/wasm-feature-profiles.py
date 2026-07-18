@@ -44,6 +44,16 @@ def main() -> int:
         default=ROOT / "src/wasm/simd.zig",
     )
     parser.add_argument(
+        "--atomic-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-atomic-opcodes.json",
+    )
+    parser.add_argument(
+        "--atomic-source",
+        type=Path,
+        default=ROOT / "src/wasm/atomic.zig",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -107,6 +117,35 @@ def main() -> int:
     }
     inventoried_simd = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(names, subopcodes)}
     require(runtime_simd == inventoried_simd, "SIMD inventory/runtime opcode drift")
+
+    threads_feature = next(feature for feature in features if feature["id"] == "threads")
+    atomic_inventory = json.loads(args.atomic_inventory.read_text())
+    require(atomic_inventory.get("schema_version") == 1, "atomic inventory: unsupported schema version")
+    require(atomic_inventory.get("kind") == "webassembly_threads_atomic_opcode_inventory", "atomic inventory: invalid kind")
+    require(atomic_inventory.get("prefix") == "0xfe", "atomic inventory: invalid opcode prefix")
+    require(atomic_inventory.get("source", {}).get("repository") == threads_feature["repository"], "atomic inventory/registry repository drift")
+    require(atomic_inventory.get("source", {}).get("commit") == threads_feature["commit"], "atomic inventory/registry commit drift")
+    require(atomic_inventory.get("source", {}).get("corpus_files") == 13, "atomic inventory: expected 13 corpus files")
+    atomic_opcodes = atomic_inventory.get("opcodes", [])
+    require(atomic_inventory.get("opcode_count") == len(atomic_opcodes) == 67, "atomic inventory: expected 67 opcodes")
+    atomic_subopcodes = [entry.get("subopcode") for entry in atomic_opcodes]
+    atomic_names = [entry.get("name") for entry in atomic_opcodes]
+    require(len(atomic_subopcodes) == len(set(atomic_subopcodes)), "atomic inventory: duplicate subopcode")
+    require(len(atomic_names) == len(set(atomic_names)), "atomic inventory: duplicate instruction name")
+    require(all(isinstance(value, int) and 0 <= value <= 0x4E for value in atomic_subopcodes), "atomic inventory: invalid subopcode")
+    require(set(range(0x04, 0x10)).isdisjoint(atomic_subopcodes), "atomic inventory: reserved subopcode used")
+    require(atomic_inventory.get("reserved_subopcode_ranges") == [[0x04, 0x0F]], "atomic inventory: reserved range drift")
+    require(all(entry.get("immediate") in {"memarg", "fence"} for entry in atomic_opcodes), "atomic inventory: invalid immediate kind")
+    require(all(entry.get("natural_alignment") in {None, 0, 1, 2, 3} for entry in atomic_opcodes), "atomic inventory: invalid natural alignment")
+    require(all(entry.get("shape") in {"notify", "wait32", "wait64", "fence", "load_i32", "load_i64", "store_i32", "store_i64", "rmw_i32", "rmw_i64", "cmpxchg_i32", "cmpxchg_i64"} for entry in atomic_opcodes), "atomic inventory: invalid stack shape")
+    atomic_source = args.atomic_source.read_text()
+    atomic_enum = atomic_source.split("pub const Op = enum(u8) {", 1)[1].split("pub fn fromSubopcode", 1)[0]
+    runtime_atomic = {
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{2}),$", atomic_enum, re.MULTILINE)
+    }
+    inventoried_atomic = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(atomic_names, atomic_subopcodes)}
+    require(runtime_atomic == inventoried_atomic, "atomic inventory/runtime opcode drift")
 
     movement = json.loads(args.simd_movement_inventory.read_text())
     require(movement.get("schema_version") == 2, "SIMD movement inventory: unsupported schema version")

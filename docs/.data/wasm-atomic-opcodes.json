@@ -1,0 +1,491 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_threads_atomic_opcode_inventory",
+  "prefix": "0xfe",
+  "source": {
+    "repository": "https://github.com/WebAssembly/threads.git",
+    "commit": "979d0fcb994439423d63b2f0a8a7332d6285dd84",
+    "document": "document/core/appendix/index-instructions.py",
+    "corpus": "test/core/threads/*.wast",
+    "corpus_files": 13,
+    "license": "Apache-2.0"
+  },
+  "opcode_count": 67,
+  "reserved_subopcode_ranges": [
+    [
+      4,
+      15
+    ]
+  ],
+  "opcodes": [
+    {
+      "name": "memory.atomic.notify",
+      "subopcode": 0,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "notify"
+    },
+    {
+      "name": "memory.atomic.wait32",
+      "subopcode": 1,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "wait32"
+    },
+    {
+      "name": "memory.atomic.wait64",
+      "subopcode": 2,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "wait64"
+    },
+    {
+      "name": "memory.atomic.fence",
+      "subopcode": 3,
+      "immediate": "fence",
+      "natural_alignment": null,
+      "shape": "fence"
+    },
+    {
+      "name": "i32.atomic.load",
+      "subopcode": 16,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "load_i32"
+    },
+    {
+      "name": "i64.atomic.load",
+      "subopcode": 17,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "load_i64"
+    },
+    {
+      "name": "i32.atomic.load8_u",
+      "subopcode": 18,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "load_i32"
+    },
+    {
+      "name": "i32.atomic.load16_u",
+      "subopcode": 19,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "load_i32"
+    },
+    {
+      "name": "i64.atomic.load8_u",
+      "subopcode": 20,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "load_i64"
+    },
+    {
+      "name": "i64.atomic.load16_u",
+      "subopcode": 21,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "load_i64"
+    },
+    {
+      "name": "i64.atomic.load32_u",
+      "subopcode": 22,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "load_i64"
+    },
+    {
+      "name": "i32.atomic.store",
+      "subopcode": 23,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "store_i32"
+    },
+    {
+      "name": "i64.atomic.store",
+      "subopcode": 24,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "store_i64"
+    },
+    {
+      "name": "i32.atomic.store8",
+      "subopcode": 25,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "store_i32"
+    },
+    {
+      "name": "i32.atomic.store16",
+      "subopcode": 26,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "store_i32"
+    },
+    {
+      "name": "i64.atomic.store8",
+      "subopcode": 27,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "store_i64"
+    },
+    {
+      "name": "i64.atomic.store16",
+      "subopcode": 28,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "store_i64"
+    },
+    {
+      "name": "i64.atomic.store32",
+      "subopcode": 29,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "store_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.add",
+      "subopcode": 30,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.add",
+      "subopcode": 31,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.add_u",
+      "subopcode": 32,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.add_u",
+      "subopcode": 33,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.add_u",
+      "subopcode": 34,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.add_u",
+      "subopcode": 35,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.add_u",
+      "subopcode": 36,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.sub",
+      "subopcode": 37,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.sub",
+      "subopcode": 38,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.sub_u",
+      "subopcode": 39,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.sub_u",
+      "subopcode": 40,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.sub_u",
+      "subopcode": 41,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.sub_u",
+      "subopcode": 42,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.sub_u",
+      "subopcode": 43,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.and",
+      "subopcode": 44,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.and",
+      "subopcode": 45,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.and_u",
+      "subopcode": 46,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.and_u",
+      "subopcode": 47,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.and_u",
+      "subopcode": 48,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.and_u",
+      "subopcode": 49,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.and_u",
+      "subopcode": 50,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.or",
+      "subopcode": 51,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.or",
+      "subopcode": 52,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.or_u",
+      "subopcode": 53,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.or_u",
+      "subopcode": 54,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.or_u",
+      "subopcode": 55,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.or_u",
+      "subopcode": 56,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.or_u",
+      "subopcode": 57,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.xor",
+      "subopcode": 58,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.xor",
+      "subopcode": 59,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.xor_u",
+      "subopcode": 60,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.xor_u",
+      "subopcode": 61,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.xor_u",
+      "subopcode": 62,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.xor_u",
+      "subopcode": 63,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.xor_u",
+      "subopcode": 64,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.xchg",
+      "subopcode": 65,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.xchg",
+      "subopcode": 66,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.xchg_u",
+      "subopcode": 67,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.xchg_u",
+      "subopcode": 68,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.xchg_u",
+      "subopcode": 69,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.xchg_u",
+      "subopcode": 70,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.xchg_u",
+      "subopcode": 71,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "rmw_i64"
+    },
+    {
+      "name": "i32.atomic.rmw.cmpxchg",
+      "subopcode": 72,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "cmpxchg_i32"
+    },
+    {
+      "name": "i64.atomic.rmw.cmpxchg",
+      "subopcode": 73,
+      "immediate": "memarg",
+      "natural_alignment": 3,
+      "shape": "cmpxchg_i64"
+    },
+    {
+      "name": "i32.atomic.rmw8.cmpxchg_u",
+      "subopcode": 74,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "cmpxchg_i32"
+    },
+    {
+      "name": "i32.atomic.rmw16.cmpxchg_u",
+      "subopcode": 75,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "cmpxchg_i32"
+    },
+    {
+      "name": "i64.atomic.rmw8.cmpxchg_u",
+      "subopcode": 76,
+      "immediate": "memarg",
+      "natural_alignment": 0,
+      "shape": "cmpxchg_i64"
+    },
+    {
+      "name": "i64.atomic.rmw16.cmpxchg_u",
+      "subopcode": 77,
+      "immediate": "memarg",
+      "natural_alignment": 1,
+      "shape": "cmpxchg_i64"
+    },
+    {
+      "name": "i64.atomic.rmw32.cmpxchg_u",
+      "subopcode": 78,
+      "immediate": "memarg",
+      "natural_alignment": 2,
+      "shape": "cmpxchg_i64"
+    }
+  ]
+}
