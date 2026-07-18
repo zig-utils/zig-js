@@ -127,9 +127,17 @@ def value_expression(value: dict) -> str:
     if kind == "i64":
         return f"BigInt.asIntN(64, BigInt({raw}))"
     if kind == "f32":
+        if value["value"].startswith("nan:"):
+            return "NaN"
         return f"__f32({raw})"
     if kind == "f64":
+        if value["value"].startswith("nan:"):
+            return "NaN"
         return f"__f64({raw})"
+    if kind == "externref":
+        return f"__externref({raw})"
+    if kind == "funcref" and value["value"] == "null":
+        return "null"
     raise ValueError(f"unknown value type {kind}")
 
 
@@ -159,7 +167,12 @@ def raw_action_expression(action: dict) -> str:
 
 def is_nan_bits(value: dict) -> bool:
     kind = value.get("type")
-    raw = int(value.get("value", "0"), 0)
+    if kind not in ("f32", "f64"):
+        return False
+    literal = value.get("value", "0")
+    if not isinstance(literal, str) or literal.startswith("nan:"):
+        return False
+    raw = int(literal, 0)
     if kind == "f32":
         return raw & 0x7F800000 == 0x7F800000 and raw & 0x007FFFFF != 0
     if kind == "f64":
@@ -171,7 +184,10 @@ def is_nan_bits(value: dict) -> bool:
 
 
 def requires_bit_exact_nan(command: dict) -> bool:
-    values = command.get("expected", []) + command.get("action", {}).get("args", [])
+    expected = command.get("expected", [])
+    if any(str(value.get("value", "")).startswith("nan:") for value in expected):
+        return False
+    values = expected + command.get("action", {}).get("args", [])
     return any(is_nan_bits(value) for value in values)
 
 
@@ -181,11 +197,17 @@ const __modules = Object.create(null);
 const __registry = Object.create(null);
 let __last = null;
 const __scratch = new ArrayBuffer(8);
+const __externrefs = new Map();
 const __view = new DataView(__scratch);
 function __f32(bits) { __view.setUint32(0, Number(bits), true); return __view.getFloat32(0, true); }
 function __f64(bits) { __view.setBigUint64(0, BigInt(bits), true); return __view.getFloat64(0, true); }
 function __f32bits(value) { __view.setFloat32(0, value, true); return __view.getUint32(0, true); }
 function __f64bits(value) { __view.setFloat64(0, value, true); return __view.getBigUint64(0, true); }
+function __externref(value) {
+  if (value === 'null') return null;
+  if (!__externrefs.has(value)) __externrefs.set(value, { specExternref: value });
+  return __externrefs.get(value);
+}
 function __record(index, line, type, status, detail, mode) {
   const entry = { index, line, type, status, mode: mode || 'javascript_api' };
   if (detail) entry.detail = detail;
@@ -198,23 +220,29 @@ function __get(instance, field) {
   const value = instance.exports[field];
   return value instanceof WebAssembly.Global ? value.value : value;
 }
-function __same(actual, expected) {
-  if (expected.length === 0) return actual === undefined;
-  if (expected.length !== 1) return false;
-  const item = expected[0];
+function __sameOne(actual, item) {
   if (item.type === 'i32') return (actual | 0) === (Number(item.value) | 0);
   if (item.type === 'i64') return actual === BigInt.asIntN(64, BigInt(item.value));
-  if (item.type === 'f32') return __f32bits(actual) === Number(item.value);
-  if (item.type === 'f64') return __f64bits(actual) === BigInt(item.value);
+  if (item.type === 'f32') return item.value.startsWith('nan:') ? Number.isNaN(actual) : __f32bits(actual) === Number(item.value);
+  if (item.type === 'f64') return item.value.startsWith('nan:') ? Number.isNaN(actual) : __f64bits(actual) === BigInt(item.value);
+  if (item.type === 'externref') return actual === __externref(item.value);
+  if (item.type === 'funcref' && item.value === 'null') return actual === null;
   return false;
 }
+function __same(actual, expected) {
+  if (expected.length === 0) return actual === undefined;
+  const values = expected.length === 1 ? [actual] : actual;
+  if (!Array.isArray(values) || values.length !== expected.length) return false;
+  for (let i = 0; i < expected.length; i++) if (!__sameOne(values[i], expected[i])) return false;
+  return true;
+}
 __registry.spectest = {
-  print() {}, print_i32() {}, print_f32() {}, print_f64() {},
+  print() {}, print_i32() {}, print_i64() {}, print_f32() {}, print_f64() {},
   print_i32_f32() {}, print_f64_f64() {},
   global_i32: 666,
   global_i64: 666n,
-  global_f32: 666,
-  global_f64: 666,
+  global_f32: 666.6,
+  global_f64: 666.6,
   table: new WebAssembly.Table({ initial: 10, maximum: 20, element: 'anyfunc' }),
   memory: new WebAssembly.Memory({ initial: 1, maximum: 2 }),
 };
