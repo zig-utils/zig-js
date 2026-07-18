@@ -314,6 +314,19 @@ const InspectorEventQueue = struct {
         q.mutex.unlock(io);
     }
 
+    /// Publish terminal runtime ownership while holding the queue mutex. An
+    /// owner that observes `runtime_detached` must still take this mutex in
+    /// `close`, so it cannot deinitialize the queue until this final worker-side
+    /// access has completed.
+    fn closeAndDetach(q: *InspectorEventQueue, runtime_detached: *std.atomic.Value(bool)) void {
+        const io = agent.engineIo();
+        q.mutex.lockUncancelable(io);
+        q.closed = true;
+        runtime_detached.store(true, .release);
+        q.cond.broadcast(io);
+        q.mutex.unlock(io);
+    }
+
     fn waitUntilDetached(q: *InspectorEventQueue, runtime_detached: *const std.atomic.Value(bool)) void {
         const io = agent.engineIo();
         q.mutex.lockUncancelable(io);
@@ -331,6 +344,7 @@ pub const InspectorClient = struct {
     worker: *Worker,
     id: u64,
     owner_thread: std.Thread.Id,
+    refs: std.atomic.Value(usize) = .init(1),
     events: InspectorEventQueue = .{},
     transport_closed: std.atomic.Value(bool) = .init(false),
     /// Set only after the runtime has released (or declined to create) its
@@ -345,6 +359,17 @@ pub const InspectorClient = struct {
     pub fn isOwnerThread(client: *const InspectorClient) bool {
         return client.owner_thread == std.Thread.getCurrentId();
     }
+
+    fn retain(client: *InspectorClient) void {
+        const previous = client.refs.fetchAdd(1, .monotonic);
+        std.debug.assert(previous != 0 and previous != std.math.maxInt(usize));
+    }
+
+    fn releaseRef(client: *InspectorClient) void {
+        const previous = client.refs.fetchSub(1, .acq_rel);
+        std.debug.assert(previous != 0);
+        if (previous == 1) alloc.destroy(client);
+    }
 };
 
 const InspectorCommandKind = enum { attach, dispatch, detach };
@@ -355,8 +380,10 @@ const InspectorCommand = struct {
     message: []u8 = &.{},
 
     fn deinit(command: *InspectorCommand) void {
+        const client = command.client;
         if (command.message.len != 0) alloc.free(command.message);
         command.* = undefined;
+        client.releaseRef();
     }
 };
 
@@ -419,11 +446,7 @@ const InspectorCommandQueue = struct {
     }
 
     fn deinit(q: *InspectorCommandQueue) void {
-        for (q.items.items[q.head..]) |*command| {
-            command.client.transport_closed.store(true, .release);
-            command.client.events.close();
-            command.deinit();
-        }
+        for (q.items.items[q.head..]) |*command| command.deinit();
         q.items.deinit(alloc);
     }
 };
@@ -728,6 +751,8 @@ pub const Worker = struct {
     fn enqueueInspectorCommand(w: *Worker, kind: InspectorCommandKind, client: *InspectorClient, message: []const u8) !void {
         const copy: []u8 = if (message.len == 0) @constCast(&.{}) else try alloc.dupe(u8, message);
         errdefer if (copy.len != 0) alloc.free(copy);
+        client.retain();
+        errdefer client.releaseRef();
         try w.inspector_commands.push(.{ .kind = kind, .client = client, .message = copy });
         w.inbox.wake();
     }
@@ -776,7 +801,7 @@ pub const Worker = struct {
         client.transport_closed.store(true, .release);
         client.events.close();
         client.events.deinit();
-        alloc.destroy(client);
+        client.releaseRef();
     }
 
     /// Spawn a worker running `src` in a fresh realm on its own thread. The
@@ -945,7 +970,7 @@ fn activeInspectorSessionIndex(w: *Worker, client: *InspectorClient) ?usize {
 }
 
 fn finishInspectorClient(client: *InspectorClient, reason: []const u8) void {
-    if (client.runtime_detached.swap(true, .acq_rel)) return;
+    if (client.runtime_detached.load(.acquire)) return;
     if (client.detach_fallback.swap(false, .acq_rel))
         _ = client.worker.inspector_commands.pending.fetchSub(1, .acq_rel);
     if (!client.transport_closed.load(.acquire)) {
@@ -958,7 +983,7 @@ fn finishInspectorClient(client: *InspectorClient, reason: []const u8) void {
         client.events.push(.{ .kind = .detached }) catch {};
     }
     client.transport_closed.store(true, .release);
-    client.events.close();
+    client.events.closeAndDetach(&client.runtime_detached);
 }
 
 fn serviceInspectorFallbackDetaches(w: *Worker) bool {
