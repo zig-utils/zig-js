@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing MVP implementation on main through `9e16789e` provides:
+The JS-facing runtime on main through `5374e601` provides:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -31,16 +31,18 @@ The JS-facing MVP implementation on main through `9e16789e` provides:
   old buffer, and publishes a fresh buffer identity;
 - transfer/detach protection for live Memory buffers, including
   `structuredClone`, ArrayBuffer transfer methods, and the test host hook;
-- `WebAssembly.Global` for mutable and immutable `i32`, `i64`, `f32`, and `f64`
-  values, including modulo integer conversion, BigInt boundaries, `valueOf`,
-  and numeric coercion;
-- `WebAssembly.Table` with `anyfunc` null/function references, exact JS identity,
-  bounds checks, `get`, `set`, `grow`, and GC-visible atomic reference slots;
+- `WebAssembly.Global` for mutable and immutable numeric and reference values,
+  including modulo integer conversion, BigInt boundaries, arbitrary externref
+  identity, `valueOf`, and numeric coercion;
+- `WebAssembly.Table` with `anyfunc`/`funcref` and `externref` elements, exact JS
+  identity, bounds checks, `get`, `set`, `grow`, and GC-visible atomic reference
+  slots;
 - `WebAssembly.Instance` with all four import/export kinds, limit/type checks,
   active element/data segments, start functions, imported-store identity, and
   immutable null-prototype exports, including primitive immutable-global
   imports and failure-atomic linking;
-- callable exported functions with i32/i64/f32/f64 conversion, JS import calls,
+- callable exported functions with numeric, funcref, and externref conversion,
+  JS import calls, mixed multi-value results, canonical function identity,
   exception identity, indirect calls, and `RuntimeError` traps;
 - `WebAssembly.compile` and both `WebAssembly.instantiate` Promise overloads,
   including synchronous byte snapshots, queued work, asynchronous rejection,
@@ -56,17 +58,20 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 151/151 at `d2fca189`, covering the
+The focused WebAssembly unit suite passes 153/153 at `d3736891`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
 classes, the opt-in Core 2.0 numeric and multi-value operations, tagged
 funcref/externref invocation and global slots, balanced root publication across
-return/checkpoint/trap paths, and the test-only bit-exact corpus boundary. A
-separate no-GIL filter passes 3/3 at the same checkpoint and proves a completed
-parallel mid-script collection retains an externref held only by a frozen Wasm
+return/checkpoint/trap paths, reference-valued JS/Wasm calls, explicit
+multi-table operations, cross-instance indirect calls, and the test-only
+bit-exact corpus boundary. The strengthened table-index witness passes its
+focused 3/3 filter at `5374e601`. The separately recorded no-GIL filter passes
+3/3 at `d2fca189` and proves a completed parallel mid-script collection retains
+an externref held only by a frozen Wasm
 frame, then reclaims it after that frame unregisters. The most recent batched
-full engine checkpoint passes 1,002/1,002 at `af689c4a`. Both runs report zero
+full engine checkpoint passes 1,002/1,002 at `af689c4a`. All recorded runs report zero
 failures, skips, and leaks.
 
 The checked-in [upstream inventory](.data/wasm-spec-inventory.json) pins
@@ -114,8 +119,8 @@ The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 12 selected proposal repositories by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
-keeps MVP as the only default/implemented profile until the corresponding
-runtime child issue is actually complete. Validate registry drift with:
+keeps MVP as the only default complete profile until all features in a named
+post-MVP profile are implemented. Validate registry drift with:
 
 ```sh
 zig build wasm-feature-profiles-check
@@ -153,9 +158,11 @@ cover reference value positions, typed select, `ref.*`, explicit table indices,
 multiple typed tables, and `table.get/set/grow/size/fill`; the interpreter
 executes tagged funcref and arbitrary externref tables. JavaScript externref
 Table and Global values preserve identity through get/set/grow and precise GC,
-then reclaim exactly after overwrite. [#275](https://github.com/zig-utils/zig-js/issues/275)
-remains open for complete reference-valued JavaScript/Wasm function calls and
-cross-instance multi-table evidence.
+then reclaim exactly after overwrite. Reference-valued exports and imports
+preserve arbitrary externref identity and canonical funcref identity, including
+mixed multi-value results. Explicit table indices select the intended table for
+get/grow/fill and cross-instance indirect calls. This reference-types slice was
+completed in [#275](https://github.com/zig-utils/zig-js/issues/275).
 
 Implementation is split into the shared gating foundation
 [#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
