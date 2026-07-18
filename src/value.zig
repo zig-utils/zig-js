@@ -1116,6 +1116,7 @@ pub const ObjectRareTag = enum(u8) {
     wasm_table,
     wasm_global,
     wasm_function,
+    wasm_tag,
 };
 
 /// Structured JavaScript stack metadata retained when an Error is created.
@@ -1197,6 +1198,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
     wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
+    wasm_tag: struct { tag: ?*anyopaque = null, store: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.TagInst
 };
 
 /// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
@@ -1931,6 +1933,7 @@ pub const Object = struct {
                 .owner_obj = cold.rare.wasm_global.owner_obj,
             },
             .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
+            .wasm_tag => .{ .owner_obj = cold.rare.wasm_tag.owner_obj },
             else => .{},
         };
     }
@@ -2261,6 +2264,16 @@ pub const Object = struct {
 
     pub fn wasmFunctionState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_function") {
         return self.ensureRare(fallback, .wasm_function, .{});
+    }
+
+    pub inline fn wasmTag(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_tag") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_tag)) return null;
+        return &cold.rare.wasm_tag;
+    }
+
+    pub fn wasmTagState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_tag") {
+        return self.ensureRare(fallback, .wasm_tag, .{});
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {

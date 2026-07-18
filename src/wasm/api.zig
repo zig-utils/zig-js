@@ -76,6 +76,7 @@ const ModuleDescriptor = struct { proto: *Object, compile_error_proto: *Object }
 const MemoryDescriptor = struct { proto: *Object };
 const TableDescriptor = struct { proto: *Object };
 const GlobalDescriptor = struct { proto: *Object };
+const TagDescriptor = struct { proto: *Object };
 const InstanceDescriptor = struct {
     proto: *Object,
     roots: *Object,
@@ -83,6 +84,7 @@ const InstanceDescriptor = struct {
     memory_proto: *Object,
     table_proto: *Object,
     global_proto: *Object,
+    tag_proto: *Object,
     link_error_proto: *Object,
     runtime_error_proto: *Object,
 };
@@ -115,6 +117,18 @@ const GlobalOwner = struct {
 
     fn deinit(self: *GlobalOwner) void {
         if (self.owns_native) exec.destroyGlobal(self.store.gpa, self.glob);
+        self.store.gpa.destroy(self);
+    }
+};
+
+const TagOwner = struct {
+    store: *context.Context,
+    tag: *exec.TagInst,
+    params: []types.ValType,
+
+    fn deinit(self: *TagOwner) void {
+        exec.destroyTag(self.store.gpa, self.tag);
+        self.store.gpa.free(self.params);
         self.store.gpa.destroy(self);
     }
 };
@@ -1095,6 +1109,63 @@ fn globalValueOf(ctx: *anyopaque, this: Value, _: []const Value) value.HostError
     return globalValue(self, (try globalFromThis(self, this, "WebAssembly.Global.prototype.valueOf requires a Global")).glob);
 }
 
+fn tagValueType(self: *Interpreter, input: Value) value.HostError!types.ValType {
+    const name = try self.toStringV(input);
+    inline for ([_]types.ValType{ .i32, .i64, .f32, .f64, .v128, .funcref, .externref }) |kind|
+        if (std.mem.eql(u8, name, kind.name())) return kind;
+    // `anyfunc` is the historical JS spelling retained by the pinned proposal
+    // tests; type() always reflects the canonical core spelling `funcref`.
+    if (std.mem.eql(u8, name, "anyfunc")) return .funcref;
+    return self.throwError("TypeError", "WebAssembly.Tag descriptor has an unsupported parameter type");
+}
+
+fn tagFromValue(self: *Interpreter, input: Value, store: ?*context.Context, what: []const u8) value.HostError!*exec.TagInst {
+    const object = languageObject(input) orelse return self.throwError("TypeError", what);
+    const state = object.wasmTag() orelse return self.throwError("TypeError", what);
+    if (store) |expected| if (state.store) |raw_store|
+        if (raw_store != @as(*anyopaque, @ptrCast(expected))) return self.throwError("TypeError", "WebAssembly.Tag belongs to another store");
+    return @ptrCast(@alignCast(state.tag orelse return self.throwError("TypeError", what)));
+}
+
+fn tagConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *TagDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Tag must be called with new");
+    const type_descriptor = try requireDescriptor(self, args, "WebAssembly.Tag requires a descriptor object");
+    const raw_parameters = try self.getProperty(Value.obj(type_descriptor), "parameters");
+    if (raw_parameters.isUndefined()) return self.throwError("TypeError", "WebAssembly.Tag descriptor requires parameters");
+    var parameter_values: std.ArrayListUnmanaged(Value) = .empty;
+    try self.spreadInto(&parameter_values, raw_parameters);
+    const temporary = try self.arena.alloc(types.ValType, parameter_values.items.len);
+    for (parameter_values.items, 0..) |entry, index| temporary[index] = try tagValueType(self, entry);
+
+    const store = try storeFor(self);
+    const params = try store.gpa.dupe(types.ValType, temporary);
+    errdefer store.gpa.free(params);
+    const tag = try exec.createTag(store.gpa, .{ .params = params, .results = &.{} });
+    errdefer exec.destroyTag(store.gpa, tag);
+    const owner = try store.gpa.create(TagOwner);
+    errdefer store.gpa.destroy(owner);
+    owner.* = .{ .store = store, .tag = tag, .params = params };
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
+    const state = try object.wasmTagState(self.arena);
+    state.tag = @ptrCast(tag);
+    state.store = @ptrCast(store);
+    try store.appendWasmOwned(.{ .tag = @ptrCast(owner) });
+    return Value.obj(object);
+}
+
+fn tagType(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const tag = try tagFromValue(self, this, null, "WebAssembly.Tag.prototype.type requires a Tag");
+    const parameters = (try self.newArray()).asObj();
+    for (tag.type.params) |kind| try parameters.appendElement(self.arena, try Value.strAlloc(self.arena, kind.name()));
+    const result = try self.newObject();
+    try self.setProp(result.asObj(), "parameters", Value.obj(parameters));
+    return result;
+}
+
 const ResolvedImports = struct {
     store: *context.Context,
     funcs: []exec.ImportFunc,
@@ -1108,6 +1179,7 @@ const ResolvedImports = struct {
     table_values: []Value,
     mem_values: []Value,
     global_values: []Value,
+    tag_values: []Value,
 
     fn deinitTemps(self: *ResolvedImports) void {
         self.store.gpa.free(self.funcs);
@@ -1150,11 +1222,13 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
     const table_values = try self.arena.alloc(Value, module.imported_tables);
     const mem_values = try self.arena.alloc(Value, module.imported_mems);
     const global_values = try self.arena.alloc(Value, module.imported_globals);
+    const tag_values = try self.arena.alloc(Value, module.imported_tags);
 
     var fi: usize = 0;
     var ti: usize = 0;
     var mi: usize = 0;
     var gi: usize = 0;
+    var tag_i: usize = 0;
     for (module.imports, 0..) |entry, import_index| {
         const namespace_value = try self.getProperty(import_object, entry.module);
         const namespace = languageObject(namespace_value) orelse
@@ -1227,12 +1301,13 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 global_values[gi] = Value.undef();
                 gi += 1;
             },
-            .tag => return throwWasmWithProto(
-                self,
-                "LinkError",
-                "WebAssembly tag imports require the WebAssembly.Tag API",
-                link_proto,
-            ),
+            .tag => {
+                const tag = tagFromValue(self, imported, store, "WebAssembly tag import is not a Tag") catch
+                    return throwWasmWithProto(self, "LinkError", "WebAssembly tag import is not a Tag", link_proto);
+                tags[tag_i] = tag;
+                tag_values[tag_i] = imported;
+                tag_i += 1;
+            },
         }
     }
     return .{
@@ -1248,6 +1323,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
         .table_values = table_values,
         .mem_values = mem_values,
         .global_values = global_values,
+        .tag_values = tag_values,
     };
 }
 
@@ -1316,6 +1392,16 @@ fn wrapDefinedGlobal(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     state.ref = &glob.ref_root;
     state.owner_obj = instance_object;
     try store.appendWasmOwned(.{ .global = @ptrCast(owner) });
+    return Value.obj(object);
+}
+
+fn wrapDefinedTag(self: *Interpreter, descriptor: *InstanceDescriptor, store: *context.Context, instance_object: *Object, tag: *exec.TagInst) value.HostError!Value {
+    const object = try gc.allocObj(self.arena);
+    object.* = .{ .proto = descriptor.tag_proto };
+    const state = try object.wasmTagState(self.arena);
+    state.tag = @ptrCast(tag);
+    state.store = @ptrCast(store);
+    state.owner_obj = instance_object;
     return Value.obj(object);
 }
 
@@ -1498,10 +1584,12 @@ fn instantiateModuleObject(
     const table_cache = try self.arena.alloc(Value, module.totalTables());
     const memory_cache = try self.arena.alloc(Value, module.totalMems());
     const global_cache = try self.arena.alloc(Value, module.totalGlobals());
+    const tag_cache = try self.arena.alloc(Value, module.totalTags());
     @memset(function_cache, Value.undef());
     @memset(table_cache, Value.undef());
     @memset(memory_cache, Value.undef());
     @memset(global_cache, Value.undef());
+    @memset(tag_cache, Value.undef());
     const function_host = try self.arena.create(FunctionHostContext);
     function_host.* = .{
         .store = store,
@@ -1515,6 +1603,7 @@ fn instantiateModuleObject(
     for (resolved.table_values, 0..) |entry, i| table_cache[i] = entry;
     for (resolved.mem_values, 0..) |entry, i| memory_cache[i] = entry;
     for (resolved.global_values, 0..) |entry, i| global_cache[i] = entry;
+    for (resolved.tag_values, 0..) |entry, i| tag_cache[i] = entry;
     exec.applyActiveSegments(inst, &diag) catch {
         // Core 2 store mutations from earlier active segments survive a later
         // instantiation trap. The already-registered hidden instance keeps any
@@ -1551,12 +1640,11 @@ fn instantiateModuleObject(
                     global_cache[entry.index] = try wrapDefinedGlobal(self, descriptor, store, object, inst.globals[entry.index]);
                 break :blk global_cache[entry.index];
             },
-            .tag => return throwWasmWithProto(
-                self,
-                "LinkError",
-                "WebAssembly tag exports require the WebAssembly.Tag API",
-                descriptor.link_error_proto,
-            ),
+            .tag => blk: {
+                if (tag_cache[entry.index].isUndefined())
+                    tag_cache[entry.index] = try wrapDefinedTag(self, descriptor, store, object, inst.tags[entry.index]);
+                break :blk tag_cache[entry.index];
+            },
         };
         try setData(self.arena, self.root_shape, exports, entry.name, exported, .{ .writable = false, .enumerable = true, .configurable = false });
     }
@@ -1774,6 +1862,24 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try installMethod(env.arena, rs, global_pair.proto, "valueOf", 0, globalValueOf);
     try setData(env.arena, rs, namespace, "Global", Value.obj(global_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
+    const tag_pair = try constructorPair(env, rs, "Tag", 1, tagConstructor, object_proto, function_proto);
+    const tag_descriptor = try env.arena.create(TagDescriptor);
+    tag_descriptor.* = .{ .proto = tag_pair.proto };
+    tag_pair.ctor.private_data = tag_descriptor;
+    try installMethod(env.arena, rs, tag_pair.proto, "type", 0, tagType);
+    try setData(env.arena, rs, namespace, "Tag", Value.obj(tag_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
+
+    // The built-in JS-exception tag has the proposal-fixed `(externref) -> ()`
+    // type. Its native identity lives in the realm arena and is never exposed
+    // through the Tag constructor, so it cannot be confused with a fresh tag.
+    const js_tag_native = try env.arena.create(exec.TagInst);
+    js_tag_native.* = .{ .type = .{ .params = &.{.externref}, .results = &.{} } };
+    const js_tag = try gc.allocObj(env.arena);
+    js_tag.* = .{ .proto = tag_pair.proto };
+    const js_tag_state = try js_tag.wasmTagState(env.arena);
+    js_tag_state.tag = @ptrCast(js_tag_native);
+    try setData(env.arena, rs, namespace, "JSTag", Value.obj(js_tag), .{ .writable = false, .enumerable = false, .configurable = false });
+
     const instance_pair = try constructorPair(env, rs, "Instance", 1, instanceConstructor, object_proto, function_proto);
     const instance_roots = try gc.allocObj(env.arena);
     instance_roots.* = .{};
@@ -1786,6 +1892,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
         .memory_proto = memory_pair.proto,
         .table_proto = table_pair.proto,
         .global_proto = global_pair.proto,
+        .tag_proto = tag_pair.proto,
         .link_error_proto = link_error_proto,
         .runtime_error_proto = runtime_error_proto,
     };
@@ -1807,6 +1914,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
             try setData(env.arena, rs, memory_pair.proto, key, Value.str("WebAssembly.Memory"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, table_pair.proto, key, Value.str("WebAssembly.Table"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, global_pair.proto, key, Value.str("WebAssembly.Global"), .{ .writable = false, .enumerable = false, .configurable = true });
+            try setData(env.arena, rs, tag_pair.proto, key, Value.str("WebAssembly.Tag"), .{ .writable = false, .enumerable = false, .configurable = true });
             try setData(env.arena, rs, instance_pair.proto, key, Value.str("WebAssembly.Instance"), .{ .writable = false, .enumerable = false, .configurable = true });
         };
     };
@@ -1832,6 +1940,10 @@ pub fn teardownWasmStore(store: *context.Context) void {
             },
             .global => |owner_ptr| {
                 const owner: *GlobalOwner = @ptrCast(@alignCast(owner_ptr));
+                owner.deinit();
+            },
+            .tag => |owner_ptr| {
+                const owner: *TagOwner = @ptrCast(@alignCast(owner_ptr));
                 owner.deinit();
             },
             .table => |owner_ptr| {
@@ -2054,6 +2166,43 @@ test "wasm api reflects opted-in exception tag imports and exports" {
         \\  imports[0].name === 't' && imports[0].kind === 'tag' &&
         \\  exports.length === 2 && exports[0].kind === 'tag' &&
         \\  exports[1].kind === 'tag';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api constructs and links exception tags by identity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,5,1,96,1,127,0,
+        \\  2,8,1,1,109,1,116,4,0,0,
+        \\  13,3,1,0,0,
+        \\  7,9,2,1,105,4,0,1,100,4,1
+        \\]);
+        \\let parameterGets = 0;
+        \\const imported = new WebAssembly.Tag({ get parameters() { parameterGets++; return ['i32']; } });
+        \\const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: imported } });
+        \\const defined = instance.exports.d;
+        \\const reflected = defined.type();
+        \\let callError = false, brandError = false, linkError = false;
+        \\try { WebAssembly.Tag({ parameters: [] }); } catch (error) { callError = error instanceof TypeError; }
+        \\try { WebAssembly.Tag.prototype.type.call({}); } catch (error) { brandError = error instanceof TypeError; }
+        \\try {
+        \\  new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: new WebAssembly.Tag({ parameters: ['i64'] }) } });
+        \\} catch (error) { linkError = error instanceof WebAssembly.LinkError; }
+        \\parameterGets === 1 && instance.exports.i === imported && defined !== imported &&
+        \\  imported instanceof WebAssembly.Tag && defined instanceof WebAssembly.Tag &&
+        \\  Object.prototype.toString.call(defined) === '[object WebAssembly.Tag]' &&
+        \\  reflected.parameters.length === 1 && reflected.parameters[0] === 'i32' &&
+        \\  WebAssembly.JSTag instanceof WebAssembly.Tag && WebAssembly.JSTag.type().parameters[0] === 'externref' &&
+        \\  callError && brandError && linkError;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
