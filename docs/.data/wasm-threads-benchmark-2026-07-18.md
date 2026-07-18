@@ -61,6 +61,7 @@ JSC is therefore `N/A`, not zero and not slower. The main README comparison sepa
 ## Method and timing boundary
 
 The artifact contains 105 raw samples across 15 rows. Module decoding, validation, instantiation, JavaScript setup, and warm-up are outside the timer.
+The published performance support boundary is the macOS arm64 host recorded above; this artifact makes no Linux or x86 throughput claim. Portable correctness and sanitizer hosts are tracked separately.
 Single-worker rows time one selected Wasm invocation. Multi-worker rows deliberately include shared-realm `Thread` construction, dispatch, joins, and the final checksum/generation validation; every worker executes the displayed per-worker job count.
 Contended add targets word zero. CAS retries until each requested increment commits. Disjoint add assigns one cache-adjacent word per worker. Wait/notify uses two monotonic words per pair so scheduling delays cannot lose a generation.
 

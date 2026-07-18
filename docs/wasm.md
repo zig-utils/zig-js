@@ -410,6 +410,16 @@ They run the same fixed shared-memory module at one owner thread and 2/4/8
 no-GIL shared-realm workers. All atomic medians exceed 50 ms, each row has seven
 samples, and the harness validates exact final counts, monotonic wait/notify
 generations, zero timeouts, and a per-process watchdog.
+This dated performance support boundary is macOS arm64; the artifact makes no
+Linux or x86 throughput claim, and portable correctness/sanitizer hosts remain
+separate evidence.
+
+At checkpoint `87c0f0f8`, the exact checked-in benchmark module has a focused
+repeat-lifecycle gate of its own. Five no-GIL GC contexts each execute four
+rounds of contended add, CAS, disjoint atomics, and paired wait/notify before
+teardown. Both the ordinary and ThreadSanitizer runs pass 3/3 tests with zero
+skips, failures, leaks, or reported races. This is the local macOS arm64
+sanitizer witness; the wider supported-host matrix remains the final #287 gate.
 
 | workers | contended add | contended CAS | disjoint add | pair handoffs/s |
 | ---: | ---: | ---: | ---: | ---: |

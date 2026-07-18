@@ -202,6 +202,7 @@ def render(rows: list[Row], lanes: tuple[int, ...], info: dict[str, str], jsc_pr
         "", "JSC is therefore `N/A`, not zero and not slower. The main README comparison separately scores zig-js and system JSC for equivalent single and independent-context workloads.",
         "", "## Method and timing boundary", "",
         f"The artifact contains {len(rows):,} raw samples across {len(groups)} rows. Module decoding, validation, instantiation, JavaScript setup, and warm-up are outside the timer.",
+        "The published performance support boundary is the macOS arm64 host recorded above; this artifact makes no Linux or x86 throughput claim. Portable correctness and sanitizer hosts are tracked separately.",
         "Single-worker rows time one selected Wasm invocation. Multi-worker rows deliberately include shared-realm `Thread` construction, dispatch, joins, and the final checksum/generation validation; every worker executes the displayed per-worker job count.",
         "Contended add targets word zero. CAS retries until each requested increment commits. Disjoint add assigns one cache-adjacent word per worker. Wait/notify uses two monotonic words per pair so scheduling delays cannot lose a generation.",
         "", "## Reproduce", "", "```sh",

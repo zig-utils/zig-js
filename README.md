@@ -225,6 +225,11 @@ from clean benchmark commit `eb43a2f9`. Seven samples per row cover one owner
 thread and 2/4/8 no-GIL shared-realm workers over the exact same shared module
 and memory. Every atomic median exceeds 50 ms; checksums, monotonic
 wait/notify generations, timeouts, and a 120-second watchdog are validated.
+This dated performance score supports the recorded macOS arm64 host; it makes
+no Linux or x86 throughput claim.
+At `87c0f0f8`, the exact checked-in benchmark kernels also pass their repeated
+no-GIL GC-context lifecycle gate both normally and under ThreadSanitizer: 3/3
+tests, 0 skipped, 0 failed, and 0 leaked in each run.
 
 | workers | contended add | CAS increment | disjoint add | wait/notify pair handoffs |
 | ---: | ---: | ---: | ---: | ---: |
