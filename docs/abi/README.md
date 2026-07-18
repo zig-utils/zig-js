@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (255 implemented, 176 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (259 implemented, 172 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -649,11 +649,18 @@ descriptor over that unchanged register layout. Exact frame and VM identity
 gate an owned caller URL, one-based line/column, Bun-main origin detection, and
 a bounded NUL-terminated description; the fixture covers sibling globals,
 foreign VMs, stale/null pointers, constructors, and reentrant restoration.
+The four FFI-function exports reuse that frame implementation with a distinct
+validated function brand. Their names and arity are owned, the same callback
+serves call and construct, nullable `dataPtr` mutation is atomic, and the
+optional read-only/enumerable/configurable `ptr` property preserves the exact
+callback-address bits. Dynamic-library metadata is stored separately; get/set
+reject ordinary host functions and immediate values while accepting any valid
+FFI cell regardless of VM ownership.
 `JSC__Exception__getStackTrace` fills the caller-owned exact-layout frame buffer
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 254-symbol
+the same frame/script identity and own every returned string. The 258-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -697,7 +704,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (249 implemented, 172 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (253 implemented, 168 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |

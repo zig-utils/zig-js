@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 255
-private exports and 176 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 259
+private exports and 172 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 255 cover JSC64 identity, cell equality,
+The 259 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -276,6 +276,12 @@ without changing its pinned register words: owned source URL, one-based line and
 column, exact `builtin://bun/main` recognition, and a thread-local NUL-terminated
 debug description. Identity/VM checks reject null, stale, mismatched, and foreign
 frames, while nested native reentry restores the outer descriptor.
+Four FFI-function exports reuse those callbacks with a distinct runtime brand.
+Names/arity are owned, call and construct share the pinned callback, nullable
+native data is atomically mutable, and the optional `ptr` property is the exact
+callback-address bit pattern with upstream read-only/enumerable/configurable
+attributes. Dynamic-library metadata remains separate from `dataPtr`; only
+validated FFI cells accept get/set, independent of their owning VM.
 The structured exception boundary retains creation-time frames separately from
 `.stack` and fills caller-owned Home/Bun buffers through the exact 48-byte trace,
 72-byte frame, 12-byte position, and 216-byte exception layouts. Full projection
@@ -283,12 +289,12 @@ classifies Error, DOMException, primitive, and system-like values; owns its
 strings; preserves the stable exception cell; and reports the cause runtime
 type. The second pass resolves the retained script identity and copies the
 current source line plus capped preceding lines with exact zero-based numbers,
-including through a sibling realm. The combined 254-symbol fixture also covers
+including through a sibling realm. The combined 258-symbol fixture also covers
 foreign-VM failures, exception clearing, callback reentrancy, and already-settled
 targets.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
-of which 249 shims are implemented and 172 remain pending. Its
+of which 253 shims are implemented and 168 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
