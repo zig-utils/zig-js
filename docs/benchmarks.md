@@ -5,12 +5,60 @@ description: Reproduce and interpret zig-js direct, independent-context, shared-
 
 # Performance Benchmarks
 
-zig-js keeps two benchmark families separate:
+zig-js keeps three benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
+- `python3 tools/wasm-simd-benchmark.py` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 
-Neither is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+
+## Latest WebAssembly SIMD comparison
+
+The [July 18, 2026 SIMD report](.data/wasm-simd-benchmark-2026-07-18.md)
+preserves all [224 raw timing samples](.data/wasm-simd-benchmark-2026-07-18.tsv)
+from clean benchmark inputs at zig-js commit
+`7362c1e28c74f92b4c82e380a4ebcba038de5f1c`. It ran on an 11-core Apple M3
+Pro using Zig `0.17.0-dev.956+2dca73595`, system JavaScriptCore framework
+`22625.1.20.11.3`, and AC power. All 32 scored-row medians exceed 50 ms.
+
+| family | zig-js 1 thread | zig-js 8 threads | zig-js scaling | JSC 1 thread | JSC 8 threads | JSC scaling | zig-js / JSC at 8 threads |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| integer | 7.73 M/s | 28.35 M/s | 3.67x | 62.02 M/s | 280.32 M/s | 4.52x | 0.10x |
+| float | 7.06 M/s | 27.66 M/s | 3.92x | 63.66 M/s | 283.33 M/s | 4.45x | 0.10x |
+| shuffle | 6.74 M/s | 29.00 M/s | 4.30x | 63.23 M/s | 286.75 M/s | 4.54x | 0.10x |
+| memory | 8.98 M/s | 41.13 M/s | 4.58x | 53.32 M/s | 291.96 M/s | 5.48x | 0.14x |
+
+`M/s` means millions of logical 128-bit state updates per second, normalized by
+the exact inner-loop count. Each SIMD export has a semantically equivalent
+scalar export in the same 1,166-byte module; the harness rejects disagreement
+between them and between engines before scoring. At one zig-js thread, SIMD is
+1.38x the scalar integer throughput, 1.27x float, 17.27x shuffle, and 1.69x
+memory. Read those as instruction-path measurements: zig-js currently executes
+all fixed-width SIMD through one portable architecture-independent
+implementation, with no native per-architecture intrinsic path.
+
+The one-thread timer covers only the exact warmed invocation. The eight-thread
+timer covers symmetric dispatch, one invocation in each persistent worker-owned
+context/module instance, and completion waits. Compilation, instantiation, and
+three warm-ups are outside both timers. Independent contexts are the equivalent
+public concurrency surface in both engines; zig-js shared-realm `Thread`s are a
+different capability and are not folded into the cross-engine ratios.
+
+Reproduce the dated matrix on macOS after building the two runners:
+
+```sh
+zig build benchmark-comparison-bin -Doptimize=ReleaseFast
+python3 tools/wasm-simd-benchmark.py --samples 7 --lanes 8 \
+  --raw-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.tsv \
+  --markdown-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.md
+```
+
+The readable module source is
+[`bench/wasm_simd_kernels.wat`](../bench/wasm_simd_kernels.wat); the exact bytes
+embedded in [`bench/wasm_simd_comparison.js`](../bench/wasm_simd_comparison.js)
+were produced with pinned WABT 1.0.39 and have SHA-256
+`5f33169c01f36873c1ac4ec8bb07675b8d4d770a6a4f3d961454f139f1818957`.
 
 ## Latest JavaScriptCore comparison
 

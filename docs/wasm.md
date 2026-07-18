@@ -183,9 +183,10 @@ all six immediate forms, lane/shuffle bounds, memory alignment, and stack
 signatures across the complete inventory. A distinct `u128` execution slot and
 test-only raw-lane boundary preserve every bit; ordinary JavaScript function
 and Global access rejects opaque v128 values with `TypeError`. This foundation
-is complete in [#279](https://github.com/zig-utils/zig-js/issues/279); execution
-families and terminal corpus/performance evidence remain tracked by
-[#280](https://github.com/zig-utils/zig-js/issues/280) through
+and every execution family are complete in
+[#279](https://github.com/zig-utils/zig-js/issues/279) through
+[#282](https://github.com/zig-utils/zig-js/issues/282); terminal corpus and
+performance evidence are recorded by
 [#283](https://github.com/zig-utils/zig-js/issues/283).
 
 The same driver exposes a `simd-movement` profile over a declared 20-file
@@ -224,6 +225,56 @@ float-to-integer conversions, integer-to-float conversions, signed-zero
 preservation, and specification-permitted canonical/arithmetic NaN matching.
 The ReleaseFast evaluator is used for the two 3,887-command pseudo-min/max files;
 the runtime remains the same architecture-independent scalar oracle.
+
+### Complete fixed-width SIMD profile
+
+The terminal `simd` profile scores every command in all 56 files at the exact
+pinned `WebAssembly/simd` revision
+`a78b98a6899c9e91a13095e560767af6e99d98fd`. At engine checkpoint `9c7288bf`,
+all **25,466 / 25,466 applicable commands pass**, with zero failures, zero
+runner errors, and 510 text-format parser assertions explicitly classified as
+not applicable to the binary JavaScript API. The checked-in
+[25,976-command inventory](.data/wasm-simd-inventory.json) retains every file,
+line, command type, execution mode, exact vector-bit comparison, and
+specification-permitted NaN policy. There are no hidden skips, exclusions, or
+timeouts.
+
+Reproduce the complete score with the exact proposal checkout and WABT 1.0.39:
+
+```sh
+zig build wasm-spec-eval -Doptimize=ReleaseFast
+python3 tools/wasm-spec.py \
+  --profile simd \
+  --spec-root /path/to/WebAssembly-simd-a78b98a \
+  --wast2json /path/to/wabt-1.0.39/wast2json \
+  --inventory docs/.data/wasm-simd-inventory.json
+```
+
+Ordinary CI keeps this bounded: exact-pin witnesses run
+`simd_i32x4_arith2.wast`, `simd_f32x4_rounding.wast`, `simd_lane.wast`, and
+`simd_load.wast`. The deliberate command above owns the complete 56-file score.
+The registry checker locks both the terminal totals and the four explicit
+execution modes so a corpus, engine, or documentation change cannot silently
+weaken the claim.
+
+The implementation has no target-architecture branches. Every architecture
+that can build zig-js uses the same portable `u128` slot and lane-by-lane
+integer, floating, shuffle, and memory semantics; there is no unsupported-target
+fallback gap and no claim of native SIMD intrinsic lowering. This is the
+committed fallback behavior until an architecture-specific fast path lands, at
+which point the portable path remains the semantic oracle.
+
+Performance is recorded separately from conformance. The
+[July 18, 2026 report](.data/wasm-simd-benchmark-2026-07-18.md) and its
+[224 raw samples](.data/wasm-simd-benchmark-2026-07-18.tsv) compare integer,
+float, shuffle, and memory kernels against scalar exports from the exact same
+module and against macOS system JavaScriptCore. At eight warmed independent
+contexts, zig-js reaches 28.35, 27.66, 29.00, and 41.13 million logical vector
+updates per second respectively, scaling 3.67x–4.58x over one context. System
+JSC reaches 280.32, 283.33, 286.75, and 291.96 M/s. These direct numbers are
+published rather than hidden by one aggregate; the report records timing
+boundaries, dispersion, checksums, environment, exact module hash, and full
+reproduction.
 
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation,
