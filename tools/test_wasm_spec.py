@@ -88,6 +88,35 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn(".join()", wait_js)
         self.assertIn("||", either_js)
 
+    def test_exception_assertion_requires_typed_webassembly_exception(self) -> None:
+        generated = wasm_spec.generate_command(0, {
+            "type": "assert_exception",
+            "line": 9,
+            "action": {"type": "invoke", "field": "throw"},
+        }, pathlib.Path("."))
+        self.assertIn("WebAssembly.Exception", generated)
+        self.assertIn('__last.exports["throw"]()', generated)
+        self.assertNotIn("WebAssembly.RuntimeError", generated)
+
+    def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
+        tail = wasm_spec.PROFILES["tail-calls"]
+        exceptions = wasm_spec.PROFILES["exception-handling"]
+        self.assertEqual(tail["default_files"], [
+            "return_call.wast",
+            "return_call_indirect.wast",
+        ])
+        self.assertEqual(exceptions["default_files"], [
+            "tag.wast",
+            "throw.wast",
+            "throw_ref.wast",
+            "try_table.wast",
+        ])
+        self.assertIn("--enable-tail-call", tail["converter_args"])
+        self.assertEqual(
+            exceptions["converter_args"],
+            ["--enable-exceptions", "--enable-tail-call"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
