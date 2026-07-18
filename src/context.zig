@@ -14781,6 +14781,35 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     try std.testing.expectEqual(precise_before, ctx.gc_precise_safepoints.load(.monotonic));
 }
 
+test "threads: WebAssembly compiles and executes in shared-realm workers" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const gil_modes = [_]bool{ false, true };
+    for (gil_modes) |gil| {
+        const ctx = try Context.createWith(std.testing.allocator, .{
+            .enable_threads = true,
+            .gil = gil,
+        });
+        defer ctx.destroy();
+
+        const result = try ctx.evaluate(
+            \\const wasmThreadBytes = new Uint8Array([
+            \\  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+            \\  0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+            \\  0x03, 0x02, 0x01, 0x00,
+            \\  0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+            \\  0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+            \\]);
+            \\const wasmThread = new Thread(() => {
+            \\  if (!WebAssembly.validate(wasmThreadBytes)) return -1;
+            \\  const module = new WebAssembly.Module(wasmThreadBytes);
+            \\  return new WebAssembly.Instance(module).exports.add(40, 2);
+            \\});
+            \\wasmThread.join();
+        );
+        try std.testing.expectEqual(@as(f64, 42), result.asNum());
+    }
+}
+
 test "GC precise fixed-shape checkpoints preserve materialized roots" {
     const source =
         \\function runAllocationLane(lane) {

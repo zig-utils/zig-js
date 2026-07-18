@@ -7,7 +7,8 @@
 //!
 //! The allowlist below is the green set; it grows as API surface lands.
 //! Files needing machinery a GIL'd tree-walker structurally lacks (some JIT/GC
-//! stress, WebAssembly, and $vm hooks) stay reference-only.
+//! stress and $vm hooks), plus tests whose JSC-specific contract conflicts with
+//! zig-js behavior, stay reference-only.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -41,7 +42,6 @@ const allowlist = [_][]const u8{
     "api/blocking-gate.js",
     "api/thread-lifecycle.js",
     "api/threadlocal-basic.js",
-    "api/wasm-refused-sd7.js",
     "lifecycle/create-basics.js",
     "lifecycle/current-and-id.js",
     "lifecycle/exceptions-cross-join.js",

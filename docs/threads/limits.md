@@ -705,7 +705,8 @@ Issue #1 remains the umbrella status page.
   cleanup/finalization interleavings.
 - **Reference-only PR-249 files.** Promote only when the engine implements the
   behavior and the file is reliable under Zig `0.17-dev`, especially the
-  WebAssembly-required files, JIT/shell-hook witnesses, JSC-specific mark-list
+  WebAssembly-required files, the incompatible JSC worker-Wasm refusal policy,
+  JIT/shell-hook witnesses, JSC-specific mark-list
   or heap-snapshot/preventCollection probes, detached-buffer fresh-view
   reference assumptions, and typed-array race-shape probes.
   Run

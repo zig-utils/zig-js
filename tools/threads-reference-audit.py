@@ -34,6 +34,10 @@ HELPERS = {
 }
 
 EXPLICIT_CASE_CATEGORIES = {
+    "api/wasm-refused-sd7.js": (
+        "JSC-specific spawned-thread WebAssembly refusal contract",
+        "zig-js intentionally supports WebAssembly in shared-realm Threads",
+    ),
     "cve/mc-df-arraycopy-relabel.js": (
         "JSC butterfly verification shell option",
         "typed-array set source-length snapshot covered by zig-js witnesses",

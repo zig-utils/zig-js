@@ -161,8 +161,12 @@ world-stopped finish.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 236 promoted files out of 259 executable PR-249 files: 234 in the
-default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
+contains 235 compatible promoted files out of 259 executable PR-249 files: 233
+in the default `zig build threads-test` allowlist plus 2 `parallel_js`-only
+witnesses. The JSC-specific `api/wasm-refused-sd7.js` case stays reference-only:
+its required refusal conflicts with zig-js intentionally supporting WebAssembly
+inside shared-realm Threads. The native unit suite checks module validation,
+compilation, instantiation, and execution from a Thread in both GIL modes.
 It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
@@ -184,7 +188,7 @@ It covers:
 - `heap-*`, `gc-stress/`, and `cve/`: heap option/epoch/deferral/stress
   drivers, parked-frame/root witnesses, teardown/lifecycle hazards,
   waiter-table reclamation, FinalizationRegistry delivery, buffer/SAB lifetime,
-  and no-WebAssembly premise/refusal witnesses.
+  and WebAssembly-adjacent lifecycle witnesses whose portable behavior matches.
 - `bench/`, `scaling/`, `jit/`, and `vmstate/`: deterministic checksum
   coverage, independent-work scaling witnesses, tree-walker-compatible JIT audit
   files, per-thread exception/regexp/stack/structure state, and flag identity
@@ -877,6 +881,11 @@ PR-249 files stay reference-only for concrete reasons:
 
 - WebAssembly-required CVE files remain out until this engine has the matching
   WebAssembly construction, compilation, relocation, and grow behavior.
+- `api/wasm-refused-sd7.js` remains out because it requires JSC's v1 policy of
+  throwing `TypeError` for every WebAssembly entry point on a spawned Thread.
+  zig-js deliberately supports that surface; the unit witness `threads:
+  WebAssembly compiles and executes in shared-realm workers` verifies the
+  supported contract under both parallel and serialized/GIL execution.
 - JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
   stop counters, disassembly controls, or retired-artifact machinery remain out
   until real engine behavior backs those hooks.
