@@ -101,6 +101,7 @@ test {
     _ = @import("private_abi.zig");
     _ = @import("wasm/decode.zig");
     _ = @import("wasm/types.zig");
+    _ = @import("wasm/validate.zig");
 }
 
 test "evalNumber convenience" {
