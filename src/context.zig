@@ -2369,7 +2369,6 @@ pub const Context = struct {
     wasm_features: wasm_types.Features = .{},
     /// The interpreter most recently executing WebAssembly JS-API work on this
     /// context (type-erased `*interp.Interpreter`), used by wasm↔JS callbacks.
-    wasm_active_interp: ?*anyopaque = null,
     /// Shared automatic JSClassRef prototypes. These are explicit GC roots and
     /// each record retains its class until Context teardown.
     c_api_class_prototypes: std.ArrayListUnmanaged(*value.CApiClassPrototypeOwner) = .empty,

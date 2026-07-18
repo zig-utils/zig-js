@@ -21,21 +21,27 @@ const Interpreter = interpreter.Interpreter;
 const Environment = interpreter.Environment;
 const Shape = shape.Shape;
 
+/// The active JavaScript interpreter is invocation-local, not Context-global:
+/// shared-realm Threads may enter the same Wasm store concurrently. Keeping
+/// this pointer in TLS also preserves the existing reentrant call stack by
+/// saving/restoring the prior value around every boundary.
+threadlocal var active_wasm_interp: ?*anyopaque = null;
+
 fn enterExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) error{OutOfMemory}!void {
-    const store: *context.Context = @ptrCast(@alignCast(raw));
-    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    _ = raw;
+    const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
     try machine.pushWasmRoots(roots);
 }
 
 fn leaveExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) void {
-    const store: *context.Context = @ptrCast(@alignCast(raw));
-    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    _ = raw;
+    const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
     machine.popWasmRoots(roots);
 }
 
 fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void {
-    const store: *context.Context = @ptrCast(@alignCast(raw));
-    const machine: *Interpreter = @ptrCast(@alignCast(store.wasm_active_interp orelse return));
+    _ = raw;
+    const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
     machine.serviceGcSafepoint();
 }
 
@@ -501,7 +507,7 @@ fn makeMemoryBuffer(self: *Interpreter, store: *context.Context, mem: *exec.Memo
 fn memoryDidGrow(raw: *anyopaque, mem: *exec.MemoryInst) bool {
     const owner: *MemoryOwner = @ptrCast(@alignCast(raw));
     if (owner.mem != mem) return false;
-    const self: *Interpreter = @ptrCast(@alignCast(owner.store.wasm_active_interp orelse return false));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return false));
     const fresh = makeMemoryBuffer(self, owner.store, mem) catch return false;
     const state = owner.wrapper.wasmMemory() orelse return false;
     const old_object = state.buffer_obj orelse return false;
@@ -580,9 +586,9 @@ fn memoryGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     const self = activeInterpreter(ctx);
     const owner = try memoryFromThis(self, this, "WebAssembly.Memory.prototype.grow requires a Memory");
     const delta = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Memory grow delta is out of range");
-    const previous = owner.store.wasm_active_interp;
-    owner.store.wasm_active_interp = @ptrCast(self);
-    defer owner.store.wasm_active_interp = previous;
+    const previous = active_wasm_interp;
+    active_wasm_interp = @ptrCast(self);
+    defer active_wasm_interp = previous;
     const result = exec.memoryGrow(owner.mem, delta);
     if (result < 0) return self.throwError("RangeError", "WebAssembly.Memory could not grow");
     return Value.num(@floatFromInt(result));
@@ -683,13 +689,13 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
             .funcref => |maybe_func| {
                 const func = maybe_func orelse return Value.nul();
                 if (mirroredFunctionMatches(mirrored, func)) return mirrored;
-                const previous = owner.store.wasm_active_interp;
-                owner.store.wasm_active_interp = @ptrCast(self);
+                const previous = active_wasm_interp;
+                active_wasm_interp = @ptrCast(self);
                 const resolved = wasmSlotToJs(self, .funcref, slot, null) catch |err| {
-                    owner.store.wasm_active_interp = previous;
+                    active_wasm_interp = previous;
                     return err;
                 };
-                owner.store.wasm_active_interp = previous;
+                active_wasm_interp = previous;
                 owner.lockOwner();
                 owner.table.lockTable();
                 const unchanged = index < owner.table.elems.len and
@@ -834,7 +840,7 @@ fn jsToWasmSlot(self: *Interpreter, store: *context.Context, kind: types.ValType
 
 fn resolveFunctionReference(raw: *anyopaque, func: *exec.FuncInst) value.HostError!Value {
     const host: *FunctionHostContext = @ptrCast(@alignCast(raw));
-    const self: *Interpreter = @ptrCast(@alignCast(host.store.wasm_active_interp orelse return error.OutOfMemory));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.OutOfMemory));
     for (host.inst.funcs, 0..) |candidate, index| {
         if (candidate != func) continue;
         return functionValueFor(
@@ -853,7 +859,7 @@ fn resolveFunctionReference(raw: *anyopaque, func: *exec.FuncInst) value.HostErr
 
 fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Diagnostic) error{ Trap, Host }!void {
     const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
-    const self: *Interpreter = @ptrCast(@alignCast(bridge.store.wasm_active_interp orelse return error.Host));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.Host));
     const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
     defer bridge.store.gpa.free(js_args);
     for (args, bridge.function_type.params, 0..) |bits, kind, i|
@@ -875,7 +881,7 @@ fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Di
 
 fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []exec.ValueSlot, _: *types.Diagnostic) error{ Trap, Host }!void {
     const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
-    const self: *Interpreter = @ptrCast(@alignCast(bridge.store.wasm_active_interp orelse return error.Host));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.Host));
     const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
     defer bridge.store.gpa.free(js_args);
     for (args, bridge.function_type.params, 0..) |slot, kind, i|
@@ -910,9 +916,9 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
         slot_args[i] = try jsToWasmSlot(self, owner.store, kind, if (i < args.len) args[i] else Value.undef());
 
     var diag: types.Diagnostic = .{};
-    const previous = owner.store.wasm_active_interp;
-    owner.store.wasm_active_interp = @ptrCast(self);
-    defer owner.store.wasm_active_interp = previous;
+    const previous = active_wasm_interp;
+    active_wasm_interp = @ptrCast(self);
+    defer active_wasm_interp = previous;
     exec.callFuncInstSlots(owner.func, slot_args, slot_results, &diag) catch |err| switch (err) {
         error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
         error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
@@ -970,9 +976,9 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
         }
 
         var diag: types.Diagnostic = .{};
-        const previous = owner.store.wasm_active_interp;
-        owner.store.wasm_active_interp = @ptrCast(self);
-        defer owner.store.wasm_active_interp = previous;
+        const previous = active_wasm_interp;
+        active_wasm_interp = @ptrCast(self);
+        defer active_wasm_interp = previous;
         exec.callFuncInstSlots(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
             error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
             error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
@@ -1393,9 +1399,9 @@ fn instantiateModuleObject(
 
     try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
     var diag: types.Diagnostic = .{};
-    const previous = store.wasm_active_interp;
-    store.wasm_active_interp = @ptrCast(self);
-    defer store.wasm_active_interp = previous;
+    const previous = active_wasm_interp;
+    active_wasm_interp = @ptrCast(self);
+    defer active_wasm_interp = previous;
     const inst = exec.instantiateStore(store.gpa, module, .{
         .funcs = resolved.funcs,
         .tables = resolved.tables,
