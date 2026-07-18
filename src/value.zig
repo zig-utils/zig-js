@@ -46,12 +46,20 @@ pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Valu
 /// precise-root path as VM operand stacks and frame locals.
 pub const WasmSlot = union(enum) {
     numeric: u64,
+    vector: u128,
     funcref: ?*anyopaque,
     externref: Value,
 
     pub fn numericBits(self: WasmSlot) u64 {
         return switch (self) {
             .numeric => |bits| bits,
+            else => unreachable,
+        };
+    }
+
+    pub fn vectorBits(self: WasmSlot) u128 {
+        return switch (self) {
+            .vector => |bits| bits,
             else => unreachable,
         };
     }

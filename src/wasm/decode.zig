@@ -253,8 +253,11 @@ const Reader = struct {
     fn readValType(self: *Reader) DecodeError!types.ValType {
         const off = self.offset();
         const b = try self.readU8();
-        return types.ValType.fromByte(b) orelse
-            self.failAt(off, "invalid value type", .{});
+        const value_type = types.ValType.fromByte(b) orelse
+            return self.failAt(off, "invalid value type", .{});
+        if (value_type == .v128 and !self.features.fixed_width_simd)
+            return self.unsupportedFeature(off, .fixed_width_simd);
+        return value_type;
     }
 
     fn readBlockType(self: *Reader) DecodeError!types.BlockType {
@@ -271,6 +274,10 @@ const Reader = struct {
             -2 => .{ .value = .i64 },
             -3 => .{ .value = .f32 },
             -4 => .{ .value = .f64 },
+            -5 => if (self.features.fixed_width_simd)
+                .{ .value = .v128 }
+            else
+                self.unsupportedFeature(off, .fixed_width_simd),
             -16 => if (self.features.reference_types)
                 .{ .value = .funcref }
             else
@@ -1100,8 +1107,8 @@ test "wasm.decode malformed section framing" {
 }
 
 test "wasm.decode malformed declarations" {
-    // Type section: 0x7B is not a value type.
-    try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x7B\x00", 13, "invalid value type");
+    // v128 is feature-gated in value positions.
+    try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x7B\x00", 13, "WebAssembly feature fixed-width-simd is disabled");
     // Two results = multi-value proposal.
     try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "WebAssembly feature multi-value is disabled");
     // Import kind 4.

@@ -22,8 +22,14 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
     for (mod.types) |ft| {
-        for (ft.params) |p| if (p.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
-        for (ft.results) |r| if (r.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.params) |p| {
+            if (p.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+            if (p == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
+        }
+        for (ft.results) |r| {
+            if (r.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+            if (r == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
+        }
     }
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
@@ -40,11 +46,15 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
         if (g.type.val.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+        if (g.type.val == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
-    for (mod.code) |body|
-        for (body.locals) |l|
+    for (mod.code) |body| {
+        for (body.locals) |l| {
             if (l.isReference() and !mod.features.reference_types) return unsupportedFeature(mod, diag, .reference_types);
+            if (l == .v128 and !mod.features.fixed_width_simd) return unsupportedFeature(mod, diag, .fixed_width_simd);
+        }
+    }
 
     // 4. Element segments.
     for (mod.elems) |e| {
@@ -158,7 +168,7 @@ fn isDeclaredFunction(mod: *const types.Module, funcidx: u32) bool {
 
 /// Abstract operand: a concrete numeric type or `unknown`, the bottom type
 /// produced by the polymorphic stack after `unreachable`/branches.
-const StackVal = enum { unknown, i32, i64, f32, f64, funcref, externref };
+const StackVal = enum { unknown, i32, i64, f32, f64, v128, funcref, externref };
 
 fn stackVal(vt: types.ValType) StackVal {
     return switch (vt) {
@@ -166,6 +176,7 @@ fn stackVal(vt: types.ValType) StackVal {
         .i64 => .i64,
         .f32 => .f32,
         .f64 => .f64,
+        .v128 => .v128,
         .funcref => .funcref,
         .externref => .externref,
     };
@@ -798,6 +809,14 @@ fn expectInvalidAtWithFeatures(comptime bytes: []const u8, features: types.Featu
 
 test "wasm.validate empty module" {
     try expectValid(hdr);
+}
+
+test "wasm.validate fixed-width SIMD v128 signatures locals and control" {
+    const bytes = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7B\x01\x7B") ++ // (v128) -> v128
+        sec(3, "\x01\x00") ++
+        sec(10, "\x01" ++ codeBody("\x01\x01\x7B", "\x02\x7B\x00\x0B\x1A\x20\x00\x0B")));
+    try expectValidWithFeatures(bytes, .{ .fixed_width_simd = true });
 }
 
 // Function 1 (type () -> i32, locals 2 x i32): block/loop/if-else results,

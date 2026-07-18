@@ -268,7 +268,7 @@ fn nullTableSlot(elem_type: types.ValType) ValueSlot {
     return switch (elem_type) {
         .funcref => .{ .funcref = null },
         .externref => .{ .externref = js_value.Value.nul() },
-        else => unreachable,
+        .i32, .i64, .f32, .f64, .v128 => unreachable,
     };
 }
 
@@ -290,7 +290,7 @@ pub fn createGlobalSlot(gpa: Allocator, gt: types.GlobalType, value: ValueSlot) 
 fn publishGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
     const bits = switch (slot) {
         .externref => |ref| ref.bits,
-        .numeric, .funcref => js_value.Value.undef().bits,
+        .numeric, .vector, .funcref => js_value.Value.undef().bits,
     };
     global.ref_root.store(bits, .release);
     if (global.barrier) |barrier| barrier(global.barrier_ctx.?, slot);
@@ -570,6 +570,7 @@ pub fn callFuncInst(f: *const FuncInst, args: []const u64, results: []u64, diag:
 fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
     return switch (val_type) {
         .i32, .i64, .f32, .f64 => slot == .numeric,
+        .v128 => slot == .vector,
         .funcref => slot == .funcref,
         .externref => slot == .externref,
     };
@@ -744,6 +745,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     s.stack.items.len = arg_start;
     for (body.locals) |local_type| try s.locals.append(s.alloc, switch (local_type) {
         .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
+        .v128 => .{ .vector = 0 },
         .funcref => .{ .funcref = null },
         .externref => .{ .externref = js_value.Value.nul() },
     });
@@ -1052,14 +1054,14 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .ref_null => try pushSlot(s, switch (instr.imm.type) {
                 .funcref => .{ .funcref = null },
                 .externref => .{ .externref = js_value.Value.nul() },
-                else => unreachable,
+                .i32, .i64, .f32, .f64, .v128 => unreachable,
             }),
             .ref_is_null => {
                 const slot = popSlot(s);
                 try pushBool(s, switch (slot) {
                     .funcref => |func| func == null,
                     .externref => |ref| ref.isNull(),
-                    .numeric => unreachable,
+                    .numeric, .vector => unreachable,
                 });
             },
             .ref_func => try pushSlot(s, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
@@ -3082,6 +3084,13 @@ test "wasm.exec execution roots refresh after pop and local overwrite" {
     state.locals.items[0] = .{ .numeric = 0 };
     checkpoint(&state);
     try std.testing.expectEqualSlices(usize, &.{ 1, 0, 1, 0 }, &probe.externrefs);
+}
+
+test "wasm.exec v128 slots preserve all lane bits" {
+    const bits: u128 = 0xFEDCBA98765432100123456789ABCDEF;
+    const slot: ValueSlot = .{ .vector = bits };
+    try std.testing.expectEqual(bits, slot.vectorBits());
+    try std.testing.expect(slot == .vector);
 }
 
 test "wasm.exec conversions trunc f32 to int" {

@@ -104,6 +104,7 @@ pub const ValType = enum(u8) {
     i64 = 0x7E,
     f32 = 0x7D,
     f64 = 0x7C,
+    v128 = 0x7B,
     externref = 0x6F,
     funcref = 0x70,
 
@@ -113,6 +114,7 @@ pub const ValType = enum(u8) {
             0x7E => .i64,
             0x7D => .f32,
             0x7C => .f64,
+            0x7B => .v128,
             0x6F => .externref,
             0x70 => .funcref,
             else => null,
@@ -143,6 +145,7 @@ pub const BlockType = union(enum) {
                 .i64 => &.{.i64},
                 .f32 => &.{.f32},
                 .f64 => &.{.f64},
+                .v128 => &.{.v128},
                 .externref => &.{.externref},
                 .funcref => &.{.funcref},
             } },

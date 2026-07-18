@@ -683,11 +683,11 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
 fn traceWasmExecutionRoots(roots: *const value.WasmExecutionRoots, v: anytype) void {
     for (roots.stack) |slot| switch (slot) {
         .externref => |root| markValue(v, root),
-        .numeric, .funcref => {},
+        .numeric, .vector, .funcref => {},
     };
     for (roots.locals) |slot| switch (slot) {
         .externref => |root| markValue(v, root),
-        .numeric, .funcref => {},
+        .numeric, .vector, .funcref => {},
     };
 }
 
