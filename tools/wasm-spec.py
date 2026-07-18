@@ -18,6 +18,33 @@ SPEC_COMMIT = "977f97014c962f7bd1291fcc6d28b41a924882bf"
 WABT_VERSION = "1.0.12"
 WABT_COMMIT = "cf261f2bd561297e0da7008ddde8c09ba5ea35a2"
 
+PROFILES = {
+    "mvp": {
+        "kind": "webassembly_wg_1_0_core_inventory",
+        "tag": "wg-1.0",
+        "commit": SPEC_COMMIT,
+        "wabt_version": WABT_VERSION,
+        "wabt_commit": WABT_COMMIT,
+        "evaluator_profile": None,
+        "features": [],
+    },
+    "core-2-structural": {
+        "kind": "webassembly_core_2_0_structural_inventory",
+        "tag": "wg-2.0",
+        "commit": "fffc6e12fa454e475455a7b58d3b5dc343980c10",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "core-2-structural",
+        "features": [
+            "sign_extension_ops",
+            "nontrapping_float_to_int",
+            "multi_value",
+            "reference_types",
+            "bulk_memory",
+        ],
+    },
+}
+
 
 def fail(message: str) -> None:
     print(f"wasm-spec: {message}", file=sys.stderr)
@@ -31,17 +58,27 @@ def checked_output(command: list[str], cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def verify_tools(spec_root: Path, converter: Path, engine: Path) -> None:
+def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     if not (spec_root / "test/core").is_dir():
         fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
-    if actual_spec != SPEC_COMMIT:
-        fail(f"wasm-spec pin drift: expected {SPEC_COMMIT}, found {actual_spec}")
+    if actual_spec != profile["commit"]:
+        fail(f"wasm-spec pin drift: expected {profile['commit']}, found {actual_spec}")
     if not converter.is_file():
         fail(
-            f"missing wast2json at {converter}; build WABT {WABT_VERSION} "
-            f"({WABT_COMMIT}) and pass --wast2json"
+            f"missing wast2json at {converter}; build WABT {profile['wabt_version']} "
+            f"({profile['wabt_commit']}) and pass --wast2json"
         )
+    if profile["wabt_version"] != WABT_VERSION:
+        version = checked_output([str(converter), "--version"])
+        if version != profile["wabt_version"]:
+            fail(
+                f"wast2json version drift: expected {profile['wabt_version']} "
+                f"({profile['wabt_commit']}), found {version}"
+            )
+        if not engine.is_file():
+            fail(f"missing evaluator at {engine}; run `zig build wasm-spec-eval`")
+        return
     # WABT 1.0.12 predates `--version`. Probe the two syntax boundaries that
     # distinguish it from converters too old for final `local.get` spelling and
     # newer converters that removed wg-1.0's NaN assertion commands.
@@ -344,6 +381,8 @@ def run_file(
     engine: Path,
     work_root: Path,
     timeout: float,
+    spec_root: Path,
+    evaluator_profile: str | None,
 ) -> dict:
     stem = wast.stem
     directory = work_root / stem
@@ -356,7 +395,7 @@ def run_file(
     )
     if converted.returncode != 0:
         return {
-            "path": wast.relative_to(ROOT).as_posix(),
+            "path": wast.relative_to(spec_root).as_posix(),
             "status": "conversion_failed",
             "detail": converted.stderr.strip(),
             "commands": [],
@@ -365,11 +404,15 @@ def run_file(
     script_path = directory / f"{stem}.js"
     script_path.write_text(generate_script(document, directory))
     try:
+        env = os.environ.copy()
+        if evaluator_profile:
+            env["WASM_SPEC_PROFILE"] = evaluator_profile
         evaluated = subprocess.run(
             [str(engine), str(script_path)],
             text=True,
             capture_output=True,
             timeout=timeout,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         commands = [
@@ -382,7 +425,7 @@ def run_file(
             }
             for index, command in enumerate(document["commands"])
         ]
-        return {"path": wast.relative_to(ROOT).as_posix(), "commands": commands}
+        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
     if evaluated.returncode != 0:
         detail = evaluated.stderr.strip() or f"engine exited {evaluated.returncode}"
         commands = [
@@ -395,7 +438,7 @@ def run_file(
             }
             for index, command in enumerate(document["commands"])
         ]
-        return {"path": wast.relative_to(ROOT).as_posix(), "commands": commands}
+        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
     try:
         report = json.loads(evaluated.stdout)
     except json.JSONDecodeError as error:
@@ -409,8 +452,8 @@ def run_file(
             }
             for index, command in enumerate(document["commands"])
         ]
-        return {"path": wast.relative_to(ROOT).as_posix(), "commands": commands}
-    return {"path": wast.relative_to(ROOT).as_posix(), "commands": report["commands"]}
+        return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
+    return {"path": wast.relative_to(spec_root).as_posix(), "commands": report["commands"]}
 
 
 def counts(commands: list[dict]) -> dict[str, int]:
@@ -421,26 +464,56 @@ def counts(commands: list[dict]) -> dict[str, int]:
     return result
 
 
+def feature_area(profile_name: str, filename: str) -> str:
+    if profile_name == "mvp":
+        return "mvp"
+    stem = Path(filename).stem
+    if stem in {
+        "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
+    }:
+        return "bulk_memory"
+    if stem in {
+        "ref_func", "ref_is_null", "ref_null", "table-sub", "table_fill", "table_get",
+        "table_grow", "table_set", "table_size",
+    }:
+        return "reference_types"
+    if stem in {
+        "block", "br", "br_if", "br_table", "call", "call_indirect", "func", "if",
+        "loop", "return", "select", "type",
+    }:
+        return "multi_value_control"
+    if stem == "conversions":
+        return "numeric_extensions"
+    return "shared_core"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--spec-root", type=Path, default=ROOT / "wasm-spec")
+    parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
+    parser.add_argument("--spec-root", type=Path)
     parser.add_argument(
         "--wast2json",
         type=Path,
         default=Path(os.environ.get("WAST2JSON", shutil.which("wast2json") or "wast2json")),
     )
     parser.add_argument("--engine", type=Path, default=ROOT / "zig-out/bin/wasm-spec-eval")
-    parser.add_argument("--inventory", type=Path, default=ROOT / "docs/.data/wasm-spec-inventory.json")
+    parser.add_argument("--inventory", type=Path)
     parser.add_argument("--filter", help="run only corpus paths containing this text")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--keep-work", type=Path)
     parser.add_argument("--allow-failures", action="store_true")
     args = parser.parse_args()
 
-    spec_root = args.spec_root.resolve()
+    profile = PROFILES[args.profile]
+    spec_root = (args.spec_root or ROOT / "wasm-spec").resolve()
     converter = args.wast2json.resolve()
     engine = args.engine.resolve()
-    verify_tools(spec_root, converter, engine)
+    inventory_path = args.inventory or (
+        ROOT / "docs/.data/wasm-spec-inventory.json"
+        if args.profile == "mvp"
+        else ROOT / "docs/.data/wasm-core-2-structural-inventory.json"
+    )
+    verify_tools(spec_root, converter, engine, profile)
     all_wast = sorted((spec_root / "test/core").glob("*.wast"))
     selected = [path for path in all_wast if not args.filter or args.filter in path.as_posix()]
     if not selected:
@@ -456,7 +529,20 @@ def main() -> int:
 
     files = []
     for number, wast in enumerate(selected, 1):
-        entry = run_file(wast, converter, engine, work_root, args.timeout)
+        entry = run_file(
+            wast,
+            converter,
+            engine,
+            work_root,
+            args.timeout,
+            spec_root,
+            profile["evaluator_profile"],
+        )
+        area = feature_area(args.profile, wast.name)
+        entry["feature_area"] = area
+        for command in entry["commands"]:
+            command.setdefault("mode", "javascript_api")
+            command["feature_area"] = area
         entry["counts"] = counts(entry["commands"])
         files.append(entry)
         print(
@@ -468,14 +554,20 @@ def main() -> int:
 
     all_commands = [command for entry in files for command in entry["commands"]]
     totals = counts(all_commands)
+    totals_by_feature_area = {
+        area: counts([command for command in all_commands if command["feature_area"] == area])
+        for area in sorted({command["feature_area"] for command in all_commands})
+    }
     engine_commit = checked_output(["git", "rev-parse", "HEAD"], ROOT)
     inventory = {
         "schema_version": 2,
-        "kind": "webassembly_wg_1_0_core_inventory",
+        "kind": profile["kind"],
+        "profile": args.profile,
+        "features": profile["features"],
         "spec": {
             "repository": "https://github.com/WebAssembly/spec.git",
-            "tag": "wg-1.0",
-            "commit": SPEC_COMMIT,
+            "tag": profile["tag"],
+            "commit": profile["commit"],
             "license": "Apache-2.0",
             "suite": "test/core/*.wast",
             "files_available": len(all_wast),
@@ -483,19 +575,20 @@ def main() -> int:
         },
         "converter": {
             "repository": "https://github.com/WebAssembly/wabt.git",
-            "version": WABT_VERSION,
-            "commit": WABT_COMMIT,
+            "version": profile["wabt_version"],
+            "commit": profile["wabt_commit"],
         },
         "engine_commit": engine_commit,
         "totals": totals,
+        "totals_by_feature_area": totals_by_feature_area,
         "files": files,
     }
-    args.inventory.parent.mkdir(parents=True, exist_ok=True)
-    args.inventory.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
+    inventory_path.parent.mkdir(parents=True, exist_ok=True)
+    inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
     print(
         f"TOTAL: {totals['pass']}/{totals['total']} pass, "
         f"{totals['fail']} fail, {totals['not_applicable']} n/a, "
-        f"{totals['runner_error']} runner; inventory={args.inventory}"
+        f"{totals['runner_error']} runner; inventory={inventory_path}"
     )
     if temporary is not None:
         temporary.cleanup()
