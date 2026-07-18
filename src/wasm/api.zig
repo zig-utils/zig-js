@@ -91,6 +91,7 @@ const InstanceDescriptor = struct {
     global_proto: *Object,
     tag_proto: *Object,
     exception_proto: *Object,
+    js_tag: *exec.TagInst,
     link_error_proto: *Object,
     runtime_error_proto: *Object,
 };
@@ -98,6 +99,28 @@ const AsyncDescriptor = struct {
     module: *ModuleDescriptor,
     instance: *InstanceDescriptor,
 };
+
+fn exposeUncaughtException(raw: *anyopaque, exception: *value.WasmException) error{OutOfMemory}!void {
+    const descriptor: *InstanceDescriptor = @ptrCast(@alignCast(raw));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.OutOfMemory));
+    if (exception.is_js_exception) {
+        self.exception = exception.js_exception;
+        return;
+    }
+    if (exception.wrapper.load(.acquire)) |wrapper| {
+        self.exception = Value.obj(wrapper);
+        return;
+    }
+    const candidate = gc.allocObj(self.arena) catch return error.OutOfMemory;
+    candidate.* = .{ .proto = descriptor.exception_proto };
+    const state = candidate.wasmExceptionState(self.arena) catch return error.OutOfMemory;
+    state.exception = exception;
+    const wrapper = if (exception.wrapper.cmpxchgStrong(null, candidate, .acq_rel, .acquire)) |existing|
+        existing orelse candidate
+    else
+        candidate;
+    self.exception = Value.obj(wrapper);
+}
 
 const MemoryOwner = struct {
     store: *context.Context,
@@ -243,6 +266,7 @@ const JsImportBridge = struct {
     store: *context.Context,
     callable: Value,
     function_type: types.FuncType,
+    js_tag: *exec.TagInst,
     inst: ?*exec.Instance = null,
 };
 
@@ -901,51 +925,73 @@ fn resolveFunctionReference(raw: *anyopaque, func: *exec.FuncInst) value.HostErr
     return self.throwError("TypeError", "WebAssembly function reference is unavailable");
 }
 
-fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Diagnostic) error{ Trap, Host }!void {
+fn importCallError(err: value.HostError) exec.ImportCallError {
+    return if (err == error.OutOfMemory) error.OutOfMemory else error.Host;
+}
+
+fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Diagnostic) exec.ImportCallError!void {
     const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
     const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.Host));
-    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
+    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.OutOfMemory;
     defer bridge.store.gpa.free(js_args);
     for (args, bridge.function_type.params, 0..) |bits, kind, i|
-        js_args[i] = wasmBitsToJs(self, kind, bits) catch return error.Host;
-    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch return error.Host;
+        js_args[i] = wasmBitsToJs(self, kind, bits) catch |err| return importCallError(err);
+    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch |err| return importCallError(err);
     if (bridge.function_type.results.len == 1) {
-        results[0] = coerceGlobalBits(self, bridge.function_type.results[0], result) catch return error.Host;
+        results[0] = coerceGlobalBits(self, bridge.function_type.results[0], result) catch |err| return importCallError(err);
     } else if (bridge.function_type.results.len > 1) {
         var values: std.ArrayListUnmanaged(Value) = .empty;
-        self.spreadInto(&values, result) catch return error.Host;
+        self.spreadInto(&values, result) catch |err| return importCallError(err);
         if (values.items.len != bridge.function_type.results.len) {
             _ = self.throwError("TypeError", "WebAssembly multi-value import returned the wrong number of values") catch {};
             return error.Host;
         }
         for (bridge.function_type.results, values.items, 0..) |kind, item, i|
-            results[i] = coerceGlobalBits(self, kind, item) catch return error.Host;
+            results[i] = coerceGlobalBits(self, kind, item) catch |err| return importCallError(err);
     }
 }
 
-fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []exec.ValueSlot, _: *types.Diagnostic) error{ Trap, Host }!void {
+fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []exec.ValueSlot, _: *types.Diagnostic) exec.ImportCallError!void {
     const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
     const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return error.Host));
-    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.Host;
+    const js_args = bridge.store.gpa.alloc(Value, args.len) catch return error.OutOfMemory;
     defer bridge.store.gpa.free(js_args);
     for (args, bridge.function_type.params, 0..) |slot, kind, i|
-        js_args[i] = wasmSlotToJs(self, kind, slot, bridge.inst) catch return error.Host;
+        js_args[i] = wasmSlotToJs(self, kind, slot, bridge.inst) catch |err| return importCallError(err);
 
-    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch return error.Host;
+    const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch |err| return importCallError(err);
     if (bridge.function_type.results.len == 0) return;
     if (bridge.function_type.results.len == 1) {
-        results[0] = jsToWasmSlot(self, bridge.store, bridge.function_type.results[0], result) catch return error.Host;
+        results[0] = jsToWasmSlot(self, bridge.store, bridge.function_type.results[0], result) catch |err| return importCallError(err);
         return;
     }
 
     var values: std.ArrayListUnmanaged(Value) = .empty;
-    self.spreadInto(&values, result) catch return error.Host;
+    self.spreadInto(&values, result) catch |err| return importCallError(err);
     if (values.items.len != bridge.function_type.results.len) {
         _ = self.throwError("TypeError", "WebAssembly multi-value import returned the wrong number of values") catch {};
         return error.Host;
     }
     for (bridge.function_type.results, values.items, 0..) |kind, item, i|
-        results[i] = jsToWasmSlot(self, bridge.store, kind, item) catch return error.Host;
+        results[i] = jsToWasmSlot(self, bridge.store, kind, item) catch |err| return importCallError(err);
+}
+
+fn takeJsImportException(raw: *anyopaque) ?exec.HostException {
+    const bridge: *JsImportBridge = @ptrCast(@alignCast(raw));
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return null));
+    const thrown = self.exception;
+    if (languageObject(thrown)) |object| {
+        if (object.isWasmUncatchableException()) return null;
+        if (object.wasmException()) |state|
+            if (state.exception) |exception| return .{ .wasm = exception };
+    }
+    return .{ .js = .{ .tag = bridge.js_tag, .value = thrown } };
+}
+
+fn clearJsImportException(raw: *anyopaque) void {
+    _ = raw;
+    const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
+    self.exception = Value.undef();
 }
 
 fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
@@ -964,9 +1010,9 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     active_wasm_interp = @ptrCast(self);
     defer active_wasm_interp = previous;
     exec.callFuncInstSlots(owner.func, slot_args, slot_results, &diag) catch |err| switch (err) {
-        error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
-        error.Exception => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
-        error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+        error.Trap => return throwWasmTrap(self, diag.message(), owner.runtime_error_proto),
+        error.Exception => return error.Throw,
+        error.Host => return error.Throw,
         error.OutOfMemory => return error.OutOfMemory,
     };
     if (slot_results.len == 0) return Value.undef();
@@ -1025,9 +1071,9 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
         active_wasm_interp = @ptrCast(self);
         defer active_wasm_interp = previous;
         exec.callFuncInstSlots(owner.func, raw_args, raw_results, &diag) catch |err| switch (err) {
-            error.Trap => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
-            error.Exception => return self.throwErrorWithProto("RuntimeError", diag.message(), owner.runtime_error_proto),
-            error.Host => return if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+            error.Trap => return throwWasmTrap(self, diag.message(), owner.runtime_error_proto),
+            error.Exception => return error.Throw,
+            error.Host => return error.Throw,
             error.OutOfMemory => return error.OutOfMemory,
         };
         if (raw_results.len == 0) return Value.undef();
@@ -1125,6 +1171,45 @@ fn tagValueType(self: *Interpreter, input: Value) value.HostError!types.ValType 
     return self.throwError("TypeError", "WebAssembly.Tag descriptor has an unsupported parameter type");
 }
 
+fn sequenceValues(self: *Interpreter, input: Value) value.HostError![]const Value {
+    const iterator = try self.iteratorOf(input);
+    const next = try self.getProperty(iterator, "next");
+    const next_root = try self.pushTempRoot(next);
+    defer self.restoreTempRoots(next_root);
+    var done = false;
+    errdefer if (!done) self.iteratorCloseKeepingThrow(iterator);
+    var values: std.ArrayListUnmanaged(Value) = .empty;
+    while (true) {
+        const result = try self.callValueWithThis(next, &.{}, iterator);
+        const object = languageObject(result) orelse return self.throwError("TypeError", "WebAssembly sequence iterator result is not an object");
+        if ((try self.getProperty(Value.obj(object), "done")).toBoolean()) {
+            done = true;
+            return values.items;
+        }
+        try values.append(self.arena, try self.getProperty(Value.obj(object), "value"));
+    }
+}
+
+fn tagParameterTypes(self: *Interpreter, input: Value) value.HostError![]const types.ValType {
+    const iterator = try self.iteratorOf(input);
+    const next = try self.getProperty(iterator, "next");
+    const next_root = try self.pushTempRoot(next);
+    defer self.restoreTempRoots(next_root);
+    var done = false;
+    errdefer if (!done) self.iteratorCloseKeepingThrow(iterator);
+    var parameters: std.ArrayListUnmanaged(types.ValType) = .empty;
+    while (true) {
+        const result = try self.callValueWithThis(next, &.{}, iterator);
+        const object = languageObject(result) orelse return self.throwError("TypeError", "WebAssembly.Tag parameter iterator result is not an object");
+        if ((try self.getProperty(Value.obj(object), "done")).toBoolean()) {
+            done = true;
+            return parameters.items;
+        }
+        const entry = try self.getProperty(Value.obj(object), "value");
+        try parameters.append(self.arena, try tagValueType(self, entry));
+    }
+}
+
 fn tagFromValue(self: *Interpreter, input: Value, store: ?*context.Context, what: []const u8) value.HostError!*exec.TagInst {
     const object = languageObject(input) orelse return self.throwError("TypeError", what);
     const state = object.wasmTag() orelse return self.throwError("TypeError", what);
@@ -1140,10 +1225,7 @@ fn tagConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     const type_descriptor = try requireDescriptor(self, args, "WebAssembly.Tag requires a descriptor object");
     const raw_parameters = try self.getProperty(Value.obj(type_descriptor), "parameters");
     if (raw_parameters.isUndefined()) return self.throwError("TypeError", "WebAssembly.Tag descriptor requires parameters");
-    var parameter_values: std.ArrayListUnmanaged(Value) = .empty;
-    try self.spreadInto(&parameter_values, raw_parameters);
-    const temporary = try self.arena.alloc(types.ValType, parameter_values.items.len);
-    for (parameter_values.items, 0..) |entry, index| temporary[index] = try tagValueType(self, entry);
+    const temporary = try tagParameterTypes(self, raw_parameters);
 
     const store = try storeFor(self);
     const params = try store.gpa.dupe(types.ValType, temporary);
@@ -1188,14 +1270,17 @@ fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     if (tag == descriptor.js_tag)
         return self.throwError("TypeError", "WebAssembly.Exception cannot be constructed with WebAssembly.JSTag");
     if (args.len < 2) return self.throwError("TypeError", "WebAssembly.Exception requires a payload sequence");
-    var payload_values: std.ArrayListUnmanaged(Value) = .empty;
-    try self.spreadInto(&payload_values, args[1]);
-    if (payload_values.items.len != tag.type.params.len)
+    const payload_values = try sequenceValues(self, args[1]);
+    if (args.len > 2 and !args[2].isUndefined() and !args[2].isNull()) {
+        const options = languageObject(args[2]) orelse return self.throwError("TypeError", "WebAssembly.Exception options must be an object");
+        _ = (try self.getProperty(Value.obj(options), "traceStack")).toBoolean();
+    }
+    if (payload_values.len != tag.type.params.len)
         return self.throwError("TypeError", "WebAssembly.Exception payload length does not match its Tag");
 
     const temporary = try self.arena.alloc(exec.ValueSlot, tag.type.params.len);
     var externref_count: usize = 0;
-    for (tag.type.params, payload_values.items, 0..) |kind, entry, index| {
+    for (tag.type.params, payload_values, 0..) |kind, entry, index| {
         temporary[index] = try jsToWasmSlot(self, store, kind, entry);
         if (kind == .externref) externref_count += 1;
     }
@@ -1224,12 +1309,12 @@ fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
     const state = try object.wasmExceptionState(self.arena);
     state.exception = exception;
-    state.payload_values = try self.arena.dupe(Value, payload_values.items);
-    exception.wrapper = object;
+    state.payload_values = try self.arena.dupe(Value, payload_values);
+    exception.wrapper.store(object, .release);
     try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
     store.appendWasmOwned(.{ .exception = @ptrCast(exception) }) catch |err| {
         state.exception = null;
-        exception.wrapper = null;
+        exception.wrapper.store(null, .release);
         exec.destroyExceptionRecord(store.gpa, exception);
         return err;
     };
@@ -1299,7 +1384,14 @@ fn throwWasmWithProto(self: *Interpreter, name: []const u8, message: []const u8,
     return self.throwErrorWithProto(name, message, proto);
 }
 
-fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Module, import_object: Value, link_proto: *Object) value.HostError!ResolvedImports {
+fn throwWasmTrap(self: *Interpreter, message: []const u8, proto: *Object) value.HostError {
+    self.exception = try self.makeErrorWithProto("RuntimeError", message, proto);
+    self.exception.asObj().markWasmUncatchableException();
+    try self.notifyDebuggerException(false);
+    return error.Throw;
+}
+
+fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Module, import_object: Value, descriptor: *InstanceDescriptor) value.HostError!ResolvedImports {
     if (!import_object.isUndefined() and languageObject(import_object) == null)
         return self.throwError("TypeError", "WebAssembly imports must be an object");
     if (module.imports.len > 0 and import_object.isUndefined())
@@ -1337,40 +1429,42 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
     for (module.imports, 0..) |entry, import_index| {
         const namespace_value = try self.getProperty(import_object, entry.module);
         const namespace = languageObject(namespace_value) orelse
-            return throwWasmWithProto(self, "LinkError", "WebAssembly import module is not an object", link_proto);
+            return throwWasmWithProto(self, "LinkError", "WebAssembly import module is not an object", descriptor.link_error_proto);
         const imported = try self.getProperty(Value.obj(namespace), entry.name);
         values[import_index] = imported;
         switch (entry.desc) {
             .func => |type_index| {
-                if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", link_proto);
+                if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", descriptor.link_error_proto);
                 if (imported.isObject()) if (imported.asObj().wasmFunction()) |state| {
-                    const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", link_proto)));
+                    const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", descriptor.link_error_proto)));
                     if (owner.store != store or !types.funcTypeEql(owner.function_type, module.types[type_index]))
-                        return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", link_proto);
+                        return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", descriptor.link_error_proto);
                 };
-                bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index] };
+                bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index], .js_tag = descriptor.js_tag };
                 funcs[fi] = .{
                     .ctx = @ptrCast(&bridges[fi]),
                     .type = module.types[type_index],
                     .call = jsImportCall,
                     .call_slots = jsImportCallSlots,
+                    .take_exception = takeJsImportException,
+                    .clear_exception = clearJsImportException,
                 };
                 fi += 1;
             },
             .table => {
-                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", link_proto);
-                const state = object.wasmTable() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", link_proto);
-                const owner: *TableOwner = @ptrCast(@alignCast(state.table orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is unavailable", link_proto)));
-                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly table import belongs to another store", link_proto);
+                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", descriptor.link_error_proto);
+                const state = object.wasmTable() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is not a Table", descriptor.link_error_proto);
+                const owner: *TableOwner = @ptrCast(@alignCast(state.table orelse return throwWasmWithProto(self, "LinkError", "WebAssembly table import is unavailable", descriptor.link_error_proto)));
+                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly table import belongs to another store", descriptor.link_error_proto);
                 tables[ti] = owner.table;
                 table_values[ti] = imported;
                 ti += 1;
             },
             .mem => {
-                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", link_proto);
-                const state = object.wasmMemory() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", link_proto);
-                const owner: *MemoryOwner = @ptrCast(@alignCast(state.mem orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is unavailable", link_proto)));
-                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly memory import belongs to another store", link_proto);
+                const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", descriptor.link_error_proto);
+                const state = object.wasmMemory() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", descriptor.link_error_proto);
+                const owner: *MemoryOwner = @ptrCast(@alignCast(state.mem orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is unavailable", descriptor.link_error_proto)));
+                if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly memory import belongs to another store", descriptor.link_error_proto);
                 mems[mi] = owner.mem;
                 mem_values[mi] = imported;
                 mi += 1;
@@ -1378,8 +1472,8 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
             .global => |global_type| {
                 if (languageObject(imported)) |object| {
                     if (object.wasmGlobal()) |state| {
-                        const owner: *GlobalOwner = @ptrCast(@alignCast(state.glob orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is unavailable", link_proto)));
-                        if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly global import belongs to another store", link_proto);
+                        const owner: *GlobalOwner = @ptrCast(@alignCast(state.glob orelse return throwWasmWithProto(self, "LinkError", "WebAssembly global import is unavailable", descriptor.link_error_proto)));
+                        if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly global import belongs to another store", descriptor.link_error_proto);
                         globals[gi] = owner.glob;
                         global_values[gi] = imported;
                         gi += 1;
@@ -1387,7 +1481,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                     }
                 }
                 if (global_type.mutable)
-                    return throwWasmWithProto(self, "LinkError", "mutable WebAssembly global import requires a Global", link_proto);
+                    return throwWasmWithProto(self, "LinkError", "mutable WebAssembly global import requires a Global", descriptor.link_error_proto);
                 const primitive_matches = switch (global_type.val) {
                     .i32, .f32, .f64 => imported.isNumber(),
                     .i64 => imported.isObject() and imported.asObj().is_bigint,
@@ -1395,7 +1489,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                     .funcref, .exnref, .v128 => false,
                 };
                 if (!primitive_matches)
-                    return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", link_proto);
+                    return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", descriptor.link_error_proto);
                 const global = try exec.createGlobalSlot(
                     store.gpa,
                     global_type,
@@ -1408,7 +1502,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
             },
             .tag => {
                 const tag = tagFromValue(self, imported, store, "WebAssembly tag import is not a Tag") catch
-                    return throwWasmWithProto(self, "LinkError", "WebAssembly tag import is not a Tag", link_proto);
+                    return throwWasmWithProto(self, "LinkError", "WebAssembly tag import is not a Tag", descriptor.link_error_proto);
                 tags[tag_i] = tag;
                 tag_values[tag_i] = imported;
                 tag_i += 1;
@@ -1616,7 +1710,7 @@ fn instantiateModuleObject(
     const module_object = languageObject(module_value) orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
     const module: *types.Module = @ptrCast(@alignCast(module_object.wasmModule() orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module")));
     const store = try storeFor(self);
-    var resolved = try resolveImports(self, store, module, import_object, descriptor.link_error_proto);
+    var resolved = try resolveImports(self, store, module, import_object, descriptor);
     defer resolved.deinitTemps();
     var bridges_owned = false;
     defer if (!bridges_owned) store.gpa.free(resolved.bridges);
@@ -1651,6 +1745,8 @@ fn instantiateModuleObject(
         .begin_wait = beginExecutionWait,
         .end_wait = endExecutionWait,
         .wait_interrupted = executionWaitInterrupted,
+        .uncaught_ctx = @ptrCast(descriptor),
+        .uncaught_exception = exposeUncaughtException,
     };
     var inst_transferred = false;
     defer if (!inst_transferred) exec.destroyInstance(store.gpa, inst);
@@ -1714,14 +1810,14 @@ fn instantiateModuleObject(
         // instantiation trap. The already-registered hidden instance keeps any
         // functions written into imported tables callable.
         try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
-        return throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto);
+        return throwWasmTrap(self, diag.message(), descriptor.runtime_error_proto);
     };
     try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
 
     exec.runStart(inst, &diag) catch |err| return switch (err) {
-        error.Trap => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
-        error.Exception => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
-        error.Host => if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+        error.Trap => throwWasmTrap(self, diag.message(), descriptor.runtime_error_proto),
+        error.Exception => error.Throw,
+        error.Host => error.Throw,
         error.OutOfMemory => error.OutOfMemory,
     };
 
@@ -2011,6 +2107,7 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
         .global_proto = global_pair.proto,
         .tag_proto = tag_pair.proto,
         .exception_proto = exception_pair.proto,
+        .js_tag = js_tag_native,
         .link_error_proto = link_error_proto,
         .runtime_error_proto = runtime_error_proto,
     };
@@ -2313,6 +2410,7 @@ test "wasm api constructs and links exception tags by identity" {
         \\const imported = new WebAssembly.Tag({ get parameters() { parameterGets++; return ['i32']; } });
         \\const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: imported } });
         \\const defined = instance.exports.d;
+        \\const linked = new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: defined } });
         \\const reflected = defined.type();
         \\let callError = false, brandError = false, linkError = false;
         \\try { WebAssembly.Tag({ parameters: [] }); } catch (error) { callError = error instanceof TypeError; }
@@ -2320,7 +2418,7 @@ test "wasm api constructs and links exception tags by identity" {
         \\try {
         \\  new WebAssembly.Instance(new WebAssembly.Module(bytes), { m: { t: new WebAssembly.Tag({ parameters: ['i64'] }) } });
         \\} catch (error) { linkError = error instanceof WebAssembly.LinkError; }
-        \\parameterGets === 1 && instance.exports.i === imported && defined !== imported &&
+        \\parameterGets === 1 && instance.exports.i === imported && linked.exports.i === defined && defined !== imported &&
         \\  imported instanceof WebAssembly.Tag && defined instanceof WebAssembly.Tag &&
         \\  Object.prototype.toString.call(defined) === '[object WebAssembly.Tag]' &&
         \\  reflected.parameters.length === 1 && reflected.parameters[0] === 'i32' &&
@@ -2360,6 +2458,227 @@ test "wasm api constructs branded typed exceptions" {
         \\  WebAssembly.Exception.prototype.is.length === 1 && mismatch && bounds && invalidIndex && brand && jsTag && badPayload;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api exception descriptors preserve observable conversion order" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const tagOrder = [];
+        \\let step = 0;
+        \\const parameters = {
+        \\  [Symbol.iterator]() {
+        \\    tagOrder.push('iterator');
+        \\    return {
+        \\      next() {
+        \\        tagOrder.push('next');
+        \\        if (step++ === 0) return { value: { toString() { tagOrder.push('convert'); return 'i32'; } }, done: false };
+        \\        return { value: 'invalid', done: false };
+        \\      },
+        \\      return() { tagOrder.push('return'); return {}; },
+        \\    };
+        \\  },
+        \\};
+        \\try { new WebAssembly.Tag({ get parameters() { tagOrder.push('parameters'); return parameters; } }); } catch (_) {}
+        \\const payloadOrder = [];
+        \\const tag = new WebAssembly.Tag({ parameters: ['i32'] });
+        \\const payload = {
+        \\  [Symbol.iterator]() {
+        \\    payloadOrder.push('iterator');
+        \\    let done = false;
+        \\    return { next() {
+        \\      payloadOrder.push('next');
+        \\      if (done) return { done: true };
+        \\      done = true;
+        \\      return { value: { valueOf() { payloadOrder.push('coerce'); return 7; } }, done: false };
+        \\    } };
+        \\  },
+        \\};
+        \\const exception = new WebAssembly.Exception(tag, payload, {
+        \\  get traceStack() { payloadOrder.push('options'); return true; },
+        \\});
+        \\let payloadTouched = false;
+        \\try { new WebAssembly.Exception({}, { [Symbol.iterator]() { payloadTouched = true; return [][Symbol.iterator](); } }); } catch (_) {}
+        \\let indexTouched = false;
+        \\try { exception.getArg(new WebAssembly.Tag({ parameters: ['i32'] }), { valueOf() { indexTouched = true; return 0; } }); } catch (_) {}
+        \\tagOrder.join(',') === 'parameters,iterator,next,convert,next,return' &&
+        \\  payloadOrder.join(',') === 'iterator,next,next,options,coerce' &&
+        \\  exception.getArg(tag, 0) === 7 && !payloadTouched && !indexTouched;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api transports typed exceptions across JavaScript calls" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const nativeBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,8,2,96,1,127,0,96,0,0,
+        \\  3,2,1,1,
+        \\  13,3,1,0,0,
+        \\  7,13,2,3,116,97,103,4,0,3,114,117,110,0,0,
+        \\  10,8,1,6,0,65,7,8,0,11
+        \\]);
+        \\const native = new WebAssembly.Instance(new WebAssembly.Module(nativeBytes)).exports;
+        \\let first, second;
+        \\try { native.run(); } catch (error) { first = error; }
+        \\try { native.run(); } catch (error) { second = error; }
+        \\const importedTag = new WebAssembly.Tag({ parameters: ['i32'] });
+        \\const importedException = new WebAssembly.Exception(importedTag, [42]);
+        \\const catchBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,12,3,96,1,127,0,96,0,0,96,0,1,127,
+        \\  2,14,2,1,109,1,116,4,0,0,1,109,1,102,0,1,
+        \\  3,2,1,2,
+        \\  7,9,1,5,99,97,116,99,104,0,1,
+        \\  10,15,1,13,0,31,64,1,0,0,0,16,0,11,65,9,11
+        \\]);
+        \\let callback = () => { throw importedException; };
+        \\const catcher = new WebAssembly.Instance(new WebAssembly.Module(catchBytes), { m: { t: importedTag, f: () => callback() } }).exports;
+        \\const marker = { host: 291 };
+        \\let escaped;
+        \\callback = () => { throw marker; };
+        \\try { catcher.catch(); } catch (error) { escaped = error; }
+        \\const rethrowBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,4,1,96,0,0,
+        \\  2,7,1,1,109,1,102,0,0,
+        \\  3,2,1,0,
+        \\  7,11,1,7,114,101,116,104,114,111,119,0,1,
+        \\  10,21,1,19,0,2,64,2,105,31,64,1,3,0,16,0,11,12,1,11,10,11,11
+        \\]);
+        \\let rethrowValue;
+        \\const rethrow = new WebAssembly.Instance(new WebAssembly.Module(rethrowBytes), { m: { f: () => { throw rethrowValue; } } }).exports.rethrow;
+        \\let markerIdentity = false, undefinedIdentity = false, exceptionIdentity = false;
+        \\rethrowValue = marker;
+        \\try { rethrow(); } catch (error) { markerIdentity = error === marker; }
+        \\rethrowValue = undefined;
+        \\try { rethrow(); } catch (error) { undefinedIdentity = error === undefined; }
+        \\rethrowValue = importedException;
+        \\try { rethrow(); } catch (error) { exceptionIdentity = error === importedException; }
+        \\const jsTagCatchBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,12,3,96,1,111,0,96,0,0,96,0,1,111,
+        \\  2,14,2,1,109,1,116,4,0,0,1,109,1,102,0,1,
+        \\  3,2,1,2,
+        \\  7,9,1,5,99,97,116,99,104,0,1,
+        \\  10,15,1,13,0,31,64,1,0,0,0,16,0,11,208,111,11
+        \\]);
+        \\let jsTagValue = marker;
+        \\const jsTagCatch = new WebAssembly.Instance(new WebAssembly.Module(jsTagCatchBytes), {
+        \\  m: { t: WebAssembly.JSTag, f: () => { throw jsTagValue; } }
+        \\}).exports.catch;
+        \\const jsTagIdentity = jsTagCatch() === marker;
+        \\let jsTagSkipsWasm = false;
+        \\jsTagValue = importedException;
+        \\try { jsTagCatch(); } catch (error) { jsTagSkipsWasm = error === importedException; }
+        \\const trapBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,0,10,5,1,3,0,0,11
+        \\]);
+        \\const trap = new WebAssembly.Instance(new WebAssembly.Module(trapBytes)).exports.run;
+        \\const catchAllBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,4,1,96,0,0,
+        \\  2,7,1,1,109,1,102,0,0,3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,1,
+        \\  10,12,1,10,0,31,64,1,2,0,16,0,11,11
+        \\]);
+        \\let trapCallback = () => trap();
+        \\const catchAll = new WebAssembly.Instance(new WebAssembly.Module(catchAllBytes), { m: { f: () => trapCallback() } }).exports.run;
+        \\let trapBypassed = false;
+        \\try { catchAll(); } catch (error) { trapBypassed = error instanceof WebAssembly.RuntimeError; }
+        \\trapCallback = () => { throw new WebAssembly.RuntimeError('ordinary'); };
+        \\let explicitRuntimeCaught = false;
+        \\try { catchAll(); explicitRuntimeCaught = true; } catch (_) {}
+        \\first instanceof WebAssembly.Exception && first.is(native.tag) && first.getArg(native.tag, 0) === 7 &&
+        \\  second instanceof WebAssembly.Exception && second !== first && second.is(native.tag) &&
+        \\  (() => { callback = () => { throw importedException; }; return catcher.catch() === 42; })() &&
+        \\  escaped === marker && markerIdentity && undefinedIdentity && exceptionIdentity && jsTagIdentity && jsTagSkipsWasm &&
+        \\  trapBypassed && explicitRuntimeCaught;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api rejects async instantiation with the typed start exception" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.asyncException = { settled: false };
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,8,2,96,1,127,0,96,0,0,
+        \\  2,8,1,1,109,1,116,4,0,0,
+        \\  3,2,1,1,
+        \\  8,1,0,
+        \\  10,8,1,6,0,65,7,8,0,11
+        \\]);
+        \\const tag = new WebAssembly.Tag({ parameters: ['i32'] });
+        \\WebAssembly.instantiate(bytes, { m: { t: tag } }).then(
+        \\  () => { asyncException.fulfilled = true; asyncException.settled = true; },
+        \\  error => {
+        \\    asyncException.typed = error instanceof WebAssembly.Exception && error.is(tag) && error.getArg(tag, 0) === 7;
+        \\    asyncException.settled = true;
+        \\  },
+        \\);
+    );
+    const result = try store.evaluate(
+        \\asyncException.settled && asyncException.typed === true && asyncException.fulfilled !== true;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api exception payloads and wrappers survive precise GC" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .reference_types = true,
+            .exception_handling = true,
+        },
+    });
+    defer store.destroy();
+    const before = try store.evaluate(
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,5,1,96,1,111,0,
+        \\  3,2,1,0,
+        \\  13,3,1,0,0,
+        \\  7,13,2,3,116,97,103,4,0,3,114,117,110,0,0,
+        \\  10,8,1,6,0,32,0,8,0,11
+        \\]);
+        \\globalThis.gcExceptionInstance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+        \\globalThis.gcExceptionMarker = { issue: 291 };
+        \\globalThis.gcExceptionWeak = new WeakRef(gcExceptionMarker);
+        \\try { gcExceptionInstance.exports.run(gcExceptionMarker); } catch (error) { globalThis.gcNativeException = error; }
+        \\globalThis.gcJsTag = new WebAssembly.Tag({ parameters: ['externref'] });
+        \\globalThis.gcJsException = new WebAssembly.Exception(gcJsTag, [gcExceptionMarker]);
+        \\gcNativeException.getArg(gcExceptionInstance.exports.tag, 0) === gcExceptionMarker &&
+        \\  gcJsException.getArg(gcJsTag, 0) === gcExceptionMarker;
+    );
+    try std.testing.expect(before.isBoolean() and before.asBool());
+    _ = try store.evaluate("globalThis.gcExceptionMarker = undefined");
+    store.collectGarbage();
+    const after = try store.evaluate(
+        \\gcExceptionWeak.deref()?.issue === 291 &&
+        \\  gcNativeException.getArg(gcExceptionInstance.exports.tag, 0) === gcExceptionWeak.deref() &&
+        \\  gcJsException.getArg(gcJsTag, 0) === gcExceptionWeak.deref();
+    );
+    try std.testing.expect(after.isBoolean() and after.asBool());
 }
 
 test "wasm api returns opted-in multi-value exports as arrays" {

@@ -1454,12 +1454,12 @@ pub const Interpreter = struct {
         // stack can overflow before `max_call_depth`).
         if (self.depth < stack_check_floor) return;
         if (self.depth >= max_call_depth or stack_scan.nearLimit(stack_redzone))
-            return self.throwError("RangeError", "Maximum call stack size exceeded");
+            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded");
         // If the native stack-pointer probe can't see this thread's bounds, it
         // can't catch a real overflow — fall back to the conservative depth cap
         // so an unsupported platform can't run off the end of the stack.
         if (!stack_scan.boundsKnown() and self.depth >= conservative_call_depth)
-            return self.throwError("RangeError", "Maximum call stack size exceeded");
+            return self.throwUncatchableError("RangeError", "Maximum call stack size exceeded");
     }
 
     // ---- exception helpers ------------------------------------------------
@@ -2445,6 +2445,16 @@ pub const Interpreter = struct {
     /// `error.Throw` (or `error.OutOfMemory` if the error object can't be built).
     pub fn throwError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
         self.exception = try self.makeError(name, message);
+        try self.notifyDebuggerException(false);
+        return error.Throw;
+    }
+
+    /// Raise an engine-originated exception that WebAssembly `try_table` must
+    /// not catch when it crosses a JavaScript callback frame (stack exhaustion
+    /// and WebAssembly traps are specified to bypass Wasm handlers).
+    pub fn throwUncatchableError(self: *Interpreter, name: []const u8, message: []const u8) EvalError {
+        self.exception = try self.makeError(name, message);
+        self.exception.asObj().markWasmUncatchableException();
         try self.notifyDebuggerException(false);
         return error.Throw;
     }

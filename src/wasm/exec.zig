@@ -30,6 +30,7 @@ const WasmSlot = ValueSlot;
 var atomic_fence_word = std.atomic.Value(u8).init(0);
 
 pub const ExecError = error{ OutOfMemory, Trap, Host, Exception };
+pub const ImportCallError = error{ OutOfMemory, Trap, Host };
 
 pub const RootHooks = struct {
     ctx: *anyopaque,
@@ -39,14 +40,23 @@ pub const RootHooks = struct {
     begin_wait: ?*const fn (*anyopaque) void = null,
     end_wait: ?*const fn (*anyopaque) void = null,
     wait_interrupted: ?*const fn (*anyopaque) bool = null,
+    uncaught_ctx: ?*anyopaque = null,
+    uncaught_exception: ?*const fn (*anyopaque, *js_value.WasmException) error{OutOfMemory}!void = null,
+};
+
+pub const HostException = union(enum) {
+    wasm: *js_value.WasmException,
+    js: struct { tag: *TagInst, value: js_value.Value },
 };
 
 /// Host-imported function. `ctx` is host-owned (traced/freed by the host).
 pub const ImportFunc = struct {
     ctx: *anyopaque,
     type: types.FuncType,
-    call: *const fn (ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void,
-    call_slots: ?*const fn (ctx: *anyopaque, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) error{ Trap, Host }!void = null,
+    call: *const fn (ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) ImportCallError!void,
+    call_slots: ?*const fn (ctx: *anyopaque, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ImportCallError!void = null,
+    take_exception: ?*const fn (ctx: *anyopaque) ?HostException = null,
+    clear_exception: ?*const fn (ctx: *anyopaque) void = null,
     owner_instance: ?*Instance = null,
 };
 
@@ -861,6 +871,8 @@ const ActiveException = struct {
     payload: []const WasmSlot,
     reference: ?*js_value.WasmException = null,
     owner: *Instance,
+    js_exception: js_value.Value = js_value.Value.undef(),
+    is_js_exception: bool = false,
 };
 
 const State = struct {
@@ -2101,6 +2113,8 @@ fn publishExceptionReference(s: *State, active: *ActiveException) ExecError!*js_
         .payload = payload,
         .externrefs = externrefs,
         .owner = @ptrCast(owner),
+        .js_exception = active.js_exception,
+        .is_js_exception = active.is_js_exception,
     };
     s.created_exceptions.append(s.alloc, exception) catch |err| {
         owner.gpa.destroy(exception);
@@ -2207,6 +2221,11 @@ fn handleException(s: *State, active: *ActiveException) ExecError!void {
     s.labels.items.len = 0;
     s.frames.items.len = 0;
     s.diag.set(types.Diagnostic.no_offset, "uncaught WebAssembly exception", .{});
+    const exception = try publishExceptionReference(s, active);
+    publishStoredException(exception);
+    if (active.owner.root_hooks) |hooks|
+        if (hooks.uncaught_exception) |uncaught|
+            try uncaught(hooks.uncaught_ctx orelse hooks.ctx, exception);
     return error.Exception;
 }
 
@@ -2237,6 +2256,34 @@ fn publishEscapingSlots(slots: []const WasmSlot) void {
             if (slot.exnref) |exception| publishStoredException(exception);
 }
 
+fn handleHostException(s: *State, imp: *const ImportFunc, owner: *Instance) ExecError!void {
+    const take = imp.take_exception orelse return error.Host;
+    const thrown = take(imp.ctx) orelse return error.Host;
+    var js_payload: [1]WasmSlot = undefined;
+    var active: ActiveException = switch (thrown) {
+        .wasm => |exception| .{
+            .tag = @ptrCast(@alignCast(exception.tag)),
+            .payload = exception.payload,
+            .reference = exception,
+            .owner = owner,
+            .js_exception = exception.js_exception,
+            .is_js_exception = exception.is_js_exception,
+        },
+        .js => |js| blk: {
+            js_payload[0] = .{ .externref = js.value };
+            break :blk .{
+                .tag = js.tag,
+                .payload = &js_payload,
+                .owner = owner,
+                .js_exception = js.value,
+                .is_js_exception = true,
+            };
+        },
+    };
+    handleException(s, &active) catch |err| return err;
+    if (imp.clear_exception) |clear| clear(imp.ctx);
+}
+
 fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
     checkpoint(s);
     switch (f.*) {
@@ -2249,9 +2296,15 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
             if (!argumentsMatchSignature(imp.type, args, res.len))
                 return s.trap("function signature mismatch");
             if (imp.call_slots) |call_slots|
-                try call_slots(imp.ctx, args, res, s.diag)
+                call_slots(imp.ctx, args, res, s.diag) catch |err| switch (err) {
+                    error.Host => return handleHostException(s, imp, s.frames.items[s.frames.items.len - 1].func.defined.inst),
+                    else => return err,
+                }
             else
-                try callNumericImport(s.alloc, imp, args, res, s.diag);
+                callNumericImport(s.alloc, imp, args, res, s.diag) catch |err| switch (err) {
+                    error.Host => return handleHostException(s, imp, s.frames.items[s.frames.items.len - 1].func.defined.inst),
+                    else => return err,
+                };
             for (res, imp.type.results) |slot, val_type|
                 if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
             s.stack.items.len = arg_start;
@@ -2312,10 +2365,31 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
             const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
             if (!argumentsMatchSignature(imp.type, args, res.len))
                 return s.trap("function signature mismatch");
+            const caller_inst = current.func.defined.inst;
             if (imp.call_slots) |call_slots|
-                try call_slots(imp.ctx, args, res, s.diag)
+                call_slots(imp.ctx, args, res, s.diag) catch |err| switch (err) {
+                    error.Host => {
+                        s.stack.items.len = current.stack_base;
+                        s.labels.items.len = current.label_base;
+                        s.locals.items.len = current.locals_base;
+                        s.frames.items.len -= 1;
+                        pruneHandlers(s);
+                        return handleHostException(s, imp, caller_inst);
+                    },
+                    else => return err,
+                }
             else
-                try callNumericImport(s.alloc, imp, args, res, s.diag);
+                callNumericImport(s.alloc, imp, args, res, s.diag) catch |err| switch (err) {
+                    error.Host => {
+                        s.stack.items.len = current.stack_base;
+                        s.labels.items.len = current.label_base;
+                        s.locals.items.len = current.locals_base;
+                        s.frames.items.len -= 1;
+                        pruneHandlers(s);
+                        return handleHostException(s, imp, caller_inst);
+                    },
+                    else => return err,
+                };
             for (res, imp.type.results) |slot, val_type|
                 if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
 

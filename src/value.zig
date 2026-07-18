@@ -52,10 +52,11 @@ pub const WasmException = struct {
     /// Stable JS identity for a WebAssembly.Exception. Native exceptions fill
     /// this lazily when they cross into JS; JS-constructed exceptions set it
     /// immediately. The owning exception root list traces the object.
-    wrapper: ?*Object = null,
-    /// Non-undefined only for the built-in JSTag transport. Such exceptions
-    /// escape back to JavaScript as the original thrown value, not a wrapper.
+    wrapper: std.atomic.Value(?*Object) = .init(null),
+    /// Payload for the built-in JSTag transport. Such exceptions escape back
+    /// to JavaScript as the original thrown value, not a wrapper.
     js_exception: Value = Value.undef(),
+    is_js_exception: bool = false,
     next: ?*WasmException = null,
     published: bool = false,
 };
@@ -1169,6 +1170,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         ctor: ?[]const u8 = null,
         stack: ?*const ErrorStack = null,
         stack_materialized: bool = false,
+        wasm_uncatchable: bool = false,
     },
     date: struct {},
     module_ns: struct { ptr: ?*anyopaque = null },
@@ -2025,6 +2027,16 @@ pub const Object = struct {
     pub inline fn markErrorInfoMaterialized(self: *Object) void {
         const cold = self.coldState() orelse return;
         if (cold.hasRare(.error_state)) cold.rare.error_state.stack_materialized = true;
+    }
+
+    pub inline fn isWasmUncatchableException(self: *const Object) bool {
+        const cold = self.coldState() orelse return false;
+        return cold.hasRare(.error_state) and cold.rare.error_state.wasm_uncatchable;
+    }
+
+    pub inline fn markWasmUncatchableException(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.error_state)) cold.rare.error_state.wasm_uncatchable = true;
     }
 
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {
