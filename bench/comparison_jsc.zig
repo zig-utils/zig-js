@@ -31,6 +31,7 @@ extern fn JSEvaluateScript(
 extern fn JSValueToNumber(ctx: JSContextRef, value: JSValueRef, exception: [*c]JSValueRef) callconv(.c) f64;
 
 const workload_source: [:0]const u8 = @embedFile("comparison.js");
+const wasm_simd_workload_source: [:0]const u8 = @embedFile("wasm_simd_comparison.js");
 const invocation: [:0]const u8 = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
 
 const Mode = enum { single, independent_steady, independent_cold };
@@ -85,7 +86,7 @@ fn configure(
     jobs: usize,
     lane: usize,
 ) !void {
-    _ = try evaluate(ctx, workload_source);
+    _ = try evaluate(ctx, if (std.mem.startsWith(u8, workload, "wasm_")) wasm_simd_workload_source else workload_source);
     const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     }, 0);

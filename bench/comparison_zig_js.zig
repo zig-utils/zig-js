@@ -15,6 +15,7 @@ const std = @import("std");
 const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
+const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const invocation = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
 // Every measured context uses the same process-wide production allocator.
 // libc malloc keeps reusable slabs between contexts instead of translating
@@ -85,7 +86,7 @@ fn printRow(
 }
 
 fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !void {
-    _ = try ctx.evaluate(workload_source);
+    _ = try ctx.evaluate(if (std.mem.startsWith(u8, workload, "wasm_")) wasm_simd_workload_source else workload_source);
     const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     });
@@ -108,7 +109,13 @@ fn runSingle(
     jobs: usize,
     samples: usize,
 ) !void {
-    const ctx = try js.Context.createWith(allocator, .{ .enable_gc = true });
+    const ctx = try js.Context.createWith(allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+        },
+    });
     defer ctx.destroy();
     try configure(ctx, workload, jobs, 0);
     try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
@@ -122,7 +129,13 @@ fn runSingle(
 }
 
 fn steadyLaneMain(lane: *SteadyLane) void {
-    const ctx = js.Context.createWith(benchmark_context_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(benchmark_context_allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+        },
+    }) catch {
         lane.failed.store(true, .release);
         lane.ready.post(lane.io);
         return;
@@ -208,7 +221,13 @@ fn runIndependentSteady(
 }
 
 fn coldLaneMain(lane: *ColdLane) void {
-    const ctx = js.Context.createWith(benchmark_context_allocator, .{ .enable_gc = true }) catch {
+    const ctx = js.Context.createWith(benchmark_context_allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+        },
+    }) catch {
         lane.failed.store(true, .release);
         return;
     };
@@ -275,7 +294,13 @@ fn runShared(
     samples: usize,
     lanes: usize,
 ) !void {
-    const ctx = try js.Context.createWith(allocator, .{ .enable_threads = true });
+    const ctx = try js.Context.createWith(allocator, .{
+        .enable_threads = true,
+        .wasm_features = .{
+            .nontrapping_float_to_int = true,
+            .fixed_width_simd = true,
+        },
+    });
     defer ctx.destroy();
     try configure(ctx, workload, jobs, 0);
     _ = try ctx.evaluate(shared_harness);
