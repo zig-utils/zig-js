@@ -709,7 +709,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
 
 fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
     switch (slot) {
-        .externref => |root| markValue(v, root),
+        .externref, .hostref => |root| markValue(v, root),
         .exnref => |exception| if (exception) |ex|
             for (ex.externrefs) |root| markValue(v, root),
         .gcref => |reference| if (reference) |root| {
@@ -721,7 +721,13 @@ fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
             };
             root.trace(root, @ptrCast(v), Marker.mark);
         },
-        .numeric, .vector, .funcref, .i31ref => {},
+        .externalized_gcref => |root| root.trace(root, @ptrCast(v), struct {
+            fn mark(raw: *anyopaque, child: Value) void {
+                const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+                markValue(visitor, child);
+            }
+        }.mark),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     }
 }
 
@@ -1588,7 +1594,7 @@ test "gc traces only the active microtask variant" {
 
 test "gc traces direct and exception-payload WebAssembly roots" {
     const Recorder = struct {
-        marked: [5]?*anyopaque = .{ null, null, null, null, null },
+        marked: [7]?*anyopaque = .{ null, null, null, null, null, null, null },
         len: usize = 0,
 
         pub fn mark(self: *@This(), cell: ?*anyopaque) void {
@@ -1611,6 +1617,7 @@ test "gc traces direct and exception-payload WebAssembly roots" {
     var nested_ref = Object{};
     var pending_ref = Object{};
     var aggregate_ref = Object{};
+    var host_ref = Object{};
     var dummy_tag: u8 = 0;
     var dummy_owner: u8 = 0;
     const AggregateTrace = struct {
@@ -1643,6 +1650,8 @@ test "gc traces direct and exception-payload WebAssembly roots" {
         .{ .externref = Value.obj(&stack_ref) },
         .{ .exnref = &nested_exception },
         .{ .gcref = &aggregate_header },
+        .{ .hostref = Value.obj(&host_ref) },
+        .{ .externalized_gcref = &aggregate_header },
     };
     const locals = [_]value.WasmSlot{.{ .externref = Value.obj(&local_ref) }};
     const roots: value.WasmExecutionRoots = .{
@@ -1657,6 +1666,7 @@ test "gc traces direct and exception-payload WebAssembly roots" {
     try std.testing.expect(recorder.contains(&nested_ref));
     try std.testing.expect(recorder.contains(&pending_ref));
     try std.testing.expect(recorder.contains(&aggregate_ref));
+    try std.testing.expect(recorder.contains(&host_ref));
     try std.testing.expect(!recorder.contains(&numeric_only));
     try std.testing.expect(!recorder.contains(&funcref_only));
 }

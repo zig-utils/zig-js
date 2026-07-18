@@ -274,7 +274,7 @@ fn traceGcReference(
         const owner = object.owner;
         while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
         for (object.fields) |slot| switch (slot) {
-            .externref => |child| mark_value(visitor, child),
+            .externref, .hostref => |child| mark_value(visitor, child),
             .exnref => |exception| if (exception) |ex|
                 for (ex.externrefs) |child| mark_value(visitor, child),
             .gcref => |child_ref| if (child_ref) |child_header| {
@@ -285,7 +285,15 @@ fn traceGcReference(
                     worklist = child;
                 }
             },
-            .numeric, .vector, .funcref, .i31ref => {},
+            .externalized_gcref => |child_header| {
+                const child = gcObjectFromRef(child_header);
+                if (child.host_trace_epoch != epoch) {
+                    child.host_trace_epoch = epoch;
+                    child.host_trace_next = worklist;
+                    worklist = child;
+                }
+            },
+            .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
         };
         owner.gc_object_lock.unlock();
     }
@@ -294,10 +302,11 @@ fn traceGcReference(
 fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
     switch (slot) {
         .gcref => |reference| if (reference) |root| root.trace(root, visitor, mark_value),
-        .externref => |root| mark_value(visitor, root),
+        .externref, .hostref => |root| mark_value(visitor, root),
         .exnref => |exception| if (exception) |ex|
             for (ex.externrefs) |root| mark_value(visitor, root),
-        .numeric, .vector, .funcref, .i31ref => {},
+        .externalized_gcref => |root| root.trace(root, visitor, mark_value),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     }
 }
 
@@ -502,6 +511,7 @@ fn markGcSlot(
 ) error{OutOfMemory}!void {
     const reference = switch (slot) {
         .gcref => |value| value orelse return,
+        .externalized_gcref => |value| value,
         else => return,
     };
     const object = gcObjectFromRef(reference);
@@ -819,8 +829,8 @@ pub fn createGlobalSlot(gpa: Allocator, gt: types.GlobalType, value: ValueSlot) 
 
 fn publishGlobalValue(global: *GlobalInst, slot: ValueSlot) void {
     const bits = switch (slot) {
-        .externref => |ref| ref.bits,
-        .numeric, .vector, .funcref, .exnref, .i31ref, .gcref => js_value.Value.undef().bits,
+        .externref, .hostref => |ref| ref.bits,
+        .numeric, .vector, .funcref, .exnref, .i31ref, .gcref, .externalized_gcref, .externalized_i31 => js_value.Value.undef().bits,
     };
     global.ref_root.store(bits, .release);
     if (global.barrier) |barrier| barrier(global.barrier_ctx.?, slot);
@@ -1185,9 +1195,10 @@ fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
         if (!reference.nullable and slotIsNull(slot)) return false;
         return switch (reference.heap) {
             .func, .nofunc => slot == .funcref,
-            .extern_, .noextern => slot == .externref,
+            .extern_, .noextern => slot == .externref or slot == .externalized_gcref or slot == .externalized_i31,
             .i31 => slot == .i31ref or (reference.nullable and slot == .gcref and slot.gcref == null),
-            .eq, .any => slot == .i31ref or slot == .gcref,
+            .eq => slot == .i31ref or slot == .gcref,
+            .any => slot == .i31ref or slot == .gcref or slot == .hostref,
             .struct_, .array, .none => slot == .gcref,
             _ => reference.heap.concreteIndex() != null and slot == .gcref,
         };
@@ -1383,6 +1394,7 @@ fn slotIsNull(slot: WasmSlot) bool {
         .funcref => |value| value == null,
         .exnref => |value| value == null,
         .externref => |value| value.isNull(),
+        .hostref, .externalized_gcref, .externalized_i31 => false,
         .gcref => |value| value == null,
         .i31ref => false,
         .numeric, .vector => unreachable,
@@ -1398,6 +1410,7 @@ fn gcReferenceMatches(inst: ?*const Instance, slot: WasmSlot, target: types.RefT
     if (slotIsNull(slot)) return target.nullable;
     return switch (slot) {
         .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
+        .hostref => target.heap == .any,
         .gcref => |raw| blk: {
             const object = gcObjectFromRef(raw.?);
             if (target.heap.concreteIndex() != null) {
@@ -1687,6 +1700,24 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             if ((op == .br_on_cast and matches) or (op == .br_on_cast_fail and !matches))
                 branchTo(s, immediate.label_index);
         },
+        .any_convert_extern => {
+            const reference = popSlot(s);
+            try pushSlot(s, switch (reference) {
+                .externref => |host| if (host.isNull()) .{ .gcref = null } else .{ .hostref = host },
+                .externalized_gcref => |inner| .{ .gcref = inner },
+                .externalized_i31 => |inner| .{ .i31ref = inner },
+                else => unreachable,
+            });
+        },
+        .extern_convert_any => {
+            const reference = popSlot(s);
+            try pushSlot(s, switch (reference) {
+                .hostref => |host| .{ .externref = host },
+                .gcref => |inner| if (inner) |value| .{ .externalized_gcref = value } else .{ .externref = js_value.Value.nul() },
+                .i31ref => |inner| .{ .externalized_i31 = inner },
+                else => unreachable,
+            });
+        },
         .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
         .i31_get_u => try pushI32(s, popSlot(s).i31ref),
         .i31_get_s => {
@@ -1694,7 +1725,6 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const signed: i32 = @as(i32, @bitCast(raw << 1)) >> 1;
             try pushI32(s, @bitCast(signed));
         },
-        else => return s.trap("WebAssembly GC instruction is not implemented"),
     }
 }
 
@@ -2909,11 +2939,11 @@ fn publishExceptionReference(s: *State, active: *ActiveException) ExecError!*js_
     var externref_set: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer externref_set.deinit(s.alloc);
     for (payload) |slot| switch (slot) {
-        .externref => |root| try externref_set.put(s.alloc, root.bits, {}),
+        .externref, .hostref => |root| try externref_set.put(s.alloc, root.bits, {}),
         .exnref => |nested| if (nested) |exception| {
             for (exception.externrefs) |root| try externref_set.put(s.alloc, root.bits, {});
         },
-        .numeric, .vector, .funcref, .i31ref, .gcref => {},
+        .numeric, .vector, .funcref, .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {},
     };
     const externrefs = try owner.gpa.alloc(js_value.Value, externref_set.count());
     errdefer owner.gpa.free(externrefs);
@@ -6732,6 +6762,45 @@ test "wasm.exec GC i31 equality and non-null scalar operations" {
     try std.testing.expectEqualStrings("null reference", diag.message());
 }
 
+test "wasm.exec GC extern conversions preserve host aggregate and i31 identity" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            ft("\x6F", "\x6F"),
+            ft("\x6F", "\x6E"),
+            ft("", "\x6F"),
+        }) ++
+        funcSec(&.{ 0, 1, 2 }) ++
+        codeSec(&.{
+            "\x20\x00\xFB\x1A\xFB\x1B",
+            "\x20\x00\xFB\x1A",
+            i32c(-7) ++ "\xFB\x1C\xFB\x1B",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    var marker = js_value.Object{};
+    var result: [1]ValueSlot = undefined;
+    try invokeSlots(inst, 0, &.{.{ .externref = js_value.Value.obj(&marker) }}, &result, &diag);
+    try std.testing.expect(result[0] == .externref and result[0].externref.asObj() == &marker);
+    try invokeSlots(inst, 1, &.{.{ .externref = js_value.Value.obj(&marker) }}, &result, &diag);
+    try std.testing.expect(result[0] == .hostref and result[0].hostref.asObj() == &marker);
+    try invokeSlots(inst, 2, &.{}, &result, &diag);
+    try std.testing.expect(result[0] == .externalized_i31);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(i32, -7))) & 0x7fff_ffff, result[0].externalized_i31);
+    try invokeSlots(inst, 0, &result, &result, &diag);
+    try std.testing.expect(result[0] == .externalized_i31);
+    try invokeSlots(inst, 1, &.{.{ .externref = js_value.Value.nul() }}, &result, &diag);
+    try std.testing.expect(result[0] == .gcref and result[0].gcref == null);
+}
+
 fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
     defer mod.deinit();
@@ -6773,7 +6842,7 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     var trace_probe: TraceProbe = .{};
     third.trace_ref.trace(&third.trace_ref, @ptrCast(&trace_probe), TraceProbe.mark);
     try std.testing.expectEqual(&js_child, trace_probe.marked);
-    const active_slots = [_]ValueSlot{.{ .gcref = gcObjectRef(first) }};
+    const active_slots = [_]ValueSlot{.{ .externalized_gcref = gcObjectRef(first) }};
     var active_roots: js_value.WasmExecutionRoots = .{ .stack = &active_slots };
     var registration: GcRootRegistration = .{ .roots = &active_roots };
     inst.gc_active_roots = &registration;

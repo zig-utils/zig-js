@@ -68,7 +68,10 @@ fn executionWaitInterrupted(raw: *anyopaque) bool {
 
 fn barrierGlobalReference(raw: *anyopaque, slot: exec.ValueSlot) void {
     const owner: *Object = @ptrCast(@alignCast(raw));
-    if (slot == .externref) gc.barrierValueFrom(owner, slot.externref);
+    switch (slot) {
+        .externref, .hostref => |root| gc.barrierValueFrom(owner, root),
+        else => {},
+    }
 }
 
 const ErrorDescriptor = struct { name: []const u8, proto: *Object };
@@ -240,7 +243,11 @@ fn tableHostSync(raw: *anyopaque, table: *exec.TableInst, start: usize, len: usi
             if (!mirroredFunctionMatches(current, func))
                 owner.refs[index].store(Value.nul().bits, .release);
         } else owner.refs[index].store(Value.nul().bits, .release),
-        .i31ref, .gcref => owner.refs[index].store(Value.nul().bits, .release),
+        .i31ref, .gcref, .externalized_gcref, .externalized_i31 => owner.refs[index].store(Value.nul().bits, .release),
+        .hostref => |ref| {
+            owner.refs[index].store(ref.bits, .release);
+            gc.barrierValueFrom(owner.wrapper, ref);
+        },
         .numeric, .vector, .exnref => unreachable,
     };
 }
@@ -705,7 +712,10 @@ const TableRef = struct {
 };
 
 fn tableRefFromValue(self: *Interpreter, store: *context.Context, inst: ?*exec.Instance, elem_type: types.ValType, input: Value) value.HostError!TableRef {
-    if (elem_type == .externref) return .{ .value = input, .slot = .{ .externref = input } };
+    if (elem_type == .externref) {
+        const slot = jsToWasmExternReference(input);
+        return .{ .value = if (slot == .externref) input else Value.nul(), .slot = slot };
+    }
     if (elem_type.refType()) |reference| if (reference.heap != .func and reference.heap != .nofunc) {
         const slot = try jsToWasmGcReference(self, inst, elem_type, input);
         return .{ .value = Value.nul(), .slot = slot };
@@ -796,7 +806,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
         owner.table.unlockTable();
         owner.unlockOwner();
         switch (slot) {
-            .externref => return slot.externref,
+            .externref, .hostref => |host| return host,
             .funcref => |maybe_func| {
                 const func = maybe_func orelse return Value.nul();
                 if (mirroredFunctionMatches(mirrored, func)) return mirrored;
@@ -820,7 +830,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                     return resolved;
                 }
             },
-            .i31ref, .gcref => {
+            .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {
                 const resolved = try wasmSlotToJs(self, owner.table.type, slot, owner.table.owner_instance);
                 owner.lockOwner();
                 owner.table.lockTable();
@@ -894,7 +904,7 @@ fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostE
 
 fn coerceGlobalSlot(self: *Interpreter, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
     return switch (kind) {
-        .externref => .{ .externref = input },
+        .externref => jsToWasmExternReference(input),
         .funcref => unreachable,
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
@@ -942,6 +952,9 @@ fn functionInstance(func: *exec.FuncInst, fallback: ?*exec.Instance) ?*exec.Inst
 fn wasmGcReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostError!Value {
     return switch (slot) {
         .i31ref => |bits| Value.num(@floatFromInt(@as(i32, @bitCast(bits << 1)) >> 1)),
+        .hostref => |host| host,
+        .externalized_gcref => |reference| wasmGcReferenceToJs(self, .{ .gcref = reference }),
+        .externalized_i31 => |bits| wasmGcReferenceToJs(self, .{ .i31ref = bits }),
         .gcref => |reference| if (reference) |root| blk: {
             const wrapper = try gc.allocObj(self.arena);
             wrapper.* = .{};
@@ -961,12 +974,26 @@ fn wasmGcReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostError
     };
 }
 
+fn jsToWasmExternReference(input: Value) exec.ValueSlot {
+    if (languageObject(input)) |object| if (object.wasmGcReference()) |state| if (state.reference) |reference|
+        return .{ .externalized_gcref = reference };
+    return .{ .externref = input };
+}
+
+fn wasmExternReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostError!Value {
+    return switch (slot) {
+        .externref, .hostref => |host| host,
+        .externalized_gcref, .externalized_i31 => wasmGcReferenceToJs(self, slot),
+        else => self.throwError("TypeError", "value is not a WebAssembly external reference"),
+    };
+}
+
 fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
     return switch (kind) {
         .i32, .i64, .f32, .f64 => wasmBitsToJs(self, kind, slot.numericBits()),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
-        .externref => slot.externref,
+        .externref => wasmExternReferenceToJs(self, slot),
         .funcref => if (slot.funcref) |raw| blk: {
             const func: *exec.FuncInst = @ptrCast(@alignCast(raw));
             const inst = functionInstance(func, fallback) orelse
@@ -1000,6 +1027,7 @@ fn jsToWasmGcReference(self: *Interpreter, inst: ?*exec.Instance, kind: types.Va
         const slot: exec.ValueSlot = .{ .gcref = reference };
         if (exec.gcReferenceSlotMatches(inst, slot, kind)) return slot;
     };
+    if (target.heap == .any) return .{ .hostref = input };
     return self.throwError("TypeError", "JavaScript value does not match the WebAssembly GC reference type");
 }
 
@@ -1008,7 +1036,7 @@ fn jsToWasmSlot(self: *Interpreter, store: *context.Context, inst: ?*exec.Instan
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
         .v128 => return self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
         .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
-        .externref => .{ .externref = input },
+        .externref => jsToWasmExternReference(input),
         .funcref => (try tableRefFromValue(self, store, inst, .funcref, input)).slot,
         else => jsToWasmGcReference(self, inst, kind, input),
     };
@@ -1209,7 +1237,7 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .i64 => try self.makeBigInt(@as(i64, @bitCast(glob.value.numericBits()))),
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value.numericBits()))))),
         .f64 => Value.num(@bitCast(glob.value.numericBits())),
-        .externref => glob.value.externref,
+        .externref => wasmExternReferenceToJs(self, glob.value),
         .funcref => unreachable,
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
@@ -1735,7 +1763,7 @@ fn wrapDefinedTable(
     const refs = try allocateTableRefs(store, table.elems.len, Value.nul());
     errdefer store.gpa.free(refs);
     for (table.elems, 0..) |slot, i| switch (slot) {
-        .externref => |ref| refs[i].store(ref.bits, .monotonic),
+        .externref, .hostref => |ref| refs[i].store(ref.bits, .monotonic),
         .exnref => return self.throwError("TypeError", "exnref table requires the WebAssembly.Exception API"),
         .funcref => |raw_func| if (raw_func) |raw| {
             const entry: *exec.FuncInst = @ptrCast(@alignCast(raw));
@@ -1749,7 +1777,7 @@ fn wrapDefinedTable(
                 refs[i].store(exported.bits, .monotonic);
             }
         },
-        .i31ref, .gcref => {},
+        .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {},
         .numeric, .vector => unreachable,
     };
     const object = try gc.allocObj(self.arena);
@@ -2420,13 +2448,14 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
     const before = try store.evaluate(
         \\const gcBytes = new Uint8Array([
         \\  0,97,115,109,1,0,0,0,
-        \\  1,22,4,95,1,111,0,96,1,111,1,100,0,96,1,100,0,1,100,0,96,0,1,108,
-        \\  3,4,3,1,2,3,
+        \\  1,27,5,95,1,111,0,96,1,111,1,100,0,96,1,100,0,1,100,0,96,0,1,108,96,1,111,1,111,
+        \\  3,5,4,1,2,3,4,
         \\  4,5,1,99,0,0,1,
         \\  6,7,1,99,0,1,208,0,11,
-        \\  7,38,5,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
-        \\    5,116,97,98,108,101,1,0,6,103,108,111,98,97,108,3,0,
-        \\  10,21,3,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11
+        \\  7,46,6,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
+        \\    5,116,97,98,108,101,1,0,6,103,108,111,98,97,108,3,0,5,114,111,117,110,100,0,3,
+        \\  10,30,4,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11,
+        \\    8,0,32,0,251,26,251,27,11
         \\]);
         \\globalThis.gcExports = new WebAssembly.Instance(new WebAssembly.Module(gcBytes)).exports;
         \\const linkedBytes = new Uint8Array([
@@ -2448,6 +2477,7 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
         \\Object.getPrototypeOf(gcKeep) === null && !Object.isExtensible(gcKeep) &&
         \\  gcExports.echo(gcKeep) === gcKeep && gcExports.table.get(0) === gcKeep &&
         \\  gcExports.global.value === gcKeep && gcLinked.echo(gcKeep) === gcKeep &&
+        \\  gcExports.round(gcKeep) === gcKeep && gcExports.round(gcMarker) === gcMarker &&
         \\  gcLinked.table === gcExports.table && gcLinked.global === gcExports.global &&
         \\  gcExports.make() !== gcKeep && gcExports.i31() === -1;
     );

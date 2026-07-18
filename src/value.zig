@@ -79,11 +79,16 @@ pub const WasmSlot = union(enum) {
     funcref: ?*anyopaque,
     exnref: ?*WasmException,
     externref: Value,
+    /// Host reference after `any.convert_extern` removes the external wrapper.
+    hostref: Value,
     /// Unboxed low 31 bits for the Wasm GC i31 hierarchy.
     i31ref: u32,
     /// Struct/array identity. The concrete aggregate remains runtime-owned;
     /// this header exposes only precise host-GC tracing.
     gcref: ?*WasmGcRef,
+    /// Internal references wrapped by `extern.convert_any`.
+    externalized_gcref: *WasmGcRef,
+    externalized_i31: u32,
 
     pub fn numericBits(self: WasmSlot) u64 {
         return switch (self) {
