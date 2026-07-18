@@ -749,13 +749,17 @@ pub const ErrorStackFrame = struct {
     jsc_stack_frame_index: i32 = -1,
 };
 
+const ErrorStack = struct {
+    frames: []const ErrorStackFrame,
+};
+
 pub const ObjectRareState = union(ObjectRareTag) {
     none: void,
     primitive: ObjectPrimitiveState,
     error_state: struct {
         name: []const u8 = "",
         ctor: ?[]const u8 = null,
-        stack_frames: []const ErrorStackFrame = &.{},
+        stack: ?*const ErrorStack = null,
     },
     date: struct {},
     module_ns: struct { ptr: ?*anyopaque = null },
@@ -1472,7 +1476,8 @@ pub const Object = struct {
     pub inline fn errorStackFrames(self: *const Object) []const ErrorStackFrame {
         const cold = self.coldState() orelse return &.{};
         if (!cold.hasRare(.error_state)) return &.{};
-        return cold.rare.error_state.stack_frames;
+        const stack = cold.rare.error_state.stack orelse return &.{};
+        return stack.frames;
     }
 
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {
@@ -1735,7 +1740,9 @@ pub const Object = struct {
 
     pub fn setErrorStackFrames(self: *Object, fallback: std.mem.Allocator, frames: []const ErrorStackFrame) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .error_state, .{});
-        state.stack_frames = frames;
+        const stack = try fallback.create(ErrorStack);
+        stack.* = .{ .frames = frames };
+        state.stack = stack;
     }
 
     pub inline fn regexSource(self: *const Object) []const u8 {
