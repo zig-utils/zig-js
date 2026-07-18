@@ -326,6 +326,9 @@ const Ticket = struct {
     async_id: u64 = 0,
     /// Absolute `.awake`-clock nanoseconds; null waits forever.
     deadline_ns: ?i96 = null,
+    interrupt_ctx: ?*anyopaque = null,
+    interrupted_fn: ?*const fn (*anyopaque) bool = null,
+    interrupted: bool = false,
 };
 
 const WaiterList = struct {
@@ -356,6 +359,33 @@ fn listFor(key: WaitKey) ?*WaiterList {
     return gop.value_ptr.*;
 }
 
+fn removeListIfEmptyLocked(key: WaitKey, list: *WaiterList) void {
+    if (list.tickets.items.len != 0) return;
+    if (waiters.remove(key)) {
+        list.tickets.deinit(alloc);
+        alloc.destroy(list);
+    }
+}
+
+/// Allocation-free sweep used after operations that visit multiple lists.
+/// Restarting after each removal keeps the hash-map iterator valid.
+fn removeEmptyListsLocked() void {
+    while (true) {
+        var empty_key: ?WaitKey = null;
+        var empty_list: ?*WaiterList = null;
+        var it = waiters.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.*.tickets.items.len == 0) {
+                empty_key = entry.key_ptr.*;
+                empty_list = entry.value_ptr.*;
+                break;
+            }
+        }
+        if (empty_key == null) return;
+        removeListIfEmptyLocked(empty_key.?, empty_list.?);
+    }
+}
+
 fn reserveTicketsLocked(list: *WaiterList, additional: usize) bool {
     if (additional == 0) return true;
     const spare = list.tickets.capacity - list.tickets.items.len;
@@ -371,11 +401,23 @@ fn appendTicketLocked(list: *WaiterList, ticket: *Ticket) bool {
     return true;
 }
 
-pub const WaitOutcome = enum { ok, not_equal, timed_out };
+pub const WaitOutcome = enum { ok, not_equal, timed_out, interrupted };
+
+pub const WaitInterrupt = struct {
+    ctx: *anyopaque,
+    is_interrupted: *const fn (*anyopaque) bool,
+};
 
 /// Blocking `Atomics.wait` core. `T` is i32 or i64; `offset` is the element's
 /// byte offset into the storage; `timeout_ns` null means wait forever.
 pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64) WaitOutcome {
+    return waitInterruptible(storage, offset, T, expected, timeout_ns, null);
+}
+
+/// Blocking wait with an optional host-owned cancellation predicate. The host
+/// calls `interruptWaiters` after publishing its stop word; no polling or
+/// fixed wake interval is needed, and unrelated waiter domains stay asleep.
+pub fn waitInterruptible(storage: *SharedBufferStorage, offset: usize, comptime T: type, expected: T, timeout_ns: ?u64, interrupt: ?WaitInterrupt) WaitOutcome {
     const io = engineIo();
     waiters_used.store(true, .monotonic);
     waiters_mutex.lockUncancelable(io);
@@ -386,15 +428,23 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
         waiters_mutex.unlock(io);
         return .not_equal;
     }
+    if (interrupt) |i| if (i.is_interrupted(i.ctx)) {
+        waiters_mutex.unlock(io);
+        return .interrupted;
+    };
     if (group.stopping) {
         waiters_mutex.unlock(io);
         return .timed_out;
     }
-    const list = listFor(.{ .storage = storage, .offset = offset }) orelse {
+    const key = WaitKey{ .storage = storage, .offset = offset };
+    const list = listFor(key) orelse {
         waiters_mutex.unlock(io);
         return .timed_out;
     };
-    var ticket = Ticket{};
+    var ticket = Ticket{
+        .interrupt_ctx = if (interrupt) |i| i.ctx else null,
+        .interrupted_fn = if (interrupt) |i| i.is_interrupted else null,
+    };
     if (!appendTicketLocked(list, &ticket)) {
         waiters_mutex.unlock(io);
         return .timed_out;
@@ -420,9 +470,12 @@ pub fn wait(storage: *SharedBufferStorage, offset: usize, comptime T: type, expe
     }
     // Unlink before returning — unless notify/teardown already unlinked the
     // stack ticket before signaling us.
-    if (ticket.linked) unlinkTicket(list, &ticket);
+    if (ticket.linked) {
+        unlinkTicket(list, &ticket);
+        removeListIfEmptyLocked(key, list);
+    }
     waiters_mutex.unlock(io);
-    return outcome;
+    return if (ticket.interrupted) .interrupted else outcome;
 }
 
 fn unlinkTicket(list: *WaiterList, ticket: *Ticket) void {
@@ -449,7 +502,8 @@ pub fn notify(storage: *SharedBufferStorage, offset: usize, count: usize) usize 
     const io = engineIo();
     waiters_mutex.lockUncancelable(io);
     defer waiters_mutex.unlock(io);
-    const list = waiters.get(.{ .storage = storage, .offset = offset }) orelse return 0;
+    const key = WaitKey{ .storage = storage, .offset = offset };
+    const list = waiters.get(key) orelse return 0;
     var n: usize = 0;
     var any_async = false;
     var write: usize = 0;
@@ -472,8 +526,43 @@ pub fn notify(storage: *SharedBufferStorage, offset: usize, count: usize) usize 
         }
     }
     if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
+    removeListIfEmptyLocked(key, list);
     if (any_async) waiters_cond.broadcast(io);
     return n;
+}
+
+/// Wake only waiters whose host-published interruption predicate is true.
+/// Called after Worker/Context termination stores its stop word.
+pub fn interruptWaiters() void {
+    if (!waiters_used.load(.monotonic)) return;
+    const io = engineIo();
+    waiters_mutex.lockUncancelable(io);
+    defer waiters_mutex.unlock(io);
+    var it = waiters.valueIterator();
+    while (it.next()) |list_ptr| {
+        const list = list_ptr.*;
+        var write: usize = 0;
+        for (list.tickets.items, 0..) |ticket, read| {
+            var keep = true;
+            if (!ticket.woken and ticket.interrupted_fn != null and
+                ticket.interrupted_fn.?(ticket.interrupt_ctx.?))
+            {
+                ticket.interrupted = true;
+                ticket.woken = true;
+                if (!ticket.is_async) {
+                    ticket.linked = false;
+                    ticket.cond.signal(io);
+                    keep = false;
+                }
+            }
+            if (keep) {
+                if (write != read) list.tickets.items[write] = ticket;
+                write += 1;
+            }
+        }
+        if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
+    }
+    removeEmptyListsLocked();
 }
 
 // ---- Atomics.waitAsync ------------------------------------------------------
@@ -575,6 +664,7 @@ pub fn harvestAsync(owner: *const anyopaque, out: []Settled) usize {
             }
             if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
         }
+        removeEmptyListsLocked();
         if (n > 0 or outstanding == 0) return n;
         if (!group.stopping and nearest == null and live_agents.load(.monotonic) == 0) return 0;
         const wait_ns: u64 = if (nearest) |d| @intCast(@max(1, d - now)) else 100 * std.time.ns_per_ms;
@@ -611,6 +701,7 @@ pub fn abandonAsync(owner: *const anyopaque) void {
         }
         if (write != list.tickets.items.len) list.tickets.shrinkRetainingCapacity(write);
     }
+    removeEmptyListsLocked();
 }
 
 /// Teardown helper: wake every parked sync waiter (they observe
@@ -636,6 +727,7 @@ fn wakeAllWaiters() void {
         }
         if (write != list.*.tickets.items.len) list.*.tickets.shrinkRetainingCapacity(write);
     }
+    removeEmptyListsLocked();
     waiters_cond.broadcast(io);
 }
 
@@ -664,6 +756,46 @@ test "waiter table: wait blocks until notify; not-equal early-out" {
     const t = try std.Thread.spawn(.{}, Waker.run, .{s});
     try std.testing.expectEqual(WaitOutcome.ok, wait(s, 0, i32, 7, 2 * std.time.ns_per_s));
     t.join();
+}
+
+test "waiter table host interruption unlinks a blocking ticket" {
+    const storage = try SharedBufferStorage.create(8, null);
+    defer storage.release();
+    const word: *i32 = @ptrCast(@alignCast(storage.slab));
+    @atomicStore(i32, word, 0, .seq_cst);
+    var stop = std.atomic.Value(bool).init(false);
+    var outcome: WaitOutcome = .timed_out;
+    const interrupted = struct {
+        fn check(raw: *anyopaque) bool {
+            const flag: *std.atomic.Value(bool) = @ptrCast(@alignCast(raw));
+            return flag.load(.acquire);
+        }
+    }.check;
+    const Worker = struct {
+        fn run(s: *SharedBufferStorage, flag: *std.atomic.Value(bool), result: *WaitOutcome, callback: *const fn (*anyopaque) bool) void {
+            result.* = waitInterruptible(s, 0, i32, 0, std.time.ns_per_s, .{
+                .ctx = @ptrCast(flag),
+                .is_interrupted = callback,
+            });
+        }
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{ storage, &stop, &outcome, interrupted });
+    var attempts: usize = 0;
+    while (attempts < 100_000) : (attempts += 1) {
+        waiters_mutex.lockUncancelable(engineIo());
+        const queued = if (waiters.get(.{ .storage = storage, .offset = 0 })) |list| list.tickets.items.len == 1 else false;
+        waiters_mutex.unlock(engineIo());
+        if (queued) break;
+        std.Thread.yield() catch {};
+    }
+    stop.store(true, .release);
+    interruptWaiters();
+    thread.join();
+    try std.testing.expectEqual(WaitOutcome.interrupted, outcome);
+    waiters_mutex.lockUncancelable(engineIo());
+    defer waiters_mutex.unlock(engineIo());
+    if (waiters.get(.{ .storage = storage, .offset = 0 })) |list|
+        try std.testing.expectEqual(@as(usize, 0), list.tickets.items.len);
 }
 
 test "agent reports drain FIFO with a head cursor" {

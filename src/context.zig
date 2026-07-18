@@ -3200,6 +3200,12 @@ pub const Context = struct {
     /// destroy it after the interrupted evaluation instead of attempting reuse.
     pub fn requestTermination(self: *Context) void {
         self.teardown_stop.store(true, .release);
+        agent.interruptWaiters();
+    }
+
+    pub fn terminationRequested(self: *const Context) bool {
+        if (self.stop_flag) |flag| if (flag.load(.acquire)) return true;
+        return @constCast(&self.teardown_stop).load(.acquire);
     }
 
     pub fn destroy(self: *Context) void {
@@ -3210,6 +3216,7 @@ pub const Context = struct {
         const host_allocator_lock = self.host_allocator_lock;
         if (self.gil) |g| {
             self.teardown_stop.store(true, .release);
+            agent.interruptWaiters();
             // Spawned threads need the lock to finish: park until each is
             // done, then OS-join the handles.
             if (self.parallel_js) {
@@ -4550,7 +4557,10 @@ pub const Context = struct {
         // thread finishes (each drains its own queue and settles its
         // asyncJoins), then drains whatever those settlements queued here.
         if (self.gil) |g| {
-            if (top_level_failed) self.teardown_stop.store(true, .release);
+            if (top_level_failed) {
+                self.teardown_stop.store(true, .release);
+                agent.interruptWaiters();
+            }
             var i: usize = 0;
             while (i < self.js_threads.items.len) : (i += 1) {
                 const rec = self.js_threads.items[i];

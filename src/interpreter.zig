@@ -28907,6 +28907,7 @@ fn atomicsWaitFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
         .ok => Value.str("ok"),
         .not_equal => Value.str("not-equal"),
         .timed_out => Value.str("timed-out"),
+        .interrupted => Value.str("timed-out"), // plain Atomics.wait has no interrupt source
     };
 }
 /// `Atomics.pause(N)` — a microarchitectural pause hint. `N`, if present, must

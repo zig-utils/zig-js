@@ -15,8 +15,10 @@
 //! legacy `u64` invocation path is numeric-only.
 
 const std = @import("std");
+const agent = @import("../agent.zig");
 const js_value = @import("../value.zig");
 const SharedBufferStorage = @import("../shared_buffer.zig").SharedBufferStorage;
+const wasm_atomic = @import("atomic.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate = @import("validate.zig");
@@ -25,6 +27,7 @@ const simd = @import("simd.zig");
 const Allocator = std.mem.Allocator;
 pub const ValueSlot = js_value.WasmSlot;
 const WasmSlot = ValueSlot;
+var atomic_fence_word = std.atomic.Value(u8).init(0);
 
 pub const ExecError = error{ OutOfMemory, Trap, Host };
 
@@ -33,6 +36,9 @@ pub const RootHooks = struct {
     enter: *const fn (*anyopaque, *js_value.WasmExecutionRoots) error{OutOfMemory}!void,
     leave: *const fn (*anyopaque, *js_value.WasmExecutionRoots) void,
     checkpoint: *const fn (*anyopaque, *js_value.WasmExecutionRoots) void,
+    begin_wait: ?*const fn (*anyopaque) void = null,
+    end_wait: ?*const fn (*anyopaque) void = null,
+    wait_interrupted: ?*const fn (*anyopaque) bool = null,
 };
 
 /// Host-imported function. `ctx` is host-owned (traced/freed by the host).
@@ -1876,6 +1882,182 @@ fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u32, size: u64)
     return @intCast(ea);
 }
 
+const AtomicDecoded = struct {
+    op: wasm_atomic.Op,
+    memarg: ?types.Instr.MemArg = null,
+};
+
+fn atomicDecoded(instr: types.Instr) AtomicDecoded {
+    return switch (instr.imm) {
+        .atomic => |op| .{ .op = op },
+        .atomic_memarg => |decoded| .{ .op = decoded.op, .memarg = decoded.memarg },
+        else => unreachable,
+    };
+}
+
+fn atomicByteWidth(op: wasm_atomic.Op) usize {
+    return @as(usize, 1) << @intCast(op.naturalAlignment().?);
+}
+
+fn atomicResultIsI64(op: wasm_atomic.Op) bool {
+    return switch (op.shape()) {
+        .load_i64, .store_i64, .rmw_i64, .cmpxchg_i64, .wait64 => true,
+        else => false,
+    };
+}
+
+fn atomicAddress(s: *State, mem: *const MemoryInst, addr: u32, memarg: types.Instr.MemArg, width: usize) ExecError!usize {
+    const ea = try effAddr(s, mem, addr, memarg.offset, width);
+    if ((ea & (width - 1)) != 0) return s.trap("unaligned atomic");
+    return ea;
+}
+
+fn atomicPtr(comptime T: type, bytes: []u8, offset: usize) *T {
+    return @ptrCast(@alignCast(bytes.ptr + offset));
+}
+
+fn atomicLoadRaw(bytes: []u8, offset: usize, width: usize) u64 {
+    return switch (width) {
+        1 => @atomicLoad(u8, atomicPtr(u8, bytes, offset), .seq_cst),
+        2 => @atomicLoad(u16, atomicPtr(u16, bytes, offset), .seq_cst),
+        4 => @atomicLoad(u32, atomicPtr(u32, bytes, offset), .seq_cst),
+        8 => @atomicLoad(u64, atomicPtr(u64, bytes, offset), .seq_cst),
+        else => unreachable,
+    };
+}
+
+fn atomicStoreRaw(bytes: []u8, offset: usize, width: usize, raw: u64) void {
+    switch (width) {
+        1 => @atomicStore(u8, atomicPtr(u8, bytes, offset), @truncate(raw), .seq_cst),
+        2 => @atomicStore(u16, atomicPtr(u16, bytes, offset), @truncate(raw), .seq_cst),
+        4 => @atomicStore(u32, atomicPtr(u32, bytes, offset), @truncate(raw), .seq_cst),
+        8 => @atomicStore(u64, atomicPtr(u64, bytes, offset), raw, .seq_cst),
+        else => unreachable,
+    }
+}
+
+fn atomicRmwRaw(comptime operation: std.builtin.AtomicRmwOp, bytes: []u8, offset: usize, width: usize, raw: u64) u64 {
+    return switch (width) {
+        1 => @atomicRmw(u8, atomicPtr(u8, bytes, offset), operation, @truncate(raw), .seq_cst),
+        2 => @atomicRmw(u16, atomicPtr(u16, bytes, offset), operation, @truncate(raw), .seq_cst),
+        4 => @atomicRmw(u32, atomicPtr(u32, bytes, offset), operation, @truncate(raw), .seq_cst),
+        8 => @atomicRmw(u64, atomicPtr(u64, bytes, offset), operation, raw, .seq_cst),
+        else => unreachable,
+    };
+}
+
+fn atomicCmpxchgRaw(bytes: []u8, offset: usize, width: usize, expected: u64, replacement: u64) u64 {
+    return switch (width) {
+        1 => blk: {
+            const e: u8 = @truncate(expected);
+            break :blk @cmpxchgStrong(u8, atomicPtr(u8, bytes, offset), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        2 => blk: {
+            const e: u16 = @truncate(expected);
+            break :blk @cmpxchgStrong(u16, atomicPtr(u16, bytes, offset), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        4 => blk: {
+            const e: u32 = @truncate(expected);
+            break :blk @cmpxchgStrong(u32, atomicPtr(u32, bytes, offset), e, @truncate(replacement), .seq_cst, .seq_cst) orelse e;
+        },
+        8 => @cmpxchgStrong(u64, atomicPtr(u64, bytes, offset), expected, replacement, .seq_cst, .seq_cst) orelse expected,
+        else => unreachable,
+    };
+}
+
+fn executeAtomic(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
+    const decoded = atomicDecoded(instr);
+    if (decoded.op == .memory_atomic_fence) {
+        _ = atomic_fence_word.fetchAdd(0, .seq_cst);
+        return;
+    }
+
+    const mem = inst.mems[0];
+    // Ordinary memories may move on grow. Shared slabs never move, so their
+    // atomics stay lock-free and scale through hardware SeqCst operations.
+    const lock_memory = !mem.isShared();
+    if (lock_memory) while (!mem.grow_lock.tryLock()) std.atomic.spinLoopHint();
+    defer if (lock_memory) mem.grow_lock.unlock();
+
+    const memarg = decoded.memarg.?;
+    const width = atomicByteWidth(decoded.op);
+    switch (decoded.op.shape()) {
+        .notify => {
+            const count: usize = popI32(s);
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            const storage = mem.shared_storage orelse {
+                try pushI32(s, 0);
+                return;
+            };
+            try pushI32(s, @intCast(agent.notify(storage, ea, count)));
+        },
+        .wait32, .wait64 => {
+            const timeout: i64 = @bitCast(pop(s));
+            const expected = pop(s);
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            const storage = mem.shared_storage orelse return s.trap("expected shared memory");
+            checkpoint(s);
+            if (s.root_hooks) |hooks| if (hooks.begin_wait) |begin| begin(hooks.ctx);
+            defer if (s.root_hooks) |hooks| if (hooks.end_wait) |end| end(hooks.ctx);
+            const timeout_ns: ?u64 = if (timeout < 0) null else @intCast(timeout);
+            const interrupt: ?agent.WaitInterrupt = if (s.root_hooks) |hooks|
+                if (hooks.wait_interrupted) |is_interrupted| .{ .ctx = hooks.ctx, .is_interrupted = is_interrupted } else null
+            else
+                null;
+            const outcome = if (decoded.op.shape() == .wait64)
+                agent.waitInterruptible(storage, ea, i64, @bitCast(expected), timeout_ns, interrupt)
+            else
+                agent.waitInterruptible(storage, ea, i32, @bitCast(@as(u32, @truncate(expected))), timeout_ns, interrupt);
+            if (outcome == .interrupted) return s.trap("WebAssembly execution interrupted");
+            try pushI32(s, switch (outcome) {
+                .ok => 0,
+                .not_equal => 1,
+                .timed_out => 2,
+                .interrupted => unreachable,
+            });
+        },
+        .load_i32, .load_i64 => {
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            const raw = atomicLoadRaw(mem.bytes(), ea, width);
+            if (atomicResultIsI64(decoded.op)) try pushI64(s, raw) else try pushI32(s, @truncate(raw));
+        },
+        .store_i32, .store_i64 => {
+            const value_bits = pop(s);
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            atomicStoreRaw(mem.bytes(), ea, width, value_bits);
+        },
+        .rmw_i32, .rmw_i64 => {
+            const operand = pop(s);
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            const group = (@intFromEnum(decoded.op) - 0x1e) / 7;
+            const old = switch (group) {
+                0 => atomicRmwRaw(.Add, mem.bytes(), ea, width, operand),
+                1 => atomicRmwRaw(.Sub, mem.bytes(), ea, width, operand),
+                2 => atomicRmwRaw(.And, mem.bytes(), ea, width, operand),
+                3 => atomicRmwRaw(.Or, mem.bytes(), ea, width, operand),
+                4 => atomicRmwRaw(.Xor, mem.bytes(), ea, width, operand),
+                5 => atomicRmwRaw(.Xchg, mem.bytes(), ea, width, operand),
+                else => unreachable,
+            };
+            if (atomicResultIsI64(decoded.op)) try pushI64(s, old) else try pushI32(s, @truncate(old));
+        },
+        .cmpxchg_i32, .cmpxchg_i64 => {
+            const replacement = pop(s);
+            const expected = pop(s);
+            const address = popI32(s);
+            const ea = try atomicAddress(s, mem, address, memarg, width);
+            const old = atomicCmpxchgRaw(mem.bytes(), ea, width, expected, replacement);
+            if (atomicResultIsI64(decoded.op)) try pushI64(s, old) else try pushI32(s, @truncate(old));
+        },
+        .fence => unreachable,
+    }
+}
+
 // IEEE roundTiesToEven via the 2^52/2^23 add-subtract trick (valid in the
 // default to-nearest-even rounding mode), with a sign fix for zero results
 // (nearest(-0.5) is -0.0, not +0.0).
@@ -2405,7 +2587,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
             .simd => try executeSimd(s, inst, instr),
-            .atomic => return s.trap("WebAssembly threads execution is not implemented"),
+            .atomic => try executeAtomic(s, inst, instr),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
             .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
                 const bu = popI32(s);
@@ -3186,6 +3368,156 @@ test "wasm.exec shared memory backing outlives its store owner" {
     try std.testing.expectEqual(@as(usize, 1), storage.retainCount());
     try std.testing.expectEqual(@as(u8, 0xa5), storage.fixedSlice(types.PAGE_SIZE)[31]);
     storage.release();
+}
+
+fn atomicTestInstr(op: wasm_atomic.Op) types.Instr {
+    return .{
+        .op = .atomic,
+        .imm = if (op == .memory_atomic_fence)
+            .{ .atomic = op }
+        else
+            .{ .atomic_memarg = .{
+                .op = op,
+                .memarg = .{ .align_ = op.naturalAlignment().?, .offset = 0 },
+            } },
+    };
+}
+
+test "wasm.exec executes every atomic load store RMW and cmpxchg opcode" {
+    const mem = try createMemoryTyped(talloc, 1, 1, true);
+    defer destroyMemory(talloc, mem);
+    var inst: Instance = undefined;
+    var memories = [_]*MemoryInst{mem};
+    inst.mems = &memories;
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    var diag: types.Diagnostic = .{};
+    var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+    const initial: u64 = 0x0102030405060708;
+    const operand: u64 = 0xf1e2d3c4b5a69788;
+
+    for (std.enums.values(wasm_atomic.Op)) |op| {
+        switch (op.shape()) {
+            .notify, .wait32, .wait64, .fence => continue,
+            else => {},
+        }
+        state.stack.clearRetainingCapacity();
+        atomicStoreRaw(mem.bytes(), 0, 8, initial);
+        const width = atomicByteWidth(op);
+        const mask: u64 = if (width == 8) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width * 8)) - 1;
+        const old = initial & mask;
+        try pushI32(&state, 0);
+        switch (op.shape()) {
+            .load_i32, .load_i64 => {
+                try executeAtomic(&state, &inst, atomicTestInstr(op));
+                try std.testing.expectEqual(old, pop(&state));
+            },
+            .store_i32, .store_i64 => {
+                try push(&state, operand);
+                try executeAtomic(&state, &inst, atomicTestInstr(op));
+                try std.testing.expectEqual(operand & mask, atomicLoadRaw(mem.bytes(), 0, width));
+            },
+            .rmw_i32, .rmw_i64 => {
+                try push(&state, operand);
+                try executeAtomic(&state, &inst, atomicTestInstr(op));
+                try std.testing.expectEqual(old, pop(&state));
+                const group = (@intFromEnum(op) - 0x1e) / 7;
+                const expected = switch (group) {
+                    0 => (old +% operand) & mask,
+                    1 => (old -% operand) & mask,
+                    2 => old & operand & mask,
+                    3 => (old | operand) & mask,
+                    4 => (old ^ operand) & mask,
+                    5 => operand & mask,
+                    else => unreachable,
+                };
+                try std.testing.expectEqual(expected, atomicLoadRaw(mem.bytes(), 0, width));
+            },
+            .cmpxchg_i32, .cmpxchg_i64 => {
+                try push(&state, old);
+                try push(&state, operand);
+                try executeAtomic(&state, &inst, atomicTestInstr(op));
+                try std.testing.expectEqual(old, pop(&state));
+                try std.testing.expectEqual(operand & mask, atomicLoadRaw(mem.bytes(), 0, width));
+            },
+            else => unreachable,
+        }
+    }
+
+    state.stack.clearRetainingCapacity();
+    try executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_fence));
+
+    try pushI32(&state, 1);
+    try std.testing.expectError(error.Trap, executeAtomic(&state, &inst, atomicTestInstr(.i32_atomic_load)));
+    try std.testing.expectEqualStrings("unaligned atomic", state.diag.message());
+}
+
+test "wasm.exec atomic wait and notify share the FIFO waiter table" {
+    const mem = try createMemoryTyped(talloc, 1, 1, true);
+    defer destroyMemory(talloc, mem);
+    atomicStoreRaw(mem.bytes(), 0, 8, 0);
+
+    const Waiter = struct {
+        fn run(memory: *MemoryInst, result: *i32) void {
+            var inst: Instance = undefined;
+            var memories = [_]*MemoryInst{memory};
+            inst.mems = &memories;
+            var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+            defer arena.deinit();
+            var diag: types.Diagnostic = .{};
+            var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+            pushI32(&state, 0) catch return;
+            pushI32(&state, 0) catch return;
+            pushI64(&state, std.time.ns_per_s) catch return;
+            executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_wait32)) catch return;
+            result.* = @bitCast(popI32(&state));
+        }
+    };
+    var wait_result: i32 = -1;
+    const thread = try std.Thread.spawn(.{}, Waiter.run, .{ mem, &wait_result });
+
+    var woke: u32 = 0;
+    var attempts: usize = 0;
+    while (woke == 0 and attempts < 100_000) : (attempts += 1) {
+        var inst: Instance = undefined;
+        var memories = [_]*MemoryInst{mem};
+        inst.mems = &memories;
+        var arena = std.heap.ArenaAllocator.init(talloc);
+        defer arena.deinit();
+        var diag: types.Diagnostic = .{};
+        var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+        try pushI32(&state, 0);
+        try pushI32(&state, 1);
+        try executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_notify));
+        woke = popI32(&state);
+        if (woke == 0) std.Thread.yield() catch {};
+    }
+    thread.join();
+    try std.testing.expectEqual(@as(u32, 1), woke);
+    try std.testing.expectEqual(@as(i32, 0), wait_result);
+
+    var inst: Instance = undefined;
+    var memories = [_]*MemoryInst{mem};
+    inst.mems = &memories;
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    var diag: types.Diagnostic = .{};
+    var state: State = .{ .alloc = arena.allocator(), .diag = &diag };
+    try pushI32(&state, 0);
+    try pushI64(&state, 1);
+    try pushI64(&state, 0);
+    try executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_wait64));
+    try std.testing.expectEqual(@as(u32, 1), popI32(&state));
+
+    const ordinary = try createMemory(talloc, 1, 1);
+    defer destroyMemory(talloc, ordinary);
+    memories[0] = ordinary;
+    state.stack.clearRetainingCapacity();
+    try pushI32(&state, 0);
+    try pushI32(&state, 0);
+    try pushI64(&state, 0);
+    try std.testing.expectError(error.Trap, executeAtomic(&state, &inst, atomicTestInstr(.memory_atomic_wait32)));
+    try std.testing.expectEqualStrings("expected shared memory", diag.message());
 }
 
 // -- Instantiation: import resolution ----------------------------------------

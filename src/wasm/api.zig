@@ -10,6 +10,7 @@ const gc = @import("../gc.zig");
 const interpreter = @import("../interpreter.zig");
 const context = @import("../context.zig");
 const promise = @import("../promise.zig");
+const stack_scan = @import("../stack_scan.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate_mod = @import("validate.zig");
@@ -43,6 +44,25 @@ fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void 
     _ = raw;
     const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
     machine.serviceGcSafepoint();
+}
+
+fn beginExecutionWait(raw: *anyopaque) void {
+    const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
+    stack_scan.beginPark();
+    if (machine.use_thread_gil and machine.gil != null) machine.gil.?.release();
+    _ = raw;
+}
+
+fn endExecutionWait(raw: *anyopaque) void {
+    const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
+    if (machine.use_thread_gil and machine.gil != null) machine.gil.?.acquire();
+    stack_scan.endPark();
+    _ = raw;
+}
+
+fn executionWaitInterrupted(raw: *anyopaque) bool {
+    const store: *context.Context = @ptrCast(@alignCast(raw));
+    return store.terminationRequested();
 }
 
 fn barrierGlobalReference(raw: *anyopaque, slot: exec.ValueSlot) void {
@@ -1418,6 +1438,9 @@ fn instantiateModuleObject(
         .enter = enterExecutionRoots,
         .leave = leaveExecutionRoots,
         .checkpoint = checkpointExecutionRoots,
+        .begin_wait = beginExecutionWait,
+        .end_wait = endExecutionWait,
+        .wait_interrupted = executionWaitInterrupted,
     };
     var inst_transferred = false;
     defer if (!inst_transferred) exec.destroyInstance(store.gpa, inst);
@@ -2219,6 +2242,41 @@ test "wasm api shared Memory preserves fixed historical buffers and aliases back
         \\Object.prototype.toString.call(shared.buffer) === '[object SharedArrayBuffer]' && mismatch;
     );
     try std.testing.expect(defined_and_imported.isBoolean() and defined_and_imported.asBool());
+}
+
+test "wasm api atomic exports scale across no-GIL Threads and wake waiters" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .wasm_features = .{ .threads = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const atomicModule = new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,16,3,96,1,127,1,127,96,0,1,127,96,2,127,126,
+        \\  1,127,3,5,4,0,1,2,0,5,4,1,3,1,2,7,39,5,6,109,101,109,111,114,121,
+        \\  2,0,3,97,100,100,0,0,4,108,111,97,100,0,1,4,119,97,105,116,0,2,6,110,
+        \\  111,116,105,102,121,0,3,10,45,4,10,0,65,0,32,0,254,30,2,0,11,8,0,65,
+        \\  0,254,16,2,0,11,12,0,65,0,32,0,32,1,254,1,2,0,11,10,0,65,0,32,0,254,
+        \\  0,2,0,11,
+        \\]));
+        \\const atomic = new WebAssembly.Instance(atomicModule).exports;
+        \\const workers = [];
+        \\for (let i = 0; i < 8; i++) workers.push(new Thread(() => {
+        \\  for (let j = 0; j < 1000; j++) atomic.add(1);
+        \\}));
+        \\for (const worker of workers) worker.join();
+        \\const count = atomic.load();
+        \\const jsView = new Int32Array(atomic.memory.buffer);
+        \\const differential = Atomics.load(jsView, 0) === count &&
+        \\  Atomics.add(jsView, 0, 7) === count && atomic.load() === count + 7 &&
+        \\  atomic.add(-7) === count + 7 && Atomics.load(jsView, 0) === count;
+        \\const waiter = new Thread(() => atomic.wait(count, 1000000000n));
+        \\let woke = 0;
+        \\while (woke === 0) woke = atomic.notify(1);
+        \\const waitResult = waiter.join();
+        \\count === 8000 && differential && woke === 1 && waitResult === 0;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api Global converts numeric values and enforces mutability" {

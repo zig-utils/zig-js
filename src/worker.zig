@@ -865,6 +865,7 @@ pub const Worker = struct {
         w.beginClosing();
         w.inspector_wait_abort.store(true, .release);
         w.stop.store(true, .monotonic);
+        agent.interruptWaiters();
         w.inbox.close();
         w.inspector_commands.wake();
     }
@@ -1252,6 +1253,35 @@ test "worker preserves fixed WebAssembly shared-memory buffer views" {
     try std.testing.expect((try ctx.evaluate(
         "new Uint8Array(__workerWasmMemory.buffer)[29] === 84",
     )).asBool());
+}
+
+test "worker termination interrupts WebAssembly atomic wait" {
+    const host = try Context.create(std.testing.allocator);
+    defer host.destroy();
+    var machine = host.interpreter();
+    const w = try Worker.spawnWith(
+        \\const module = new WebAssembly.Module(new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,1,16,3,96,1,127,1,127,96,0,1,127,96,2,127,126,
+        \\  1,127,3,5,4,0,1,2,0,5,4,1,3,1,2,7,39,5,6,109,101,109,111,114,121,
+        \\  2,0,3,97,100,100,0,0,4,108,111,97,100,0,1,4,119,97,105,116,0,2,6,110,
+        \\  111,116,105,102,121,0,3,10,45,4,10,0,65,0,32,0,254,30,2,0,11,8,0,65,
+        \\  0,254,16,2,0,11,12,0,65,0,32,0,32,1,254,1,2,0,11,10,0,65,0,32,0,254,
+        \\  0,2,0,11,
+        \\]));
+        \\const instance = new WebAssembly.Instance(module);
+        \\postMessage('ready');
+        \\instance.exports.wait(0, -1n);
+        \\postMessage('unexpected');
+    , .{ .context_options = .{
+        .enable_gc = true,
+        .wasm_features = .{ .threads = true },
+    } });
+    defer w.destroy();
+    const ready = (try w.receive(&machine, 10_000)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(ready.isString() and std.mem.eql(u8, ready.asStr(), "ready"));
+    w.terminate();
+    w.join();
+    try std.testing.expect((try w.receive(&machine, 0)) == null);
 }
 
 test "workers: inspector target ids are stable and lifecycle is atomic" {
