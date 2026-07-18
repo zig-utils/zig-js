@@ -1,0 +1,9 @@
+{
+  "name": "wasm-spec-gen",
+  "private": true,
+  "type": "module",
+  "description": "Generator for the pinned WebAssembly wg-1.0 spec-test artifacts (issue #141). Run `bun install` once, then see fetch.sh / gen.mjs.",
+  "dependencies": {
+    "wabt": "^1.0.39"
+  }
+}

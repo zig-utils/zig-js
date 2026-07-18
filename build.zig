@@ -499,22 +499,34 @@ pub fn build(b: *std.Build) void {
     const wasm_spec_eval_install = b.addInstallArtifact(wasm_spec_eval, .{});
     const wasm_spec_eval_step = b.step("wasm-spec-eval", "Build the upstream WebAssembly corpus evaluator");
     wasm_spec_eval_step.dependOn(&wasm_spec_eval_install.step);
-    const wasm_spec_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/wasm-spec.py",
-        "--wast2json",
-        b.option([]const u8, "wast2json", "Path to WABT 1.0.12 wast2json") orelse "wast2json",
-        "--spec-root",
-        b.option([]const u8, "wasm-spec-root", "Path to the pinned WebAssembly specification checkout") orelse "wasm-spec",
-        "--engine",
+    // Native WebAssembly wg-1.0 spec runner: `zig build wasm-spec` executes
+    // the packed upstream suite (tests/wasm/spec/{manifest.json,modules.bin})
+    // through the engine's real JS WebAssembly API and prints the
+    // machine-readable pass/fail/skip inventory. The runner re-executes itself
+    // once per .wast file (WASM_SPEC_WORKER=<file>) for crash isolation.
+    // `-Dwasm-spec-filter=<substr>` runs only matching files;
+    // `-Dwasm-spec-out=<path>` also writes the aggregate inventory JSON.
+    const wasm_spec_filter = b.option([]const u8, "wasm-spec-filter", "wasm-spec: run only files whose name contains this substring") orelse "";
+    const wasm_spec_out = b.option([]const u8, "wasm-spec-out", "wasm-spec: also write the aggregate inventory JSON to this path") orelse "";
+    const wasm_spec_options = b.addOptions();
+    wasm_spec_options.addOption([]const u8, "filter", wasm_spec_filter);
+    wasm_spec_options.addOption([]const u8, "out", wasm_spec_out);
+    const wasm_spec = b.addExecutable(.{
+        .name = "wasm-spec",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/wasm_spec.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
     });
-    wasm_spec_cmd.addArtifactArg(wasm_spec_eval);
-    if (b.option([]const u8, "wasm-spec-inventory", "Path for the WebAssembly corpus inventory")) |inventory|
-        wasm_spec_cmd.addArgs(&.{ "--inventory", inventory });
-    if (b.option([]const u8, "wasm-spec-filter", "Run only upstream WebAssembly files containing this text")) |filter|
-        wasm_spec_cmd.addArgs(&.{ "--filter", filter });
-    const wasm_spec_step = b.step("wasm-spec", "Run and inventory the pinned WebAssembly wg-1.0 core corpus");
-    wasm_spec_step.dependOn(&wasm_spec_cmd.step);
+    wasm_spec.root_module.addOptions("build_options", wasm_spec_options);
+    const run_wasm_spec = b.addRunArtifact(wasm_spec);
+    const wasm_spec_step = b.step("wasm-spec", "Run the pinned WebAssembly wg-1.0 spec suite and emit the pass/fail/skip inventory");
+    wasm_spec_step.dependOn(&run_wasm_spec.step);
+    const wasm_spec_install = b.addInstallArtifact(wasm_spec, .{});
+    const wasm_spec_bin_step = b.step("wasm-spec-bin", "Build the wasm-spec runner exe only (no run)");
+    wasm_spec_bin_step.dependOn(&wasm_spec_install.step);
 
     const wasm_feature_profiles_cmd = b.addSystemCommand(&.{
         "python3",

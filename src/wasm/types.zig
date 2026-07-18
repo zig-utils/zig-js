@@ -717,9 +717,10 @@ test "op encoding is total over MVP bytes" {
     try std.testing.expectEqual(Op.i32_load, Op.fromByte(0x28).?);
     try std.testing.expectEqual(Op.f64_promote_f32, Op.fromByte(0xBB).?);
     try std.testing.expectEqual(Op.memory_grow, Op.fromByte(0x40).?);
-    // Proposal prefixes and gaps are not MVP ops.
+    // Proposal prefixes and gaps are not MVP ops. 0xFC (misc/bulk-memory)
+    // remains unmapped; 0xFD is the recognized SIMD prefix op.
     try std.testing.expectEqual(@as(?Op, null), Op.fromByte(0xFC));
-    try std.testing.expectEqual(@as(?Op, null), Op.fromByte(0xFD));
+    try std.testing.expectEqual(Op.simd, Op.fromByte(0xFD).?);
 }
 
 test "diagnostic truncation stays deterministic" {
