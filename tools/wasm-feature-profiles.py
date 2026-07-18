@@ -157,6 +157,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-memory64-binary-inventory.json",
     )
     parser.add_argument(
+        "--gc-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-gc-binary-inventory.json",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -526,6 +531,102 @@ def main() -> int:
     require(sum(sum(entry.get("commands", {}).values()) for entry in memory64_files) == 13918, "memory64 inventory command breakdown drift")
     require(sum(entry.get("memory64_declarations", 0) for entry in memory64_files) == 824, "memory64 inventory declaration drift")
     require(sum(entry.get("table64_declarations", 0) for entry in memory64_files) == 151, "table64 inventory declaration drift")
+
+    gc_feature = next(feature for feature in features if feature["id"] == "gc")
+    gc_inventory = json.loads(args.gc_inventory.read_text())
+    require(gc_inventory.get("schema_version") == 1, "GC inventory: unsupported schema version")
+    require(gc_inventory.get("kind") == "webassembly_gc_binary_inventory", "GC inventory: invalid kind")
+    gc_source = gc_inventory.get("source", {})
+    require(gc_source.get("repository") == gc_feature["repository"], "GC inventory/registry repository drift")
+    require(gc_source.get("commit") == gc_feature["commit"], "GC inventory/registry commit drift")
+    require(gc_inventory.get("dependencies") == gc_feature["dependencies"] == ["typed_function_references"], "GC inventory dependency drift")
+    require(gc_source.get("corpus_tree") == "97755327e6db5943ccd4cce6bc92e1a72c523e3f", "GC inventory corpus tree drift")
+    gc_hashes = gc_source.get("document_sha256", {})
+    require(
+        gc_hashes == {
+            "proposals/gc/Overview.md": "1cc66876b716e4359f8623e8ad8492641a412965523fbb77fe691a6888cf5102",
+            "document/core/binary/types.rst": "ee8858f4d82bbf9435512cc9b47cd0b30ad6a3fc667c2bc2db3f17cd1bf893ca",
+            "document/core/binary/instructions.rst": "8d74c260473617cc61b794ac67c480821578c4be3f65011bc9f597e3c30aba4a",
+            "document/core/valid/types.rst": "2fc40d1e0bd3e2b3c6024942f967533eaa2d55c577ebceeb289ba0c25ca65e1a",
+            "document/core/valid/instructions.rst": "8dd56035753cb9019fda35f860c00fed01162a382a05e39841e58c8fb0aae754",
+        },
+        "GC inventory normative document drift",
+    )
+    gc_types = gc_inventory.get("type_encodings", {})
+    require(gc_types.get("packed") == [{"name": "i8", "byte": 0x78}, {"name": "i16", "byte": 0x77}], "GC packed-type encoding drift")
+    require(
+        [(entry.get("name"), entry.get("byte")) for entry in gc_types.get("abstract_heap", [])]
+        == list(zip(
+            ["nofunc", "noextern", "none", "func", "extern", "any", "eq", "i31", "struct", "array"],
+            range(0x73, 0x69, -1),
+        )),
+        "GC abstract heap-type encoding drift",
+    )
+    require(
+        [(entry.get("name"), entry.get("byte"), entry.get("nullable")) for entry in gc_types.get("reference", [])]
+        == [("ref", 0x64, False), ("ref_null", 0x63, True)],
+        "GC reference-type encoding drift",
+    )
+    require(
+        [(entry.get("name"), entry.get("byte")) for entry in gc_types.get("composite", [])]
+        == [("func", 0x60), ("struct", 0x5F), ("array", 0x5E)],
+        "GC composite-type encoding drift",
+    )
+    require(
+        [(entry.get("byte"), entry.get("final")) for entry in gc_types.get("subtype", [])]
+        == [(0x50, False), (0x4F, True)]
+        and gc_types.get("recursive_group", {}).get("byte") == 0x4E,
+        "GC recursive/subtype encoding drift",
+    )
+    gc_opcodes = gc_inventory.get("opcodes", [])
+    require(gc_inventory.get("opcode_count") == len(gc_opcodes) == 33, "GC inventory: expected 33 opcodes")
+    require(
+        [(entry.get("name"), entry.get("opcode")) for entry in gc_opcodes[:2]]
+        == [("ref.eq", 0xD3), ("ref.as_non_null", 0xD4)],
+        "GC direct opcode drift",
+    )
+    expected_gc_prefixed_names = [
+        "struct.new", "struct.new_default", "struct.get", "struct.get_s", "struct.get_u", "struct.set",
+        "array.new", "array.new_default", "array.new_fixed", "array.new_data", "array.new_elem",
+        "array.get", "array.get_s", "array.get_u", "array.set", "array.len", "array.fill", "array.copy",
+        "array.init_data", "array.init_elem", "ref.test", "ref.test_null", "ref.cast", "ref.cast_null",
+        "br_on_cast", "br_on_cast_fail", "any.convert_extern", "extern.convert_any", "ref.i31", "i31.get_s", "i31.get_u",
+    ]
+    require(
+        [(entry.get("name"), entry.get("prefix"), entry.get("subopcode")) for entry in gc_opcodes[2:]]
+        == [(name, 0xFB, subopcode) for subopcode, name in enumerate(expected_gc_prefixed_names)],
+        "GC prefixed opcode drift",
+    )
+    require(len({entry.get("name") for entry in gc_opcodes}) == 33, "GC duplicate instruction name")
+    gc_corpus = gc_inventory.get("corpus", {})
+    gc_files = gc_corpus.get("files", [])
+    expected_gc_files = [
+        ("array.wast", 46), ("array_copy.wast", 35), ("array_fill.wast", 17),
+        ("array_init_data.wast", 33), ("array_init_elem.wast", 23), ("array_new_data.wast", 15),
+        ("array_new_elem.wast", 22), ("binary-gc.wast", 1), ("br_on_cast.wast", 37),
+        ("br_on_cast_fail.wast", 37), ("extern.wast", 18), ("i31.wast", 73),
+        ("ref_cast.wast", 45), ("ref_eq.wast", 89), ("ref_test.wast", 71),
+        ("struct.wast", 30), ("type-subtyping-invalid.wast", 4), ("type-subtyping.wast", 102),
+    ]
+    require(
+        [(Path(entry.get("path", "")).name, entry.get("top_level_commands")) for entry in gc_files]
+        == expected_gc_files,
+        "GC inventory corpus file/count drift",
+    )
+    require(gc_corpus.get("files_declared") == len(expected_gc_files) == 18, "GC inventory declared-file drift")
+    require(gc_corpus.get("top_level_commands") == 698, "GC inventory command total drift")
+    require(sum(sum(entry.get("commands", {}).values()) for entry in gc_files) == 698, "GC inventory command breakdown drift")
+    expected_gc_occurrences = {
+        "any.convert_extern": 8, "array.copy": 9, "array.fill": 5, "array.get": 14,
+        "array.get_s": 1, "array.get_u": 13, "array.init_data": 5, "array.init_elem": 5,
+        "array.len": 6, "array.new": 8, "array.new_data": 9, "array.new_default": 13,
+        "array.new_elem": 9, "array.new_fixed": 4, "array.set": 6, "br_on_cast": 61,
+        "br_on_cast_fail": 72, "extern.convert_any": 6, "i31.get_s": 2, "i31.get_u": 14,
+        "ref.as_non_null": 2, "ref.cast": 64, "ref.eq": 11, "ref.i31": 46,
+        "ref.test": 121, "struct.get": 11, "struct.get_s": 12, "struct.get_u": 10,
+        "struct.new": 5, "struct.new_default": 46, "struct.set": 6,
+    }
+    require(gc_corpus.get("instruction_occurrences") == expected_gc_occurrences, "GC inventory instruction-occurrence drift")
 
     movement = json.loads(args.simd_movement_inventory.read_text())
     require(movement.get("schema_version") == 2, "SIMD movement inventory: unsupported schema version")
