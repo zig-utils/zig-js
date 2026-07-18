@@ -103,11 +103,14 @@ validator foundation. The declared 20-file movement/integer profile from the
 pinned 56-file proposal corpus passes **2,253 / 2,253 applicable commands**,
 with **0 failures**, **351 explicit text-format n/a**, and **0 runner errors**
 at `6306ed59`. The checked-in [2,604-command inventory](docs/.data/wasm-simd-movement-inventory.json)
-records every result. Remaining arithmetic/conversion families are tracked by
-[#282](https://github.com/zig-utils/zig-js/issues/282); the complete portable
-integer implementation passes **4,380 / 4,380 applicable commands** across its
+records every result. The complete portable integer implementation passes
+**4,380 / 4,380 applicable commands** across its
 24 focused official files, with 65 explicit text-format n/a and no failures or
-runner errors. Exact pins and reproduction are in [WebAssembly status](docs/wasm.md).
+runner errors. All floating-point and conversion families likewise pass
+**19,106 / 19,106 applicable commands** across 13 focused files, with 98
+explicit text-format n/a and no failures or runner errors. Exact pins and
+reproduction are in [WebAssembly status](docs/wasm.md); the terminal aggregate
+and performance evidence remains tracked by [#283](https://github.com/zig-utils/zig-js/issues/283).
 
 ## Performance
 
@@ -162,7 +165,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `08e29a5f` do not execute in these
+The ABI and WebAssembly/conformance changes through `b5a9876a` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store/reference-root, reference-call, bulk-memory, or Core 2
@@ -858,7 +861,7 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including remaining SIMD floating-point conversions, Threads, exceptions/tail
+  from the PR-249 reference corpus, including Threads, exceptions/tail
   calls, and memory64/GC (the complete MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
   type/decoder/validator foundation, complete feature-gated reference instructions, typed multi-table runtime,

@@ -215,6 +215,16 @@ extension-add, every extmul width, dot product, and q15 rounded saturation. No
 native SIMD acceleration exists yet, so the portable implementation is both the
 runtime path and the scalar oracle for future lane-by-lane differential checks.
 
+The portable floating-point implementation is complete at `b5a9876a`. Across
+13 focused proposal files, all 19,106 applicable commands pass with zero
+failures, 98 explicit text-format n/a, and zero runner errors. This includes
+comparisons, arithmetic, exact abs/neg payload transforms, sqrt and every
+rounding mode, min/max and pseudo-min/max, promote/demote, saturating
+float-to-integer conversions, integer-to-float conversions, signed-zero
+preservation, and specification-permitted canonical/arithmetic NaN matching.
+The ReleaseFast evaluator is used for the two 3,887-command pseudo-min/max files;
+the runtime remains the same architecture-independent scalar oracle.
+
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation,
 while a selected but unfinished feature produces a deterministic
