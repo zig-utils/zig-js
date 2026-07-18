@@ -303,6 +303,29 @@ function __same(actual, expected) {
   for (let i = 0; i < expected.length; i++) if (!__sameOne(values[i], expected[i])) return false;
   return true;
 }
+function __sameV128Bits(actual, laneType, expected) {
+  const widths = { i8: 8n, i16: 16n, i32: 32n, i64: 64n, f32: 32n, f64: 64n };
+  const width = widths[laneType];
+  if (!width) return false;
+  let bits;
+  try { bits = BigInt(actual); } catch (_) { return false; }
+  const mask = (1n << width) - 1n;
+  for (let index = 0; index < expected.length; index++) {
+    const lane = (bits >> (BigInt(index) * width)) & mask;
+    const value = expected[index];
+    if (value === 'nan:canonical') {
+      const magnitude = lane & (laneType === 'f32' ? 0x7fffffffn : 0x7fffffffffffffffn);
+      const canonical = laneType === 'f32' ? 0x7fc00000n : 0x7ff8000000000000n;
+      if (magnitude !== canonical) return false;
+    } else if (value === 'nan:arithmetic') {
+      const quietMask = laneType === 'f32' ? 0x7fc00000n : 0x7ff8000000000000n;
+      if ((lane & quietMask) !== quietMask) return false;
+    } else if (lane !== (BigInt(value) & mask)) {
+      return false;
+    }
+  }
+  return true;
+}
 __registry.spectest = {
   print() {}, print_i32() {}, print_i64() {}, print_f32() {}, print_f64() {},
   print_i32_f32() {}, print_f64_f64() {},
@@ -387,13 +410,20 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
         if kind == "assert_return":
             if requires_vector_bits(command):
                 expected = command.get("expected", [])
-                expected_bits = [raw_value_bits(value) for value in expected]
                 expression = raw_action_expression(command["action"])
-                if len(expected_bits) == 0:
+                if len(expected) == 0:
                     comparison = "__actual===undefined"
-                elif len(expected_bits) == 1:
-                    comparison = f"__actual==={js_string(expected_bits[0])}"
+                elif len(expected) == 1 and expected[0].get("type") == "v128" and any(
+                    str(lane).startswith("nan:") for lane in expected[0].get("value", [])
+                ):
+                    comparison = (
+                        f"__sameV128Bits(__actual,{js_string(expected[0]['lane_type'])},"
+                        f"{json.dumps(expected[0]['value'], separators=(',', ':'))})"
+                    )
+                elif len(expected) == 1:
+                    comparison = f"__actual==={js_string(raw_value_bits(expected[0]))}"
                 else:
+                    expected_bits = [raw_value_bits(value) for value in expected]
                     comparison = f"JSON.stringify(__actual)==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
                 return (
                     f"{{try{{const __actual={expression};if({comparison}){{"
