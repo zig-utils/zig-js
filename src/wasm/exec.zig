@@ -1149,6 +1149,167 @@ fn executeSimdIntegerBounded(s: *State, op: simd.Op) ExecError!bool {
     return true;
 }
 
+fn f32Lane(vector: u128, lane: u8) f32 {
+    return @bitCast(@as(u32, @truncate(laneBits(vector, lane, 32))));
+}
+
+fn f64Lane(vector: u128, lane: u8) f64 {
+    return @bitCast(laneBits(vector, lane, 64));
+}
+
+fn replaceF32Lane(vector: u128, lane: u8, value: f32) u128 {
+    return replaceLaneBits(vector, lane, 32, @as(u32, @bitCast(value)));
+}
+
+fn replaceF64Lane(vector: u128, lane: u8, value: f64) u128 {
+    return replaceLaneBits(vector, lane, 64, @bitCast(value));
+}
+
+fn executeSimdFloatComparison(s: *State, op: simd.Op) ExecError!bool {
+    const width: u8 = switch (op) {
+        .f32x4_eq, .f32x4_ne, .f32x4_lt, .f32x4_gt, .f32x4_le, .f32x4_ge => 32,
+        .f64x2_eq, .f64x2_ne, .f64x2_lt, .f64x2_gt, .f64x2_le, .f64x2_ge => 64,
+        else => return false,
+    };
+    const right = popVector(s);
+    const left = popVector(s);
+    var result: u128 = 0;
+    for (0..128 / width) |lane| {
+        const matches = if (width == 32) blk: {
+            const a = f32Lane(left, @intCast(lane));
+            const b = f32Lane(right, @intCast(lane));
+            break :blk switch (op) {
+                .f32x4_eq => a == b,
+                .f32x4_ne => a != b,
+                .f32x4_lt => a < b,
+                .f32x4_gt => a > b,
+                .f32x4_le => a <= b,
+                .f32x4_ge => a >= b,
+                else => unreachable,
+            };
+        } else blk: {
+            const a = f64Lane(left, @intCast(lane));
+            const b = f64Lane(right, @intCast(lane));
+            break :blk switch (op) {
+                .f64x2_eq => a == b,
+                .f64x2_ne => a != b,
+                .f64x2_lt => a < b,
+                .f64x2_gt => a > b,
+                .f64x2_le => a <= b,
+                .f64x2_ge => a >= b,
+                else => unreachable,
+            };
+        };
+        if (matches) result = replaceLaneBits(result, @intCast(lane), width, std.math.maxInt(u64));
+    }
+    try pushVector(s, result);
+    return true;
+}
+
+fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
+    const width: u8 = switch (op) {
+        .f32x4_abs, .f32x4_neg, .f32x4_sqrt => 32,
+        .f64x2_abs, .f64x2_neg, .f64x2_sqrt => 64,
+        else => return false,
+    };
+    const source = popVector(s);
+    var result: u128 = 0;
+    for (0..128 / width) |lane| {
+        if (width == 32) {
+            const value = f32Lane(source, @intCast(lane));
+            result = replaceF32Lane(result, @intCast(lane), switch (op) {
+                .f32x4_abs => @abs(value),
+                .f32x4_neg => -value,
+                .f32x4_sqrt => @sqrt(value),
+                else => unreachable,
+            });
+        } else {
+            const value = f64Lane(source, @intCast(lane));
+            result = replaceF64Lane(result, @intCast(lane), switch (op) {
+                .f64x2_abs => @abs(value),
+                .f64x2_neg => -value,
+                .f64x2_sqrt => @sqrt(value),
+                else => unreachable,
+            });
+        }
+    }
+    try pushVector(s, result);
+    return true;
+}
+
+fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
+    const width: u8 = switch (op) {
+        .f32x4_add, .f32x4_sub, .f32x4_mul, .f32x4_div, .f32x4_min, .f32x4_max => 32,
+        .f64x2_add, .f64x2_sub, .f64x2_mul, .f64x2_div, .f64x2_min, .f64x2_max => 64,
+        else => return false,
+    };
+    const right = popVector(s);
+    const left = popVector(s);
+    var result: u128 = 0;
+    for (0..128 / width) |lane| {
+        if (width == 32) {
+            const a = f32Lane(left, @intCast(lane));
+            const b = f32Lane(right, @intCast(lane));
+            result = replaceF32Lane(result, @intCast(lane), switch (op) {
+                .f32x4_add => a + b,
+                .f32x4_sub => a - b,
+                .f32x4_mul => a * b,
+                .f32x4_div => a / b,
+                .f32x4_min => fminF32(a, b),
+                .f32x4_max => fmaxF32(a, b),
+                else => unreachable,
+            });
+        } else {
+            const a = f64Lane(left, @intCast(lane));
+            const b = f64Lane(right, @intCast(lane));
+            result = replaceF64Lane(result, @intCast(lane), switch (op) {
+                .f64x2_add => a + b,
+                .f64x2_sub => a - b,
+                .f64x2_mul => a * b,
+                .f64x2_div => a / b,
+                .f64x2_min => fminF64(a, b),
+                .f64x2_max => fmaxF64(a, b),
+                else => unreachable,
+            });
+        }
+    }
+    try pushVector(s, result);
+    return true;
+}
+
+fn executeSimdFloatConversion(s: *State, op: simd.Op) ExecError!bool {
+    switch (op) {
+        .i32x4_trunc_sat_f32x4_s, .i32x4_trunc_sat_f32x4_u => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..4) |lane| {
+                const value = f32Lane(source, @intCast(lane));
+                const converted: u32 = if (op == .i32x4_trunc_sat_f32x4_s)
+                    @bitCast(truncSatI32S(value))
+                else
+                    truncSatI32U(value);
+                result = replaceLaneBits(result, @intCast(lane), 32, converted);
+            }
+            try pushVector(s, result);
+        },
+        .f32x4_convert_i32x4_s, .f32x4_convert_i32x4_u => {
+            const source = popVector(s);
+            var result: u128 = 0;
+            for (0..4) |lane| {
+                const bits: u32 = @truncate(laneBits(source, @intCast(lane), 32));
+                const converted: f32 = if (op == .f32x4_convert_i32x4_s)
+                    @floatFromInt(@as(i32, @bitCast(bits)))
+                else
+                    @floatFromInt(bits);
+                result = replaceF32Lane(result, @intCast(lane), converted);
+            }
+            try pushVector(s, result);
+        },
+        else => return false,
+    }
+    return true;
+}
+
 fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
     const op = simdOp(instr);
     switch (op) {
@@ -1235,6 +1396,10 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     if (try executeSimdIntegerComparison(s, op)) return;
     if (try executeSimdIntegerBasic(s, op)) return;
     if (try executeSimdIntegerBounded(s, op)) return;
+    if (try executeSimdFloatComparison(s, op)) return;
+    if (try executeSimdFloatUnary(s, op)) return;
+    if (try executeSimdFloatBinary(s, op)) return;
+    if (try executeSimdFloatConversion(s, op)) return;
     switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
         .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
