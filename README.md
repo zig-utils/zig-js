@@ -99,13 +99,14 @@ Threads, exceptions/tail calls, memory64/GC, or shell-only hooks. Exact pins,
 feature-area subtotals, CI gates, and reproduction are in [WebAssembly status](docs/wasm.md).
 
 Fixed-width SIMD is now executing beyond its complete 236-opcode decoder and
-validator foundation. The declared 20-file movement/integer audit from the
-pinned 56-file proposal corpus currently passes **2,240 / 2,253 applicable
-commands**, with **13 execution failures**, **351 explicit text-format n/a**,
-and **0 runner errors** at `9a82d87d`. Eighteen selected files are fully green;
-the remaining failures are floating-point/conversion contexts in `simd_load`
-and `simd_splat`, tracked by [#282](https://github.com/zig-utils/zig-js/issues/282).
-Exact pins, file selection, and reproduction are in [WebAssembly status](docs/wasm.md).
+validator foundation. The declared 20-file movement/integer profile from the
+pinned 56-file proposal corpus passes **2,253 / 2,253 applicable commands**,
+with **0 failures**, **351 explicit text-format n/a**, and **0 runner errors**
+at `6306ed59`. The checked-in [2,604-command inventory](docs/.data/wasm-simd-movement-inventory.json)
+records every result. Remaining arithmetic/conversion families are tracked by
+[#281](https://github.com/zig-utils/zig-js/issues/281) and
+[#282](https://github.com/zig-utils/zig-js/issues/282); exact pins and
+reproduction are in [WebAssembly status](docs/wasm.md).
 
 ## Performance
 
@@ -160,7 +161,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `9a82d87d` do not execute in these
+The ABI and WebAssembly/conformance changes through `6306ed59` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store/reference-root, reference-call, bulk-memory, or Core 2
@@ -856,7 +857,7 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including SIMD execution, Threads, exceptions/tail
+  from the PR-249 reference corpus, including remaining SIMD arithmetic/conversions, Threads, exceptions/tail
   calls, and memory64/GC (the complete MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
   type/decoder/validator foundation, complete feature-gated reference instructions, typed multi-table runtime,

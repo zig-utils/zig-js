@@ -188,16 +188,14 @@ families and terminal corpus/performance evidence remain tracked by
 [#280](https://github.com/zig-utils/zig-js/issues/280) through
 [#283](https://github.com/zig-utils/zig-js/issues/283).
 
-The same driver now exposes a `simd-movement` profile over a declared 20-file
+The same driver exposes a `simd-movement` profile over a declared 20-file
 selection from the pinned 56-file proposal corpus. At engine checkpoint
-`9a82d87d`, it passes 2,240/2,253 applicable commands, with 13 execution
-failures, 351 text-format assertions explicitly marked not applicable, and zero
-runner errors. Eighteen files are fully green, including address/alignment,
-bitwise/boolean, constants, lanes, every lane load/store width, load extension,
-load splats/zero, and stores. The 13 visible failures are later
-floating-point/conversion operations used as contexts by `simd_load.wast` and
-`simd_splat.wast`; they remain assigned to #282 rather than hidden by the
-runner. Reproduce the current audit with:
+`6306ed59`, all 2,253 applicable commands pass, with zero failures, 351
+text-format assertions explicitly marked not applicable, and zero runner
+errors. The checked-in [2,604-command inventory](.data/wasm-simd-movement-inventory.json)
+records every address/alignment, bitwise/boolean, constant, lane, load/store,
+splat, and contextual integer/float result without hidden exclusions.
+Reproduce the terminal score with:
 
 ```sh
 zig build wasm-spec-eval
@@ -205,8 +203,7 @@ python3 tools/wasm-spec.py \
   --profile simd-movement \
   --spec-root /path/to/WebAssembly-simd-a78b98a \
   --wast2json /path/to/wabt-1.0.39/wast2json \
-  --allow-failures \
-  --inventory /tmp/zig-js-simd-movement.json
+  --inventory docs/.data/wasm-simd-movement-inventory.json
 ```
 
 Zig embedders opt into an exact feature set per realm; module bytes never

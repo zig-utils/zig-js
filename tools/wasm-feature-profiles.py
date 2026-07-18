@@ -43,6 +43,11 @@ def main() -> int:
         type=Path,
         default=ROOT / "src/wasm/simd.zig",
     )
+    parser.add_argument(
+        "--simd-movement-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -97,6 +102,22 @@ def main() -> int:
     }
     inventoried_simd = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(names, subopcodes)}
     require(runtime_simd == inventoried_simd, "SIMD inventory/runtime opcode drift")
+
+    movement = json.loads(args.simd_movement_inventory.read_text())
+    require(movement.get("schema_version") == 2, "SIMD movement inventory: unsupported schema version")
+    require(movement.get("kind") == "webassembly_fixed_width_simd_movement_inventory", "SIMD movement inventory: invalid kind")
+    require(movement.get("profile") == "simd-movement", "SIMD movement inventory: invalid profile")
+    require(movement.get("spec", {}).get("repository") == simd_feature["repository"], "SIMD movement inventory: repository drift")
+    require(movement.get("spec", {}).get("commit") == simd_feature["commit"], "SIMD movement inventory: commit drift")
+    require(movement.get("spec", {}).get("files_available") == 56, "SIMD movement inventory: expected 56 available files")
+    require(movement.get("spec", {}).get("files_scored") == 20, "SIMD movement inventory: expected 20 scored files")
+    require(SHA.fullmatch(movement.get("engine_commit", "")) is not None, "SIMD movement inventory: invalid engine commit")
+    movement_totals = movement.get("totals", {})
+    require(movement_totals.get("pass") == 2253, "SIMD movement inventory: expected 2253 passing commands")
+    require(movement_totals.get("not_applicable") == 351, "SIMD movement inventory: expected 351 explicit n/a commands")
+    require(movement_totals.get("total") == 2604, "SIMD movement inventory: expected 2604 total commands")
+    require(movement_totals.get("fail") == 0 and movement_totals.get("runner_error") == 0, "SIMD movement inventory: terminal score is not green")
+    require(len(movement.get("files", [])) == 20, "SIMD movement inventory: file detail count drift")
 
     profiles = document.get("profiles", [])
     profile_ids = [profile.get("id") for profile in profiles]
