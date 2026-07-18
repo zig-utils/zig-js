@@ -509,6 +509,8 @@ pub fn build(b: *std.Build) void {
         "--engine",
     });
     wasm_spec_cmd.addArtifactArg(wasm_spec_eval);
+    if (b.option([]const u8, "wasm-spec-inventory", "Path for the WebAssembly corpus inventory")) |inventory|
+        wasm_spec_cmd.addArgs(&.{ "--inventory", inventory });
     if (b.option([]const u8, "wasm-spec-filter", "Run only upstream WebAssembly files containing this text")) |filter|
         wasm_spec_cmd.addArgs(&.{ "--filter", filter });
     const wasm_spec_step = b.step("wasm-spec", "Run and inventory the pinned WebAssembly wg-1.0 core corpus");

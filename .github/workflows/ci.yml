@@ -79,6 +79,12 @@ jobs:
             cmd: zig build threads-reference-audit && python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
+          # Revision drift, converter compatibility, and the densest MVP
+          # linking/store path stay gated without putting the multi-minute
+          # complete 73-file inventory on every CI run.
+          - name: wasm-mvp-smoke
+            wasm_spec: true
+            cmd: zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=linking -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-smoke.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
@@ -183,6 +189,16 @@ jobs:
       - uses: pantry-pm/pantry/packages/action@main
         with:
           packages: zig@0.17.0-dev
+      - name: Install pinned WebAssembly corpus tools
+        if: matrix.wasm_spec == true
+        working-directory: zig-js
+        run: |
+          git submodule update --init wasm-spec
+          curl --fail --location --silent --show-error \
+            https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz \
+            --output "$RUNNER_TEMP/wabt-1.0.12-linux.tar.gz"
+          echo "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271  $RUNNER_TEMP/wabt-1.0.12-linux.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.12-linux.tar.gz" --directory "$RUNNER_TEMP"
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}
