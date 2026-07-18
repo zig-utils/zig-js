@@ -88,7 +88,9 @@ def main() -> int:
     enum_body = source.split("pub const Feature = enum {", 1)[1].split("pub fn name", 1)[0]
     runtime_features = set(re.findall(r"^    ([a-z][a-z0-9_]*),$", enum_body, re.MULTILINE))
     require(runtime_features == known, f"registry/runtime feature drift: registry-only={sorted(known - runtime_features)}, runtime-only={sorted(runtime_features - known)}")
-    gate_source = (ROOT / "src/wasm/decode.zig").read_text() + (ROOT / "src/wasm/validate.zig").read_text()
+    decode_source = (ROOT / "src/wasm/decode.zig").read_text()
+    validate_source = (ROOT / "src/wasm/validate.zig").read_text()
+    gate_source = decode_source + validate_source
     ungated = sorted(feature_id for feature_id in known if re.search(rf"\.{re.escape(feature_id)}\b", gate_source) is None)
     require(not ungated, f"registry features without decoder/validator gates: {ungated}")
     for feature in features:
@@ -279,6 +281,29 @@ def main() -> int:
     require(
         sum(sum(entry.get("commands", {}).values()) for entry in exception_files) == 86,
         "exception inventory: command breakdown drift",
+    )
+    require(
+        re.search(r"^    tag = 4,$", source, re.MULTILINE) is not None,
+        "exception inventory/runtime tag external-kind drift",
+    )
+    require(
+        re.search(r"pub const Tag = struct \{\s+type_index: u32,\s+\};", source) is not None,
+        "exception inventory/runtime tag declaration drift",
+    )
+    require(
+        "13 => 6," in decode_source
+        and "mod.tags = try parseTagSection(&r, a);" in decode_source,
+        "exception inventory/runtime tag section drift",
+    )
+    require(
+        ".tag = try r.readTag()" in decode_source
+        and "malformed tag attribute" in decode_source,
+        "exception inventory/runtime tag import drift",
+    )
+    require(
+        "fn validateTagType" in validate_source
+        and "e.index >= mod.totalTags()" in validate_source,
+        "exception inventory/runtime tag validation drift",
     )
 
     movement = json.loads(args.simd_movement_inventory.read_text())

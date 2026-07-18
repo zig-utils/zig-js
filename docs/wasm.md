@@ -232,9 +232,22 @@ top-level commands across `tag.wast`, `throw.wast`, `throw_ref.wast`, and
 `try_table.wast`, including each command and source-surface occurrence count.
 This deliberately excludes the obsolete legacy try/catch/rethrow/delegate
 encoding. Run `zig build wasm-feature-profiles-check` to verify the proposal
-pin and inventory facts. Decoder, validator, linker, unwinder, and root-safety
-implementation remains [#290](https://github.com/zig-utils/zig-js/issues/290),
-so this inventory does not claim runtime support or a proposal score yet.
+pin, inventory facts, and implemented tag surface. With the feature enabled,
+tag declarations and section order decode exactly, imported and defined tag
+types validate, tag imports preserve store identity, definitions allocate
+distinct identities, and failed instantiation tears down every partially
+created tag. The core linker checks exact payload types, while Module
+import/export reflection exposes the standard `tag` kind. The JavaScript
+`WebAssembly.Tag` and `WebAssembly.Exception` objects remain
+[#291](https://github.com/zig-utils/zig-js/issues/291). `exnref`, instruction
+validation/execution, typed unwinding, root safety, and the proposal score
+remain [#290](https://github.com/zig-utils/zig-js/issues/290).
+
+Reproduce the focused tag ownership and failure-atomicity witness with:
+
+```sh
+zig build test -Dtest-filter='exception tag'
+```
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned

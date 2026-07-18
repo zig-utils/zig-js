@@ -125,9 +125,13 @@ not its legacy try/catch encoding. Its checked-in
 `exnref` (`0x69`), tag section 13, tag import/export kind 4, `throw` (`0x08`),
 `throw_ref` (`0x0a`), `try_table` (`0x1f`), all four catch-clause encodings,
 their validation rules, and 86 top-level commands across the four dedicated
-proposal files. Core decoding, validation, and unwinding remain tracked by
-[#290](https://github.com/zig-utils/zig-js/issues/290); this inventory alone
-does not claim execution support or a corpus score.
+proposal files. Behind the opt-in feature, tag declarations, sections,
+imports/exports, type validation, runtime identity, linking, and rollback-safe
+ownership are implemented. Module reflection reports the standard `tag` kind;
+the JavaScript `WebAssembly.Tag`/`Exception` boundary is tracked separately by
+[#291](https://github.com/zig-utils/zig-js/issues/291). Exception values,
+instruction validation/execution, unwinding, and the proposal score remain
+tracked by [#290](https://github.com/zig-utils/zig-js/issues/290).
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -969,8 +973,8 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including exception handling, tail-call
-  proposal corpus scoring, and
+  from the PR-249 reference corpus, including exception instruction execution
+  and proposal corpus scoring, tail-call proposal corpus scoring, and
   memory64/GC, plus terminal Threads host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
