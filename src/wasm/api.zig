@@ -1708,15 +1708,18 @@ test "wasm api Context options gate post-MVP features explicitly" {
         \\  0,97,115,109,1,0,0,0,
         \\  1,4,1,96,0,0,
         \\  3,2,1,0,
-        \\  10,6,1,4,0,252,8,11
+        \\  5,3,1,0,1,
+        \\  7,16,2,3,114,117,110,0,0,6,109,101,109,111,114,121,2,0,
+        \\  12,1,1,
+        \\  10,17,1,15,0,65,0,65,0,65,3,252,8,0,0,252,9,0,11,
+        \\  11,6,1,1,3,88,89,90
         \\]);
-        \\try {
-        \\  new WebAssembly.Module(bytes);
-        \\  false;
-        \\} catch (error) {
-        \\  error instanceof WebAssembly.CompileError &&
-        \\  error.message.includes('bulk-memory is enabled but not implemented');
-        \\}
+        \\const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+        \\instance.exports.run();
+        \\const view = new Uint8Array(instance.exports.memory.buffer);
+        \\let dropped = false;
+        \\try { instance.exports.run(); } catch (error) { dropped = error instanceof WebAssembly.RuntimeError; }
+        \\view[0] === 88 && view[1] === 89 && view[2] === 90 && dropped;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
 }

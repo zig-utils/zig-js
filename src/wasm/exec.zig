@@ -93,6 +93,16 @@ pub const GlobalInst = struct {
     barrier: ?*const fn (*anyopaque, ValueSlot) void = null,
 };
 
+pub const ElemSegmentInst = struct {
+    elems: []const ValueSlot,
+    dropped: bool,
+};
+
+pub const DataSegmentInst = struct {
+    bytes: []const u8,
+    dropped: bool,
+};
+
 pub const Imports = struct {
     funcs: []const ImportFunc = &.{}, // in import declaration order, per kind
     tables: []const *TableInst = &.{},
@@ -112,6 +122,8 @@ pub const Instance = struct {
     tables: []*TableInst,
     mems: []*MemoryInst,
     globals: []*GlobalInst,
+    elem_segments: []ElemSegmentInst,
+    data_segments: []DataSegmentInst,
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     root_hooks: ?RootHooks = null,
@@ -343,6 +355,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         .tables = &.{},
         .mems = &.{},
         .globals = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
         .gpa = gpa,
         .arena = std.heap.ArenaAllocator.init(gpa),
     };
@@ -400,16 +414,36 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         inst.globals[mod.imported_globals + j] = g;
     }
 
+    inst.elem_segments = try a.alloc(ElemSegmentInst, mod.elems.len);
+    for (mod.elems, inst.elem_segments) |elem, *segment| {
+        const values = try a.alloc(ValueSlot, elem.init.len);
+        for (elem.init, values) |init, *slot| slot.* = evalConstExpr(inst, init);
+        segment.* = .{ .elems = values, .dropped = switch (elem.mode) {
+            .passive => false,
+            .active, .declarative => true,
+        } };
+    }
+    inst.data_segments = try a.alloc(DataSegmentInst, mod.datas.len);
+    for (mod.datas, inst.data_segments) |data, *segment|
+        segment.* = .{ .bytes = data.bytes, .dropped = switch (data.mode) {
+            .passive => false,
+            .active => true,
+        } };
+
     // 3. Preflight every active segment before mutating any store. A link
     // failure must leave imported memories and tables untouched; start-function
     // traps happen later and deliberately retain already-applied mutations.
-    for (mod.elems) |e| {
-        const tab = inst.tables[e.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset).numericBits()));
+    for (mod.elems, inst.elem_segments) |e, segment| {
+        const active = switch (e.mode) {
+            .active => |active| active,
+            .passive, .declarative => continue,
+        };
+        const tab = inst.tables[active.table];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
         tab.lockTable();
         const table_len: u64 = @intCast(tab.elems.len);
         const available = if (start <= table_len) tab.elems.len - @as(usize, @intCast(start)) else 0;
-        const in_bounds = start <= table_len and e.funcs.len <= available;
+        const in_bounds = start <= table_len and segment.elems.len <= available;
         tab.unlockTable();
         if (!in_bounds) {
             diag.set(types.Diagnostic.no_offset, "out of bounds table index", .{});
@@ -417,8 +451,12 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         }
     }
     for (mod.datas) |d| {
-        const mem = inst.mems[d.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset).numericBits()));
+        const active = switch (d.mode) {
+            .active => |active| active,
+            .passive => continue,
+        };
+        const mem = inst.mems[active.mem];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
         const memory_len: u64 = @intCast(mem.bytes.len);
         const available = if (start <= memory_len) mem.bytes.len - @as(usize, @intCast(start)) else 0;
         if (start > memory_len or d.bytes.len > available) {
@@ -428,18 +466,26 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     }
 
     // 4. Apply element segments.
-    for (mod.elems) |e| {
-        const tab = inst.tables[e.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset).numericBits()));
+    for (mod.elems, inst.elem_segments) |e, segment| {
+        const active = switch (e.mode) {
+            .active => |active| active,
+            .passive, .declarative => continue,
+        };
+        const tab = inst.tables[active.table];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
         tab.lockTable();
-        for (e.funcs, 0..) |fidx, j| tab.elems[@intCast(start + j)] = .{ .funcref = @ptrCast(inst.funcs[fidx]) };
+        @memcpy(tab.elems[@intCast(start)..][0..segment.elems.len], segment.elems);
         tab.unlockTable();
     }
 
     // 5. Apply data segments.
     for (mod.datas) |d| {
-        const mem = inst.mems[d.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset).numericBits()));
+        const active = switch (d.mode) {
+            .active => |active| active,
+            .passive => continue,
+        };
+        const mem = inst.mems[active.mem];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
         const lo: usize = @intCast(start);
         @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
     }
@@ -1015,6 +1061,103 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const end = @as(u64, start) + count;
                 if (end > table.elems.len) return s.trap("out of bounds table access");
                 @memset(table.elems[start..@intCast(end)], slot);
+            },
+            .memory_init => {
+                const count = popI32(s);
+                const source = popI32(s);
+                const dest = popI32(s);
+                const immediate = instr.imm.indices;
+                const segment = &inst.data_segments[immediate.first];
+                const bytes = if (segment.dropped) &.{} else segment.bytes;
+                const source_end = @as(u64, source) + count;
+                const dest_end = @as(u64, dest) + count;
+                const memory = inst.mems[immediate.second];
+                if (source_end > bytes.len or dest_end > memory.bytes.len)
+                    return s.trap("out of bounds memory access");
+                @memcpy(memory.bytes[dest..@intCast(dest_end)], bytes[source..@intCast(source_end)]);
+            },
+            .data_drop => inst.data_segments[instr.imm.idx].dropped = true,
+            .memory_copy => {
+                const count = popI32(s);
+                const source = popI32(s);
+                const dest = popI32(s);
+                const immediate = instr.imm.indices;
+                const dest_memory = inst.mems[immediate.first];
+                const source_memory = inst.mems[immediate.second];
+                const source_end = @as(u64, source) + count;
+                const dest_end = @as(u64, dest) + count;
+                if (source_end > source_memory.bytes.len or dest_end > dest_memory.bytes.len)
+                    return s.trap("out of bounds memory access");
+                const dest_slice = dest_memory.bytes[dest..@intCast(dest_end)];
+                const source_slice = source_memory.bytes[source..@intCast(source_end)];
+                if (dest_memory != source_memory or dest <= source)
+                    std.mem.copyForwards(u8, dest_slice, source_slice)
+                else
+                    std.mem.copyBackwards(u8, dest_slice, source_slice);
+            },
+            .memory_fill => {
+                const count = popI32(s);
+                const value: u8 = @truncate(popI32(s));
+                const dest = popI32(s);
+                const memory = inst.mems[instr.imm.idx];
+                const end = @as(u64, dest) + count;
+                if (end > memory.bytes.len) return s.trap("out of bounds memory access");
+                @memset(memory.bytes[dest..@intCast(end)], value);
+            },
+            .table_init => {
+                const count = popI32(s);
+                const source = popI32(s);
+                const dest = popI32(s);
+                const immediate = instr.imm.indices;
+                const segment = &inst.elem_segments[immediate.first];
+                const elems = if (segment.dropped) &.{} else segment.elems;
+                const source_end = @as(u64, source) + count;
+                const dest_end = @as(u64, dest) + count;
+                const table = inst.tables[immediate.second];
+                table.lockTable();
+                defer table.unlockTable();
+                if (source_end > elems.len or dest_end > table.elems.len)
+                    return s.trap("out of bounds table access");
+                @memcpy(table.elems[dest..@intCast(dest_end)], elems[source..@intCast(source_end)]);
+            },
+            .elem_drop => inst.elem_segments[instr.imm.idx].dropped = true,
+            .table_copy => {
+                const count = popI32(s);
+                const source = popI32(s);
+                const dest = popI32(s);
+                const immediate = instr.imm.indices;
+                const dest_table = inst.tables[immediate.first];
+                const source_table = inst.tables[immediate.second];
+                if (dest_table == source_table) {
+                    dest_table.lockTable();
+                } else if (@intFromPtr(dest_table) < @intFromPtr(source_table)) {
+                    dest_table.lockTable();
+                    source_table.lockTable();
+                } else {
+                    source_table.lockTable();
+                    dest_table.lockTable();
+                }
+                defer {
+                    if (dest_table == source_table) {
+                        dest_table.unlockTable();
+                    } else if (@intFromPtr(dest_table) < @intFromPtr(source_table)) {
+                        source_table.unlockTable();
+                        dest_table.unlockTable();
+                    } else {
+                        dest_table.unlockTable();
+                        source_table.unlockTable();
+                    }
+                }
+                const source_end = @as(u64, source) + count;
+                const dest_end = @as(u64, dest) + count;
+                if (source_end > source_table.elems.len or dest_end > dest_table.elems.len)
+                    return s.trap("out of bounds table access");
+                const dest_slice = dest_table.elems[dest..@intCast(dest_end)];
+                const source_slice = source_table.elems[source..@intCast(source_end)];
+                if (dest_table != source_table or dest <= source)
+                    std.mem.copyForwards(ValueSlot, dest_slice, source_slice)
+                else
+                    std.mem.copyBackwards(ValueSlot, dest_slice, source_slice);
             },
             .i32_load => {
                 const m = instr.imm.memarg;
@@ -2791,6 +2934,63 @@ test "wasm.exec externref tables preserve arbitrary identity" {
     try std.testing.expect(inst.tables[0].elems[0].externref.asObj() == &object);
     try std.testing.expectEqual(@as(i32, 1), tableGrowWith(inst.tables[0], 1, results[0]));
     try std.testing.expect(inst.tables[0].elems[1].externref.asObj() == &object);
+}
+
+test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {
+    const initialize = comptime i32c(10) ++ i32c(0) ++ i32c(5) ++ "\xFC\x08\x00\x00" ++
+        i32c(12) ++ i32c(10) ++ i32c(5) ++ "\xFC\x0A\x00\x00" ++
+        i32c(20) ++ i32c(81) ++ i32c(3) ++ "\xFC\x0B\x00" ++
+        "\xFC\x09\x00";
+    const zero_at_end = comptime i32c(65536) ++ i32c(0) ++ i32c(0) ++ "\xFC\x08\x00\x00";
+    const bad_zero_source = comptime i32c(65536) ++ i32c(1) ++ i32c(0) ++ "\xFC\x08\x00\x00";
+    const bad_copy = comptime i32c(65535) ++ i32c(0) ++ i32c(2) ++ "\xFC\x0A\x00\x00";
+    const bytes = comptime hdr ++
+        typesSec(&.{ft("", "")}) ++ funcSec(&.{ 0, 0, 0, 0 }) ++ memSec(1, null) ++
+        sec(12, "\x01") ++ codeSec(&.{ initialize, zero_at_end, bad_zero_source, bad_copy }) ++
+        sec(11, "\x01\x01\x05ABCDE");
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .bulk_memory = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try invoke(inst, 0, &.{}, &.{}, &diag);
+    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes[10..17]);
+    try std.testing.expectEqualSlices(u8, "QQQ", inst.mems[0].bytes[20..23]);
+    try std.testing.expect(inst.data_segments[0].dropped);
+    try invoke(inst, 1, &.{}, &.{}, &diag);
+    try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("out of bounds memory access", diag.message());
+    const before = inst.mems[0].bytes[65534];
+    try std.testing.expectError(error.Trap, invoke(inst, 3, &.{}, &.{}, &diag));
+    try std.testing.expectEqual(before, inst.mems[0].bytes[65534]);
+    try std.testing.expectError(error.Trap, invoke(inst, 0, &.{}, &.{}, &diag));
+    try std.testing.expectEqualSlices(u8, "ABABCDE", inst.mems[0].bytes[10..17]);
+}
+
+test "wasm.exec bulk table operations preserve explicit indices and drop state" {
+    const initialize = comptime i32c(1) ++ i32c(0) ++ i32c(1) ++ "\xFC\x0C\x00\x01" ++
+        "\xFC\x0D\x00" ++
+        i32c(2) ++ i32c(1) ++ i32c(1) ++ "\xFC\x0E\x00\x01";
+    const call = comptime i32c(2) ++ "\x11\x00\x00";
+    const bytes = comptime hdr ++
+        typesSec(&.{ ft("", I32), ft("", "") }) ++ funcSec(&.{ 0, 1, 0 }) ++
+        sec(4, "\x02\x70\x00\x03\x70\x00\x03") ++
+        sec(9, "\x01\x01\x00\x01\x00") ++
+        codeSec(&.{ i32c(77), initialize, call });
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .bulk_memory = true, .reference_types = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try invoke(inst, 1, &.{}, &.{}, &diag);
+    try std.testing.expect(inst.elem_segments[0].dropped);
+    try std.testing.expect(inst.tables[1].elems[1].funcref == @as(*anyopaque, @ptrCast(inst.funcs[0])));
+    try std.testing.expect(inst.tables[0].elems[2].funcref == @as(*anyopaque, @ptrCast(inst.funcs[0])));
+    try std.testing.expectEqual(@as(u64, 77), try run1(inst, 2, &.{}));
+    try std.testing.expectError(error.Trap, invoke(inst, 1, &.{}, &.{}, &diag));
+    try std.testing.expectEqualStrings("out of bounds table access", diag.message());
 }
 
 test "wasm.exec global reference roots publish overwrite and barrier state" {

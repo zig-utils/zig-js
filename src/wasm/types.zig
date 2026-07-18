@@ -254,15 +254,31 @@ pub const Global = struct {
     init: ConstExpr,
 };
 
+pub const ElemMode = union(enum) {
+    passive,
+    declarative,
+    active: struct {
+        table: u32,
+        offset: ConstExpr,
+    },
+};
+
 pub const Elem = struct {
-    table: u32,
-    offset: ConstExpr,
-    funcs: []const u32,
+    type: ValType,
+    mode: ElemMode,
+    init: []const ConstExpr,
+};
+
+pub const DataMode = union(enum) {
+    passive,
+    active: struct {
+        mem: u32,
+        offset: ConstExpr,
+    },
 };
 
 pub const Data = struct {
-    mem: u32,
-    offset: ConstExpr,
+    mode: DataMode,
     bytes: []const u8,
 };
 
@@ -295,6 +311,7 @@ pub const Instr = struct {
         ///        end_pc = pc past `end`.
         block: Block,
         br_table: BrTable,
+        indices: Indices,
     };
 
     pub const MemArg = struct {
@@ -305,6 +322,11 @@ pub const Instr = struct {
     pub const CallIndirect = struct {
         type_index: u32,
         table_index: u32,
+    };
+
+    pub const Indices = struct {
+        first: u32,
+        second: u32,
     };
 
     pub const Block = struct {
@@ -534,6 +556,13 @@ pub const Op = enum(u16) {
     i64_trunc_sat_f32_u = 0xFC05,
     i64_trunc_sat_f64_s = 0xFC06,
     i64_trunc_sat_f64_u = 0xFC07,
+    memory_init = 0xFC08,
+    data_drop = 0xFC09,
+    memory_copy = 0xFC0A,
+    memory_fill = 0xFC0B,
+    table_init = 0xFC0C,
+    elem_drop = 0xFC0D,
+    table_copy = 0xFC0E,
     table_grow = 0xFC0F,
     table_size = 0xFC10,
     table_fill = 0xFC11,
@@ -571,6 +600,7 @@ pub const Module = struct {
     start: ?u32 = null,
     elems: []const Elem = &.{},
     datas: []const Data = &.{},
+    data_count: ?u32 = null,
     code: []const FuncBody = &.{},
     custom_sections: []const CustomSection = &.{},
 

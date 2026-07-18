@@ -38,7 +38,7 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
         return r.failAt(4, "unknown binary version", .{});
 
     var custom: std.ArrayListUnmanaged(types.CustomSection) = .empty;
-    var last_id: u8 = 0;
+    var last_order: u8 = 0;
     var func_count: ?u32 = null;
     var code_count: ?u32 = null;
 
@@ -59,10 +59,9 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
             r.pos = r.limit;
             try custom.append(a, .{ .name = name, .bytes = rest, .offset = sec_off });
         } else {
-            if (id > 12) return r.failAt(sec_off, "invalid section id", .{});
-            if (id == 12) return r.unsupportedFeature(sec_off, .bulk_memory);
-            if (id <= last_id) return r.failAt(sec_off, "unexpected content after last section", .{});
-            last_id = id;
+            const order = sectionOrder(id) orelse return r.failAt(sec_off, "invalid section id", .{});
+            if (order <= last_order) return r.failAt(sec_off, "unexpected content after last section", .{});
+            last_order = order;
             switch (id) {
                 1 => mod.types = try parseTypeSection(&r, a),
                 2 => mod.imports = try parseImportSection(&r, a, mod),
@@ -76,6 +75,10 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
                 7 => mod.exports = try parseExportSection(&r, a),
                 8 => mod.start = try r.readU32Leb(),
                 9 => mod.elems = try parseElemSection(&r, a),
+                12 => {
+                    if (!features.bulk_memory) return r.unsupportedFeature(sec_off, .bulk_memory);
+                    mod.data_count = try r.readU32Leb();
+                },
                 10 => {
                     mod.code = try parseCodeSection(&r, a);
                     code_count = @intCast(mod.code.len);
@@ -96,6 +99,16 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
 
     mod.custom_sections = try custom.toOwnedSlice(a);
     return mod;
+}
+
+fn sectionOrder(id: u8) ?u8 {
+    return switch (id) {
+        1...9 => id,
+        12 => 10,
+        10 => 11,
+        11 => 12,
+        else => null,
+    };
 }
 
 pub fn destroyModule(gpa: Allocator, mod: *types.Module) void {
@@ -467,25 +480,113 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
     const n = try r.readCount();
     const elems = try a.alloc(types.Elem, n);
     for (elems) |*e| {
-        const table = try r.readU32Leb();
-        const offset = try r.readConstExpr();
-        const fn_count = try r.readCount();
-        const funcs = try a.alloc(u32, fn_count);
-        for (funcs) |*f| f.* = try r.readU32Leb();
-        e.* = .{ .table = table, .offset = offset, .funcs = funcs };
+        const kind_off = r.offset();
+        const kind = try r.readU32Leb();
+        e.* = switch (kind) {
+            0 => .{
+                .type = .funcref,
+                .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr() } },
+                .init = try readFuncElemInit(r, a),
+            },
+            1 => blk: {
+                if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
+                try readElemKind(r);
+                break :blk .{ .type = .funcref, .mode = .passive, .init = try readFuncElemInit(r, a) };
+            },
+            2 => blk: {
+                if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
+                const table = try r.readU32Leb();
+                const offset = try r.readConstExpr();
+                try readElemKind(r);
+                break :blk .{
+                    .type = .funcref,
+                    .mode = .{ .active = .{ .table = table, .offset = offset } },
+                    .init = try readFuncElemInit(r, a),
+                };
+            },
+            3 => blk: {
+                if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
+                try readElemKind(r);
+                break :blk .{ .type = .funcref, .mode = .declarative, .init = try readFuncElemInit(r, a) };
+            },
+            4 => blk: {
+                if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
+                break :blk .{
+                    .type = .funcref,
+                    .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr() } },
+                    .init = try readExprElemInit(r, a),
+                };
+            },
+            5 => blk: {
+                if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
+                const elem_type = try r.readValType();
+                if (!elem_type.isReference()) return r.failAt(kind_off, "reference type expected", .{});
+                break :blk .{ .type = elem_type, .mode = .passive, .init = try readExprElemInit(r, a) };
+            },
+            6 => blk: {
+                if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
+                const table = try r.readU32Leb();
+                const offset = try r.readConstExpr();
+                const elem_type = try r.readValType();
+                if (!elem_type.isReference()) return r.failAt(kind_off, "reference type expected", .{});
+                break :blk .{
+                    .type = elem_type,
+                    .mode = .{ .active = .{ .table = table, .offset = offset } },
+                    .init = try readExprElemInit(r, a),
+                };
+            },
+            7 => blk: {
+                if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
+                const elem_type = try r.readValType();
+                if (!elem_type.isReference()) return r.failAt(kind_off, "reference type expected", .{});
+                break :blk .{ .type = elem_type, .mode = .declarative, .init = try readExprElemInit(r, a) };
+            },
+            else => return r.failAt(kind_off, "malformed element segment kind", .{}),
+        };
     }
     return elems;
+}
+
+fn readElemKind(r: *Reader) DecodeError!void {
+    const off = r.offset();
+    if (try r.readU8() != 0) return r.failAt(off, "malformed element kind", .{});
+}
+
+fn readFuncElemInit(r: *Reader, a: Allocator) DecodeError![]const types.ConstExpr {
+    const count = try r.readCount();
+    const init = try a.alloc(types.ConstExpr, count);
+    for (init) |*entry| entry.* = .{ .ref_func = try r.readU32Leb() };
+    return init;
+}
+
+fn readExprElemInit(r: *Reader, a: Allocator) DecodeError![]const types.ConstExpr {
+    const count = try r.readCount();
+    const init = try a.alloc(types.ConstExpr, count);
+    for (init) |*entry| entry.* = try r.readConstExpr();
+    return init;
 }
 
 fn parseDataSection(r: *Reader, a: Allocator) DecodeError![]const types.Data {
     const n = try r.readCount();
     const datas = try a.alloc(types.Data, n);
     for (datas) |*d| {
-        const mem = try r.readU32Leb();
-        const offset = try r.readConstExpr();
+        const kind_off = r.offset();
+        const kind = try r.readU32Leb();
+        const mode: types.DataMode = switch (kind) {
+            0 => .{ .active = .{ .mem = 0, .offset = try r.readConstExpr() } },
+            1 => blk: {
+                if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
+                break :blk .passive;
+            },
+            2 => blk: {
+                if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
+                break :blk .{ .active = .{ .mem = try r.readU32Leb(), .offset = try r.readConstExpr() } };
+            },
+            else => return r.failAt(kind_off, "malformed data segment kind", .{}),
+        };
         const len = try r.readCount();
         const bytes = try a.dupe(u8, try r.readBytes(len));
-        d.* = .{ .mem = mem, .offset = offset, .bytes = bytes };
+        d.* = .{ .mode = mode, .bytes = bytes };
     }
     return datas;
 }
@@ -560,7 +661,11 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                         return r.unsupportedFeature(instr_off, .nontrapping_float_to_int);
                     break :proposal types.Op.fromFC(subopcode).?;
                 }
-                if (subopcode <= 14) return r.unsupportedFeature(instr_off, .bulk_memory);
+                if (subopcode <= 14) {
+                    if (!r.features.bulk_memory)
+                        return r.unsupportedFeature(instr_off, .bulk_memory);
+                    break :proposal types.Op.fromFC(subopcode).?;
+                }
                 if (subopcode <= 17) {
                     if (!r.features.reference_types)
                         return r.unsupportedFeature(instr_off, .reference_types);
@@ -651,8 +756,17 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .table_grow,
             .table_size,
             .table_fill,
+            .data_drop,
+            .memory_fill,
+            .elem_drop,
             => {
                 instr.imm = .{ .idx = try r.readU32Leb() };
+            },
+            .memory_init, .memory_copy, .table_init, .table_copy => {
+                instr.imm = .{ .indices = .{
+                    .first = try r.readU32Leb(),
+                    .second = try r.readU32Leb(),
+                } };
             },
             .call_indirect => {
                 const typeidx = try r.readU32Leb();
@@ -778,6 +892,7 @@ test "wasm.decode empty module" {
     try std.testing.expectEqual(@as(?u32, null), mod.start);
     try std.testing.expectEqual(@as(usize, 0), mod.elems.len);
     try std.testing.expectEqual(@as(usize, 0), mod.datas.len);
+    try std.testing.expectEqual(@as(?u32, null), mod.data_count);
     try std.testing.expectEqual(@as(usize, 0), mod.code.len);
     try std.testing.expectEqual(@as(usize, 0), mod.custom_sections.len);
     try std.testing.expectEqual(@as(u32, 0), mod.imported_funcs);
@@ -895,12 +1010,15 @@ test "wasm.decode kitchen sink module" {
     // Start / elem / data.
     try std.testing.expectEqual(@as(?u32, 1), mod.start);
     try std.testing.expectEqual(@as(usize, 1), mod.elems.len);
-    try std.testing.expectEqual(@as(u32, 0), mod.elems[0].table);
-    try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 0 }, mod.elems[0].offset);
-    try std.testing.expectEqualDeep(&[_]u32{1}, mod.elems[0].funcs);
+    try std.testing.expectEqual(types.ValType.funcref, mod.elems[0].type);
+    const elem_active = mod.elems[0].mode.active;
+    try std.testing.expectEqual(@as(u32, 0), elem_active.table);
+    try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 0 }, elem_active.offset);
+    try std.testing.expectEqualDeep(&[_]types.ConstExpr{.{ .ref_func = 1 }}, mod.elems[0].init);
     try std.testing.expectEqual(@as(usize, 1), mod.datas.len);
-    try std.testing.expectEqual(@as(u32, 0), mod.datas[0].mem);
-    try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 4 }, mod.datas[0].offset);
+    const data_active = mod.datas[0].mode.active;
+    try std.testing.expectEqual(@as(u32, 0), data_active.mem);
+    try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 4 }, data_active.offset);
     try std.testing.expectEqualSlices(u8, "AB", mod.datas[0].bytes);
 
     // Custom sections (recorded with module offsets).
@@ -1035,18 +1153,78 @@ test "wasm.decode malformed code bodies" {
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x0F\x01\x0D\x02\xFF\xFF\xFF\xFF\x0F\x7F\xFF\xFF\xFF\xFF\x0F\x7F", 23, "too many locals");
 }
 
-test "wasm.decode feature gates distinguish disabled dependency and pending implementation" {
-    try expectMalformedWithFeatures(
-        hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x08\x0B",
-        .{ .bulk_memory = true },
-        17,
-        "WebAssembly feature bulk-memory is enabled but not implemented",
-    );
+test "wasm.decode feature gates distinguish disabled features and dependencies" {
     try expectMalformedWithFeatures(
         hdr,
         .{ .gc = true },
         0,
         "WebAssembly feature gc requires typed-function-references",
+    );
+}
+
+test "wasm.decode bulk memory segment forms DataCount order and immediates" {
+    const elem_payload =
+        "\x08" ++
+        "\x00\x41\x00\x0B\x01\x00" ++
+        "\x01\x00\x01\x00" ++
+        "\x02\x01\x41\x00\x0B\x00\x01\x00" ++
+        "\x03\x00\x01\x00" ++
+        "\x04\x41\x00\x0B\x01\xD2\x00\x0B" ++
+        "\x05\x70\x01\xD0\x70\x0B" ++
+        "\x06\x01\x41\x00\x0B\x6F\x01\xD0\x6F\x0B" ++
+        "\x07\x70\x01\xD2\x00\x0B";
+    const bulk_ops =
+        "\xFC\x08\x02\x01" ++
+        "\xFC\x09\x02" ++
+        "\xFC\x0A\x01\x00" ++
+        "\xFC\x0B\x01" ++
+        "\xFC\x0C\x03\x01" ++
+        "\xFC\x0D\x03" ++
+        "\xFC\x0E\x01\x00\x0B";
+    const data_payload =
+        "\x03" ++
+        "\x00\x41\x00\x0B\x01A" ++
+        "\x01\x01B" ++
+        "\x02\x01\x41\x01\x0B\x01C";
+    const bytes = comptime hdr ++ func_sec_1 ++ testSection(9, elem_payload) ++
+        testSection(12, "\x03") ++ testCode(bulk_ops) ++ testSection(11, data_payload);
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{
+        .bulk_memory = true,
+        .reference_types = true,
+    }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    try std.testing.expectEqual(@as(?u32, 3), mod.data_count);
+    try std.testing.expectEqual(@as(usize, 8), mod.elems.len);
+    try std.testing.expectEqual(std.meta.Tag(types.ElemMode).active, std.meta.activeTag(mod.elems[0].mode));
+    try std.testing.expectEqual(std.meta.Tag(types.ElemMode).passive, std.meta.activeTag(mod.elems[1].mode));
+    try std.testing.expectEqual(std.meta.Tag(types.ElemMode).declarative, std.meta.activeTag(mod.elems[3].mode));
+    try std.testing.expectEqual(types.ValType.externref, mod.elems[6].type);
+    try std.testing.expectEqualDeep(types.ConstExpr{ .ref_null = .externref }, mod.elems[6].init[0]);
+    try std.testing.expectEqual(@as(usize, 3), mod.datas.len);
+    try std.testing.expectEqual(std.meta.Tag(types.DataMode).active, std.meta.activeTag(mod.datas[0].mode));
+    try std.testing.expectEqual(std.meta.Tag(types.DataMode).passive, std.meta.activeTag(mod.datas[1].mode));
+    try std.testing.expectEqualSlices(u8, "C", mod.datas[2].bytes);
+
+    const instrs = mod.code[0].instrs;
+    try std.testing.expectEqual(types.Op.memory_init, instrs[0].op);
+    try std.testing.expectEqualDeep(types.Instr.Indices{ .first = 2, .second = 1 }, instrs[0].imm.indices);
+    try std.testing.expectEqual(types.Op.data_drop, instrs[1].op);
+    try std.testing.expectEqual(types.Op.memory_copy, instrs[2].op);
+    try std.testing.expectEqual(types.Op.memory_fill, instrs[3].op);
+    try std.testing.expectEqual(types.Op.table_init, instrs[4].op);
+    try std.testing.expectEqualDeep(types.Instr.Indices{ .first = 3, .second = 1 }, instrs[4].imm.indices);
+    try std.testing.expectEqual(types.Op.elem_drop, instrs[5].op);
+    try std.testing.expectEqual(types.Op.table_copy, instrs[6].op);
+
+    const code_only = comptime testCode("\x0B");
+    const out_of_order = comptime hdr ++ code_only ++ testSection(12, "\x00");
+    try expectMalformedWithFeatures(
+        out_of_order,
+        .{ .bulk_memory = true },
+        @intCast(hdr.len + code_only.len),
+        "unexpected content after last section",
     );
 }
 

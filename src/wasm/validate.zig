@@ -48,21 +48,34 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 4. Element segments.
     for (mod.elems) |e| {
-        if (e.table >= mod.totalTables())
-            return failModFmt(diag, "unknown table {d}", .{e.table});
-        if (mod.tableType(e.table).elem != .funcref)
-            return failMod(diag, "type mismatch");
-        try checkConstExpr(mod, e.offset, .i32, diag);
-        for (e.funcs) |f|
-            if (f >= mod.totalFuncs()) return failMod(diag, "unknown function");
+        if (e.type.isReference() and !mod.features.reference_types and e.type != .funcref)
+            return unsupportedFeature(mod, diag, .reference_types);
+        switch (e.mode) {
+            .active => |active| {
+                if (active.table >= mod.totalTables())
+                    return failModFmt(diag, "unknown table {d}", .{active.table});
+                if (mod.tableType(active.table).elem != e.type)
+                    return failMod(diag, "type mismatch");
+                try checkConstExpr(mod, active.offset, .i32, diag);
+            },
+            .passive, .declarative => {},
+        }
+        for (e.init) |init| try checkConstExpr(mod, init, e.type, diag);
     }
 
     // 5. Data segments.
     for (mod.datas) |d| {
-        if (d.mem >= mod.totalMems())
-            return failModFmt(diag, "unknown memory {d}", .{d.mem});
-        try checkConstExpr(mod, d.offset, .i32, diag);
+        switch (d.mode) {
+            .active => |active| {
+                if (active.mem >= mod.totalMems())
+                    return failModFmt(diag, "unknown memory {d}", .{active.mem});
+                try checkConstExpr(mod, active.offset, .i32, diag);
+            },
+            .passive => {},
+        }
     }
+    if (mod.data_count) |count|
+        if (count != mod.datas.len) return failMod(diag, "data count and data section have inconsistent lengths");
 
     // 6. Exports: indices resolve and names are unique.
     for (mod.exports, 0..) |e, i| {
@@ -493,6 +506,56 @@ const FuncValidator = struct {
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
                     try self.popExpect(.i32);
                     try self.popExpect(self.mod.tableType(tableidx).elem);
+                    try self.popExpect(.i32);
+                },
+                .memory_init => {
+                    const immediate = instr.imm.indices;
+                    if (self.mod.data_count == null) return self.fail("data count section required");
+                    if (immediate.first >= self.mod.datas.len) return self.fail("unknown data segment");
+                    if (immediate.second >= self.mod.totalMems()) return self.fail("unknown memory");
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                },
+                .data_drop => {
+                    if (self.mod.data_count == null) return self.fail("data count section required");
+                    if (instr.imm.idx >= self.mod.datas.len) return self.fail("unknown data segment");
+                },
+                .memory_copy => {
+                    const immediate = instr.imm.indices;
+                    if (immediate.first >= self.mod.totalMems() or immediate.second >= self.mod.totalMems())
+                        return self.fail("unknown memory");
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                },
+                .memory_fill => {
+                    if (instr.imm.idx >= self.mod.totalMems()) return self.fail("unknown memory");
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                },
+                .table_init => {
+                    const immediate = instr.imm.indices;
+                    if (immediate.first >= self.mod.elems.len) return self.fail("unknown element segment");
+                    if (immediate.second >= self.mod.totalTables()) return self.fail("unknown table");
+                    if (self.mod.elems[immediate.first].type != self.mod.tableType(immediate.second).elem)
+                        return self.fail("type mismatch");
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
+                },
+                .elem_drop => {
+                    if (instr.imm.idx >= self.mod.elems.len) return self.fail("unknown element segment");
+                },
+                .table_copy => {
+                    const immediate = instr.imm.indices;
+                    if (immediate.first >= self.mod.totalTables() or immediate.second >= self.mod.totalTables())
+                        return self.fail("unknown table");
+                    if (self.mod.tableType(immediate.first).elem != self.mod.tableType(immediate.second).elem)
+                        return self.fail("type mismatch");
+                    try self.popExpect(.i32);
+                    try self.popExpect(.i32);
                     try self.popExpect(.i32);
                 },
                 .i32_load, .i64_load, .f32_load, .f64_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => {
@@ -975,6 +1038,65 @@ test "wasm.validate reference instruction types and indices" {
     try expectInvalidAtWithFeatures(
         hdr ++ type_void ++ func0 ++ tables ++ code1("\xD0\x6F\xD0\x6F\x41\x00\x1B\x1A\x0B"),
         .{ .reference_types = true },
+        0,
+        3,
+        "type mismatch",
+    );
+}
+
+test "wasm.validate bulk memory instructions and passive segments" {
+    const body =
+        "\x41\x00\x41\x00\x41\x01\xFC\x08\x00\x00" ++
+        "\xFC\x09\x00" ++
+        "\x41\x01\x41\x00\x41\x01\xFC\x0A\x00\x00" ++
+        "\x41\x02\x41\x7F\x41\x01\xFC\x0B\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xFC\x0C\x00\x00" ++
+        "\xFC\x0D\x00" ++
+        "\x41\x00\x41\x00\x41\x01\xFC\x0E\x00\x00\x0B";
+    const bytes = comptime hdr ++ type_void ++ func0 ++ table1 ++ mem1 ++
+        sec(9, "\x01\x01\x00\x01\x00") ++
+        sec(12, "\x01") ++ code1(body) ++ sec(11, "\x01\x01\x01A");
+    try expectValidWithFeatures(bytes, .{ .bulk_memory = true, .reference_types = true });
+}
+
+test "wasm.validate bulk memory indices DataCount types and operands" {
+    const features: types.Features = .{ .bulk_memory = true, .reference_types = true };
+    try expectInvalidWithFeatures(
+        hdr ++ sec(12, "\x01") ++ sec(11, "\x00"),
+        features,
+        "data count and data section have inconsistent lengths",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ mem1 ++
+            code1("\x41\x00\x41\x00\x41\x00\xFC\x08\x00\x00\x0B") ++
+            sec(11, "\x01\x01\x00"),
+        features,
+        0,
+        3,
+        "data count section required",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ mem1 ++ sec(12, "\x01") ++
+            code1("\x41\x00\x41\x00\x41\x00\xFC\x08\x01\x00\x0B") ++
+            sec(11, "\x01\x01\x00"),
+        features,
+        0,
+        3,
+        "unknown data segment",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ sec(4, "\x01\x6F\x00\x01") ++
+            sec(9, "\x01\x01\x00\x01\x00") ++
+            code1("\x41\x00\x41\x00\x41\x00\xFC\x0C\x00\x00\x0B"),
+        features,
+        0,
+        3,
+        "type mismatch",
+    );
+    try expectInvalidAtWithFeatures(
+        hdr ++ type_void ++ func0 ++ mem1 ++
+            code1("\x41\x00\x43\x00\x00\x00\x00\x41\x00\xFC\x0B\x00\x0B"),
+        features,
         0,
         3,
         "type mismatch",
