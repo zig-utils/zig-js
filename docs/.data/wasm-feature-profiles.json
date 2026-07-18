@@ -52,7 +52,7 @@
       "standardization": "finished",
       "edition": "2.0",
       "dependencies": [],
-      "issue": 263
+      "issue": 269
     },
     {
       "id": "nontrapping_float_to_int",
@@ -61,7 +61,7 @@
       "standardization": "finished",
       "edition": "2.0",
       "dependencies": [],
-      "issue": 263
+      "issue": 269
     },
     {
       "id": "multi_value",

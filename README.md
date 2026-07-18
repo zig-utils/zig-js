@@ -834,8 +834,9 @@ and the final evidence-backed removal of this section is tracked by
 [issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
-- post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
+- the remaining post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
   the PR-249 reference corpus (the complete MVP binary runtime, JavaScript API,
+  opt-in Core 2.0 sign-extension and saturating-conversion instructions,
   upstream inventory, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
   are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.

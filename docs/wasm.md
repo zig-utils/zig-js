@@ -130,8 +130,16 @@ const ctx = try js.Context.createWith(gpa, .{
 });
 ```
 
+The five sign-extension instructions and eight nontrapping float-to-integer
+conversions are implemented behind their independent `sign_extension_ops` and
+`nontrapping_float_to_int` switches. They decode, validate, instantiate, and
+execute through the public JavaScript API; neither switch is enabled by
+default, and enabling them does not imply that the remaining Core 2.0 profile
+is complete.
+
 Implementation is split into the shared gating foundation
-[#262](https://github.com/zig-utils/zig-js/issues/262), the core 2.0 baseline
+[#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
+operations [#269](https://github.com/zig-utils/zig-js/issues/269), the structural core 2.0 baseline
 [#263](https://github.com/zig-utils/zig-js/issues/263), SIMD
 [#264](https://github.com/zig-utils/zig-js/issues/264), Threads
 [#265](https://github.com/zig-utils/zig-js/issues/265), exceptions/tail calls

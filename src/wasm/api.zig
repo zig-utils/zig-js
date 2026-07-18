@@ -1523,6 +1523,44 @@ test "wasm api Context options gate post-MVP features explicitly" {
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
+test "wasm api executes opted-in Core 2.0 numeric operations" {
+    const bytes_source =
+        \\var bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,11,2,96,1,127,1,127,96,1,124,1,126,
+        \\  3,3,2,0,1,
+        \\  7,12,2,2,115,120,0,0,3,115,97,116,0,1,
+        \\  10,14,2,5,0,32,0,192,11,6,0,32,0,252,6,11
+        \\]);
+    ;
+
+    const ordinary = try context.Context.create(std.testing.allocator);
+    defer ordinary.destroy();
+    const disabled = try ordinary.evaluate(bytes_source ++
+        \\WebAssembly.validate(bytes) === false && (() => {
+        \\  try { new WebAssembly.Module(bytes); } catch (error) {
+        \\    return error instanceof WebAssembly.CompileError && error.message.includes('sign-extension-ops is disabled');
+        \\  }
+        \\  return false;
+        \\})();
+    );
+    try std.testing.expect(disabled.isBoolean() and disabled.asBool());
+
+    const enabled = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{
+            .sign_extension_ops = true,
+            .nontrapping_float_to_int = true,
+        },
+    });
+    defer enabled.destroy();
+    const executed = try enabled.evaluate(bytes_source ++
+        \\const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+        \\WebAssembly.validate(bytes) && exports.sx(128) === -128 &&
+        \\exports.sat(NaN) === 0n && exports.sat(Infinity) === 9223372036854775807n;
+    );
+    try std.testing.expect(executed.isBoolean() and executed.asBool());
+}
+
 test "wasm api compile snapshots bytes and rejects asynchronously" {
     const store = try context.Context.create(std.testing.allocator);
     defer store.destroy();
