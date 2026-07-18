@@ -260,6 +260,9 @@ extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
 extern "c" fn JSC__JSString__iterator(?*anyopaque, JSContextRef, ?*anyopaque) void;
 extern "c" fn JSFunction__createFromZig(JSContextRef, BunString, ?*const JSHostFn, u32, ImplementationVisibility, Intrinsic, ?*const JSHostFn) EncodedValue;
+extern "c" fn Bun__CallFrame__getCallerSrcLoc(?*const PrivateCallFrame, JSContextRef, *BunString, *c_uint, *c_uint) void;
+extern "c" fn Bun__CallFrame__isFromBunMain(?*const PrivateCallFrame, ?*const anyopaque) bool;
+extern "c" fn Bun__CallFrame__describeFrame(?*const PrivateCallFrame) [*:0]const u8;
 extern "c" fn StringBuilder__init(*anyopaque) void;
 extern "c" fn StringBuilder__deinit(*anyopaque) void;
 extern "c" fn StringBuilder__ensureUnusedCapacity(*anyopaque, usize) void;
@@ -559,6 +562,17 @@ const HostFunctionFixtureState = struct {
     args: [2]EncodedValue = @splat(.undefined),
     calls: usize = 0,
     constructs: usize = 0,
+    introspection_global: JSContextRef = null,
+    vm: ?*anyopaque = null,
+    caller_source: BunString = .{ .tag = .empty, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } },
+    caller_line: c_uint = 0,
+    caller_column: c_uint = 0,
+    caller_is_bun_main: bool = false,
+    description: [512]u8 = @splat(0),
+    description_len: usize = 0,
+    last_frame: ?*const PrivateCallFrame = null,
+    reenter: bool = false,
+    reentry_restored: bool = false,
 };
 
 var host_function_fixture = HostFunctionFixtureState{};
@@ -573,6 +587,26 @@ fn callFrameArgumentCount(slots: [*]const EncodedValue) u32 {
     return @truncate(bits);
 }
 
+fn captureCallFrame(frame: *PrivateCallFrame) void {
+    if (host_function_fixture.caller_source.tag == .wtf_string_impl)
+        Bun__WTFStringImpl__deref(host_function_fixture.caller_source.value.wtf_string_impl);
+    host_function_fixture.caller_source = emptyBunString();
+    host_function_fixture.caller_line = 0;
+    host_function_fixture.caller_column = 0;
+    Bun__CallFrame__getCallerSrcLoc(
+        frame,
+        host_function_fixture.introspection_global,
+        &host_function_fixture.caller_source,
+        &host_function_fixture.caller_line,
+        &host_function_fixture.caller_column,
+    );
+    host_function_fixture.caller_is_bun_main = Bun__CallFrame__isFromBunMain(frame, host_function_fixture.vm);
+    const description = std.mem.span(Bun__CallFrame__describeFrame(frame));
+    host_function_fixture.description_len = @min(description.len, host_function_fixture.description.len);
+    @memcpy(host_function_fixture.description[0..host_function_fixture.description_len], description[0..host_function_fixture.description_len]);
+    host_function_fixture.last_frame = frame;
+}
+
 fn hostFunctionAdd(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) EncodedValue {
     const slots = callFrameSlots(frame);
     if (global != host_function_fixture.global or
@@ -582,6 +616,20 @@ fn hostFunctionAdd(global: JSContextRef, frame: *PrivateCallFrame) callconv(.c) 
         slots[6] != host_function_fixture.args[0] or
         slots[7] != host_function_fixture.args[1])
         fail("private JSHostFn CallFrame call layout mismatch");
+    captureCallFrame(frame);
+    if (host_function_fixture.reenter) {
+        host_function_fixture.reenter = false;
+        const outer_line = host_function_fixture.caller_line;
+        const outer_args = host_function_fixture.args;
+        host_function_fixture.args = .{ EncodedValue.fromInt32(1), EncodedValue.fromInt32(2) };
+        const nested = evaluate(global, "__private_host_function_248.call(__private_host_receiver_248, 1, 2)");
+        host_function_fixture.args = outer_args;
+        if (!JSC__JSValue__isStrictEqual(nested, EncodedValue.fromInt32(3), global)) fail("private CallFrame nested callback result mismatch");
+        captureCallFrame(frame);
+        host_function_fixture.reentry_restored = host_function_fixture.last_frame == frame and
+            host_function_fixture.caller_line == outer_line and
+            std.mem.indexOf(u8, host_function_fixture.description[0..host_function_fixture.description_len], "reentry-251.js") != null;
+    }
     host_function_fixture.calls += 1;
     return EncodedValue.fromInt32(JSC__JSValue__toInt32(slots[6]) + JSC__JSValue__toInt32(slots[7]));
 }
@@ -594,6 +642,7 @@ fn hostFunctionConstruct(global: JSContextRef, frame: *PrivateCallFrame) callcon
         !JSC__JSValue__isStrictEqual(slots[5], slots[3], global) or
         slots[6] != host_function_fixture.args[0])
         fail("private JSHostFn CallFrame construct layout mismatch");
+    captureCallFrame(frame);
     host_function_fixture.constructs += 1;
     const instance = JSC__JSValue__createEmptyObject(global, 1);
     const answer_bytes = "answer";
@@ -2394,7 +2443,13 @@ pub fn main() void {
         .callee = host_function,
         .this_value = host_receiver,
         .args = .{ EncodedValue.fromInt32(11), EncodedValue.fromInt32(22) },
+        .introspection_global = context,
+        .vm = vm,
     };
+    defer {
+        derefBunString(host_function_fixture.caller_source);
+        host_function_fixture.caller_source = emptyBunString();
+    }
     if (!JSC__JSValue__isStrictEqual(
         evaluate(context, "__private_host_function_248.call(__private_host_receiver_248, 11, 22)"),
         EncodedValue.fromInt32(33),
@@ -2402,9 +2457,66 @@ pub fn main() void {
     ) or host_function_fixture.calls != 1)
         fail("private JSFunction call result mismatch");
 
+    const caller_script = JSStringCreateWithUTF8CString("__private_host_function_248.call(__private_host_receiver_248, 13, 14)") orelse fail("CallFrame script creation failed");
+    defer JSStringRelease(caller_script);
+    const caller_url = JSStringCreateWithUTF8CString("callframe-251.js") orelse fail("CallFrame URL creation failed");
+    defer JSStringRelease(caller_url);
+    host_function_fixture.args = .{ EncodedValue.fromInt32(13), EncodedValue.fromInt32(14) };
+    host_function_fixture.introspection_global = sibling_context;
+    var caller_exception: JSValueRef = null;
+    const caller_result = JSEvaluateScript(context, caller_script, null, caller_url, 31, &caller_exception) orelse fail("CallFrame named evaluation failed");
+    if (caller_exception != null or !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(caller_result), EncodedValue.fromInt32(27), context) or
+        host_function_fixture.caller_line != 31 or host_function_fixture.caller_column == 0 or host_function_fixture.caller_is_bun_main or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &host_function_fixture.caller_source), evaluate(context, "'callframe-251.js'"), context) or
+        std.mem.indexOf(u8, host_function_fixture.description[0..host_function_fixture.description_len], "callframe-251.js") == null)
+        fail("private CallFrame caller location mismatch");
+
+    var stale_source = emptyBunString();
+    var stale_line: c_uint = 99;
+    var stale_column: c_uint = 99;
+    Bun__CallFrame__getCallerSrcLoc(host_function_fixture.last_frame, context, &stale_source, &stale_line, &stale_column);
+    if (stale_source.tag != .empty or stale_line != 0 or stale_column != 0 or
+        Bun__CallFrame__isFromBunMain(host_function_fixture.last_frame, vm) or
+        !std.mem.eql(u8, std.mem.span(Bun__CallFrame__describeFrame(host_function_fixture.last_frame)), "invalid CallFrame") or
+        Bun__CallFrame__isFromBunMain(null, vm))
+        fail("private CallFrame stale/null rejection mismatch");
+
+    const builtin_url = JSStringCreateWithUTF8CString("builtin://bun/main") orelse fail("CallFrame builtin URL creation failed");
+    defer JSStringRelease(builtin_url);
+    host_function_fixture.args = .{ EncodedValue.fromInt32(13), EncodedValue.fromInt32(14) };
+    host_function_fixture.introspection_global = context;
+    caller_exception = null;
+    const builtin_result = JSEvaluateScript(context, caller_script, null, builtin_url, 1, &caller_exception) orelse fail("CallFrame builtin evaluation failed");
+    if (caller_exception != null or !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(builtin_result), EncodedValue.fromInt32(27), context) or
+        !host_function_fixture.caller_is_bun_main)
+        fail("private CallFrame Bun main origin mismatch");
+    host_function_fixture.vm = foreign_vm;
+    caller_exception = null;
+    _ = JSEvaluateScript(context, caller_script, null, builtin_url, 1, &caller_exception) orelse fail("CallFrame foreign-VM evaluation failed");
+    if (caller_exception != null or host_function_fixture.caller_is_bun_main)
+        fail("private CallFrame Bun main foreign-VM rejection mismatch");
+    host_function_fixture.vm = vm;
+
+    const reentry_url = JSStringCreateWithUTF8CString("reentry-251.js") orelse fail("CallFrame reentry URL creation failed");
+    defer JSStringRelease(reentry_url);
+    host_function_fixture.reenter = true;
+    host_function_fixture.reentry_restored = false;
+    caller_exception = null;
+    const reentry_result = JSEvaluateScript(context, caller_script, null, reentry_url, 61, &caller_exception) orelse fail("CallFrame reentry evaluation failed");
+    if (caller_exception != null or !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(reentry_result), EncodedValue.fromInt32(27), context) or
+        !host_function_fixture.reentry_restored)
+        fail("private CallFrame nested active-frame restoration mismatch");
+
+    host_function_fixture.args = .{ EncodedValue.fromInt32(5), EncodedValue.fromInt32(6) };
+    host_function_fixture.introspection_global = foreign_context;
+    if (!JSC__JSValue__isStrictEqual(evaluate(context, "__private_host_function_248.call(__private_host_receiver_248, 5, 6)"), EncodedValue.fromInt32(11), context) or
+        host_function_fixture.caller_source.tag != .empty or host_function_fixture.caller_line != 0 or host_function_fixture.caller_column != 0)
+        fail("private CallFrame foreign-global rejection mismatch");
+    host_function_fixture.introspection_global = context;
+
     host_function_fixture.args[0] = EncodedValue.fromInt32(41);
     if (!JSC__JSValue__toBoolean(evaluate(context, "new __private_host_function_248(41).answer === 41")) or
-        host_function_fixture.constructs != 1)
+        host_function_fixture.constructs != 1 or host_function_fixture.caller_line == 0)
         fail("private JSFunction explicit constructor mismatch");
 
     _ = JSC__VM__runGC(vm, true);
@@ -4055,5 +4167,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 251/251 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 254/254 symbols linked; runtime matrix passed\n", .{});
 }

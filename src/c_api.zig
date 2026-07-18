@@ -244,6 +244,16 @@ const PrivateHostFunctionRecord = struct {
     intrinsic: PrivateIntrinsic,
 };
 
+const PrivateActiveCallFrame = struct {
+    frame: *const PrivateCallFrame,
+    context: *Context,
+    caller_location: ?interp.DebugStatementLocation,
+    caller_function_name: []const u8,
+};
+
+threadlocal var private_active_call_frame: ?*const PrivateActiveCallFrame = null;
+threadlocal var private_call_frame_description: [512]u8 = @splat(0);
+
 const private_string_builder_magic: usize = 0x5a4a_5342_0000_0000; // "ZJSB"
 const private_string_builder_overflow: usize = 0x8000_0000;
 const private_string_builder_capacity_mask: usize = 0x7fff_ffff;
@@ -1765,9 +1775,21 @@ fn privateJSHostFunctionNative(
         if (slot.* == .empty) return error.OutOfMemory;
     }
 
+    const frame: *PrivateCallFrame = @ptrCast(@alignCast(registers.ptr));
+    const caller_frame = machine.stack_trace_call_frame;
+    const active = PrivateActiveCallFrame{
+        .frame = frame,
+        .context = record.context,
+        .caller_location = machine.debug_current_location orelse if (caller_frame) |caller| caller.location else null,
+        .caller_function_name = if (caller_frame) |caller| caller.function_name else "",
+    };
+    const previous_active = private_active_call_frame;
+    private_active_call_frame = &active;
+    defer private_active_call_frame = previous_active;
+
     const result = callback(
         @ptrCast(record.context),
-        @ptrCast(@alignCast(registers.ptr)),
+        frame,
     );
     if (privateTakePendingExceptionValue(record.context)) |thrown| {
         machine.exception = thrown;
@@ -1780,6 +1802,62 @@ fn privateJSHostFunctionNative(
     if (constructing and !internal.isObject())
         return machine.throwError("TypeError", "Zig host constructor must return an object");
     return internal;
+}
+
+fn privateActiveCallFrame(frame: ?*const PrivateCallFrame) ?*const PrivateActiveCallFrame {
+    const active = private_active_call_frame orelse return null;
+    if (frame == null or active.frame != frame.?) return null;
+    return active;
+}
+
+export fn Bun__CallFrame__getCallerSrcLoc(
+    frame: ?*const PrivateCallFrame,
+    global: JSContextRef,
+    out_source_url: ?*PrivateBunString,
+    out_line: ?*c_uint,
+    out_column: ?*c_uint,
+) callconv(.c) void {
+    const source_url = out_source_url orelse return;
+    const line = out_line orelse return;
+    const column = out_column orelse return;
+    source_url.* = .empty();
+    line.* = 0;
+    column.* = 0;
+
+    const active = privateActiveCallFrame(frame) orelse return;
+    const selected = ctxForHandleInspection(global) orelse return;
+    if (selected.c_api_group != active.context.c_api_group) return;
+    const location = active.caller_location orelse return;
+    source_url.* = privateOwnedWTF8String(location.source_url) catch return;
+    line.* = std.math.cast(c_uint, location.location.line) orelse 0;
+    column.* = std.math.cast(c_uint, location.location.column) orelse 0;
+}
+
+export fn Bun__CallFrame__isFromBunMain(
+    frame: ?*const PrivateCallFrame,
+    vm_ref: ?*const anyopaque,
+) callconv(.c) bool {
+    const active = privateActiveCallFrame(frame) orelse return false;
+    if (vm_ref == null or @intFromPtr(vm_ref.?) != @intFromPtr(active.context.c_api_group orelse return false)) return false;
+    const location = active.caller_location orelse return false;
+    return std.mem.eql(u8, location.source_url, "builtin://bun/main");
+}
+
+export fn Bun__CallFrame__describeFrame(frame: ?*const PrivateCallFrame) callconv(.c) [*:0]const u8 {
+    const active = privateActiveCallFrame(frame) orelse return "invalid CallFrame";
+    const location = active.caller_location;
+    const function_name = if (active.caller_function_name.len > 0) active.caller_function_name else "<global>";
+    const rendered = if (location) |source|
+        std.fmt.bufPrint(
+            private_call_frame_description[0 .. private_call_frame_description.len - 1],
+            "{s} at {s}:{d}:{d}",
+            .{ function_name, source.source_url, source.location.line, source.location.column },
+        ) catch return "CallFrame description overflow"
+    else
+        std.fmt.bufPrint(private_call_frame_description[0 .. private_call_frame_description.len - 1], "{s} at <native>", .{function_name}) catch
+            return "CallFrame description overflow";
+    private_call_frame_description[rendered.len] = 0;
+    return @ptrCast(private_call_frame_description[0..].ptr);
 }
 
 /// Create the pinned private-JSC host-function object. Visibility and intrinsic
