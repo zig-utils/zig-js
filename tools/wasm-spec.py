@@ -1141,7 +1141,12 @@ def main() -> int:
             "license": "Apache-2.0",
             "suite": profile["corpus_glob"],
             "files_available": len(all_wast),
+            "files_declared": len(profile.get("default_files", all_wast)),
             "files_scored": len(selected),
+            "declared_files": profile.get(
+                "default_files",
+                [path.name for path in all_wast],
+            ),
         },
         "converter": {
             "repository": "https://github.com/WebAssembly/wabt.git",
