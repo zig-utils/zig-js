@@ -56,7 +56,7 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 123/123 at `f61b6dde`, covering the
+The focused WebAssembly unit suite passes 126/126 at `86a80e40`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
@@ -114,6 +114,20 @@ runtime child issue is actually complete. Validate registry drift with:
 
 ```sh
 zig build wasm-feature-profiles-check
+```
+
+Zig embedders opt into an exact feature set per realm; module bytes never
+self-enable proposals. Invalid dependency sets fail during Context creation,
+while a selected but unfinished feature produces a deterministic
+`WebAssembly.CompileError` identifying it:
+
+```zig
+const ctx = try js.Context.createWith(gpa, .{
+    .wasm_features = .{
+        .reference_types = true,
+        .multi_value = true,
+    },
+});
 ```
 
 Implementation is split into the shared gating foundation

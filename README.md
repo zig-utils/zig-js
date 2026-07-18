@@ -140,7 +140,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `6630a05a` do not execute in these
+The ABI and WebAssembly/conformance changes through `3f7491e2` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store APIs.
