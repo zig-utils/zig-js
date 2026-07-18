@@ -331,6 +331,51 @@ python3 tools/wasm-spec.py --profile exception-handling \
 zig build wasm-feature-profiles-check
 ```
 
+### Memory64 binary and validation boundary
+
+The finished Wasm 3.0 memory64 proposal is pinned at
+`WebAssembly/memory64@9003cd5e24e53b84cd9027ea3dd7ae57159a6db1`. The checked-in
+[memory64 inventory](.data/wasm-memory64-binary-inventory.json) records the
+normative binary/type/validation documents, pointer-width host constraint,
+empty proposal-dependency set, all eight limits flags, and the exact selected
+upstream corpus. The selection contains 23 files and 13,918 top-level commands,
+with 824 textual memory64 declarations and 151 table64 declarations; these are
+inventory facts, not a terminal pass score.
+
+Behind `Features.memory64`, memory and table types retain an explicit i32/i64
+address type, limits retain their normative u64 encoding, and every scalar,
+SIMD, and atomic memory argument retains its u64 offset. The decoder enforces
+the i32 memory limit of 2^16 pages, i64 memory limit of 2^48 pages, i32 table
+limit of 2^32-1 elements, and i64 table limit of 2^64-1 elements. It rejects
+oversized or overlong u64 LEB encodings and reports disabled memory64/Threads
+gates at deterministic byte offsets.
+
+Validation uses the selected memory or table address type for active segment
+offsets, loads/stores, SIMD and atomic operations, `memory.size/grow`,
+`table.get/set/size/grow/fill`, indirect calls, and the destination/source/
+narrower-length rules for bulk copies. Memory/table initialization keeps its
+segment offset and length operands at i32 as required by the proposal. A
+memory32 memory argument above 2^32-1 is rejected even though its binary field
+is u64. Focused checks pass all 7 memory64 tests, the complete 24-test decoder
+filter, and the complete 53-test validator filter with no failures or leaks;
+allocation-failure injection covers every decoder allocation point.
+
+Reproduce the checked-in facts and focused boundary with:
+
+```sh
+zig build wasm-feature-profiles-check
+zig build test -Dtest-filter=memory64
+zig build test -Dtest-filter=wasm.decode
+zig build test -Dtest-filter=wasm.validate
+```
+
+This boundary is complete in
+[#296](https://github.com/zig-utils/zig-js/issues/296). It does not claim i64
+runtime addressing, JavaScript API construction/growth policy, or an upstream
+corpus pass score; those are tracked by
+[#297](https://github.com/zig-utils/zig-js/issues/297) and
+[#300](https://github.com/zig-utils/zig-js/issues/300).
+
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
 `WebAssembly/simd` revision. Its verifier locks the 56-file corpus count,
@@ -617,8 +662,9 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
-execution are separate scored profiles, while memory64/GC and shell-only hooks
-remain separate work.
+execution are separate scored profiles. Memory64 binary/validation is complete
+as the independently pinned boundary below, while its runtime/corpus score,
+Wasm GC, and shell-only hooks remain separate work.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

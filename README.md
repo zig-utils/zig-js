@@ -97,7 +97,8 @@ accounts for 25,350 public-JavaScript-API commands, 2,087 bit-exact float
 commands, and 581 explicitly non-applicable text-format parser commands. This
 score covers sign extension, nontrapping conversions, multi-value control,
 reference types, and bulk memory/table operations. SIMD, Threads, exceptions,
-and tail calls are independently pinned and scored below; memory64/GC and
+and tail calls are independently pinned and scored below. Memory64 now has a
+pinned binary/validation boundary, while memory64 execution, Wasm GC, and
 shell-only hooks remain outside this profile. Exact pins, feature-area
 subtotals, CI gates, and reproduction are in
 [WebAssembly status](docs/wasm.md).
@@ -153,6 +154,22 @@ pass**, with **0 failures**, **0 runner errors**, and both text-format parser
 assertions explicitly recorded as not applicable. Together the exception and
 tail-call profiles account for all **205 commands: 192 pass and 13 explicit
 text-only N/A**, with no hidden exclusions.
+
+The finished Wasm 3.0 memory64 proposal is pinned independently at
+`WebAssembly/memory64@9003cd5e24e53b84cd9027ea3dd7ae57159a6db1`. Its checked-in
+[binary and corpus inventory](docs/.data/wasm-memory64-binary-inventory.json)
+locks all eight limits flags, i32/i64 address types, u64 limits and memory
+offsets, the 2^16/2^48-page memory bounds, table64 bounds, host constraint, and
+the exact 23-file upstream selection (13,918 top-level commands, 824 memory64
+declarations, and 151 table64 declarations). Behind the opt-in `memory64`
+feature, the IR, decoder, and validator now preserve and enforce memory64 and
+table64 address widths across active segments, scalar/SIMD/atomic memory
+operations, bulk memory/table operations, indirect calls, size, and grow.
+Malformed encodings, disabled gates, 4 GiB+ offsets, and every decoder
+allocation-failure point have focused zero-leak witnesses. This is deliberately
+not an execution claim: runtime/JavaScript API behavior is tracked by
+[#297](https://github.com/zig-utils/zig-js/issues/297), and terminal corpus
+scoring by [#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -994,7 +1011,9 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including memory64/GC, plus terminal Threads
+  from the PR-249 reference corpus, including memory64 runtime/JavaScript API
+  and corpus scoring plus Wasm GC (the memory64 binary/validation boundary is
+  complete), plus terminal Threads
   host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
