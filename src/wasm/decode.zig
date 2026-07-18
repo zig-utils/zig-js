@@ -60,6 +60,7 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
             r.pos = r.limit;
             try custom.append(a, .{ .name = name, .bytes = rest, .offset = sec_off });
         } else {
+            if (id == 13) return r.unsupportedFeature(sec_off, .exception_handling);
             const order = sectionOrder(id) orelse return r.failAt(sec_off, "invalid section id", .{});
             if (order <= last_order) return r.failAt(sec_off, "unexpected content after last section", .{});
             last_order = order;
@@ -254,6 +255,7 @@ const Reader = struct {
     fn readValType(self: *Reader) DecodeError!types.ValType {
         const off = self.offset();
         const b = try self.readU8();
+        if (b == 0x69) return self.unsupportedFeature(off, .exception_handling);
         const value_type = types.ValType.fromByte(b) orelse
             return self.failAt(off, "invalid value type", .{});
         if (value_type == .v128 and !self.features.fixed_width_simd)
@@ -471,6 +473,7 @@ fn parseImportSection(r: *Reader, a: Allocator, mod: *types.Module) DecodeError!
                 mod.imported_globals += 1;
                 break :blk .{ .global = try r.readGlobalType() };
             },
+            4 => return r.unsupportedFeature(kind_off, .exception_handling),
             else => return r.failAt(kind_off, "invalid import kind", .{}),
         };
         imp.* = .{ .module = module, .name = name, .desc = desc };
@@ -517,6 +520,7 @@ fn parseExportSection(r: *Reader, a: Allocator) DecodeError![]const types.Export
             1 => .table,
             2 => .mem,
             3 => .global,
+            4 => return r.unsupportedFeature(kind_off, .exception_handling),
             else => return r.failAt(kind_off, "invalid export kind", .{}),
         };
         e.* = .{ .name = name, .kind = kind, .index = try r.readU32Leb() };
@@ -729,7 +733,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
             if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
             if (b == 0x14 or b == 0x15) return r.unsupportedFeature(instr_off, .typed_function_references);
-            if (b == 0x06 or b == 0x07 or b == 0x08 or b == 0x09 or b == 0x18 or b == 0x19)
+            if (b == 0x08 or b == 0x0A or b == 0x1F)
                 return r.unsupportedFeature(instr_off, .exception_handling);
             return r.failAt(instr_off, "invalid opcode 0x{x:0>2}", .{b});
         };
@@ -1198,7 +1202,7 @@ test "wasm.decode malformed leb128" {
 }
 
 test "wasm.decode malformed section framing" {
-    try expectMalformed(hdr ++ "\x0D\x00", 8, "invalid section id");
+    try expectMalformed(hdr ++ "\x0D\x00", 8, "WebAssembly feature exception-handling is disabled");
     try expectMalformed(hdr ++ "\x0C\x01\x00", 8, "WebAssembly feature bulk-memory is disabled");
     try expectMalformed(hdr ++ "\x01\x01\x00" ++ "\x01\x01\x00", 11, "unexpected content after last section");
     try expectMalformed(hdr ++ "\x03\x01\x00" ++ "\x01\x01\x00", 11, "unexpected content after last section");
@@ -1214,10 +1218,10 @@ test "wasm.decode malformed declarations" {
     try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x7B\x00", 13, "WebAssembly feature fixed-width-simd is disabled");
     // Two results = multi-value proposal.
     try expectMalformed(hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F", 13, "invalid result arity");
-    // Import kind 4.
-    try expectMalformed(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", 15, "invalid import kind");
-    // Export kind 4.
-    try expectMalformed(hdr ++ "\x07\x05\x01\x01\x65\x04\x00", 13, "invalid export kind");
+    // Exception-handling exnref and tag external kind are exact feature gates.
+    try expectMalformed(hdr ++ "\x01\x05\x01\x60\x01\x69\x00", 13, "WebAssembly feature exception-handling is disabled");
+    try expectMalformed(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", 15, "WebAssembly feature exception-handling is disabled");
+    try expectMalformed(hdr ++ "\x07\x05\x01\x01\x65\x04\x00", 13, "WebAssembly feature exception-handling is disabled");
     // Global mutability 2.
     try expectMalformed(hdr ++ "\x06\x06\x01\x7F\x02\x41\x00\x0B", 12, "invalid mutability");
     // Table element type 0x6F.
@@ -1285,8 +1289,11 @@ test "wasm.decode threads shared limits and atomic immediates" {
 }
 
 test "wasm.decode malformed code bodies" {
-    // 0x06 is an exception-handling proposal opcode.
-    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x06", 17, "WebAssembly feature exception-handling is disabled");
+    // The pinned proposal uses 0x08/0x0a/0x1f; legacy 0x06 is invalid.
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x06", 17, "invalid opcode 0x06");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x08", 17, "WebAssembly feature exception-handling is disabled");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x0A", 17, "WebAssembly feature exception-handling is disabled");
+    try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x1F", 17, "WebAssembly feature exception-handling is disabled");
     // Proposal prefixes.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x00\x0B", 17, "WebAssembly feature nontrapping-float-to-int is disabled");
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\xFD", 17, "WebAssembly feature fixed-width-simd is disabled");
@@ -1380,6 +1387,19 @@ test "wasm.decode feature gates distinguish disabled features and dependencies" 
         0,
         "WebAssembly feature gc requires typed-function-references",
     );
+
+    const exceptions: types.Features = .{
+        .reference_types = true,
+        .exception_handling = true,
+    };
+    const pending = "WebAssembly feature exception-handling is enabled but not implemented";
+    try expectMalformedWithFeatures(hdr ++ "\x0D\x00", exceptions, 8, pending);
+    try expectMalformedWithFeatures(hdr ++ "\x01\x05\x01\x60\x01\x69\x00", exceptions, 13, pending);
+    try expectMalformedWithFeatures(hdr ++ "\x02\x06\x01\x01\x61\x01\x62\x04", exceptions, 15, pending);
+    try expectMalformedWithFeatures(hdr ++ "\x07\x05\x01\x01\x65\x04\x00", exceptions, 13, pending);
+    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x08", exceptions, 17, pending);
+    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x0A", exceptions, 17, pending);
+    try expectMalformedWithFeatures(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x1F", exceptions, 17, pending);
 }
 
 test "wasm.decode bulk memory segment forms DataCount order and immediates" {
