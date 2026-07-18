@@ -184,6 +184,20 @@ boundary is complete in [#297](https://github.com/zig-utils/zig-js/issues/297);
 terminal upstream corpus scoring remains in
 [#300](https://github.com/zig-utils/zig-js/issues/300).
 
+The next Wasm 3.0 profile is pinned at
+`WebAssembly/gc@756060f5816c7e2159f4817fbdee76cf52f9c923`. Its checked-in
+[binary and corpus inventory](docs/.data/wasm-gc-binary-inventory.json) locks
+the proposal commit and corpus tree, hashes five normative documents, all
+packed/heap/reference/composite/subtype/recursive-group encodings, and all
+**33 GC instruction encodings**. The complete dedicated upstream selection is
+**18 files and 698 top-level commands**: 88 modules, 408 return assertions,
+100 trap assertions, 60 invalid assertions, two malformed assertions, eight
+unlinkable assertions, 20 invokes, and 12 registrations. These are inventory
+facts, not a pass score. Recursive types, validation, and deterministic
+malformed/invalid coverage are tracked by
+[#298](https://github.com/zig-utils/zig-js/issues/298); runtime objects and
+precise tracing follow in [#299](https://github.com/zig-utils/zig-js/issues/299).
+
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
 files, with **0 failures**, **0 runner errors**, and all 510 text-format parser

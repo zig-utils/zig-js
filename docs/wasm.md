@@ -405,6 +405,37 @@ API/lifecycle coverage is complete in
 inventory above is not yet a pass score; terminal upstream corpus scoring is
 tracked by [#300](https://github.com/zig-utils/zig-js/issues/300).
 
+### Wasm GC pinned binary and corpus contract
+
+The finished Wasm 3.0 GC proposal is pinned at
+`WebAssembly/gc@756060f5816c7e2159f4817fbdee76cf52f9c923`, with its declared
+`typed_function_references` dependency. The checked-in
+[GC inventory](.data/wasm-gc-binary-inventory.json) also pins the proposal's
+`test/core/gc` tree object and SHA-256 digests for the overview plus the
+normative binary and validation type/instruction documents. This prevents a
+branch name, rebuilt document, or later proposal edit from silently changing
+the implementation target.
+
+The binary contract contains i8/i16 packed storage, ten abstract heap types,
+nullable and non-null reference forms with signed-33-bit heap immediates,
+function/struct/array composite types, final and extensible subtypes, recursive
+groups, and field mutability. It contains **33 instruction encodings**: direct
+`ref.eq`/`ref.as_non_null` opcodes and every `0xfb` subopcode from 0 through 30,
+including structs, arrays, casts/tests, cast branches, extern conversion, and
+i31 operations.
+
+All **18** dedicated upstream GC files are declared. They contain **698
+top-level commands**: 88 modules, 408 return assertions, 100 trap assertions,
+60 invalid assertions, two malformed assertions, eight unlinkable assertions,
+20 invokes, and 12 registrations. Per-file command breakdowns and source-token
+occurrences for every instruction family are recorded in the inventory. These
+numbers describe the selected corpus and do not claim that it passes yet.
+`zig build wasm-feature-profiles-check` locks these facts against the feature
+registry. Type decoding/canonicalization/validation is tracked by
+[#298](https://github.com/zig-utils/zig-js/issues/298), runtime objects and
+precise tracing by [#299](https://github.com/zig-utils/zig-js/issues/299), and
+terminal corpus results by [#300](https://github.com/zig-utils/zig-js/issues/300).
+
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
 `WebAssembly/simd` revision. Its verifier locks the 56-file corpus count,
