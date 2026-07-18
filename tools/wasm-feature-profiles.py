@@ -489,10 +489,10 @@ def main() -> int:
             (entry.get("flag"), entry.get("address_type"), entry.get("minimum"), entry.get("maximum"), entry.get("shared"))
             for entry in memory64.get("limit_flags", [])
         ] == [
-            (0, "i32", "u32", None, False),
-            (1, "i32", "u32", "u32", False),
-            (2, "i32", "u32", None, True),
-            (3, "i32", "u32", "u32", True),
+            (0, "i32", "u64", None, False),
+            (1, "i32", "u64", "u64", False),
+            (2, "i32", "u64", None, True),
+            (3, "i32", "u64", "u64", True),
             (4, "i64", "u64", None, False),
             (5, "i64", "u64", "u64", False),
             (6, "i64", "u64", None, True),
