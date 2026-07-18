@@ -138,10 +138,9 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI-only changes through `1318a1e6` do not execute in these benchmark
+The ABI-only changes through `ed109b6d` do not execute in these benchmark
 workloads, so the validated 1,540-sample July 17 matrix remains the latest
-score set; no unchanged benchmark was rerun for the native ArrayBuffer-handle
-slice.
+score set; no unchanged benchmark was rerun for the debugger async-call slice.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -241,7 +240,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**272 implemented / 159 pending**), 15
+files**, classified as 431 private (**276 implemented / 155 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -252,7 +251,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 272 private exports—encoded identity/cell equality, truthiness,
+The first 276 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -268,6 +267,7 @@ one exact internal length projection,
 one exact private property-path traversal,
 five exact non-indexed property/accessor-cell operations,
 seven realm/VM job, rejection, module-registry, and code-invalidation operations,
+four debugger async-call scheduling, cancellation, and dispatch operations,
 eight VM-owned strong/weak embedding-reference operations,
 13 caller-owned native StringBuilder operations,
 five rooted native argument/registry container operations,
@@ -559,7 +559,7 @@ stable descriptor identity across sibling realms and callback-triggered GC.
 It visits own string/Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and the non-enumerable special cases, clears
 property-read failures where JSC does, and stops immediately on a callback-published
-exception. The 274/274 compiled fixture covers data and every accessor shape,
+exception. The 278/278 compiled fixture covers data and every accessor shape,
 C-class accessors, proxies, Symbols, filtering, reentry, GC, and foreign inputs.
 ZigString JSON parsing now constructs selected-realm values from every tagged
 string form. Syntax failures are returned as cleared SyntaxError values exactly
@@ -610,7 +610,7 @@ Promise await and transparent forwarding chains. The walker preserves existing
 or materialized stacks, honors the selected realm's `Error.stackTraceLimit`,
 stops at combinators/settled links or after 32 transparent hops per frame, and
 keeps activation links precise across GC without retaining completed work. The
-274-symbol combined fixture covers sibling realms, foreign-VM rejection,
+278-symbol combined fixture covers sibling realms, foreign-VM rejection,
 callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
@@ -624,12 +624,12 @@ The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
 separately compiled fixtures pass 20 real cell kinds for each, including exact
-GetterSetter and CustomGetterSetter tags. All 272 private exports remain
+GetterSetter and CustomGetterSetter tags. All 276 private exports remain
 excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**264 implemented / 157
+437 symbols from 54 `src/jsc` files: 421 private (**268 implemented / 153
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;
@@ -640,6 +640,14 @@ now publish stable scripts and exact statement locations, and provide real
 script/URL breakpoints with removal. Logical-depth step-into, step-over, and
 step-out cover ordinary calls plus suspendable generator/async VM execution,
 alongside none/all/uncaught exception pause policy and thrown-exception events.
+The four pinned private debugger async-call hooks now copy scheduling stacks
+without rooting their originating realm, key calls by exact type and callback
+ID, preserve nested/reentrant dispatch ancestry, and retire cancelled or
+single-shot work at the matching lifecycle boundary. Their
+[`enum(u8)` and forwarding contract](docs/abi/debugger-async-call-contract.json)
+pins all five call types and the upstream no-agent fast no-op. While a task is
+dispatching, `Debugger.paused` includes its owned `asyncStackTrace`; completion,
+disable, detach, and teardown clear the ancestry deterministically.
 The [machine-readable protocol inventory](docs/inspector-protocol-0.1.json)
 contains both implemented transports, 20 commands, and 8 events with no hidden
 accepted stubs.

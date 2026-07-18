@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (272 implemented, 159 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (276 implemented, 155 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 272 private entries are implemented; the other 159 remain pending
+The first 276 private entries are implemented; the other 155 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -487,6 +487,17 @@ value without taking the unhandled-error branch when absent, and `disconnect`
 receives no arguments. The fixture covers same-VM sibling identity, once
 removal, foreign-VM no-op versus observed rejection, and listener throws.
 
+The four debugger async-call exports follow the pinned
+[`AsyncCallType` contract](debugger-async-call-contract.json): five exact `u8`
+call types, a no-agent return before enum conversion, and direct
+schedule/cancel/will-dispatch/did-dispatch forwarding. With an enabled agent,
+owned scheduling frames are keyed by `(type, callbackId)` without rooting the
+source realm, nested active calls restore in LIFO order, duplicate schedules
+replace their prior snapshot, and single-shot work retires only after matching
+dispatch completion. `Debugger.paused` exposes the copied `asyncStackTrace`
+only while that task is active; cancellation, final-agent disable/detach, and
+teardown release every dormant and active snapshot.
+
 The native iterable callback boundary executes the pinned `@@iterator` method,
 caches the returned iterator's `next` function, and observes IteratorStep and
 IteratorValue in order. Every yielded value retains stable encoded identity and
@@ -499,7 +510,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 274/274 compiled fixture additionally
+sibling realms, GC, and reentry; the 278/278 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -717,7 +728,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 274-symbol
+the same frame/script identity and own every returned string. The 278-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -762,7 +773,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (264 implemented, 157 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (268 implemented, 153 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -779,5 +790,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 157
+not claim complete Bun runtime compatibility; #164 remains open for the 153
 pending core entries and later wider/generated profiles.
