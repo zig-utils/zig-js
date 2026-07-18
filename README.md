@@ -85,7 +85,7 @@ Representative green areas from the saved run:
 
 `zig build conformance` is a separate fast smoke suite; the July 4, 2026 verification run passed 33/33 cases. Use `zig build test262` for the full configured corpus.
 
-The pinned upstream WebAssembly wg-1.0 corpus is scored separately. All **16,801 / 16,801 JavaScript-observable commands pass** across all 73 MVP files, with **0 failures** and **0 runner errors**. The checked-in [19,270-command inventory](docs/.data/wasm-spec-inventory.json) explicitly classifies 430 text-format parser assertions outside the binary JavaScript API and 2,039 exact NaN payload/sign assertions that require the bit-exact runner tracked by [#261](https://github.com/zig-utils/zig-js/issues/261). See [WebAssembly MVP status](docs/wasm.md) for the exact specification/WABT pins and reproduction commands.
+The pinned upstream WebAssembly wg-1.0 corpus is scored separately. All **18,840 / 18,840 applicable binary-runtime commands pass** across all 73 MVP files, with **0 failures** and **0 runner errors**. The checked-in [19,270-command inventory](docs/.data/wasm-spec-inventory.json) records each execution mode: 16,801 commands use the public JavaScript API, 2,039 exact NaN payload/sign commands use the test-only bit-exact path, and 430 text-format parser assertions are explicitly outside the binary API. See [WebAssembly MVP status](docs/wasm.md) for the exact specification/WABT pins and reproduction commands.
 
 ## Performance
 
@@ -140,7 +140,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly API changes through `9e16789e` do not execute in these
+The ABI and WebAssembly/conformance changes through `6630a05a` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store APIs.

@@ -56,23 +56,24 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 122/122 at `af689c4a`, covering the
+The focused WebAssembly unit suite passes 123/123 at `f61b6dde`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
-classes. The same batched checkpoint passes the full engine suite 1,002/1,002.
-Both runs report zero failures, skips, and leaks.
+classes, plus the test-only bit-exact corpus boundary. The most recent batched
+full engine checkpoint passes 1,002/1,002 at `af689c4a`. Both runs report zero
+failures, skips, and leaks.
 
 The checked-in [upstream inventory](.data/wasm-spec-inventory.json) pins
 `WebAssembly/spec` tag `wg-1.0` at
 `977f97014c962f7bd1291fcc6d28b41a924882bf` and WABT 1.0.12 at
-`cf261f2bd561297e0da7008ddde8c09ba5ea35a2`. At engine checkpoint `038ebaf3`,
-all 16,801 JavaScript-observable commands pass across all 73 MVP files, with
-zero failures and zero runner errors. The inventory accounts for every one of
-the 19,270 commands: 430 text-format syntax assertions are outside the binary
-JavaScript API, and 2,039 exact f32/f64 NaN payload/sign assertions are linked
-to the bit-exact runner work in
-[#261](https://github.com/zig-utils/zig-js/issues/261).
+`cf261f2bd561297e0da7008ddde8c09ba5ea35a2`. At engine checkpoint `977d02c8`,
+all 18,840 applicable binary-runtime commands pass across all 73 MVP files,
+with zero failures and zero runner errors. Inventory schema v2 accounts for
+every one of the 19,270 commands and records its execution mode: 16,801 use the
+public JavaScript API, 2,039 exact f32/f64 NaN payload/sign assertions use the
+test-only raw-bit path, and 430 text-format syntax assertions are outside the
+binary JavaScript API.
 
 Run the focused suite with:
 
@@ -87,17 +88,17 @@ complete corpus run with:
 zig build wasm-spec -Dwast2json=/path/to/wabt-1.0.12/wast2json
 ```
 
-CI runs the bounded `linking.wast` smoke/drift gate; it verifies the corpus pin,
-converter compatibility, and 118 linking/store commands without putting the
-multi-minute complete inventory on every push.
+CI runs bounded `linking.wast` and `f32_bitwise.wast` smoke/drift gates. Together
+they verify the corpus pin, converter compatibility, 118 linking/store commands,
+and all 364 f32 bit-exact cases without putting the multi-minute complete
+inventory on every push.
 
 ## Beyond the MVP
 
-The JavaScript `Number` boundary cannot carry every exact WebAssembly NaN
-payload and sign. A direct bit-exact corpus path is tracked by
-[#261](https://github.com/zig-utils/zig-js/issues/261); the public API inventory
-keeps those commands explicit rather than counting accidental canonicalization
-as a pass or an engine failure.
+The corpus evaluator keeps the standards-facing JavaScript API unchanged while
+using a test-only Context hook for NaN payload/sign assertions that JavaScript
+`Number` cannot represent bit-exactly. This makes the full MVP binary-runtime
+score auditable without exposing a non-standard WebAssembly method to embedders.
 
 Post-MVP feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249
