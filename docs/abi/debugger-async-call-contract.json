@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "contract": "debugger-async-call-lifecycle",
+  "issue": 259,
+  "profiles": [
+    {
+      "name": "home-private-7ed99c02",
+      "revision": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+      "declaration_file": {
+        "path": "packages/runtime/src/jsc/Debugger.zig",
+        "sha256": "20f804c3d69bb579ac3f4403a2608ea4c097b74833a9ebf4fb4e92d1bba58e90"
+      }
+    },
+    {
+      "name": "bun-private-core-4982b91e",
+      "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+      "declaration_file": {
+        "path": "src/jsc/Debugger.zig",
+        "sha256": "a4e5fc49edaca3f20fc7709fd60082e22b38180ba46fd5eb7b38e545819fb882"
+      },
+      "forwarding_file": {
+        "path": "src/jsc/bindings/BunDebugger.cpp",
+        "sha256": "2d59cddfb83274966f0bd4b9450579e9a14e1572206ca57c0ee2fefedecfd137"
+      }
+    }
+  ],
+  "async_call_type": {
+    "repr": "u8",
+    "values": {
+      "DOMTimer": 1,
+      "EventListener": 2,
+      "PostMessage": 3,
+      "RequestAnimationFrame": 4,
+      "Microtask": 5
+    }
+  },
+  "exports": [
+    "Debugger__didScheduleAsyncCall(*JSGlobalObject, AsyncCallType, u64, bool) void",
+    "Debugger__didCancelAsyncCall(*JSGlobalObject, AsyncCallType, u64) void",
+    "Debugger__didDispatchAsyncCall(*JSGlobalObject, AsyncCallType, u64) void",
+    "Debugger__willDispatchAsyncCall(*JSGlobalObject, AsyncCallType, u64) void"
+  ],
+  "upstream_forwarding": {
+    "agent_lookup": "debuggerAgent(globalObject)",
+    "no_agent": "return before converting AsyncCallType",
+    "invalid_type_with_agent": "RELEASE_ASSERT_NOT_REACHED",
+    "schedule": "agent->didScheduleAsyncCall(globalObject, mappedType, callbackId, singleShot)",
+    "cancel": "agent->didCancelAsyncCall(mappedType, callbackId)",
+    "will_dispatch": "agent->willDispatchAsyncCall(mappedType, callbackId)",
+    "did_dispatch": "agent->didDispatchAsyncCall(mappedType, callbackId)"
+  },
+  "zig_js_semantics": {
+    "key": [
+      "AsyncCallType",
+      "callbackId"
+    ],
+    "schedule_snapshot": "owned protocol frames; no realm or VM root",
+    "nested_dispatch": "LIFO active snapshots",
+    "single_shot_release": "matching didDispatch",
+    "cancel_release": "matching didCancel",
+    "detach_release": "last debugger agent disabled or detached",
+    "protocol_projection": "Debugger.paused.params.asyncStackTrace"
+  }
+}

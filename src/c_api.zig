@@ -662,10 +662,72 @@ const CInspectorState = struct {
     detached_resume_pending: bool = false,
     pause_wait_ctx: ?*anyopaque = null,
     pause_wait_hook: ?WorkerMod.InspectorPauseWaitHook = null,
+    async_calls: std.ArrayListUnmanaged(InspectorAsyncCall) = .empty,
+    active_async_calls: std.ArrayListUnmanaged(InspectorActiveAsyncCall) = .empty,
 };
 
 const CInspectorStepMode = enum { none, into, over, out };
 const CInspectorExceptionMode = enum { none, uncaught, all };
+
+const PrivateDebuggerAsyncCallType = enum(u8) {
+    dom_timer = 1,
+    event_listener = 2,
+    post_message = 3,
+    request_animation_frame = 4,
+    microtask = 5,
+    _,
+};
+
+const InspectorAsyncCallKey = struct {
+    call_type: PrivateDebuggerAsyncCallType,
+    callback_id: u64,
+
+    fn eql(a: InspectorAsyncCallKey, b: InspectorAsyncCallKey) bool {
+        return @intFromEnum(a.call_type) == @intFromEnum(b.call_type) and
+            a.callback_id == b.callback_id;
+    }
+};
+
+const InspectorAsyncCallFrame = struct {
+    functionName: []u8,
+    scriptId: u64,
+    url: []u8,
+    lineNumber: i32,
+    columnNumber: i32,
+
+    fn deinit(frame: *InspectorAsyncCallFrame) void {
+        gpa.free(frame.functionName);
+        gpa.free(frame.url);
+        frame.* = undefined;
+    }
+};
+
+const InspectorAsyncCall = struct {
+    key: InspectorAsyncCallKey,
+    frames: []InspectorAsyncCallFrame,
+    single_shot: bool,
+
+    fn deinit(call: *InspectorAsyncCall) void {
+        deinitInspectorAsyncFrames(call.frames);
+        call.* = undefined;
+    }
+};
+
+const InspectorActiveAsyncCall = struct {
+    key: InspectorAsyncCallKey,
+    frames: []InspectorAsyncCallFrame,
+    single_shot: bool,
+
+    fn deinit(call: *InspectorActiveAsyncCall) void {
+        deinitInspectorAsyncFrames(call.frames);
+        call.* = undefined;
+    }
+};
+
+const InspectorProtocolAsyncStackTrace = struct {
+    description: []const u8,
+    callFrames: []const InspectorAsyncCallFrame,
+};
 
 const CInspectorScript = Context.DebugScript;
 
@@ -10104,6 +10166,244 @@ fn inspectorHasDebugger(state: *const CInspectorState) bool {
     return false;
 }
 
+fn deinitInspectorAsyncFrames(frames: []InspectorAsyncCallFrame) void {
+    for (frames) |*frame| frame.deinit();
+    gpa.free(frames);
+}
+
+fn appendInspectorAsyncFrame(
+    frames: *std.ArrayListUnmanaged(InspectorAsyncCallFrame),
+    function_name: []const u8,
+    source_url: []const u8,
+    script_id: u64,
+    line_number: i32,
+    column_number: i32,
+) !void {
+    const owned_function_name = try gpa.dupe(u8, function_name);
+    errdefer gpa.free(owned_function_name);
+    const owned_source_url = try gpa.dupe(u8, source_url);
+    errdefer gpa.free(owned_source_url);
+    try frames.append(gpa, .{
+        .functionName = owned_function_name,
+        .scriptId = script_id,
+        .url = owned_source_url,
+        .lineNumber = line_number,
+        .columnNumber = column_number,
+    });
+}
+
+fn cloneInspectorAsyncFrames(source: []const InspectorAsyncCallFrame) ![]InspectorAsyncCallFrame {
+    var frames: std.ArrayListUnmanaged(InspectorAsyncCallFrame) = .empty;
+    errdefer {
+        for (frames.items) |*frame| frame.deinit();
+        frames.deinit(gpa);
+    }
+    for (source) |frame| try appendInspectorAsyncFrame(
+        &frames,
+        frame.functionName,
+        frame.url,
+        frame.scriptId,
+        frame.lineNumber,
+        frame.columnNumber,
+    );
+    return frames.toOwnedSlice(gpa);
+}
+
+fn captureInspectorAsyncFrames(context: *Context, state: *const CInspectorState) ![]InspectorAsyncCallFrame {
+    var frames: std.ArrayListUnmanaged(InspectorAsyncCallFrame) = .empty;
+    errdefer {
+        for (frames.items) |*frame| frame.deinit();
+        frames.deinit(gpa);
+    }
+
+    const machine: ?*interp.Interpreter = if (context.active_interpreters.items.len > 0)
+        context.active_interpreters.items[context.active_interpreters.items.len - 1]
+    else
+        null;
+    const limit = if (machine) |active| active.selectedStackTraceLimit() else std.math.maxInt(u8);
+    if (machine) |active| {
+        var current = active.stack_trace_call_frame;
+        while (current) |frame| : (current = frame.caller) {
+            const retained = interp.Interpreter.errorStackFrameFromCallFrame(frame, frames.items.len);
+            try appendInspectorAsyncFrame(
+                &frames,
+                if (retained.function_name.len == 0) "(anonymous)" else retained.function_name,
+                retained.source_url,
+                retained.script_id,
+                retained.line_zero_based,
+                retained.column_zero_based,
+            );
+            if (frames.items.len >= limit) break;
+        }
+        if (frames.items.len == 0 and limit > 0) {
+            const location = active.debug_current_location;
+            try appendInspectorAsyncFrame(
+                &frames,
+                "(global)",
+                if (location) |loc| loc.source_url else "",
+                if (location) |loc| loc.script_id else 0,
+                if (location) |loc| std.math.cast(i32, loc.location.line -| 1) orelse std.math.maxInt(i32) else -1,
+                if (location) |loc| std.math.cast(i32, loc.location.column -| 1) orelse std.math.maxInt(i32) else -1,
+            );
+        }
+    }
+
+    if (frames.items.len < limit and state.active_async_calls.items.len > 0) {
+        const parent = state.active_async_calls.items[state.active_async_calls.items.len - 1];
+        for (parent.frames) |frame| {
+            try appendInspectorAsyncFrame(
+                &frames,
+                frame.functionName,
+                frame.url,
+                frame.scriptId,
+                frame.lineNumber,
+                frame.columnNumber,
+            );
+            if (frames.items.len >= limit) break;
+        }
+    }
+    return frames.toOwnedSlice(gpa);
+}
+
+fn clearInspectorAsyncCalls(state: *CInspectorState) void {
+    for (state.async_calls.items) |*call| call.deinit();
+    state.async_calls.clearRetainingCapacity();
+    for (state.active_async_calls.items) |*call| call.deinit();
+    state.active_async_calls.clearRetainingCapacity();
+}
+
+fn findInspectorAsyncCall(state: *const CInspectorState, key: InspectorAsyncCallKey) ?usize {
+    for (state.async_calls.items, 0..) |call, index| {
+        if (call.key.eql(key)) return index;
+    }
+    return null;
+}
+
+fn removeInspectorAsyncCall(state: *CInspectorState, index: usize) void {
+    var removed = state.async_calls.swapRemove(index);
+    removed.deinit();
+}
+
+fn checkedInspectorAsyncCallType(call_type: PrivateDebuggerAsyncCallType) PrivateDebuggerAsyncCallType {
+    return switch (call_type) {
+        .dom_timer, .event_listener, .post_message, .request_animation_frame, .microtask => call_type,
+        _ => @panic("invalid private debugger AsyncCallType ABI value"),
+    };
+}
+
+fn inspectorAsyncCallTypeName(call_type: PrivateDebuggerAsyncCallType) []const u8 {
+    return switch (call_type) {
+        .dom_timer => "DOMTimer",
+        .event_listener => "EventListener",
+        .post_message => "PostMessage",
+        .request_animation_frame => "RequestAnimationFrame",
+        .microtask => "Microtask",
+        _ => unreachable,
+    };
+}
+
+fn debuggerInspectorStateForGlobal(context: *Context) ?*CInspectorState {
+    if (inspectorState(context)) |state| {
+        if (inspectorHasDebugger(state)) return state;
+    }
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    for (group.contexts.items) |realm| {
+        const state = inspectorState(realm) orelse continue;
+        if (inspectorHasDebugger(state)) return state;
+    }
+    return null;
+}
+
+fn inspectorActiveAsyncStack(state: *const CInspectorState) ?InspectorProtocolAsyncStackTrace {
+    if (state.active_async_calls.items.len == 0) return null;
+    const active = state.active_async_calls.items[state.active_async_calls.items.len - 1];
+    return .{
+        .description = inspectorAsyncCallTypeName(active.key.call_type),
+        .callFrames = active.frames,
+    };
+}
+
+export fn Debugger__didScheduleAsyncCall(
+    global: JSContextRef,
+    raw_call_type: PrivateDebuggerAsyncCallType,
+    callback_id: u64,
+    single_shot: bool,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const state = debuggerInspectorStateForGlobal(context) orelse return;
+    const key = InspectorAsyncCallKey{
+        .call_type = checkedInspectorAsyncCallType(raw_call_type),
+        .callback_id = callback_id,
+    };
+    const frames = captureInspectorAsyncFrames(context, state) catch return;
+    if (findInspectorAsyncCall(state, key)) |index| {
+        state.async_calls.items[index].deinit();
+        state.async_calls.items[index] = .{ .key = key, .frames = frames, .single_shot = single_shot };
+        return;
+    }
+    state.async_calls.append(gpa, .{ .key = key, .frames = frames, .single_shot = single_shot }) catch {
+        deinitInspectorAsyncFrames(frames);
+    };
+}
+
+export fn Debugger__didCancelAsyncCall(
+    global: JSContextRef,
+    raw_call_type: PrivateDebuggerAsyncCallType,
+    callback_id: u64,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const state = debuggerInspectorStateForGlobal(context) orelse return;
+    const key = InspectorAsyncCallKey{
+        .call_type = checkedInspectorAsyncCallType(raw_call_type),
+        .callback_id = callback_id,
+    };
+    if (findInspectorAsyncCall(state, key)) |index| removeInspectorAsyncCall(state, index);
+}
+
+export fn Debugger__willDispatchAsyncCall(
+    global: JSContextRef,
+    raw_call_type: PrivateDebuggerAsyncCallType,
+    callback_id: u64,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const state = debuggerInspectorStateForGlobal(context) orelse return;
+    const key = InspectorAsyncCallKey{
+        .call_type = checkedInspectorAsyncCallType(raw_call_type),
+        .callback_id = callback_id,
+    };
+    const index = findInspectorAsyncCall(state, key) orelse return;
+    const scheduled = state.async_calls.items[index];
+    const frames = cloneInspectorAsyncFrames(scheduled.frames) catch return;
+    state.active_async_calls.append(gpa, .{
+        .key = key,
+        .frames = frames,
+        .single_shot = scheduled.single_shot,
+    }) catch deinitInspectorAsyncFrames(frames);
+}
+
+export fn Debugger__didDispatchAsyncCall(
+    global: JSContextRef,
+    raw_call_type: PrivateDebuggerAsyncCallType,
+    callback_id: u64,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const state = debuggerInspectorStateForGlobal(context) orelse return;
+    const key = InspectorAsyncCallKey{
+        .call_type = checkedInspectorAsyncCallType(raw_call_type),
+        .callback_id = callback_id,
+    };
+    if (state.active_async_calls.items.len == 0) return;
+    const top_index = state.active_async_calls.items.len - 1;
+    if (!state.active_async_calls.items[top_index].key.eql(key)) return;
+    var active = state.active_async_calls.pop().?;
+    const single_shot = active.single_shot;
+    active.deinit();
+    if (single_shot) {
+        if (findInspectorAsyncCall(state, key)) |index| removeInspectorAsyncCall(state, index);
+    }
+}
+
 fn inspectorSessionCanOwnPause(session: *const CInspectorSession) bool {
     return session.attached and session.debugger_enabled;
 }
@@ -10143,6 +10443,7 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         releaseInspectorRemotes(state, null, null, true);
         state.paused_at_uncaught_boundary = false;
         state.step_mode = .none;
+        clearInspectorAsyncCalls(state);
     }
 }
 
@@ -10561,6 +10862,7 @@ fn inspectorStatementBoundary(
                         .byteOffset = location.location.byte_offset,
                     },
                     .callFrames = call_frames,
+                    .asyncStackTrace = inspectorActiveAsyncStack(state),
                 },
             });
         }
@@ -10689,6 +10991,7 @@ fn inspectorExceptionBoundary(
                     .location = location,
                     .data = .{ .exceptionId = exception_id, .uncaught = uncaught },
                     .callFrames = call_frames,
+                    .asyncStackTrace = inspectorActiveAsyncStack(state),
                 },
             });
         }
@@ -10874,6 +11177,8 @@ fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
         state.breakpoints.deinit(gpa);
         state.resolved_breakpoints.deinit(gpa);
         state.remote_objects.deinit(gpa);
+        state.async_calls.deinit(gpa);
+        state.active_async_calls.deinit(gpa);
         gpa.destroy(state);
         JSGlobalContextRelease(ctx);
         return true;
@@ -14416,6 +14721,151 @@ test "C-API: inspectability gates concurrent in-process protocol sessions" {
     ZJSInspectorSessionRelease(first);
     ZJSInspectorSessionRelease(second);
     JSGlobalContextRelease(ctx);
+}
+
+test "private debugger async-call hooks preserve lifecycle and active parent stacks" {
+    const State = struct {
+        session: ZJSInspectorSessionRef = null,
+        bytes: [65536]u8 = undefined,
+        len: usize = 0,
+        pauses: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (std.mem.indexOf(u8, message[0..message_len], "\"method\":\"Debugger.paused\"") != null) {
+                self.pauses += 1;
+                const resume_request = "{\"id\":900,\"method\":\"Debugger.resume\"}";
+                std.debug.assert(ZJSInspectorSessionDispatch(self.session, resume_request, resume_request.len));
+            }
+        }
+    };
+
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    const first = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    const sibling = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+
+    // Upstream returns before converting the enum when no debugger agent is
+    // attached. An otherwise-invalid value must therefore remain a true no-op.
+    Debugger__didScheduleAsyncCall(sibling, @enumFromInt(255), 0, true);
+    Debugger__didCancelAsyncCall(null, @enumFromInt(255), 0);
+
+    JSGlobalContextSetInspectable(first, true);
+    var capture: State = .{};
+    capture.session = ZJSInspectorSessionCreate(first, State.receive, &capture) orelse return error.SessionCreateFailed;
+    const enable = "{\"id\":1,\"method\":\"Debugger.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(capture.session, enable, enable.len));
+    const state = inspectorState(ctxRawFrom(first).?).?;
+
+    const sibling_context = ctxRawFrom(sibling).?;
+    var schedule_machine = sibling_context.interpreter();
+    var schedule_frame = interp.StackTraceCallFrame{
+        .function_name = "scheduleParent",
+        .location = .{
+            .script_id = 777,
+            .source_url = "async-parent.js",
+            .location = .{ .line = 9, .column = 4, .byte_offset = 73 },
+        },
+    };
+    schedule_machine.stack_trace_call_frame = &schedule_frame;
+    try sibling_context.pushActiveInterpreter(&schedule_machine);
+    Debugger__didScheduleAsyncCall(sibling, .event_listener, std.math.maxInt(u64), true);
+    sibling_context.popActiveInterpreter(&schedule_machine);
+    try std.testing.expectEqual(@as(usize, 1), state.async_calls.items.len);
+    try std.testing.expectEqualStrings("scheduleParent", state.async_calls.items[0].frames[0].functionName);
+    try std.testing.expectEqualStrings("async-parent.js", state.async_calls.items[0].frames[0].url);
+    try std.testing.expectEqual(@as(i32, 8), state.async_calls.items[0].frames[0].lineNumber);
+
+    // Duplicate scheduling replaces, rather than leaks or ambiguously stacks,
+    // the same (type,id) record.
+    schedule_frame.function_name = "replacementParent";
+    try sibling_context.pushActiveInterpreter(&schedule_machine);
+    Debugger__didScheduleAsyncCall(sibling, .event_listener, std.math.maxInt(u64), false);
+    sibling_context.popActiveInterpreter(&schedule_machine);
+    try std.testing.expectEqual(@as(usize, 1), state.async_calls.items.len);
+    try std.testing.expectEqualStrings("replacementParent", state.async_calls.items[0].frames[0].functionName);
+    Debugger__didCancelAsyncCall(sibling, .event_listener, std.math.maxInt(u64));
+    try std.testing.expectEqual(@as(usize, 0), state.async_calls.items.len);
+
+    const all_types = [_]PrivateDebuggerAsyncCallType{
+        .dom_timer,
+        .event_listener,
+        .post_message,
+        .request_animation_frame,
+        .microtask,
+    };
+    for (all_types, 0..) |call_type, index|
+        Debugger__didScheduleAsyncCall(sibling, call_type, @intCast(index), false);
+    try std.testing.expectEqual(all_types.len, state.async_calls.items.len);
+    const before_foreign = state.async_calls.items.len;
+    Debugger__didScheduleAsyncCall(foreign, .event_listener, 99, false);
+    try std.testing.expectEqual(before_foreign, state.async_calls.items.len);
+    Debugger__didCancelAsyncCall(sibling, .microtask, 4);
+    Debugger__didCancelAsyncCall(sibling, .microtask, 999);
+    try std.testing.expectEqual(all_types.len - 1, state.async_calls.items.len);
+    clearInspectorAsyncCalls(state);
+
+    // Nested dispatches restore strictly in LIFO order. A mismatched outer
+    // completion cannot tear down the still-active inner task.
+    Debugger__didScheduleAsyncCall(sibling, .event_listener, 10, false);
+    Debugger__willDispatchAsyncCall(sibling, .event_listener, 10);
+    Debugger__didScheduleAsyncCall(sibling, .microtask, 11, true);
+    Debugger__willDispatchAsyncCall(sibling, .microtask, 11);
+    try std.testing.expectEqual(@as(usize, 2), state.active_async_calls.items.len);
+    Debugger__didDispatchAsyncCall(sibling, .event_listener, 10);
+    try std.testing.expectEqual(@as(usize, 2), state.active_async_calls.items.len);
+    Debugger__didDispatchAsyncCall(sibling, .microtask, 11);
+    try std.testing.expectEqual(@as(usize, 1), state.active_async_calls.items.len);
+    try std.testing.expect(findInspectorAsyncCall(state, .{ .call_type = .microtask, .callback_id = 11 }) == null);
+    Debugger__didDispatchAsyncCall(sibling, .event_listener, 10);
+    try std.testing.expectEqual(@as(usize, 0), state.active_async_calls.items.len);
+    try std.testing.expect(findInspectorAsyncCall(state, .{ .call_type = .event_listener, .callback_id = 10 }) != null);
+    clearInspectorAsyncCalls(state);
+
+    // A real debugger pause publishes the copied scheduling parent only during
+    // matching dispatch. Single-shot completion retires the schedule.
+    schedule_frame.function_name = "protocolAsyncParent";
+    try sibling_context.pushActiveInterpreter(&schedule_machine);
+    Debugger__didScheduleAsyncCall(sibling, .event_listener, std.math.maxInt(u64), true);
+    sibling_context.popActiveInterpreter(&schedule_machine);
+    Debugger__willDispatchAsyncCall(sibling, .event_listener, std.math.maxInt(u64));
+    const pause_source = JSStringCreateWithUTF8CString("debugger; 42;") orelse return error.StringInitFailed;
+    const pause_url = JSStringCreateWithUTF8CString("async-dispatch.js") orelse return error.StringInitFailed;
+    var exception: JSValueRef = null;
+    _ = JSEvaluateScript(first, pause_source, null, pause_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes[0..capture.len], "\"asyncStackTrace\":{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes[0..capture.len], "protocolAsyncParent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes[0..capture.len], "async-parent.js") != null);
+    Debugger__didDispatchAsyncCall(sibling, .event_listener, std.math.maxInt(u64));
+    try std.testing.expect(findInspectorAsyncCall(state, .{ .call_type = .event_listener, .callback_id = std.math.maxInt(u64) }) == null);
+
+    capture.len = 0;
+    _ = JSEvaluateScript(first, pause_source, null, pause_url, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes[0..capture.len], "\"asyncStackTrace\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, capture.bytes[0..capture.len], "protocolAsyncParent") == null);
+
+    // Disabling the last debugger agent drops dormant and active bookkeeping;
+    // the session/context teardown therefore retains no sibling realm.
+    Debugger__didScheduleAsyncCall(sibling, .dom_timer, 0, false);
+    Debugger__willDispatchAsyncCall(sibling, .dom_timer, 0);
+    const disable = "{\"id\":2,\"method\":\"Debugger.disable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(capture.session, disable, disable.len));
+    try std.testing.expectEqual(@as(usize, 0), state.async_calls.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.active_async_calls.items.len);
+
+    JSStringRelease(pause_source);
+    JSStringRelease(pause_url);
+    ZJSInspectorSessionRelease(capture.session);
+    JSGlobalContextRelease(foreign);
+    JSGlobalContextRelease(sibling);
+    JSGlobalContextRelease(first);
+    JSContextGroupRelease(group);
 }
 
 test "C-API: inspector protocol inventory has no hidden commands" {

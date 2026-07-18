@@ -106,6 +106,14 @@ const PrivateTypedArrayType = enum(u8) {
     _,
 };
 
+const DebuggerAsyncCallType = enum(u8) {
+    DOMTimer = 1,
+    EventListener = 2,
+    PostMessage = 3,
+    RequestAnimationFrame = 4,
+    Microtask = 5,
+};
+
 const BunStringTag = enum(u8) {
     dead = 0,
     wtf_string_impl = 1,
@@ -436,6 +444,10 @@ extern "c" fn JSRemoteInspectorSetLogToSystemConsole(bool) void;
 extern "c" fn JSRemoteInspectorGetInspectionEnabledByDefault() bool;
 extern "c" fn JSRemoteInspectorSetInspectionEnabledByDefault(bool) void;
 extern "c" fn ScriptExecutionContextIdentifier__forGlobalObject(JSContextRef) u32;
+extern "c" fn Debugger__didScheduleAsyncCall(JSContextRef, DebuggerAsyncCallType, u64, bool) void;
+extern "c" fn Debugger__didCancelAsyncCall(JSContextRef, DebuggerAsyncCallType, u64) void;
+extern "c" fn Debugger__didDispatchAsyncCall(JSContextRef, DebuggerAsyncCallType, u64) void;
+extern "c" fn Debugger__willDispatchAsyncCall(JSContextRef, DebuggerAsyncCallType, u64) void;
 extern "c" fn Bun__noSideEffectsToString(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__promises__isErrorLike(JSContextRef, EncodedValue) bool;
 extern "c" fn Bun__Process__emitWarning(JSContextRef, EncodedValue, EncodedValue, EncodedValue, EncodedValue) void;
@@ -1155,6 +1167,20 @@ fn jsStringIterator(state: *JSStringIteratorState) JSStringIterator {
 pub fn main() void {
     const context = JSGlobalContextCreate(null) orelse fail("context creation failed");
     defer JSGlobalContextRelease(context);
+
+    // The pinned bridge is deliberately dormant without an attached debugger
+    // agent, but every enum and lifecycle entry still crosses the real ABI.
+    for ([_]DebuggerAsyncCallType{ .DOMTimer, .EventListener, .PostMessage, .RequestAnimationFrame, .Microtask }, 0..) |call_type, index| {
+        const callback_id: u64 = if (index == 0) 0 else if (index == 4) std.math.maxInt(u64) else @intCast(index);
+        Debugger__didScheduleAsyncCall(context, call_type, callback_id, index != 1);
+        Debugger__willDispatchAsyncCall(context, call_type, callback_id);
+        Debugger__didDispatchAsyncCall(context, call_type, callback_id);
+        Debugger__didCancelAsyncCall(context, call_type, callback_id);
+    }
+    Debugger__didScheduleAsyncCall(null, .EventListener, 1, true);
+    Debugger__didCancelAsyncCall(null, .EventListener, 1);
+    Debugger__willDispatchAsyncCall(null, .EventListener, 1);
+    Debugger__didDispatchAsyncCall(null, .EventListener, 1);
 
     if (JSC__JSValue__toBoolean(.empty) or JSC__JSValue__toBoolean(.undefined) or
         JSC__JSValue__toBoolean(.null) or JSC__JSValue__toBoolean(.false) or
@@ -5038,5 +5064,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 274/274 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 278/278 symbols linked; runtime matrix passed\n", .{});
 }

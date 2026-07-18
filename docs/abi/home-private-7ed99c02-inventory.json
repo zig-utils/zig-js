@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 287,
-      "pending": 159
+      "implemented": 291,
+      "pending": 155
     }
   },
   "declarations": [
@@ -935,10 +935,10 @@
       "line": 277,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Debugger__didCancelAsyncCall(*JSGlobalObject, AsyncCallType, u64) void;",
       "declaration_sha256": "5feed64369715d7fff8b0d9897097aeb8769fd7aab6f239dcbb2814e54f814bd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Debugger__didDispatchAsyncCall",
@@ -946,10 +946,10 @@
       "line": 278,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Debugger__didDispatchAsyncCall(*JSGlobalObject, AsyncCallType, u64) void;",
       "declaration_sha256": "be393d9ff41250169b1aaf723349825b880cd0288534ac6af6b90143164d78cd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Debugger__didScheduleAsyncCall",
@@ -957,10 +957,10 @@
       "line": 276,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Debugger__didScheduleAsyncCall(*JSGlobalObject, AsyncCallType, u64, bool) void;",
       "declaration_sha256": "cc7266305575f2d9361727c558d1e3cff19f4357b23c6b2a7f34963d6656debc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Debugger__willDispatchAsyncCall",
@@ -968,10 +968,10 @@
       "line": 279,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Debugger__willDispatchAsyncCall(*JSGlobalObject, AsyncCallType, u64) void;",
       "declaration_sha256": "4c918a3de301b723bf87e38d270bf90fdcf1f4ec2cae283969006b89391ec3bd",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSArray__constructArray",
