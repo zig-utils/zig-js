@@ -187,7 +187,8 @@ post-MVP profile are implemented. Validate registry drift with:
 zig build wasm-feature-profiles-check
 ```
 
-The tail-call binary and validation foundation is pinned independently to
+The tail-call binary, validation, and bounded execution foundation is pinned
+independently to
 `WebAssembly/tail-call@a6003d06aefef41e20a3e36fe2e500062555c895`. Its
 [machine-readable inventory](.data/wasm-tail-call-opcodes.json) locks both
 opcodes, binary field order, stack-polymorphic signatures, validation rules,
@@ -195,11 +196,31 @@ and the two proposal corpus files with all 119 top-level commands. Behind the
 `tail_calls` switch, `return_call` and `return_call_indirect` decode with exact
 byte-offset failures and validate direct/indirect indices, `funcref` tables,
 operand types, unreachable-polymorphic stacks, and exact current-function
-result compatibility. This foundation is tracked by
-[#288](https://github.com/zig-utils/zig-js/issues/288). Frame-replacing bounded
-execution is the next isolated slice in
-[#289](https://github.com/zig-utils/zig-js/issues/289); this foundation does not
-claim the proposal execution corpus yet.
+result compatibility. Direct and indirect dispatch replaces the active frame
+while retaining its caller-facing stack, local, and label bases; tail calls to
+host imports retire that same frame after exact argument/result checks. Focused
+coverage proves a 200,000-call mutual recursion stays below 64 slots of capacity,
+preserves nested callers and cross-instance funcref identity, retains live
+externref/funcref parameters and locals at every replacement checkpoint, and
+keeps both successful and trapping host-import boundaries precisely rooted.
+The public JavaScript API also performs 33 repeated deep invocations to cover
+per-call arena/frame teardown. Normal and ThreadSanitizer focused runs pass with
+zero failures, leaks, or reported races.
+
+Reproduce those execution and root-safety witnesses with:
+
+```sh
+zig build test -Dtest-filter='wasm.exec tail'
+zig build test -Dtest-filter='bounded tail recursion'
+zig build test -Dtsan=true -Dtest-filter='wasm.exec tail'
+zig build test -Dtsan=true -Dtest-filter='bounded tail recursion'
+```
+
+Binary/validation is tracked by [#288](https://github.com/zig-utils/zig-js/issues/288)
+and frame replacement/root safety by
+[#289](https://github.com/zig-utils/zig-js/issues/289). This foundation does not
+claim the pinned proposal-script score yet; that terminal gate remains
+[#292](https://github.com/zig-utils/zig-js/issues/292).
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned

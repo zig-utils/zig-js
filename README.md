@@ -97,21 +97,27 @@ accounts for 25,350 public-JavaScript-API commands, 2,087 bit-exact float
 commands, and 581 explicitly non-applicable text-format parser commands. This
 score covers sign extension, nontrapping conversions, multi-value control,
 reference types, and bulk memory/table operations; it does not claim SIMD,
-Threads, exception handling or tail-call execution, memory64/GC, or shell-only
-hooks. Exact pins, feature-area subtotals, CI gates, and reproduction are in
+Threads, exception handling or the tail-call proposal corpus, memory64/GC, or
+shell-only hooks. Exact pins, feature-area subtotals, CI gates, and reproduction are in
 [WebAssembly status](docs/wasm.md).
 
-The WebAssembly tail-call proposal now has its exact pinned binary and
-validation foundation. The checked-in [two-opcode inventory](docs/.data/wasm-tail-call-opcodes.json)
+The WebAssembly tail-call proposal now has its exact pinned binary, validation,
+and bounded execution foundation. The checked-in
+[two-opcode inventory](docs/.data/wasm-tail-call-opcodes.json)
 locks `return_call` (`0x12`) and `return_call_indirect` (`0x13`), their ordered
 immediates, stack-polymorphic signatures, validation rules, and both upstream
 proposal corpus files (119 top-level commands). Decoding is feature-gated with
 exact byte offsets; validation enforces function/type/table indices, `funcref`
 tables, argument stacks, and exact agreement with the current function's result
-type. This foundation is tracked by
-[#288](https://github.com/zig-utils/zig-js/issues/288); bounded frame-replacing
-execution remains separately tracked by
-[#289](https://github.com/zig-utils/zig-js/issues/289).
+type. Direct and indirect tail dispatch replaces the active Wasm frame instead
+of growing either the native or Wasm frame stack. A 200,000-call mutual-recursion
+witness stays within 64 slots of frame, label, local, and operand capacity;
+cross-instance funcrefs, imported functions, indirect traps, and live
+externref/funcref roots are covered in normal and ThreadSanitizer runs. Binary
+and validation landed in [#288](https://github.com/zig-utils/zig-js/issues/288),
+and execution/root safety in [#289](https://github.com/zig-utils/zig-js/issues/289).
+The pinned proposal-script score remains the separate terminal
+[#292](https://github.com/zig-utils/zig-js/issues/292) gate.
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -954,7 +960,7 @@ and the final evidence-backed removal of this section is tracked by
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
   from the PR-249 reference corpus, including exception handling, tail-call
-  execution and terminal corpus scoring, and
+  proposal corpus scoring, and
   memory64/GC, plus terminal Threads host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
