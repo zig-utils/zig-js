@@ -12,33 +12,40 @@ const types = @import("types.zig");
 
 pub const Error = error{Invalid};
 
+fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature: types.Feature) Error {
+    return if (mod.features.enabled(feature))
+        failModFmt(diag, "WebAssembly feature {s} is enabled but not implemented", .{feature.name()})
+    else
+        failModFmt(diag, "WebAssembly feature {s} is disabled", .{feature.name()});
+}
+
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; MVP value types are numeric only
     //    (funcref in a valtype position is the reference-types proposal).
     for (mod.types) |ft| {
-        for (ft.params) |p| if (p == .funcref) return failMod(diag, "type mismatch");
-        for (ft.results) |r| if (r == .funcref) return failMod(diag, "type mismatch");
+        for (ft.params) |p| if (p == .funcref) return unsupportedFeature(mod, diag, .reference_types);
+        for (ft.results) |r| if (r == .funcref) return unsupportedFeature(mod, diag, .reference_types);
     }
     for (mod.imports) |imp| switch (imp.desc) {
         .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
-        .global => |g| if (g.val == .funcref) return failMod(diag, "type mismatch"),
+        .global => |g| if (g.val == .funcref) return unsupportedFeature(mod, diag, .reference_types),
         else => {},
     };
     for (mod.funcs) |t|
         if (t >= mod.types.len) return failMod(diag, "unknown type");
 
     // 2. MVP allows at most one table and one memory (imports + defined).
-    if (mod.totalTables() > 1) return failMod(diag, "multiple tables");
+    if (mod.totalTables() > 1) return unsupportedFeature(mod, diag, .reference_types);
     if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
 
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
-        if (g.type.val == .funcref) return failMod(diag, "type mismatch");
+        if (g.type.val == .funcref) return unsupportedFeature(mod, diag, .reference_types);
         try checkConstExpr(mod, g.init, g.type.val, diag);
     }
     for (mod.code) |body|
         for (body.locals) |l|
-            if (l == .funcref) return failMod(diag, "type mismatch");
+            if (l == .funcref) return unsupportedFeature(mod, diag, .reference_types);
 
     // 4. Element segments.
     for (mod.elems) |e| {
@@ -576,8 +583,12 @@ fn expectValid(comptime bytes: []const u8) !void {
 
 /// Module-level failure: message + no_offset.
 fn expectInvalid(comptime bytes: []const u8, msg: []const u8) !void {
+    return expectInvalidWithFeatures(bytes, .{}, msg);
+}
+
+fn expectInvalidWithFeatures(comptime bytes: []const u8, features: types.Features, msg: []const u8) !void {
     var diag: types.Diagnostic = .{};
-    const mod = try decode.decode(std.testing.allocator, bytes, &diag);
+    const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
     defer decode.destroyModule(std.testing.allocator, mod);
     try std.testing.expectError(error.Invalid, validate(mod, &diag));
     try std.testing.expectEqualStrings(msg, diag.message());
@@ -825,9 +836,11 @@ test "wasm.validate multiple memories" {
 }
 
 test "wasm.validate multiple tables" {
-    try expectInvalid(hdr ++ sec(4, "\x02\x70\x00\x01\x70\x00\x01"), "multiple tables");
+    const defined = comptime (hdr ++ sec(4, "\x02\x70\x00\x01\x70\x00\x01"));
+    try expectInvalid(defined, "WebAssembly feature reference-types is disabled");
+    try expectInvalidWithFeatures(defined, .{ .reference_types = true }, "WebAssembly feature reference-types is enabled but not implemented");
     try expectInvalid(hdr ++ sec(2, "\x01\x01a\x01t\x01\x70\x00\x01") ++
-        sec(4, "\x01\x70\x00\x01"), "multiple tables");
+        sec(4, "\x01\x70\x00\x01"), "WebAssembly feature reference-types is disabled");
 }
 
 test "wasm.validate elem unknown function" {

@@ -28,6 +28,11 @@ def main() -> int:
         type=Path,
         default=ROOT / "docs/.data/wasm-feature-profiles.json",
     )
+    parser.add_argument(
+        "--feature-source",
+        type=Path,
+        default=ROOT / "src/wasm/types.zig",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -39,6 +44,10 @@ def main() -> int:
     feature_ids = [entry.get("id") for entry in features]
     require(len(feature_ids) == len(set(feature_ids)), "duplicate feature id")
     known = set(feature_ids)
+    source = args.feature_source.read_text()
+    enum_body = source.split("pub const Feature = enum {", 1)[1].split("pub fn name", 1)[0]
+    runtime_features = set(re.findall(r"^    ([a-z][a-z0-9_]*),$", enum_body, re.MULTILINE))
+    require(runtime_features == known, f"registry/runtime feature drift: registry-only={sorted(known - runtime_features)}, runtime-only={sorted(runtime_features - known)}")
     for feature in features:
         feature_id = feature.get("id")
         require(isinstance(feature_id, str) and feature_id, "feature id is required")
