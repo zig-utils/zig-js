@@ -75,6 +75,7 @@ pub const TableInst = struct {
     limits: types.Limits,
     gpa: Allocator,
     lock: std.atomic.Mutex = .unlocked,
+    host: ?TableHost = null,
 
     pub fn lockTable(self: *TableInst) void {
         while (!self.lock.tryLock()) std.atomic.spinLoopHint();
@@ -83,6 +84,14 @@ pub const TableInst = struct {
     pub fn unlockTable(self: *TableInst) void {
         self.lock.unlock();
     }
+};
+
+pub const TableHost = struct {
+    ctx: *anyopaque,
+    lock: *const fn (*anyopaque) void,
+    unlock: *const fn (*anyopaque) void,
+    ensure_len: *const fn (*anyopaque, usize) bool,
+    sync: *const fn (*anyopaque, *TableInst, usize, usize) void,
 };
 
 pub const GlobalInst = struct {
@@ -224,6 +233,30 @@ pub fn tableGrowWith(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
     if (delta > limit - old) return -1;
     tab.elems = tab.gpa.realloc(tab.elems, old + delta) catch return -1;
     @memset(tab.elems[old..], fill);
+    return @intCast(old);
+}
+
+fn tableGrowObserved(tab: *TableInst, delta: u32, fill: ValueSlot) i32 {
+    if (tab.host) |host| host.lock(host.ctx);
+    defer if (tab.host) |host| host.unlock(host.ctx);
+    tab.lockTable();
+    defer tab.unlockTable();
+    const old: u32 = @intCast(tab.elems.len);
+    if (delta == 0) return @intCast(old);
+    const limit = tab.limits.max orelse std.math.maxInt(u32);
+    if (old >= limit or delta > limit - old) return -1;
+    const new_len: usize = @as(usize, old) + delta;
+    const fresh = tab.gpa.alloc(ValueSlot, new_len) catch return -1;
+    @memcpy(fresh[0..old], tab.elems);
+    @memset(fresh[old..], fill);
+    if (tab.host) |host| if (!host.ensure_len(host.ctx, new_len)) {
+        tab.gpa.free(fresh);
+        return -1;
+    };
+    const retired = tab.elems;
+    tab.elems = fresh;
+    if (tab.host) |host| host.sync(host.ctx, tab, old, delta);
+    tab.gpa.free(retired);
     return @intCast(old);
 }
 
@@ -1020,10 +1053,13 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const slot = popSlot(s);
                 const index = popI32(s);
                 const table = inst.tables[instr.imm.idx];
+                if (table.host) |host| host.lock(host.ctx);
+                defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
                 if (index >= table.elems.len) return s.trap("undefined element");
                 table.elems[index] = slot;
+                if (table.host) |host| host.sync(host.ctx, table, index, 1);
             },
             .ref_null => try pushSlot(s, switch (instr.imm.type) {
                 .funcref => .{ .funcref = null },
@@ -1042,7 +1078,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .table_grow => {
                 const delta = popI32(s);
                 const slot = popSlot(s);
-                try pushI32(s, @bitCast(tableGrowWith(inst.tables[instr.imm.idx], delta, slot)));
+                try pushI32(s, @bitCast(tableGrowObserved(inst.tables[instr.imm.idx], delta, slot)));
             },
             .table_size => {
                 const table = inst.tables[instr.imm.idx];
@@ -1056,11 +1092,14 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const slot = popSlot(s);
                 const start = popI32(s);
                 const table = inst.tables[instr.imm.idx];
+                if (table.host) |host| host.lock(host.ctx);
+                defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
                 const end = @as(u64, start) + count;
                 if (end > table.elems.len) return s.trap("out of bounds table access");
                 @memset(table.elems[start..@intCast(end)], slot);
+                if (table.host) |host| host.sync(host.ctx, table, start, count);
             },
             .memory_init => {
                 const count = popI32(s);
@@ -1114,11 +1153,14 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const source_end = @as(u64, source) + count;
                 const dest_end = @as(u64, dest) + count;
                 const table = inst.tables[immediate.second];
+                if (table.host) |host| host.lock(host.ctx);
+                defer if (table.host) |host| host.unlock(host.ctx);
                 table.lockTable();
                 defer table.unlockTable();
                 if (source_end > elems.len or dest_end > table.elems.len)
                     return s.trap("out of bounds table access");
                 @memcpy(table.elems[dest..@intCast(dest_end)], elems[source..@intCast(source_end)]);
+                if (table.host) |host| host.sync(host.ctx, table, dest, count);
             },
             .elem_drop => inst.elem_segments[instr.imm.idx].dropped = true,
             .table_copy => {
@@ -1129,23 +1171,27 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 const dest_table = inst.tables[immediate.first];
                 const source_table = inst.tables[immediate.second];
                 if (dest_table == source_table) {
+                    if (dest_table.host) |host| host.lock(host.ctx);
                     dest_table.lockTable();
-                } else if (@intFromPtr(dest_table) < @intFromPtr(source_table)) {
-                    dest_table.lockTable();
-                    source_table.lockTable();
                 } else {
-                    source_table.lockTable();
-                    dest_table.lockTable();
+                    const first = if (@intFromPtr(dest_table) < @intFromPtr(source_table)) dest_table else source_table;
+                    const second = if (first == dest_table) source_table else dest_table;
+                    if (first.host) |host| host.lock(host.ctx);
+                    if (second.host) |host| host.lock(host.ctx);
+                    first.lockTable();
+                    second.lockTable();
                 }
                 defer {
                     if (dest_table == source_table) {
                         dest_table.unlockTable();
-                    } else if (@intFromPtr(dest_table) < @intFromPtr(source_table)) {
-                        source_table.unlockTable();
-                        dest_table.unlockTable();
+                        if (dest_table.host) |host| host.unlock(host.ctx);
                     } else {
-                        dest_table.unlockTable();
-                        source_table.unlockTable();
+                        const first = if (@intFromPtr(dest_table) < @intFromPtr(source_table)) dest_table else source_table;
+                        const second = if (first == dest_table) source_table else dest_table;
+                        second.unlockTable();
+                        first.unlockTable();
+                        if (second.host) |host| host.unlock(host.ctx);
+                        if (first.host) |host| host.unlock(host.ctx);
                     }
                 }
                 const source_end = @as(u64, source) + count;
@@ -1158,6 +1204,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                     std.mem.copyForwards(ValueSlot, dest_slice, source_slice)
                 else
                     std.mem.copyBackwards(ValueSlot, dest_slice, source_slice);
+                if (dest_table.host) |host| host.sync(host.ctx, dest_table, dest, count);
             },
             .i32_load => {
                 const m = instr.imm.memarg;

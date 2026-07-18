@@ -94,6 +94,7 @@ const GlobalOwner = struct {
 
 const TableOwner = struct {
     store: *context.Context,
+    arena: std.mem.Allocator,
     table: *exec.TableInst,
     wrapper: *Object,
     owns_native: bool = true,
@@ -110,6 +111,9 @@ const TableOwner = struct {
     }
 
     fn deinit(self: *TableOwner) void {
+        if (self.table.host) |host| {
+            if (host.ctx == @as(*anyopaque, @ptrCast(self))) self.table.host = null;
+        }
         for (self.retired_refs.items) |refs| self.store.gpa.free(refs);
         self.retired_refs.deinit(self.store.gpa);
         self.store.gpa.free(self.refs);
@@ -117,6 +121,68 @@ const TableOwner = struct {
         self.store.gpa.destroy(self);
     }
 };
+
+fn tableHostLock(raw: *anyopaque) void {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    owner.lockOwner();
+}
+
+fn tableHostUnlock(raw: *anyopaque) void {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    owner.unlockOwner();
+}
+
+fn tableHostEnsureLen(raw: *anyopaque, new_len: usize) bool {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    if (new_len <= owner.refs.len) return true;
+    const fresh = allocateTableRefs(owner.store, new_len, Value.nul()) catch return false;
+    for (owner.refs, 0..) |*old, i| fresh[i].store(old.load(.acquire), .monotonic);
+    owner.retired_refs.ensureUnusedCapacity(owner.store.gpa, 1) catch {
+        owner.store.gpa.free(fresh);
+        return false;
+    };
+    owner.wrapper.setWasmTableRefs(owner.arena, fresh) catch {
+        owner.store.gpa.free(fresh);
+        return false;
+    };
+    owner.retired_refs.appendAssumeCapacity(owner.refs);
+    owner.refs = fresh;
+    return true;
+}
+
+fn mirroredFunctionMatches(value_: Value, raw_func: *anyopaque) bool {
+    if (!value_.isObject()) return false;
+    const state = value_.asObj().wasmFunction() orelse return false;
+    const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return false));
+    return owner.func == @as(*exec.FuncInst, @ptrCast(@alignCast(raw_func)));
+}
+
+fn tableHostSync(raw: *anyopaque, table: *exec.TableInst, start: usize, len: usize) void {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    const end = @min(start + len, table.elems.len, owner.refs.len);
+    for (table.elems[start..end], start..) |slot, index| switch (slot) {
+        .externref => |ref| {
+            owner.refs[index].store(ref.bits, .release);
+            gc.barrierValueFrom(owner.wrapper, ref);
+        },
+        .funcref => |maybe_func| if (maybe_func) |func| {
+            const current: Value = .{ .bits = owner.refs[index].load(.acquire) };
+            if (!mirroredFunctionMatches(current, func))
+                owner.refs[index].store(Value.nul().bits, .release);
+        } else owner.refs[index].store(Value.nul().bits, .release),
+        .numeric => unreachable,
+    };
+}
+
+fn installTableHost(owner: *TableOwner) void {
+    owner.table.host = .{
+        .ctx = @ptrCast(owner),
+        .lock = tableHostLock,
+        .unlock = tableHostUnlock,
+        .ensure_len = tableHostEnsureLen,
+        .sync = tableHostSync,
+    };
+}
 
 const FunctionOwner = struct {
     store: *context.Context,
@@ -554,7 +620,8 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     object.* = .{ .proto = proto };
     const owner = try store.gpa.create(TableOwner);
     errdefer store.gpa.destroy(owner);
-    owner.* = .{ .store = store, .table = table, .wrapper = object, .refs = refs };
+    owner.* = .{ .store = store, .arena = self.arena, .table = table, .wrapper = object, .refs = refs };
+    installTableHost(owner);
     const state = try object.wasmTableState(self.arena);
     state.table = @ptrCast(owner);
     state.refs = refs;
@@ -575,10 +642,46 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.get requires a Table");
     const index = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table index is out of range");
-    owner.lockOwner();
-    defer owner.unlockOwner();
-    if (index >= owner.refs.len) return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
-    return .{ .bits = owner.refs[index].load(.acquire) };
+    while (true) {
+        owner.lockOwner();
+        owner.table.lockTable();
+        if (index >= owner.table.elems.len) {
+            owner.table.unlockTable();
+            owner.unlockOwner();
+            return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
+        }
+        const slot = owner.table.elems[index];
+        const mirrored: Value = .{ .bits = owner.refs[index].load(.acquire) };
+        owner.table.unlockTable();
+        owner.unlockOwner();
+        switch (slot) {
+            .externref => return slot.externref,
+            .funcref => |maybe_func| {
+                const func = maybe_func orelse return Value.nul();
+                if (mirroredFunctionMatches(mirrored, func)) return mirrored;
+                const previous = owner.store.wasm_active_interp;
+                owner.store.wasm_active_interp = @ptrCast(self);
+                const resolved = wasmSlotToJs(self, .funcref, slot, null) catch |err| {
+                    owner.store.wasm_active_interp = previous;
+                    return err;
+                };
+                owner.store.wasm_active_interp = previous;
+                owner.lockOwner();
+                owner.table.lockTable();
+                const unchanged = index < owner.table.elems.len and
+                    owner.table.elems[index] == .funcref and
+                    owner.table.elems[index].funcref == func;
+                if (unchanged) owner.refs[index].store(resolved.bits, .release);
+                owner.table.unlockTable();
+                owner.unlockOwner();
+                if (unchanged) {
+                    gc.barrierValueFrom(owner.wrapper, resolved);
+                    return resolved;
+                }
+            },
+            .numeric => unreachable,
+        }
+    }
 }
 
 fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -1165,7 +1268,8 @@ fn wrapDefinedTable(
     object.* = .{ .proto = descriptor.table_proto };
     const owner = try store.gpa.create(TableOwner);
     errdefer store.gpa.destroy(owner);
-    owner.* = .{ .store = store, .table = table, .wrapper = object, .owns_native = false, .refs = refs };
+    owner.* = .{ .store = store, .arena = self.arena, .table = table, .wrapper = object, .owns_native = false, .refs = refs };
+    installTableHost(owner);
     const state = try object.wasmTableState(self.arena);
     state.table = @ptrCast(owner);
     state.refs = refs;
@@ -2133,6 +2237,58 @@ test "wasm api reference-valued exports and imports preserve canonical identity"
         \\  mixedImportResult[0] === ext && mixedImportResult[1] === marker;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api bulk table mutations synchronize identity and precise roots" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{ .bulk_memory = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const initial = try store.evaluate(
+        \\const externBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,4,1,96,0,0,
+        \\  2,29,2,3,101,110,118,4,100,101,115,116,1,111,0,1,3,101,110,118,6,115,111,117,114,99,101,1,111,0,1,
+        \\  3,4,3,0,0,0,
+        \\  7,22,3,3,114,117,110,0,0,5,99,108,101,97,114,0,1,4,103,114,111,119,0,2,
+        \\  10,37,3,12,0,65,0,65,0,65,1,252,14,0,1,11,11,0,65,0,208,111,65,1,252,17,0,11,10,0,208,111,65,1,252,15,0,26,11
+        \\]);
+        \\globalThis.bulkDest = new WebAssembly.Table({ element: 'externref', initial: 1 });
+        \\globalThis.bulkSource = new WebAssembly.Table({ element: 'externref', initial: 1 });
+        \\let marker = { bulk: 92 };
+        \\globalThis.bulkWeak = new WeakRef(marker);
+        \\bulkSource.set(0, marker);
+        \\globalThis.bulkInstance = new WebAssembly.Instance(new WebAssembly.Module(externBytes), {
+        \\  env: { dest: bulkDest, source: bulkSource }
+        \\});
+        \\bulkInstance.exports.run();
+        \\bulkInstance.exports.grow();
+        \\const copied = bulkDest.get(0) === marker && bulkDest.length === 2 && bulkDest.get(1) === null;
+        \\bulkSource.set(0, null);
+        \\marker = null;
+        \\const funBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,8,2,96,0,1,127,96,0,0,
+        \\  2,11,1,3,101,110,118,1,116,1,112,0,1,
+        \\  3,3,2,0,1,
+        \\  7,12,2,1,102,0,0,4,105,110,105,116,0,1,
+        \\  9,5,1,1,0,1,0,
+        \\  10,19,2,4,0,65,42,11,12,0,65,0,65,0,65,1,252,12,0,0,11
+        \\]);
+        \\const funTable = new WebAssembly.Table({ element: 'funcref', initial: 1 });
+        \\const funInstance = new WebAssembly.Instance(new WebAssembly.Module(funBytes), { env: { t: funTable } });
+        \\funInstance.exports.init();
+        \\copied && funTable.get(0) === funInstance.exports.f && funTable.get(0)() === 42;
+    );
+    try std.testing.expect(initial.isBoolean() and initial.asBool());
+    store.collectGarbage();
+    const retained = try store.evaluate("bulkWeak.deref() !== undefined && bulkDest.get(0) === bulkWeak.deref()");
+    try std.testing.expect(retained.isBoolean() and retained.asBool());
+    _ = try store.evaluate("bulkInstance.exports.clear()");
+    store.collectGarbage();
+    const reclaimed = try store.evaluate("bulkWeak.deref() === undefined && bulkDest.get(0) === null");
+    try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
 }
 
 test "wasm api Instance exports callable functions and preserves Table identity" {
