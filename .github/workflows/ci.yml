@@ -84,7 +84,9 @@ jobs:
           # complete 73-file inventory on every CI run.
           - name: wasm-mvp-smoke
             wasm_spec: true
-            cmd: zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=linking -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-smoke.json"
+            cmd: |
+              zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=linking -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-linking.json"
+              zig build wasm-spec -Dwast2json="$RUNNER_TEMP/wabt-1.0.12/wast2json" -Dwasm-spec-filter=f32_bitwise -Dwasm-spec-inventory="$RUNNER_TEMP/wasm-spec-bit-exact.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
