@@ -188,6 +188,27 @@ families and terminal corpus/performance evidence remain tracked by
 [#280](https://github.com/zig-utils/zig-js/issues/280) through
 [#283](https://github.com/zig-utils/zig-js/issues/283).
 
+The same driver now exposes a `simd-movement` profile over a declared 20-file
+selection from the pinned 56-file proposal corpus. At engine checkpoint
+`9a82d87d`, it passes 2,240/2,253 applicable commands, with 13 execution
+failures, 351 text-format assertions explicitly marked not applicable, and zero
+runner errors. Eighteen files are fully green, including address/alignment,
+bitwise/boolean, constants, lanes, every lane load/store width, load extension,
+load splats/zero, and stores. The 13 visible failures are later
+floating-point/conversion operations used as contexts by `simd_load.wast` and
+`simd_splat.wast`; they remain assigned to #282 rather than hidden by the
+runner. Reproduce the current audit with:
+
+```sh
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py \
+  --profile simd-movement \
+  --spec-root /path/to/WebAssembly-simd-a78b98a \
+  --wast2json /path/to/wabt-1.0.39/wast2json \
+  --allow-failures \
+  --inventory /tmp/zig-js-simd-movement.json
+```
+
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation,
 while a selected but unfinished feature produces a deterministic

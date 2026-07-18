@@ -98,6 +98,15 @@ reference types, and bulk memory/table operations; it does not claim SIMD,
 Threads, exceptions/tail calls, memory64/GC, or shell-only hooks. Exact pins,
 feature-area subtotals, CI gates, and reproduction are in [WebAssembly status](docs/wasm.md).
 
+Fixed-width SIMD is now executing beyond its complete 236-opcode decoder and
+validator foundation. The declared 20-file movement/integer audit from the
+pinned 56-file proposal corpus currently passes **2,240 / 2,253 applicable
+commands**, with **13 execution failures**, **351 explicit text-format n/a**,
+and **0 runner errors** at `9a82d87d`. Eighteen selected files are fully green;
+the remaining failures are floating-point/conversion contexts in `simd_load`
+and `simd_splat`, tracked by [#282](https://github.com/zig-utils/zig-js/issues/282).
+Exact pins, file selection, and reproduction are in [WebAssembly status](docs/wasm.md).
+
 ## Performance
 
 `zig build bench` currently times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
@@ -151,11 +160,11 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `b1f3933f` do not execute in these
+The ABI and WebAssembly/conformance changes through `9a82d87d` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store/reference-root, reference-call, bulk-memory, or Core 2
-corpus paths.
+corpus/SIMD paths.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
