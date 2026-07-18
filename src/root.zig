@@ -100,6 +100,7 @@ test {
     _ = @import("parallel_lock.zig");
     _ = @import("private_abi.zig");
     _ = @import("wasm/decode.zig");
+    _ = @import("wasm/exec.zig");
     _ = @import("wasm/types.zig");
     _ = @import("wasm/validate.zig");
 }
