@@ -760,7 +760,127 @@ fn splatLaneBits(value: u64, width: u8, count: u8) u128 {
     return vector;
 }
 
-fn executeSimdPure(s: *State, instr: types.Instr) ExecError!void {
+fn readLittle(bytes: []const u8) u64 {
+    var value: u64 = 0;
+    for (bytes, 0..) |byte, index| value |= @as(u64, byte) << @intCast(index * 8);
+    return value;
+}
+
+fn writeLittle(bytes: []u8, value: u64) void {
+    for (bytes, 0..) |*byte, index| byte.* = @truncate(value >> @intCast(index * 8));
+}
+
+fn signExtendLane(value: u64, width: u8) u64 {
+    const shift: u6 = @intCast(64 - width);
+    return @bitCast(@as(i64, @bitCast(value << shift)) >> shift);
+}
+
+fn simdMemoryRange(s: *State, inst: *Instance, memarg: types.Instr.MemArg, size: usize) ExecError![]u8 {
+    const address: u64 = popI32(s);
+    const start = address + @as(u64, memarg.offset);
+    const mem = inst.mems[0];
+    const memory_len: u64 = @intCast(mem.bytes.len);
+    if (start > memory_len or @as(u64, @intCast(size)) > memory_len - start)
+        return s.trap("out of bounds memory access");
+    const offset: usize = @intCast(start);
+    return mem.bytes[offset..][0..size];
+}
+
+fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: bool) u128 {
+    const source_size: usize = source_width / 8;
+    const lanes = bytes.len / source_size;
+    var result: u128 = 0;
+    for (0..lanes) |lane| {
+        const start = lane * source_size;
+        var value = readLittle(bytes[start..][0..source_size]);
+        if (signed) value = signExtendLane(value, source_width);
+        result = replaceLaneBits(result, @intCast(lane), target_width, value);
+    }
+    return result;
+}
+
+fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
+    const op = simdOp(instr);
+    switch (op) {
+        .v128_load => {
+            const bytes = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
+            try pushVector(s, @as(u128, readLittle(bytes[0..8])) |
+                (@as(u128, readLittle(bytes[8..16])) << 64));
+        },
+        .v128_load8x8_s, .v128_load8x8_u => try pushVector(s, loadExtended(
+            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
+            8,
+            16,
+            op == .v128_load8x8_s,
+        )),
+        .v128_load16x4_s, .v128_load16x4_u => try pushVector(s, loadExtended(
+            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
+            16,
+            32,
+            op == .v128_load16x4_s,
+        )),
+        .v128_load32x2_s, .v128_load32x2_u => try pushVector(s, loadExtended(
+            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
+            32,
+            64,
+            op == .v128_load32x2_s,
+        )),
+        .v128_load8_splat, .v128_load16_splat, .v128_load32_splat, .v128_load64_splat => {
+            const width: u8 = switch (op) {
+                .v128_load8_splat => 8,
+                .v128_load16_splat => 16,
+                .v128_load32_splat => 32,
+                .v128_load64_splat => 64,
+                else => unreachable,
+            };
+            const value = readLittle(try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, width / 8));
+            try pushVector(s, splatLaneBits(value, width, @intCast(128 / width)));
+        },
+        .v128_load32_zero, .v128_load64_zero => {
+            const size: usize = if (op == .v128_load32_zero) 4 else 8;
+            try pushVector(s, readLittle(try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, size)));
+        },
+        .v128_store => {
+            const vector = popVector(s);
+            const bytes = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
+            writeLittle(bytes[0..8], @truncate(vector));
+            writeLittle(bytes[8..16], @truncate(vector >> 64));
+        },
+        .v128_load8_lane, .v128_load16_lane, .v128_load32_lane, .v128_load64_lane => {
+            const vector = popVector(s);
+            const width: u8 = switch (op) {
+                .v128_load8_lane => 8,
+                .v128_load16_lane => 16,
+                .v128_load32_lane => 32,
+                .v128_load64_lane => 64,
+                else => unreachable,
+            };
+            const immediate = instr.imm.simd_memarg_lane;
+            const value = readLittle(try simdMemoryRange(s, inst, immediate.memarg, width / 8));
+            try pushVector(s, replaceLaneBits(vector, immediate.lane, width, value));
+        },
+        .v128_store8_lane, .v128_store16_lane, .v128_store32_lane, .v128_store64_lane => {
+            const vector = popVector(s);
+            const width: u8 = switch (op) {
+                .v128_store8_lane => 8,
+                .v128_store16_lane => 16,
+                .v128_store32_lane => 32,
+                .v128_store64_lane => 64,
+                else => unreachable,
+            };
+            const immediate = instr.imm.simd_memarg_lane;
+            writeLittle(
+                try simdMemoryRange(s, inst, immediate.memarg, width / 8),
+                laneBits(vector, immediate.lane, width),
+            );
+        },
+        else => return false,
+    }
+    return true;
+}
+
+fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
+    if (try executeSimdMemory(s, inst, instr)) return;
     const op = simdOp(instr);
     switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
@@ -1477,7 +1597,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
-            .simd => try executeSimdPure(s, instr),
+            .simd => try executeSimd(s, inst, instr),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
             .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
                 const bu = popI32(s);
@@ -3270,6 +3390,63 @@ test "wasm.exec SIMD lane movement and bitwise operations" {
     try std.testing.expectEqual(@as(u128, 0), vector_result[0].vectorBits());
     try invokeSlots(inst, 8, &.{.{ .vector = left }}, &vector_result, &diag);
     try std.testing.expectEqual(~left, vector_result[0].vectorBits());
+}
+
+test "wasm.exec SIMD memory operations preserve bits and trap atomically" {
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            ft(I32, V128),
+            ft(I32 ++ V128, ""),
+            ft(I32 ++ V128, V128),
+        }) ++
+        funcSec(&.{ 0, 1, 2, 0, 0, 1 }) ++ memSec(1, null) ++
+        codeSec(&.{
+            "\x20\x00\xFD\x00\x04\x01",
+            "\x20\x00\x20\x01\xFD\x0B\x04\x00",
+            "\x20\x00\x20\x01\xFD\x54\x00\x00\x0F",
+            "\x20\x00\xFD\x01\x03\x00",
+            "\x20\x00\xFD\x5C\x02\x00",
+            "\x20\x00\x20\x01\xFD\x58\x00\x00\x0F",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .fixed_width_simd = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    for (0..16) |index| inst.mems[0].bytes[3 + index] = @intCast(index);
+    var vector_result: [1]ValueSlot = undefined;
+    try invokeSlots(inst, 0, &.{.{ .numeric = 2 }}, &vector_result, &diag);
+    try std.testing.expectEqual(@as(u128, 0x0F0E0D0C0B0A09080706050403020100), vector_result[0].vectorBits());
+
+    const stored: u128 = 0xFEDCBA98765432100123456789ABCDEF;
+    var no_results: [0]ValueSlot = .{};
+    try invokeSlots(inst, 1, &.{ .{ .numeric = 32 }, .{ .vector = stored } }, &no_results, &diag);
+    try std.testing.expectEqual(@as(u64, @truncate(stored)), readLittle(inst.mems[0].bytes[32..40]));
+    try std.testing.expectEqual(@as(u64, @truncate(stored >> 64)), readLittle(inst.mems[0].bytes[40..48]));
+
+    inst.mems[0].bytes[20] = 0xFE;
+    try invokeSlots(inst, 2, &.{ .{ .numeric = 20 }, .{ .vector = stored } }, &vector_result, &diag);
+    try std.testing.expectEqual(replaceLaneBits(stored, 15, 8, 0xFE), vector_result[0].vectorBits());
+
+    const signed_source = [_]u8{ 0x80, 0x7F, 0xFF, 0x01, 0x00, 0x81, 0x55, 0xAA };
+    @memcpy(inst.mems[0].bytes[48..56], &signed_source);
+    try invokeSlots(inst, 3, &.{.{ .numeric = 48 }}, &vector_result, &diag);
+    try std.testing.expectEqual(loadExtended(&signed_source, 8, 16, true), vector_result[0].vectorBits());
+
+    @memcpy(inst.mems[0].bytes[64..68], &[_]u8{ 0x78, 0x56, 0x34, 0x12 });
+    try invokeSlots(inst, 4, &.{.{ .numeric = 64 }}, &vector_result, &diag);
+    try std.testing.expectEqual(@as(u128, 0x12345678), vector_result[0].vectorBits());
+
+    try invokeSlots(inst, 5, &.{ .{ .numeric = 70 }, .{ .vector = stored } }, &no_results, &diag);
+    try std.testing.expectEqual(@as(u8, @truncate(stored >> 120)), inst.mems[0].bytes[70]);
+
+    try std.testing.expectError(error.Trap, invokeSlots(inst, 0, &.{.{ .numeric = 65521 }}, &vector_result, &diag));
+    try std.testing.expectEqualStrings("out of bounds memory access", diag.message());
+    var before: [6]u8 = undefined;
+    @memcpy(&before, inst.mems[0].bytes[65530..65536]);
+    try std.testing.expectError(error.Trap, invokeSlots(inst, 1, &.{ .{ .numeric = 65530 }, .{ .vector = 0 } }, &no_results, &diag));
+    try std.testing.expectEqualSlices(u8, &before, inst.mems[0].bytes[65530..65536]);
 }
 
 test "wasm.exec conversions trunc f32 to int" {
