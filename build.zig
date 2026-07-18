@@ -810,6 +810,26 @@ pub fn build(b: *std.Build) void {
         }
         comparison_step.dependOn(&run_comparison.step);
 
+        const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "python3", "tools/wasm-threads-benchmark.py" });
+        run_wasm_threads_benchmark.addArtifactArg(comparison_zig_js);
+        run_wasm_threads_benchmark.addArtifactArg(comparison_jsc);
+        if (b.option(usize, "wasm-threads-benchmark-samples", "WebAssembly Threads samples per matrix row")) |samples| {
+            run_wasm_threads_benchmark.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+        }
+        if (b.option([]const u8, "wasm-threads-benchmark-lanes", "Comma-separated even WebAssembly Threads worker counts")) |lanes| {
+            run_wasm_threads_benchmark.addArgs(&.{ "--lanes", lanes });
+        }
+        if (b.option(bool, "wasm-threads-benchmark-quick", "Run one reduced WebAssembly Threads sample") orelse false)
+            run_wasm_threads_benchmark.addArg("--quick");
+        if (b.option([]const u8, "wasm-threads-benchmark-raw-out", "Write raw WebAssembly Threads samples to this TSV path")) |path| {
+            run_wasm_threads_benchmark.addArgs(&.{ "--raw-out", path });
+        }
+        if (b.option([]const u8, "wasm-threads-benchmark-markdown-out", "Write the WebAssembly Threads report to this Markdown path")) |path| {
+            run_wasm_threads_benchmark.addArgs(&.{ "--markdown-out", path });
+        }
+        const wasm_threads_benchmark_step = b.step("wasm-threads-benchmark", "Benchmark WebAssembly atomic and wait/notify scaling with the system-JSC boundary");
+        wasm_threads_benchmark_step.dependOn(&run_wasm_threads_benchmark.step);
+
         const install_comparison_zig_js = b.addInstallArtifact(comparison_zig_js, .{});
         const install_comparison_jsc = b.addInstallArtifact(comparison_jsc, .{});
         comparison_bin_step.dependOn(&install_comparison_zig_js.step);
@@ -818,6 +838,9 @@ pub fn build(b: *std.Build) void {
         const unsupported = b.addFail("benchmark-comparison requires the macOS system JavaScriptCore framework");
         comparison_step.dependOn(&unsupported.step);
         comparison_bin_step.dependOn(&unsupported.step);
+        const wasm_threads_unsupported = b.addFail("wasm-threads-benchmark requires the macOS system JavaScriptCore framework");
+        const wasm_threads_benchmark_step = b.step("wasm-threads-benchmark", "Benchmark WebAssembly atomic and wait/notify scaling with the system-JSC boundary");
+        wasm_threads_benchmark_step.dependOn(&wasm_threads_unsupported.step);
     }
 
     // Thread contention profile: compare the no-GIL shared-realm default against

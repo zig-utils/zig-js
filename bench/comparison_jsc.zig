@@ -32,7 +32,8 @@ extern fn JSValueToNumber(ctx: JSContextRef, value: JSValueRef, exception: [*c]J
 
 const workload_source: [:0]const u8 = @embedFile("comparison.js");
 const wasm_simd_workload_source: [:0]const u8 = @embedFile("wasm_simd_comparison.js");
-const invocation: [:0]const u8 = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
+const wasm_threads_workload_source: [:0]const u8 = @embedFile("wasm_threads_comparison.js");
+const invocation: [:0]const u8 = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
 
 const Mode = enum { single, independent_steady, independent_cold };
 
@@ -86,8 +87,14 @@ fn configure(
     jobs: usize,
     lane: usize,
 ) !void {
-    _ = try evaluate(ctx, if (std.mem.startsWith(u8, workload, "wasm_")) wasm_simd_workload_source else workload_source);
-    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
+    const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
+        wasm_threads_workload_source
+    else if (std.mem.startsWith(u8, workload, "wasm_"))
+        wasm_simd_workload_source
+    else
+        workload_source;
+    _ = try evaluate(ctx, source_bytes);
+    const source = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     }, 0);
     defer allocator.free(source);

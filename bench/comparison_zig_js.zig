@@ -16,7 +16,8 @@ const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
-const invocation = "__benchmarkSelected(__benchmarkJobs, __benchmarkLane)";
+const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
+const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
 // Every measured context uses the same process-wide production allocator.
 // libc malloc keeps reusable slabs between contexts instead of translating
 // arena/GC backing allocations into page-level mmap/munmap churn, is safe for
@@ -26,6 +27,8 @@ const benchmark_context_allocator = std.heap.c_allocator;
 
 const shared_harness =
     \\globalThis.__benchmarkRunShared = function(jobs, lanes) {
+    \\  if (globalThis.__benchmarkPrepare)
+    \\    globalThis.__benchmarkPrepare(jobs, lanes, 0, true);
     \\  var threads = [];
     \\  for (var lane = 0; lane < lanes; lane = lane + 1) {
     \\    threads.push(new Thread(globalThis.__benchmarkSelected, jobs, lane));
@@ -33,6 +36,8 @@ const shared_harness =
     \\  var checksum = 0;
     \\  for (var index = 0; index < threads.length; index = index + 1)
     \\    checksum = checksum + threads[index].join();
+    \\  if (globalThis.__benchmarkFinish)
+    \\    return globalThis.__benchmarkFinish(jobs, lanes, 0, true);
     \\  return checksum;
     \\};
 ;
@@ -86,8 +91,14 @@ fn printRow(
 }
 
 fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !void {
-    _ = try ctx.evaluate(if (std.mem.startsWith(u8, workload, "wasm_")) wasm_simd_workload_source else workload_source);
-    const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
+    const source_bytes = if (std.mem.startsWith(u8, workload, "wasm_threads_"))
+        wasm_threads_workload_source
+    else if (std.mem.startsWith(u8, workload, "wasm_"))
+        wasm_simd_workload_source
+    else
+        workload_source;
+    _ = try ctx.evaluate(source_bytes);
+    const source = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkPrepare = undefined; globalThis.__benchmarkFinish = undefined; globalThis.__benchmarkSelected = benchmarkFunction(\"{s}\"); globalThis.__benchmarkInvoke = function(jobs, lane) {{ if (globalThis.__benchmarkPrepare) globalThis.__benchmarkPrepare(jobs, 1, lane, false); var result = globalThis.__benchmarkSelected(jobs, lane); return globalThis.__benchmarkFinish ? globalThis.__benchmarkFinish(jobs, 1, lane, false) : result; }}; globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{
         workload, jobs, lane,
     });
     _ = try ctx.evaluate(source);
@@ -114,6 +125,7 @@ fn runSingle(
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
+            .threads = true,
         },
     });
     defer ctx.destroy();
@@ -134,6 +146,7 @@ fn steadyLaneMain(lane: *SteadyLane) void {
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
+            .threads = true,
         },
     }) catch {
         lane.failed.store(true, .release);
@@ -226,6 +239,7 @@ fn coldLaneMain(lane: *ColdLane) void {
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
+            .threads = true,
         },
     }) catch {
         lane.failed.store(true, .release);
@@ -299,12 +313,14 @@ fn runShared(
         .wasm_features = .{
             .nontrapping_float_to_int = true,
             .fixed_width_simd = true,
+            .threads = true,
         },
     });
     defer ctx.destroy();
     try configure(ctx, workload, jobs, 0);
     _ = try ctx.evaluate(shared_harness);
-    try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
+    if (!std.mem.eql(u8, workload, "wasm_threads_wait_notify"))
+        try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
 
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
@@ -332,6 +348,8 @@ pub fn main(init: std.process.Init) !void {
     else
         return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
+    if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
+        (mode != .shared or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
 
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
