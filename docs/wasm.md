@@ -218,9 +218,12 @@ zig build test -Dtsan=true -Dtest-filter='bounded tail recursion'
 
 Binary/validation is tracked by [#288](https://github.com/zig-utils/zig-js/issues/288)
 and frame replacement/root safety by
-[#289](https://github.com/zig-utils/zig-js/issues/289). This foundation does not
-claim the pinned proposal-script score yet; that terminal gate remains
-[#292](https://github.com/zig-utils/zig-js/issues/292).
+[#289](https://github.com/zig-utils/zig-js/issues/289). The
+[terminal command inventory](.data/wasm-tail-call-inventory.json) records every
+command in both declared proposal files. All 108 applicable commands pass; the
+remaining 11 of 119 are `assert_malformed` text-parser assertions, recorded
+individually as not applicable because the JavaScript API accepts binary
+modules only. There are no failures or runner errors.
 
 The exception-handling foundation is pinned independently to
 `WebAssembly/exception-handling@af287a73d8f3bf7ea216c10592f9e350b947c4f2`.
@@ -284,9 +287,23 @@ and the executor's normal and ThreadSanitizer runs remain 8/8. The public API
 differential compares 10 equivalent surface, descriptor, construction,
 identity, error, iteration-order, and subclassing rows against macOS system
 JavaScriptCore 22625.1.20.11.3; all rows match with digest
-`1bb603912329d2e7`. The exact proposal-script score remains the terminal
-[#292](https://github.com/zig-utils/zig-js/issues/292) gate rather than being
-inferred from these unit and differential witnesses.
+`1bb603912329d2e7`. The
+[terminal command inventory](.data/wasm-exception-handling-inventory.json)
+records every command in all four declared proposal files. All 84 applicable
+commands pass; the remaining 2 of 86 are the same explicitly identified
+text-only `assert_malformed` boundary. There are no failures or runner errors.
+
+Together the terminal profiles account for all 205 declared commands: 192
+public-JavaScript-API passes and 13 explicit text-parser N/A results. The
+inventory schema records every command's file, source line, type, execution
+mode, status, and detail. `zig build wasm-feature-profiles-check` verifies the
+proposal and WABT pins, exact declared-file sets, per-file totals, every command
+mode, and the only permitted N/A reason on ordinary CI without rerunning the
+complete corpora. The complete score was produced on macOS arm64; the binary
+decoder, validator, and portable executor have no architecture-specific path,
+while the ordinary Linux CI unit and ThreadSanitizer suites remain the
+cross-host behavior gates. This is not a claim that the complete upstream
+corpora are rerun on every host or every push.
 
 Reproduce the focused tag ownership and failure-atomicity witness with:
 
@@ -299,6 +316,19 @@ zig build test -Dtest-filter='exception-payload WebAssembly roots'
 zig build test -Dtest-filter='wasm api'
 zig build test -Dtsan=true -Dtest-filter='wasm api transports typed exceptions'
 zig build wasm-exception-jsc-diff
+```
+
+Reproduce the complete proposal scores with WABT 1.0.39 at
+`ad75c5edcdff96d73c245b57fbc07607aaca9f95`, proposal checkouts at the exact
+revisions named above, and these deliberate full-run commands:
+
+```sh
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py --profile tail-calls \
+  --spec-root /path/to/tail-call --wast2json /path/to/wast2json
+python3 tools/wasm-spec.py --profile exception-handling \
+  --spec-root /path/to/exception-handling --wast2json /path/to/wast2json
+zig build wasm-feature-profiles-check
 ```
 
 The fixed-width-SIMD foundation additionally checks in an exact
@@ -586,8 +616,9 @@ validate, instantiate, and execute through the public JavaScript API.
 Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
-scored Core 2 profile above; SIMD, Threads, exception handling, tail-call
-execution, memory64/GC, and shell-only hooks remain separate profiles.
+scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
+execution are separate scored profiles, while memory64/GC and shell-only hooks
+remain separate work.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

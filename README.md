@@ -96,9 +96,10 @@ errors**. Its checked-in [28,018-command inventory](docs/.data/wasm-core-2-struc
 accounts for 25,350 public-JavaScript-API commands, 2,087 bit-exact float
 commands, and 581 explicitly non-applicable text-format parser commands. This
 score covers sign extension, nontrapping conversions, multi-value control,
-reference types, and bulk memory/table operations; it does not claim SIMD,
-Threads, exception handling or the tail-call proposal corpus, memory64/GC, or
-shell-only hooks. Exact pins, feature-area subtotals, CI gates, and reproduction are in
+reference types, and bulk memory/table operations. SIMD, Threads, exceptions,
+and tail calls are independently pinned and scored below; memory64/GC and
+shell-only hooks remain outside this profile. Exact pins, feature-area
+subtotals, CI gates, and reproduction are in
 [WebAssembly status](docs/wasm.md).
 
 The WebAssembly tail-call proposal now has its exact pinned binary, validation,
@@ -116,8 +117,11 @@ cross-instance funcrefs, imported functions, indirect traps, and live
 externref/funcref roots are covered in normal and ThreadSanitizer runs. Binary
 and validation landed in [#288](https://github.com/zig-utils/zig-js/issues/288),
 and execution/root safety in [#289](https://github.com/zig-utils/zig-js/issues/289).
-The pinned proposal-script score remains the separate terminal
-[#292](https://github.com/zig-utils/zig-js/issues/292) gate.
+The checked-in [terminal inventory](docs/.data/wasm-tail-call-inventory.json)
+accounts for every command in both declared proposal files: **108/108
+applicable commands pass**, with **0 failures**, **0 runner errors**, and all 11
+text-format parser assertions explicitly recorded as not applicable to the
+binary JavaScript API.
 
 The exception-handling track is pinned to the finished modern proposal shape,
 not its legacy try/catch encoding. Its checked-in
@@ -142,8 +146,13 @@ payload reflection, exact import/export and rethrow identity, arbitrary
 JavaScript throws through `JSTag`, async rejection, precise-GC roots, and
 failure-atomic teardown. The broad API witness passes **34/34 tests, 0 failed,
 0 skipped, 0 leaked**, and all **10/10 equivalent public-API rows** match the
-macOS system JavaScriptCore with digest `1bb603912329d2e7`. The complete pinned
-proposal-script score remains [#292](https://github.com/zig-utils/zig-js/issues/292).
+macOS system JavaScriptCore with digest `1bb603912329d2e7`. The checked-in
+[terminal inventory](docs/.data/wasm-exception-handling-inventory.json)
+accounts for all four declared proposal files: **84/84 applicable commands
+pass**, with **0 failures**, **0 runner errors**, and both text-format parser
+assertions explicitly recorded as not applicable. Together the exception and
+tail-call profiles account for all **205 commands: 192 pass and 13 explicit
+text-only N/A**, with no hidden exclusions.
 
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
@@ -985,9 +994,8 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including exact exception/tail-call proposal
-  corpus scoring and
-  memory64/GC, plus terminal Threads host-wide stress/TSan evidence
+  from the PR-249 reference corpus, including memory64/GC, plus terminal Threads
+  host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
