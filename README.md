@@ -138,9 +138,10 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI-only changes through `b7f98611` do not execute in these benchmark
+The ABI-only changes through `1318a1e6` do not execute in these benchmark
 workloads, so the validated 1,540-sample July 17 matrix remains the latest
-score set; no unchanged benchmark was rerun for the accessor-cell slice.
+score set; no unchanged benchmark was rerun for the native ArrayBuffer-handle
+slice.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -240,7 +241,7 @@ claim that Home's or Bun's private `JSC__*`/`Bun__*` ABI is implemented.
 The separately generated
 [Home private inventory](docs/abi/home-private-7ed99c02-inventory.json) makes
 that remaining boundary concrete: **448 unique extern symbols from 58 pinned
-files**, classified as 431 private (**269 implemented / 162 pending**), 15
+files**, classified as 431 private (**272 implemented / 159 pending**), 15
 already-covered public-C overlaps, one platform import, and one
 consumer-generated `JSFunctionCall` definition, with zero duplicate or
 unclassified entries.
@@ -251,7 +252,7 @@ The first private-ABI foundation is implemented without changing engine values:
 `private_abi.EncodedValue` translates primitives to the pinned eight-byte JSC64
 encoding (including exact int32/double/NaN/cell rules), while rejecting
 string/object conversion until a validated external cell handle exists.
-The first 269 private exports—encoded identity/cell equality, truthiness,
+The first 272 private exports—encoded identity/cell equality, truthiness,
 int32 extraction, exact signed/unsigned 64-bit BigInt construction, and
 modulo-2^64 BigInt extraction with pinned number fallbacks, plus exact `===` and
 SameValue equality, two exact cell-type queries, six opaque BigInt cell
@@ -277,6 +278,7 @@ one explicit uninitialized Uint8Array allocator,
 two generic no-copy ArrayBuffer/TypedArray adopters,
 one validated no-copy shared-memfd ArrayBuffer/Uint8Array importer,
 one exact JSValue-to-ArrayBuffer view projection,
+three independently retained native ArrayBuffer backing-handle operations,
 one VM-owned exact `typeof`-string projection,
 seven array/index operations, including revalidated contiguous vectors, and
 two packed/hole JSArray constructors, full ECMAScript ToNumber coercion, and
@@ -367,6 +369,16 @@ descriptor, never copies the slice, and unmaps the complete original region
 exactly once on construction failure, precise collection, or realm teardown.
 Invalid descriptors, ranges, sizes, and result tags return empty without a
 partial owner or a replacement exception. The
+[`IDLArrayBufferRef` contract](docs/abi/array-buffer-handle-contract.json)
+implements the pinned `RefPtr<JSC::ArrayBuffer>` producer and `leakRef()`
+transfer as an independently reference-counted backing handle. Its bytes
+outlive the JavaScript wrapper, realm, and VM; atomic `ref`/`deref` operations
+cannot underflow or steal wrapper/tracking ownership; external storage runs its
+callback exactly once after the final owner; and `asBunArrayBuffer` fills the
+exact 40-byte borrowed projection with stable pointer, length, shared, and
+resizable state. The generated fixture covers required, optional, and union
+consumer fields, explicit clone/drop, live resize, teardown, over-release, and
+shared/external storage. The
 ToNumber boundary preserves all primitive conversions, runs ordinary
 object-to-primitive hooks in spec order, distinguishes ordinary NaN from
 exceptional NaN, throws for Symbol/BigInt, accepts same-VM sibling values, and
@@ -547,7 +559,7 @@ stable descriptor identity across sibling realms and callback-triggered GC.
 It visits own string/Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and the non-enumerable special cases, clears
 property-read failures where JSC does, and stops immediately on a callback-published
-exception. The 270/270 compiled fixture covers data and every accessor shape,
+exception. The 274/274 compiled fixture covers data and every accessor shape,
 C-class accessors, proxies, Symbols, filtering, reentry, GC, and foreign inputs.
 ZigString JSON parsing now constructs selected-realm values from every tagged
 string form. Syntax failures are returned as cleared SyntaxError values exactly
@@ -598,7 +610,7 @@ Promise await and transparent forwarding chains. The walker preserves existing
 or materialized stacks, honors the selected realm's `Error.stackTraceLimit`,
 stops at combinators/settled links or after 32 transparent hops per frame, and
 keeps activation links precise across GC without retaining completed work. The
-270-symbol combined fixture covers sibling realms, foreign-VM rejection,
+274-symbol combined fixture covers sibling realms, foreign-VM rejection,
 callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
@@ -612,12 +624,12 @@ The [full private `JSType` layout](docs/abi/private-jstype-layouts.json) proves
 that Home has 97 members while Bun has 98: Bun's one inserted tag renumbers 70
 later members. `-Dprivate-abi-consumer=home|bun` selects the exact layout, and
 separately compiled fixtures pass 20 real cell kinds for each, including exact
-GetterSetter and CustomGetterSetter tags. All 269 private exports remain
+GetterSetter and CustomGetterSetter tags. All 272 private exports remain
 excluded from the 117-function public count and 19
 extensions.
 The separate pinned
 [Bun core inventory](docs/abi/bun-private-core-4982b91e-inventory.json) contains
-437 symbols from 54 `src/jsc` files: 421 private (**261 implemented / 160
+437 symbols from 54 `src/jsc` files: 421 private (**264 implemented / 157
 pending**), 15 public overlaps, and one consumer-generated `JSFunctionCall`
 definition. Its exact comparison with Home finds 434
 shared names, 3 Bun-only names, 14 Home-only names, and 28 changed signatures;

@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (269 implemented, 162 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (272 implemented, 159 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 269 private entries are implemented; the other 162 remain pending
+The first 272 private entries are implemented; the other 159 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -320,6 +320,20 @@ projection without touching stale bytes. Invalid and foreign cells leave the
 caller output unchanged, and an existing VM exception blocks projection
 without being replaced.
 
+The pinned [`IDLArrayBufferRef` contract](array-buffer-handle-contract.json)
+follows Home and Bun's `RefPtr<JSC::ArrayBuffer>` conversion through the
+generated producer's `leakRef()` transfer. The resulting backing handle has
+atomic, independently bounded external references and separate wrapper and VM
+tracking ownership, so its storage can outlive the JavaScript wrapper, realm,
+and VM without an over-`deref` stealing another ownership domain. Owned bytes
+resize in place at the handle boundary, shared storage retains shared identity,
+and external storage invokes its callback exactly once after the final owner.
+`asBunArrayBuffer` fills the exact 40-byte record with stable pointer/length
+pairs plus the shared and resizable flags. The generated fixture adopts the
+producer through required, optional, and union fields and covers explicit
+clone/drop, resize, teardown, over-release, renewed references, and last-owner
+external finalization.
+
 The private `typeof` projection returns the exact JavaScriptCore small-string
 classification for every encoded primitive and cell: `undefined`, `boolean`,
 `number`, `string`, `symbol`, `bigint`, `function`, or `object`. Null remains
@@ -485,7 +499,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 270/270 compiled fixture additionally
+sibling realms, GC, and reentry; the 274/274 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -703,7 +717,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 270-symbol
+the same frame/script identity and own every returned string. The 274-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -748,7 +762,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (261 implemented, 160 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (264 implemented, 157 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -765,5 +779,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 160
+not claim complete Bun runtime compatibility; #164 remains open for the 157
 pending core entries and later wider/generated profiles.
