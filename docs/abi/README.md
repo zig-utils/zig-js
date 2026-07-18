@@ -497,8 +497,8 @@ foreign rejection, capacity truncation, and explicit string release.
 pending Promises point to exact suspended async frames and transparent parent
 links, while queued reactions retain activations only until delivery. The
 bounded walker follows direct awaits and each plain forwarding segment for at
-most 32 hops,
-stops at combinators/settled links, respects realm `Error.stackTraceLimit`, and
+most 32 hops, stops at combinators/settled links, respects realm
+`Error.stackTraceLimit`, and
 never overwrites an existing or materialized stack or pending VM exception.
 Focused coverage includes nested awaits, source positions, sibling realms, GC,
 hop/limit boundaries, forwarding, and link clearing on completion.

@@ -306,9 +306,8 @@ targets.
 pending async-await chains. Promise links retain only suspended activations,
 survive GC and settlement-to-microtask handoff, follow each transparent
 return/then forwarding segment for at most 32 hops, and stop at combinators or
-settled/invalid links.
-It preserves existing/materialized stacks and pending exceptions while honoring
-the selected realm's `Error.stackTraceLimit`.
+settled/invalid links. It preserves existing/materialized stacks and pending
+exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 421 private symbols,
 of which 257 shims are implemented and 164 remain pending. Its

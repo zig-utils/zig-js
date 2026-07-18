@@ -575,10 +575,9 @@ recover exact async function, source, and suspension positions from pending
 Promise await and transparent forwarding chains. The walker preserves existing
 or materialized stacks, honors the selected realm's `Error.stackTraceLimit`,
 stops at combinators/settled links or after 32 transparent hops per frame, and
-keeps activation links precise
-across GC without retaining completed work. The 262-symbol combined fixture covers
-sibling realms, foreign-VM rejection, callback
-reentrancy, exception clearing, and already-settled targets.
+keeps activation links precise across GC without retaining completed work. The
+262-symbol combined fixture covers sibling realms, foreign-VM rejection,
+callback reentrancy, exception clearing, and already-settled targets.
 The BigInt cell gate downcasts only real owned cells, compares arbitrary-size
 values exactly against i64/u64/f64 (including 2^53, subnormal, infinity, and 10^400
 boundaries), performs signed modulo-2^64 extraction without lossy double
