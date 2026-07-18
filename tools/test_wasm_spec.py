@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -98,9 +99,23 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn('__last.exports["throw"]()', generated)
         self.assertNotIn("WebAssembly.RuntimeError", generated)
 
+    def test_module_definition_compiles_without_instantiating(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = pathlib.Path(raw_directory)
+            (directory / "huge.wasm").write_bytes(b"\0asm\1\0\0\0")
+            generated = wasm_spec.generate_command(0, {
+                "type": "module_definition",
+                "line": 8,
+                "filename": "huge.wasm",
+            }, directory)
+        self.assertIn("new WebAssembly.Module", generated)
+        self.assertNotIn("new WebAssembly.Instance", generated)
+
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
         exceptions = wasm_spec.PROFILES["exception-handling"]
+        memory64 = wasm_spec.PROFILES["memory64"]
+        gc = wasm_spec.PROFILES["gc"]
         self.assertEqual(tail["default_files"], [
             "return_call.wast",
             "return_call_indirect.wast",
@@ -115,6 +130,13 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertEqual(
             exceptions["converter_args"],
             ["--enable-exceptions", "--enable-tail-call"],
+        )
+        self.assertEqual(len(memory64["default_files"]), 23)
+        self.assertEqual(memory64["converter_args"], ["--enable-memory64"])
+        self.assertEqual(len(gc["default_files"]), 18)
+        self.assertEqual(
+            gc["converter_args"],
+            ["--enable-function-references", "--enable-gc"],
         )
 
 

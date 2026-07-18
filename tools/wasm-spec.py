@@ -144,6 +144,48 @@ PROFILES = {
         "default_files": ["tag.wast", "throw.wast", "throw_ref.wast", "try_table.wast"],
         "converter_args": ["--enable-exceptions", "--enable-tail-call"],
     },
+    "memory64": {
+        "kind": "webassembly_memory64_runtime_inventory",
+        "repository": "https://github.com/WebAssembly/memory64.git",
+        "tag": "proposal-revision",
+        "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "memory64",
+        "features": ["memory64"],
+        "corpus_glob": "test/core/*.wast",
+        "default_files": [
+            "address64.wast", "align64.wast", "call_indirect.wast",
+            "endianness64.wast", "float_memory64.wast", "imports.wast",
+            "load64.wast", "memory64.wast", "memory_copy.wast",
+            "memory_fill.wast", "memory_grow64.wast", "memory_init.wast",
+            "memory_redundancy64.wast", "memory_trap64.wast", "table.wast",
+            "table_copy.wast", "table_copy_mixed.wast", "table_fill.wast",
+            "table_get.wast", "table_grow.wast", "table_init.wast",
+            "table_set.wast", "table_size.wast",
+        ],
+        "converter_args": ["--enable-memory64"],
+    },
+    "gc": {
+        "kind": "webassembly_gc_runtime_inventory",
+        "repository": "https://github.com/WebAssembly/gc.git",
+        "tag": "proposal-revision",
+        "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "gc",
+        "features": ["typed_function_references", "gc"],
+        "corpus_glob": "test/core/gc/*.wast",
+        "default_files": [
+            "array.wast", "array_copy.wast", "array_fill.wast",
+            "array_init_data.wast", "array_init_elem.wast",
+            "array_new_data.wast", "array_new_elem.wast", "binary-gc.wast",
+            "br_on_cast.wast", "br_on_cast_fail.wast", "extern.wast",
+            "i31.wast", "ref_cast.wast", "ref_eq.wast", "ref_test.wast",
+            "struct.wast", "type-subtyping-invalid.wast", "type-subtyping.wast",
+        ],
+        "converter_args": ["--enable-function-references", "--enable-gc"],
+    },
 }
 
 
@@ -730,6 +772,17 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{{try{{__last=new WebAssembly.Instance(new WebAssembly.Module({binary}),__registry);"
                 f"{assign_name}{passed}}}catch(__error){{{failed}}}}}"
             )
+        if kind == "module_definition":
+            binary = binary_expression(directory / command["filename"])
+            passed = record_line(index, command, "pass")
+            failed = (
+                f"__record({index},{int(command.get('line', 0))},{js_string(kind)},"
+                "'fail',__message(__error));"
+            )
+            return (
+                f"{{try{{new WebAssembly.Module({binary});{passed}"
+                f"}}catch(__error){{{failed}}}}}"
+            )
         if kind == "register":
             source = (
                 f"__modules[{js_string(command['name'])}]"
@@ -899,9 +952,10 @@ def run_file(
     directory = work_root / stem
     directory.mkdir()
     json_path = directory / f"{stem}.json"
-    if evaluator_profile == "threads" and ("(thread" in wast.read_text() or "(wait" in wast.read_text()):
+    source = wast.read_text()
+    if evaluator_profile == "threads" and ("(thread" in source or "(wait" in source):
         try:
-            document = compile_thread_script(wast.read_text(), converter, converter_args, directory)
+            document = compile_thread_script(source, converter, converter_args, directory)
         except WastSyntaxError as error:
             detail = str(error)
             return {
@@ -917,8 +971,17 @@ def run_file(
                 }],
             }
     else:
+        definition_lines = {
+            line_number
+            for line_number, line in enumerate(source.splitlines(), 1)
+            if "(module definition" in line
+        }
+        converter_input = wast
+        if definition_lines:
+            converter_input = directory / wast.name
+            converter_input.write_text(source.replace("(module definition", "(module           "))
         converted = subprocess.run(
-            [str(converter), *converter_args, str(wast), "-o", str(json_path)],
+            [str(converter), *converter_args, str(converter_input), "-o", str(json_path)],
             text=True,
             capture_output=True,
         )
@@ -937,6 +1000,9 @@ def run_file(
                 }],
             }
         document = json.loads(json_path.read_text())
+        for command in document["commands"]:
+            if command.get("type") == "module" and command.get("line") in definition_lines:
+                command["type"] = "module_definition"
     script_path = directory / f"{stem}.js"
     script_path.write_text(generate_script(document, directory))
     try:
@@ -1015,6 +1081,10 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "tail_calls"
     if profile_name == "exception-handling":
         return "exception_handling"
+    if profile_name == "memory64":
+        return "memory64"
+    if profile_name == "gc":
+        return "gc"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -1071,6 +1141,8 @@ def main() -> int:
         "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
         "tail-calls": ROOT / "docs/.data/wasm-tail-call-inventory.json",
         "exception-handling": ROOT / "docs/.data/wasm-exception-handling-inventory.json",
+        "memory64": ROOT / "docs/.data/wasm-memory64-runtime-inventory.json",
+        "gc": ROOT / "docs/.data/wasm-gc-runtime-inventory.json",
     }
     inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
