@@ -248,16 +248,20 @@ pub const Instance = struct {
 // ---------------------------------------------------------------------------
 
 pub fn createMemory(gpa: Allocator, min_pages: u32, max_pages: ?u32) error{OutOfMemory}!*MemoryInst {
-    return createMemoryTyped(gpa, min_pages, max_pages, false);
+    return createMemoryTyped(gpa, min_pages, if (max_pages) |value| value else null, false);
 }
 
-pub fn createMemoryTyped(gpa: Allocator, min_pages: u32, max_pages: ?u32, shared: bool) error{OutOfMemory}!*MemoryInst {
+pub fn createMemoryTyped(gpa: Allocator, min_pages: u64, max_pages: ?u64, shared: bool) error{OutOfMemory}!*MemoryInst {
     const m = try gpa.create(MemoryInst);
     errdefer gpa.destroy(m);
-    const initial_len = @as(usize, min_pages) * types.PAGE_SIZE;
+    const initial_len_u64 = std.math.mul(u64, min_pages, types.PAGE_SIZE) catch return error.OutOfMemory;
+    if (initial_len_u64 > std.math.maxInt(usize)) return error.OutOfMemory;
+    const initial_len: usize = @intCast(initial_len_u64);
     if (shared) {
         const max = max_pages orelse return error.OutOfMemory;
-        const storage = try SharedBufferStorage.create(initial_len, @as(usize, max) * types.PAGE_SIZE);
+        const max_len_u64 = std.math.mul(u64, max, types.PAGE_SIZE) catch return error.OutOfMemory;
+        if (max_len_u64 > std.math.maxInt(usize)) return error.OutOfMemory;
+        const storage = try SharedBufferStorage.create(initial_len, @intCast(max_len_u64));
         m.* = .{
             .local_bytes = &.{},
             .shared_storage = storage,
@@ -332,14 +336,15 @@ pub fn memoryGrow(mem: *MemoryInst, delta: u32) i32 {
 }
 
 pub fn createTable(gpa: Allocator, initial: u32, max: ?u32) error{OutOfMemory}!*TableInst {
-    return createTableTyped(gpa, .funcref, initial, max);
+    return createTableTyped(gpa, .funcref, initial, if (max) |value| value else null);
 }
 
-pub fn createTableTyped(gpa: Allocator, elem_type: types.ValType, initial: u32, max: ?u32) error{OutOfMemory}!*TableInst {
+pub fn createTableTyped(gpa: Allocator, elem_type: types.ValType, initial: u64, max: ?u64) error{OutOfMemory}!*TableInst {
     const t = try gpa.create(TableInst);
     errdefer gpa.destroy(t);
+    if (initial > std.math.maxInt(usize)) return error.OutOfMemory;
     t.* = .{
-        .elems = try gpa.alloc(ValueSlot, initial),
+        .elems = try gpa.alloc(ValueSlot, @intCast(initial)),
         .type = elem_type,
         .limits = .{ .min = initial, .max = max },
         .gpa = gpa,
@@ -2429,9 +2434,10 @@ fn indirectCallable(
     return callable;
 }
 
-fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u32, size: u64) ExecError!usize {
-    const ea = @as(u64, addr) + offset;
-    if (ea + size > mem.bytes().len) return s.trap("out of bounds memory access");
+fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u64, size: u64) ExecError!usize {
+    const ea = std.math.add(u64, addr, offset) catch return s.trap("out of bounds memory access");
+    const end = std.math.add(u64, ea, size) catch return s.trap("out of bounds memory access");
+    if (end > mem.bytes().len) return s.trap("out of bounds memory access");
     return @intCast(ea);
 }
 

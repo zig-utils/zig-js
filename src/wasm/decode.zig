@@ -191,6 +191,28 @@ const Reader = struct {
         return result;
     }
 
+    /// Normative unsigned 64-bit LEB128. Memory64 uses this encoding for all
+    /// limits and memarg offsets, including memory32 values whose validator
+    /// subsequently constrains them to the i32 address range.
+    fn readU64Leb(self: *Reader) DecodeError!u64 {
+        const start = self.offset();
+        var result: u64 = 0;
+        var shift: u6 = 0;
+        var i: u32 = 0;
+        while (true) {
+            const b = try self.readU8();
+            if (i == 9) {
+                if (b & 0x80 != 0) return self.failAt(start, "integer representation too long", .{});
+                if (b & 0x7E != 0) return self.failAt(start, "integer too large", .{});
+            }
+            result |= @as(u64, b & 0x7F) << shift;
+            if (b & 0x80 == 0) break;
+            shift += 7;
+            i += 1;
+        }
+        return result;
+    }
+
     /// Signed LEB128 of `bits`-bit range; unused high bits of the last byte
     /// must be a sign-extension of the value's sign bit.
     fn readSignedLeb(self: *Reader, comptime bits: u32) DecodeError!i64 {
@@ -312,73 +334,45 @@ const Reader = struct {
 
     const LimitsKind = enum { table, memory };
 
-    fn readLimits(self: *Reader, kind: LimitsKind) DecodeError!types.Limits {
+    const DecodedLimits = struct {
+        address: types.AddressType,
+        limits: types.Limits,
+        shared: bool,
+    };
+
+    fn readLimits(self: *Reader, kind: LimitsKind) DecodeError!DecodedLimits {
         const flag_off = self.offset();
         const flag = try self.readU8();
-        switch (flag) {
-            0x00 => {
-                const min_off = self.offset();
-                const min = try self.readU32Leb();
-                if (kind == .memory and min > types.MAX_PAGES)
-                    return self.failAt(min_off, "memory size must be at most 65536 pages (4GiB)", .{});
-                return .{ .min = min };
-            },
-            0x01 => {
-                const min_off = self.offset();
-                const min = try self.readU32Leb();
-                if (kind == .memory and min > types.MAX_PAGES)
-                    return self.failAt(min_off, "memory size must be at most 65536 pages (4GiB)", .{});
-                const max_off = self.offset();
-                const max = try self.readU32Leb();
-                if (kind == .memory and max > types.MAX_PAGES)
-                    return self.failAt(max_off, "memory size must be at most 65536 pages (4GiB)", .{});
-                if (max < min)
-                    return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
-                return .{ .min = min, .max = max };
-            },
-            else => {
-                if (kind == .memory and flag >= 0x02 and flag <= 0x07) {
-                    if (flag & 0x02 != 0 and !self.features.threads)
-                        return self.unsupportedFeature(flag_off, .threads);
-                    if (flag & 0x04 != 0 and !self.features.memory64)
-                        return self.unsupportedFeature(flag_off, .memory64);
-                    return self.unsupportedFeature(flag_off, if (flag & 0x04 != 0) .memory64 else .threads);
-                }
-                return self.failAt(flag_off, "unsupported limits flag", .{});
-            },
-        }
+        if (flag > 0x07) return self.failAt(flag_off, "unsupported limits flag", .{});
+        const shared = flag & 0x02 != 0;
+        const address: types.AddressType = if (flag & 0x04 != 0) .i64 else .i32;
+        if (shared and kind == .table) return self.failAt(flag_off, "unsupported limits flag", .{});
+        if (shared and !self.features.threads) return self.unsupportedFeature(flag_off, .threads);
+        if (address == .i64 and !self.features.memory64) return self.unsupportedFeature(flag_off, .memory64);
+
+        const min_off = self.offset();
+        const min = try self.readU64Leb();
+        const limit = if (kind == .memory) address.maxMemoryPages() else address.maxTableElements();
+        if (min > limit) return if (kind == .memory)
+            self.failAt(min_off, "memory size exceeds address type limit", .{})
+        else
+            self.failAt(min_off, "table size exceeds address type limit", .{});
+        const maximum = if (flag & 0x01 != 0) blk: {
+            const max_off = self.offset();
+            const max = try self.readU64Leb();
+            if (max > limit) return if (kind == .memory)
+                self.failAt(max_off, "memory size exceeds address type limit", .{})
+            else
+                self.failAt(max_off, "table size exceeds address type limit", .{});
+            if (max < min) return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
+            break :blk max;
+        } else null;
+        return .{ .address = address, .limits = .{ .min = min, .max = maximum }, .shared = shared };
     }
 
     fn readMemoryType(self: *Reader) DecodeError!types.MemType {
-        const flag_off = self.offset();
-        const flag = try self.readU8();
-        if (flag & 0x04 != 0) {
-            if (flag & 0x02 != 0 and !self.features.threads)
-                return self.unsupportedFeature(flag_off, .threads);
-            if (!self.features.memory64)
-                return self.unsupportedFeature(flag_off, .memory64);
-            return self.unsupportedFeature(flag_off, .memory64);
-        }
-        if (flag > 0x03)
-            return self.failAt(flag_off, "unsupported limits flag", .{});
-        const shared = flag & 0x02 != 0;
-        if (shared and !self.features.threads)
-            return self.unsupportedFeature(flag_off, .threads);
-
-        const min_off = self.offset();
-        const min = try self.readU32Leb();
-        if (min > types.MAX_PAGES)
-            return self.failAt(min_off, "memory size must be at most 65536 pages (4GiB)", .{});
-        const maximum = if (flag & 0x01 != 0) blk: {
-            const max_off = self.offset();
-            const max = try self.readU32Leb();
-            if (max > types.MAX_PAGES)
-                return self.failAt(max_off, "memory size must be at most 65536 pages (4GiB)", .{});
-            if (max < min)
-                return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
-            break :blk max;
-        } else null;
-        return .{ .limits = .{ .min = min, .max = maximum }, .shared = shared };
+        const decoded = try self.readLimits(.memory);
+        return .{ .address = decoded.address, .limits = decoded.limits, .shared = decoded.shared };
     }
 
     fn readTableType(self: *Reader) DecodeError!types.TableType {
@@ -390,7 +384,8 @@ const Reader = struct {
             return self.unsupportedFeature(et_off, .exception_handling);
         if (elem == .externref and !self.features.reference_types)
             return self.unsupportedFeature(et_off, .reference_types);
-        return .{ .elem = elem, .limits = try self.readLimits(.table) };
+        const decoded = try self.readLimits(.table);
+        return .{ .address = decoded.address, .elem = elem, .limits = decoded.limits };
     }
 
     fn readGlobalType(self: *Reader) DecodeError!types.GlobalType {
@@ -946,7 +941,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     .none => instr.imm = .{ .simd = simd_op },
                     .memarg => instr.imm = .{ .simd_memarg = .{ .op = simd_op, .memarg = .{
                         .align_ = try r.readU32Leb(),
-                        .offset = try r.readU32Leb(),
+                        .offset = try r.readU64Leb(),
                     } } },
                     .v128 => instr.imm = .{ .simd_v128 = .{
                         .op = simd_op,
@@ -960,7 +955,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     .lane => instr.imm = .{ .simd_lane = .{ .op = simd_op, .lane = try r.readU8() } },
                     .memarg_lane => instr.imm = .{ .simd_memarg_lane = .{
                         .op = simd_op,
-                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU32Leb() },
+                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU64Leb() },
                         .lane = try r.readU8(),
                     } },
                 }
@@ -972,7 +967,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 switch (atomic_op.immediate()) {
                     .memarg => instr.imm = .{ .atomic_memarg = .{
                         .op = atomic_op,
-                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU32Leb() },
+                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU64Leb() },
                     } },
                     .fence => {
                         const reserved_off = r.offset();
@@ -987,7 +982,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 if (v >= 0x28 and v <= 0x3E) {
                     instr.imm = .{ .memarg = .{
                         .align_ = try r.readU32Leb(),
-                        .offset = try r.readU32Leb(),
+                        .offset = try r.readU64Leb(),
                     } };
                 }
             },
@@ -1290,7 +1285,7 @@ test "wasm.decode malformed declarations" {
     // Limits flag 0x03 is shared memory with a maximum.
     try expectMalformed(hdr ++ "\x05\x02\x01\x03", 11, "WebAssembly feature threads is disabled");
     // Memory min 65537 pages.
-    try expectMalformed(hdr ++ "\x05\x05\x01\x00\x81\x80\x04", 12, "memory size must be at most 65536 pages (4GiB)");
+    try expectMalformed(hdr ++ "\x05\x05\x01\x00\x81\x80\x04", 12, "memory size exceeds address type limit");
     // Memory max < min.
     try expectMalformed(hdr ++ "\x05\x04\x01\x01\x02\x01", 13, "size minimum must not be greater than maximum");
     // Table max < min.
@@ -1347,6 +1342,49 @@ test "wasm.decode threads shared limits and atomic immediates" {
         18,
         "invalid 0xfe subopcode",
     );
+}
+
+test "wasm.decode memory64 limits table64 and u64 memarg offsets" {
+    const offset_4g = "\x80\x80\x80\x80\x10";
+    const bytes = comptime (hdr ++
+        func_sec_1 ++
+        testSection(4, "\x01\x70\x05\x01\x82\x01") ++
+        testSection(5, "\x01\x05\x01\x82\x01") ++
+        testCode("\x42\x00\x28\x02" ++ offset_4g ++ "\x0B"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .memory64 = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    try std.testing.expectEqual(types.AddressType.i64, mod.tables[0].address);
+    try std.testing.expectEqualDeep(types.Limits{ .min = 1, .max = 130 }, mod.tables[0].limits);
+    try std.testing.expectEqual(types.AddressType.i64, mod.mems[0].address);
+    try std.testing.expectEqualDeep(types.Limits{ .min = 1, .max = 130 }, mod.mems[0].limits);
+    try std.testing.expectEqual(@as(u64, 0x1_0000_0000), mod.code[0].instrs[1].imm.memarg.offset);
+}
+
+test "wasm.decode memory64 feature gates and malformed u64 limits" {
+    try expectMalformed(
+        comptime (hdr ++ testSection(5, "\x01\x04\x01")),
+        11,
+        "WebAssembly feature memory64 is disabled",
+    );
+    try expectMalformed(
+        comptime (hdr ++ testSection(4, "\x01\x70\x04\x01")),
+        12,
+        "WebAssembly feature memory64 is disabled",
+    );
+
+    const too_long = comptime (hdr ++ testSection(
+        5,
+        "\x01\x04\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x00",
+    ));
+    try expectMalformedWithFeatures(too_long, .{ .memory64 = true }, 12, "integer representation too long");
+
+    const too_many_pages = comptime (hdr ++ testSection(
+        5,
+        "\x01\x04\x81\x80\x80\x80\x80\x80\x40",
+    ));
+    try expectMalformedWithFeatures(too_many_pages, .{ .memory64 = true }, 12, "memory size exceeds address type limit");
 }
 
 test "wasm.decode malformed code bodies" {

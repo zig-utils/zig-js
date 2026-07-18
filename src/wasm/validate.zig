@@ -81,7 +81,7 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
                     return failModFmt(diag, "unknown table {d}", .{active.table});
                 if (mod.tableType(active.table).elem != e.type)
                     return failMod(diag, "type mismatch");
-                try checkConstExpr(mod, active.offset, .i32, diag);
+                try checkConstExpr(mod, active.offset, mod.tableType(active.table).address.valType(), diag);
             },
             .passive, .declarative => {},
         }
@@ -94,7 +94,7 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
             .active => |active| {
                 if (active.mem >= mod.totalMems())
                     return failModFmt(diag, "unknown memory {d}", .{active.mem});
-                try checkConstExpr(mod, active.offset, .i32, diag);
+                try checkConstExpr(mod, active.offset, mod.memoryType(active.mem).address.valType(), diag);
             },
             .passive => {},
         }
@@ -418,10 +418,20 @@ const FuncValidator = struct {
         }
     }
 
-    fn memAccess(self: *FuncValidator, memarg: types.Instr.MemArg, log2_bytes: u32) Error!void {
+    fn memAddressType(self: *FuncValidator, memidx: u32) Error!types.ValType {
+        if (memidx >= self.mod.totalMems())
+            return if (memidx == 0) self.fail("unknown memory 0") else self.fail("unknown memory");
+        return self.mod.memoryType(memidx).address.valType();
+    }
+
+    fn memAccess(self: *FuncValidator, memarg: types.Instr.MemArg, log2_bytes: u32) Error!types.ValType {
         if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
+        const address = self.mod.memoryType(0).address;
+        if (address == .i32 and memarg.offset > std.math.maxInt(u32))
+            return self.fail("memory offset exceeds address type");
         if (memarg.align_ > log2_bytes)
             return self.fail("alignment must not be larger than natural");
+        return address.valType();
     }
 
     fn callFunc(self: *FuncValidator, ft: types.FuncType) Error!void {
@@ -466,8 +476,10 @@ const FuncValidator = struct {
 
     fn validateSimd(self: *FuncValidator, instr: types.Instr) Error!void {
         const decoded = simdDecoded(instr);
-        if (decoded.memarg) |memarg|
-            try self.memAccess(memarg, simd_meta.naturalAlignment(decoded.op).?);
+        const address_type = if (decoded.memarg) |memarg|
+            try self.memAccess(memarg, simd_meta.naturalAlignment(decoded.op).?)
+        else
+            types.ValType.i32;
         if (decoded.lane) |lane|
             if (lane >= simd_meta.laneLimit(decoded.op).?) return self.fail("invalid lane index");
         if (decoded.shuffle) |lanes|
@@ -475,16 +487,16 @@ const FuncValidator = struct {
 
         switch (simd_meta.shape(decoded.op)) {
             .load => {
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.v128);
             },
             .store, .lane_store => {
                 try self.popExpect(.v128);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
             },
             .lane_load => {
                 try self.popExpect(.v128);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.v128);
             },
             .const_ => self.push(.v128),
@@ -569,66 +581,67 @@ const FuncValidator = struct {
 
     fn validateAtomic(self: *FuncValidator, instr: types.Instr) Error!void {
         const decoded = atomicDecoded(instr);
+        var address_type: types.ValType = .i32;
         if (decoded.memarg) |memarg| {
-            if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
+            address_type = try self.memAccess(memarg, decoded.op.naturalAlignment().?);
             if (memarg.align_ != decoded.op.naturalAlignment().?)
                 return self.fail("atomic alignment must be natural");
         }
         switch (decoded.op.shape()) {
             .notify => {
                 try self.popExpect(.i32);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .wait32 => {
                 try self.popExpect(.i64);
                 try self.popExpect(.i32);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .wait64 => {
                 try self.popExpect(.i64);
                 try self.popExpect(.i64);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .fence => {},
             .load_i32 => {
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .load_i64 => {
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i64);
             },
             .store_i32 => {
                 try self.popExpect(.i32);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
             },
             .store_i64 => {
                 try self.popExpect(.i64);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
             },
             .rmw_i32 => {
                 try self.popExpect(.i32);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .rmw_i64 => {
                 try self.popExpect(.i64);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i64);
             },
             .cmpxchg_i32 => {
                 try self.popExpect(.i32);
                 try self.popExpect(.i32);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i32);
             },
             .cmpxchg_i64 => {
                 try self.popExpect(.i64);
                 try self.popExpect(.i64);
-                try self.popExpect(.i32);
+                try self.popExpect(address_type);
                 self.push(.i64);
             },
         }
@@ -746,7 +759,7 @@ const FuncValidator = struct {
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
                     if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).address.valType());
                     try self.callFunc(self.mod.types[tidx]);
                 },
                 .return_call_indirect => {
@@ -756,7 +769,7 @@ const FuncValidator = struct {
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
                     if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
                     if (tidx >= self.mod.types.len) return self.fail("unknown type");
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).address.valType());
                     try self.tailCallFunc(self.mod.types[tidx]);
                 },
                 .drop => _ = try self.pop(),
@@ -811,7 +824,7 @@ const FuncValidator = struct {
                     const tableidx = instr.imm.idx;
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).address.valType());
                     self.push(stackVal(self.mod.tableType(tableidx).elem));
                 },
                 .table_set => {
@@ -819,7 +832,7 @@ const FuncValidator = struct {
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
                     try self.popExpect(self.mod.tableType(tableidx).elem);
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(tableidx).address.valType());
                 },
                 .ref_null => self.push(stackVal(instr.imm.type)),
                 .ref_is_null => {
@@ -837,22 +850,24 @@ const FuncValidator = struct {
                     const tableidx = instr.imm.idx;
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    try self.popExpect(.i32);
+                    const address_type = self.mod.tableType(tableidx).address.valType();
+                    try self.popExpect(address_type);
                     try self.popExpect(self.mod.tableType(tableidx).elem);
-                    self.push(.i32);
+                    self.push(stackVal(address_type));
                 },
                 .table_size => {
                     if (instr.imm.idx >= self.mod.totalTables())
                         return if (instr.imm.idx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    self.push(.i32);
+                    self.push(stackVal(self.mod.tableType(instr.imm.idx).address.valType()));
                 },
                 .table_fill => {
                     const tableidx = instr.imm.idx;
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    try self.popExpect(.i32);
+                    const address_type = self.mod.tableType(tableidx).address.valType();
+                    try self.popExpect(address_type);
                     try self.popExpect(self.mod.tableType(tableidx).elem);
-                    try self.popExpect(.i32);
+                    try self.popExpect(address_type);
                 },
                 .memory_init => {
                     const immediate = instr.imm.indices;
@@ -861,7 +876,7 @@ const FuncValidator = struct {
                     if (immediate.second >= self.mod.totalMems()) return self.fail("unknown memory");
                     try self.popExpect(.i32);
                     try self.popExpect(.i32);
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.memoryType(immediate.second).address.valType());
                 },
                 .data_drop => {
                     if (self.mod.data_count == null) return self.fail("data count section required");
@@ -871,15 +886,18 @@ const FuncValidator = struct {
                     const immediate = instr.imm.indices;
                     if (immediate.first >= self.mod.totalMems() or immediate.second >= self.mod.totalMems())
                         return self.fail("unknown memory");
-                    try self.popExpect(.i32);
-                    try self.popExpect(.i32);
-                    try self.popExpect(.i32);
+                    const destination = self.mod.memoryType(immediate.first).address;
+                    const source = self.mod.memoryType(immediate.second).address;
+                    try self.popExpect(types.AddressType.min(destination, source).valType());
+                    try self.popExpect(source.valType());
+                    try self.popExpect(destination.valType());
                 },
                 .memory_fill => {
                     if (instr.imm.idx >= self.mod.totalMems()) return self.fail("unknown memory");
+                    const address_type = self.mod.memoryType(instr.imm.idx).address.valType();
+                    try self.popExpect(address_type);
                     try self.popExpect(.i32);
-                    try self.popExpect(.i32);
-                    try self.popExpect(.i32);
+                    try self.popExpect(address_type);
                 },
                 .table_init => {
                     const immediate = instr.imm.indices;
@@ -889,7 +907,7 @@ const FuncValidator = struct {
                         return self.fail("type mismatch");
                     try self.popExpect(.i32);
                     try self.popExpect(.i32);
-                    try self.popExpect(.i32);
+                    try self.popExpect(self.mod.tableType(immediate.second).address.valType());
                 },
                 .elem_drop => {
                     if (instr.imm.idx >= self.mod.elems.len) return self.fail("unknown element segment");
@@ -900,30 +918,32 @@ const FuncValidator = struct {
                         return self.fail("unknown table");
                     if (self.mod.tableType(immediate.first).elem != self.mod.tableType(immediate.second).elem)
                         return self.fail("type mismatch");
-                    try self.popExpect(.i32);
-                    try self.popExpect(.i32);
-                    try self.popExpect(.i32);
+                    const destination = self.mod.tableType(immediate.first).address;
+                    const source = self.mod.tableType(immediate.second).address;
+                    try self.popExpect(types.AddressType.min(destination, source).valType());
+                    try self.popExpect(source.valType());
+                    try self.popExpect(destination.valType());
                 },
                 .i32_load, .i64_load, .f32_load, .f64_load, .i32_load8_s, .i32_load8_u, .i32_load16_s, .i32_load16_u, .i64_load8_s, .i64_load8_u, .i64_load16_s, .i64_load16_u, .i64_load32_s, .i64_load32_u => {
                     const info = memInfo(instr.op);
-                    try self.memAccess(instr.imm.memarg, info.log2_bytes);
-                    try self.popExpect(.i32);
+                    const address_type = try self.memAccess(instr.imm.memarg, info.log2_bytes);
+                    try self.popExpect(address_type);
                     self.push(stackVal(info.t));
                 },
                 .i32_store, .i64_store, .f32_store, .f64_store, .i32_store8, .i32_store16, .i64_store8, .i64_store16, .i64_store32 => {
                     const info = memInfo(instr.op);
-                    try self.memAccess(instr.imm.memarg, info.log2_bytes);
+                    const address_type = try self.memAccess(instr.imm.memarg, info.log2_bytes);
                     try self.popExpect(info.t);
-                    try self.popExpect(.i32);
+                    try self.popExpect(address_type);
                 },
                 .memory_size => {
-                    if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
-                    self.push(.i32);
+                    const address_type = try self.memAddressType(0);
+                    self.push(stackVal(address_type));
                 },
                 .memory_grow => {
-                    if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
-                    try self.popExpect(.i32);
-                    self.push(.i32);
+                    const address_type = try self.memAddressType(0);
+                    try self.popExpect(address_type);
+                    self.push(stackVal(address_type));
                 },
                 .i32_const => self.push(.i32),
                 .i64_const => self.push(.i64),
@@ -1100,6 +1120,64 @@ test "wasm.validate threads shared limits and atomic signatures" {
         sec(1, "\x01\x60\x03\x7F\x7F\x7E\x01\x7F") ++ func0 ++ mem1 ++
         code1("\x20\x00\x20\x01\x20\x02\xFE\x01\x02\x00\x0B"));
     try expectValidWithFeatures(wait_unshared, features);
+}
+
+test "wasm.validate memory64 memory instructions and offsets" {
+    const features: types.Features = .{ .memory64 = true };
+    const memory64 = comptime sec(5, "\x01\x04\x01");
+    const offset_4g = "\x80\x80\x80\x80\x10";
+
+    const load = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7E\x01\x7F") ++ func0 ++ memory64 ++
+        code1("\x20\x00\x28\x02" ++ offset_4g ++ "\x0B"));
+    try expectValidWithFeatures(load, features);
+
+    const wrong_load_address = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++ memory64 ++
+        code1("\x20\x00\x28\x02\x00\x0B"));
+    try expectInvalidAtWithFeatures(wrong_load_address, features, 0, 1, "type mismatch");
+
+    const memory32_wide_offset = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++ mem1 ++
+        code1("\x20\x00\x28\x02" ++ offset_4g ++ "\x0B"));
+    try expectInvalidAt(memory32_wide_offset, 0, 1, "memory offset exceeds address type");
+
+    const size = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x01\x7E") ++ func0 ++ memory64 ++ code1("\x3F\x00\x0B"));
+    try expectValidWithFeatures(size, features);
+
+    const grow = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7E\x01\x7E") ++ func0 ++ memory64 ++
+        code1("\x20\x00\x40\x00\x0B"));
+    try expectValidWithFeatures(grow, features);
+}
+
+test "wasm.validate memory64 table instructions and active offsets" {
+    const features: types.Features = .{ .memory64 = true };
+    const table64 = comptime sec(4, "\x01\x70\x04\x01");
+    const memory64 = comptime sec(5, "\x01\x04\x01");
+
+    const table_size = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x01\x7E") ++ func0 ++ table64 ++ code1("\xFC\x10\x00\x0B"));
+    try expectValidWithFeatures(table_size, .{ .memory64 = true, .reference_types = true });
+
+    const indirect = comptime (hdr ++ type_void ++ func0 ++ table64 ++
+        code1("\x42\x00\x11\x00\x00\x0B"));
+    try expectValidWithFeatures(indirect, features);
+
+    const wrong_indirect_address = comptime (hdr ++ type_void ++ func0 ++ table64 ++
+        code1("\x41\x00\x11\x00\x00\x0B"));
+    try expectInvalidAtWithFeatures(wrong_indirect_address, features, 0, 1, "type mismatch");
+
+    const active_data = comptime (hdr ++ memory64 ++ sec(11, "\x01\x00\x42\x00\x0B\x00"));
+    try expectValidWithFeatures(active_data, features);
+    const wrong_data_offset = comptime (hdr ++ memory64 ++ sec(11, "\x01\x00\x41\x00\x0B\x00"));
+    try expectInvalidWithFeatures(wrong_data_offset, features, "type mismatch");
+
+    const active_element = comptime (hdr ++ table64 ++ sec(9, "\x01\x00\x42\x00\x0B\x00"));
+    try expectValidWithFeatures(active_element, features);
+    const wrong_element_offset = comptime (hdr ++ table64 ++ sec(9, "\x01\x00\x41\x00\x0B\x00"));
+    try expectInvalidWithFeatures(wrong_element_offset, features, "type mismatch");
 }
 
 /// Module-level failure: message + no_offset.

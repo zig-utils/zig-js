@@ -8,6 +8,7 @@ const simd = @import("simd.zig");
 
 pub const PAGE_SIZE: u32 = 65536;
 pub const MAX_PAGES: u32 = 65536; // 4 GiB
+pub const MAX_PAGES64: u64 = 1 << 48;
 
 pub const Feature = enum {
     sign_extension_ops,
@@ -159,9 +160,41 @@ pub const BlockType = union(enum) {
     }
 };
 
+pub const AddressType = enum {
+    i32,
+    i64,
+
+    pub fn valType(self: AddressType) ValType {
+        return switch (self) {
+            .i32 => .i32,
+            .i64 => .i64,
+        };
+    }
+
+    pub fn maxMemoryPages(self: AddressType) u64 {
+        return switch (self) {
+            .i32 => MAX_PAGES,
+            .i64 => MAX_PAGES64,
+        };
+    }
+
+    pub fn maxTableElements(self: AddressType) u64 {
+        return switch (self) {
+            .i32 => std.math.maxInt(u32),
+            .i64 => std.math.maxInt(u64),
+        };
+    }
+
+    /// The bulk copy length uses the narrower of the source and destination
+    /// address types.
+    pub fn min(a: AddressType, b: AddressType) AddressType {
+        return if (a == .i32 or b == .i32) .i32 else .i64;
+    }
+};
+
 pub const Limits = struct {
-    min: u32,
-    max: ?u32 = null,
+    min: u64,
+    max: ?u64 = null,
 };
 
 pub const FuncType = struct {
@@ -187,11 +220,13 @@ pub const Tag = struct {
 };
 
 pub const TableType = struct {
+    address: AddressType = .i32,
     elem: ValType = .funcref,
     limits: Limits,
 };
 
 pub const MemType = struct {
+    address: AddressType = .i32,
     limits: Limits,
     shared: bool = false,
 };
@@ -347,7 +382,7 @@ pub const Instr = struct {
 
     pub const MemArg = struct {
         align_: u32,
-        offset: u32,
+        offset: u64,
     };
 
     pub const CallIndirect = struct {

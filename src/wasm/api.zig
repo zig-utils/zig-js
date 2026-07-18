@@ -622,7 +622,8 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     const proto = try constructedPrototype(self, native.proto);
     const store = try storeFor(self);
 
-    const mem = try exec.createMemoryTyped(store.gpa, initial, maximum, shared);
+    const maximum64: ?u64 = if (maximum) |limit| limit else null;
+    const mem = try exec.createMemoryTyped(store.gpa, initial, maximum64, shared);
     errdefer exec.destroyMemory(store.gpa, mem);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
@@ -706,7 +707,8 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     const proto = try constructedPrototype(self, native.proto);
     const fill = try tableRefFromValue(self, store, elem_type, if (args.len > 1) args[1] else Value.nul());
 
-    const table = try exec.createTableTyped(store.gpa, elem_type, initial, maximum);
+    const maximum64: ?u64 = if (maximum) |limit| limit else null;
+    const table = try exec.createTableTyped(store.gpa, elem_type, initial, maximum64);
     errdefer exec.destroyTable(store.gpa, table);
     @memset(table.elems, fill.slot);
     const refs = try allocateTableRefs(store, initial, fill.value);
