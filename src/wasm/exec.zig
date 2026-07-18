@@ -215,6 +215,20 @@ pub const DataSegmentInst = struct {
     dropped: bool,
 };
 
+const GcAggregateKind = enum { struct_, array };
+
+/// Stable Wasm GC identity. Objects and their slot arrays are individually
+/// owned so publication into the instance list happens only after every
+/// allocation succeeds. Fields may point across instances; the owner pointer
+/// keeps tracing and future moving-GC rewriting explicit at every boundary.
+pub const GcObject = struct {
+    owner: *Instance,
+    type_index: u32,
+    kind: GcAggregateKind,
+    fields: []ValueSlot,
+    next: ?*GcObject = null,
+};
+
 pub const Imports = struct {
     funcs: []const ImportFunc = &.{}, // in import declaration order, per kind
     tables: []const *TableInst = &.{},
@@ -243,7 +257,40 @@ pub const Instance = struct {
     arena: std.heap.ArenaAllocator,
     root_hooks: ?RootHooks = null,
     function_host: ?FunctionHost = null,
+    gc_objects: ?*GcObject = null,
+    gc_object_count: usize = 0,
+    gc_object_lock: std.atomic.Mutex = .unlocked,
 };
+
+fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fields: []const ValueSlot) error{OutOfMemory}!*GcObject {
+    const owned_fields = try inst.gpa.dupe(ValueSlot, fields);
+    errdefer inst.gpa.free(owned_fields);
+    const object = try inst.gpa.create(GcObject);
+    object.* = .{
+        .owner = inst,
+        .type_index = type_index,
+        .kind = kind,
+        .fields = owned_fields,
+    };
+    while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    object.next = inst.gc_objects;
+    inst.gc_objects = object;
+    inst.gc_object_count += 1;
+    inst.gc_object_lock.unlock();
+    return object;
+}
+
+fn destroyGcAggregates(inst: *Instance) void {
+    var current = inst.gc_objects;
+    inst.gc_objects = null;
+    inst.gc_object_count = 0;
+    while (current) |object| {
+        const next = object.next;
+        inst.gpa.free(object.fields);
+        inst.gpa.destroy(object);
+        current = next;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Host-side constructors
@@ -803,6 +850,7 @@ pub fn destroyInstance(gpa: Allocator, inst: *Instance) void {
     for (inst.globals[mod.imported_globals..]) |g| destroyGlobal(gpa, g);
     for (inst.tags[mod.imported_tags..]) |tag| destroyTag(gpa, tag);
     destroyExceptions(gpa, inst);
+    destroyGcAggregates(inst);
     inst.arena.deinit();
     gpa.destroy(inst);
 }
@@ -6069,6 +6117,41 @@ test "wasm.exec GC i31 equality and non-null scalar operations" {
     try std.testing.expectEqual(@as(u64, 1), result[0]);
     try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &.{}, &diag));
     try std.testing.expectEqualStrings("null reference", diag.message());
+}
+
+fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(gpa) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = gpa,
+        .arena = std.heap.ArenaAllocator.init(gpa),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+
+    const first = try createGcAggregate(&inst, 3, .struct_, &.{.{ .gcref = null }});
+    const second = try createGcAggregate(&inst, 7, .array, &.{.{ .gcref = @ptrCast(first) }});
+    first.fields[0] = .{ .gcref = @ptrCast(second) };
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    try std.testing.expect(first.owner == &inst and second.owner == &inst);
+    try std.testing.expect(first.fields[0].gcref == @as(*anyopaque, @ptrCast(second)));
+    try std.testing.expect(second.fields[0].gcref == @as(*anyopaque, @ptrCast(first)));
+}
+
+test "wasm.exec GC aggregate allocation is failure atomic and cycle safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseGcAggregateAllocation,
+        .{},
+    );
 }
 
 test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {
