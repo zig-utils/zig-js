@@ -61,6 +61,16 @@ pub const WasmException = struct {
     published: bool = false,
 };
 
+pub const WasmGcMarkValueFn = *const fn (*anyopaque, Value) void;
+
+/// Type-erased tracing header embedded in every runtime-owned Wasm GC
+/// aggregate. Core GC can precisely visit nested JavaScript references
+/// without importing the WebAssembly executor (or knowing its object layout).
+pub const WasmGcRef = struct {
+    context: *anyopaque,
+    trace: *const fn (*WasmGcRef, *anyopaque, WasmGcMarkValueFn) void,
+};
+
 pub const WasmSlot = union(enum) {
     numeric: u64,
     vector: u128,
@@ -69,8 +79,9 @@ pub const WasmSlot = union(enum) {
     externref: Value,
     /// Unboxed low 31 bits for the Wasm GC i31 hierarchy.
     i31ref: u32,
-    /// Struct/array identity. The concrete header is runtime-owned.
-    gcref: ?*anyopaque,
+    /// Struct/array identity. The concrete aggregate remains runtime-owned;
+    /// this header exposes only precise host-GC tracing.
+    gcref: ?*WasmGcRef,
 
     pub fn numericBits(self: WasmSlot) u64 {
         return switch (self) {

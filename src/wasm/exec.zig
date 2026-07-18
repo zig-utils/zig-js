@@ -222,13 +222,70 @@ const GcAggregateKind = enum { struct_, array };
 /// allocation succeeds. Fields may point across instances; the owner pointer
 /// keeps tracing and future moving-GC rewriting explicit at every boundary.
 pub const GcObject = struct {
+    trace_ref: js_value.WasmGcRef,
     owner: *Instance,
     type_index: u32,
     kind: GcAggregateKind,
     fields: []ValueSlot,
     next: ?*GcObject = null,
     mark_epoch: u32 = 0,
+    host_trace_epoch: u64 = 0,
+    host_trace_next: ?*GcObject = null,
 };
+
+var gc_host_trace_lock: std.atomic.Mutex = .unlocked;
+var gc_host_trace_epoch = std.atomic.Value(u64).init(0);
+
+fn gcObjectRef(object: *GcObject) *js_value.WasmGcRef {
+    return &object.trace_ref;
+}
+
+fn gcObjectFromRef(reference: *js_value.WasmGcRef) *GcObject {
+    return @ptrCast(@alignCast(reference.context));
+}
+
+/// Walks arbitrary-depth aggregate graphs without allocating or recursing.
+/// A dedicated trace lock protects the intrusive scratch links; field reads
+/// still use each owning instance's mutation lock.
+fn traceGcReference(
+    reference: *js_value.WasmGcRef,
+    visitor: *anyopaque,
+    mark_value: js_value.WasmGcMarkValueFn,
+) void {
+    while (!gc_host_trace_lock.tryLock()) std.atomic.spinLoopHint();
+    defer gc_host_trace_lock.unlock();
+
+    var epoch = gc_host_trace_epoch.fetchAdd(1, .monotonic) +% 1;
+    if (epoch == 0) {
+        epoch = gc_host_trace_epoch.fetchAdd(1, .monotonic) +% 1;
+        if (epoch == 0) epoch = 1;
+    }
+    const first = gcObjectFromRef(reference);
+    first.host_trace_epoch = epoch;
+    first.host_trace_next = null;
+    var worklist: ?*GcObject = first;
+    while (worklist) |object| {
+        worklist = object.host_trace_next;
+        object.host_trace_next = null;
+        const owner = object.owner;
+        while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+        for (object.fields) |slot| switch (slot) {
+            .externref => |child| mark_value(visitor, child),
+            .exnref => |exception| if (exception) |ex|
+                for (ex.externrefs) |child| mark_value(visitor, child),
+            .gcref => |child_ref| if (child_ref) |child_header| {
+                const child = gcObjectFromRef(child_header);
+                if (child.host_trace_epoch != epoch) {
+                    child.host_trace_epoch = epoch;
+                    child.host_trace_next = worklist;
+                    worklist = child;
+                }
+            },
+            .numeric, .vector, .funcref, .i31ref => {},
+        };
+        owner.gc_object_lock.unlock();
+    }
+}
 
 const GcRootRegistration = struct {
     roots: *js_value.WasmExecutionRoots,
@@ -280,11 +337,11 @@ pub const Instance = struct {
 /// Stable external root indirection. A moving collector rewrites `object`
 /// without changing the handle held by a JavaScript/embedding wrapper.
 pub fn retainGcReference(slot: ValueSlot) error{OutOfMemory}!?*GcRootHandle {
-    const raw = switch (slot) {
+    const reference = switch (slot) {
         .gcref => |value| value orelse return null,
         else => return null,
     };
-    const object: *GcObject = @ptrCast(@alignCast(raw));
+    const object = gcObjectFromRef(reference);
     const owner = object.owner;
     const handle = try owner.gpa.create(GcRootHandle);
     handle.* = .{ .owner = owner, .object = object };
@@ -315,6 +372,7 @@ fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fi
     errdefer inst.gpa.free(owned_fields);
     const object = try inst.gpa.create(GcObject);
     object.* = .{
+        .trace_ref = .{ .context = @ptrCast(object), .trace = traceGcReference },
         .owner = inst,
         .type_index = type_index,
         .kind = kind,
@@ -353,11 +411,11 @@ fn markGcSlot(
     epoch: u32,
     worklist: *std.ArrayListUnmanaged(*GcObject),
 ) error{OutOfMemory}!void {
-    const raw = switch (slot) {
+    const reference = switch (slot) {
         .gcref => |value| value orelse return,
         else => return,
     };
-    const object: *GcObject = @ptrCast(@alignCast(raw));
+    const object = gcObjectFromRef(reference);
     if (object.owner != inst or object.mark_epoch == epoch) return;
     object.mark_epoch = epoch;
     try worklist.append(inst.gpa, object);
@@ -386,7 +444,7 @@ fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error
     for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist);
     var external_root = inst.gc_external_roots;
     while (external_root) |handle| : (external_root = handle.next)
-        try markGcSlot(inst, .{ .gcref = @ptrCast(handle.object) }, epoch, &worklist);
+        try markGcSlot(inst, .{ .gcref = gcObjectRef(handle.object) }, epoch, &worklist);
     var registration = inst.gc_active_roots;
     while (registration) |active| : (registration = active.next) {
         for (active.roots.stack) |slot| try markGcSlot(inst, slot, epoch, &worklist);
@@ -1228,8 +1286,8 @@ fn slotIsNull(slot: WasmSlot) bool {
 }
 
 fn gcObjectFromSlot(s: *State, slot: WasmSlot) ExecError!*GcObject {
-    const raw = slot.gcref orelse return s.trap("null reference");
-    return @ptrCast(@alignCast(raw));
+    const reference = slot.gcref orelse return s.trap("null reference");
+    return gcObjectFromRef(reference);
 }
 
 fn gcReferenceMatches(inst: *const Instance, slot: WasmSlot, target: types.RefType) bool {
@@ -1237,7 +1295,7 @@ fn gcReferenceMatches(inst: *const Instance, slot: WasmSlot, target: types.RefTy
     return switch (slot) {
         .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
         .gcref => |raw| blk: {
-            const object: *GcObject = @ptrCast(@alignCast(raw.?));
+            const object = gcObjectFromRef(raw.?);
             if (target.heap.concreteIndex() != null) {
                 if (object.owner != inst) break :blk false;
                 break :blk validate.heapTypeMatches(
@@ -1324,7 +1382,7 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             } else for (structure.fields, fields) |field, *slot|
                 slot.* = zeroSlot(field.storage.unpacked());
             const object = try createGcAggregate(inst, type_index, .struct_, fields);
-            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+            try pushSlot(s, .{ .gcref = gcObjectRef(object) });
         },
         .struct_get, .struct_get_s, .struct_get_u => {
             const immediate = instr.imm.gc_type_field;
@@ -1374,7 +1432,7 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
                 @memset(fields, initial);
             }
             const object = try createGcAggregate(inst, immediate.first, .array, fields);
-            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+            try pushSlot(s, .{ .gcref = gcObjectRef(object) });
         },
         .array_new_data, .array_new_elem => {
             const count = popI32(s);
@@ -1399,7 +1457,7 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
                 @memcpy(fields, elems[range.start..range.end]);
             }
             const object = try createGcAggregate(inst, immediate.first, .array, fields);
-            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+            try pushSlot(s, .{ .gcref = gcObjectRef(object) });
         },
         .array_get, .array_get_s, .array_get_u => {
             const index = popI32(s);
@@ -6582,22 +6640,37 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     defer inst.arena.deinit();
     defer destroyGcAggregates(&inst);
 
+    var js_child = js_value.Object{};
     const first = try createGcAggregate(&inst, 3, .struct_, &.{.{ .gcref = null }});
-    const second = try createGcAggregate(&inst, 7, .array, &.{.{ .gcref = @ptrCast(first) }});
-    first.fields[0] = .{ .gcref = @ptrCast(second) };
-    _ = try createGcAggregate(&inst, 9, .struct_, &.{});
+    const second = try createGcAggregate(&inst, 7, .array, &.{.{ .gcref = gcObjectRef(first) }});
+    first.fields[0] = .{ .gcref = gcObjectRef(second) };
+    const third = try createGcAggregate(&inst, 9, .struct_, &.{
+        .{ .externref = js_value.Value.obj(&js_child) },
+        .{ .gcref = gcObjectRef(first) },
+    });
     try std.testing.expectEqual(@as(usize, 3), inst.gc_object_count);
     try std.testing.expect(first.owner == &inst and second.owner == &inst);
-    try std.testing.expect(first.fields[0].gcref == @as(*anyopaque, @ptrCast(second)));
-    try std.testing.expect(second.fields[0].gcref == @as(*anyopaque, @ptrCast(first)));
-    const active_slots = [_]ValueSlot{.{ .gcref = @ptrCast(first) }};
+    try std.testing.expect(first.fields[0].gcref == gcObjectRef(second));
+    try std.testing.expect(second.fields[0].gcref == gcObjectRef(first));
+    const TraceProbe = struct {
+        marked: ?*js_value.Object = null,
+
+        fn mark(raw: *anyopaque, child: js_value.Value) void {
+            const probe: *@This() = @ptrCast(@alignCast(raw));
+            if (child.isObject()) probe.marked = child.asObj();
+        }
+    };
+    var trace_probe: TraceProbe = .{};
+    third.trace_ref.trace(&third.trace_ref, @ptrCast(&trace_probe), TraceProbe.mark);
+    try std.testing.expectEqual(&js_child, trace_probe.marked);
+    const active_slots = [_]ValueSlot{.{ .gcref = gcObjectRef(first) }};
     var active_roots: js_value.WasmExecutionRoots = .{ .stack = &active_slots };
     var registration: GcRootRegistration = .{ .roots = &active_roots };
     inst.gc_active_roots = &registration;
     try std.testing.expectEqual(@as(usize, 1), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
     inst.gc_active_roots = null;
-    const external_root = (try retainGcReference(.{ .gcref = @ptrCast(first) })).?;
+    const external_root = (try retainGcReference(.{ .gcref = gcObjectRef(first) })).?;
     try std.testing.expectEqual(@as(usize, 0), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
     releaseGcReference(external_root);
