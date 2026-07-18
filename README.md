@@ -119,6 +119,16 @@ and execution/root safety in [#289](https://github.com/zig-utils/zig-js/issues/2
 The pinned proposal-script score remains the separate terminal
 [#292](https://github.com/zig-utils/zig-js/issues/292) gate.
 
+The exception-handling track is pinned to the finished modern proposal shape,
+not its legacy try/catch encoding. Its checked-in
+[binary inventory](docs/.data/wasm-exception-handling-opcodes.json) locks
+`exnref` (`0x69`), tag section 13, tag import/export kind 4, `throw` (`0x08`),
+`throw_ref` (`0x0a`), `try_table` (`0x1f`), all four catch-clause encodings,
+their validation rules, and 86 top-level commands across the four dedicated
+proposal files. Core decoding, validation, and unwinding remain tracked by
+[#290](https://github.com/zig-utils/zig-js/issues/290); this inventory alone
+does not claim execution support or a corpus score.
+
 The opt-in fixed-width SIMD profile is complete across its pinned official
 proposal corpus. All **25,466 / 25,466 applicable commands pass** in all 56
 files, with **0 failures**, **0 runner errors**, and all 510 text-format parser

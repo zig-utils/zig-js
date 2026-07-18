@@ -222,6 +222,20 @@ and frame replacement/root safety by
 claim the pinned proposal-script score yet; that terminal gate remains
 [#292](https://github.com/zig-utils/zig-js/issues/292).
 
+The exception-handling foundation is pinned independently to
+`WebAssembly/exception-handling@af287a73d8f3bf7ea216c10592f9e350b947c4f2`.
+Its [machine-readable binary inventory](.data/wasm-exception-handling-opcodes.json)
+locks the finished proposal's `exnref` value type, tag section and external
+kind, `throw`, `throw_ref`, and `try_table` instructions, and the four ordered
+catch-clause encodings with exact immediate fields. It also inventories 86
+top-level commands across `tag.wast`, `throw.wast`, `throw_ref.wast`, and
+`try_table.wast`, including each command and source-surface occurrence count.
+This deliberately excludes the obsolete legacy try/catch/rethrow/delegate
+encoding. Run `zig build wasm-feature-profiles-check` to verify the proposal
+pin and inventory facts. Decoder, validator, linker, unwinder, and root-safety
+implementation remains [#290](https://github.com/zig-utils/zig-js/issues/290),
+so this inventory does not claim runtime support or a proposal score yet.
+
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
 `WebAssembly/simd` revision. Its verifier locks the 56-file corpus count,
