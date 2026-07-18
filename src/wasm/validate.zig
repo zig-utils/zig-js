@@ -262,6 +262,27 @@ const FuncValidator = struct {
         }
     }
 
+    /// Check a type sequence against the current operands without consuming or
+    /// concretizing polymorphic-bottom values. Used by br_table, whose targets
+    /// all inspect the same pre-branch stack.
+    fn checkTypes(self: *FuncValidator, values: []const types.ValType) Error!void {
+        const f = &self.frames[self.fr_len - 1];
+        var cursor = self.op_len;
+        var i = values.len;
+        while (i > 0) {
+            i -= 1;
+            const actual: StackVal = if (cursor == f.height) blk: {
+                if (!f.unreach) return self.fail("type mismatch");
+                break :blk .unknown;
+            } else blk: {
+                cursor -= 1;
+                break :blk self.opds[cursor];
+            };
+            if (actual != .unknown and actual != stackVal(values[i]))
+                return self.fail("type mismatch");
+        }
+    }
+
     fn pushTypes(self: *FuncValidator, values: []const types.ValType) void {
         for (values) |value| self.push(stackVal(value));
     }
@@ -396,16 +417,20 @@ const FuncValidator = struct {
                 .br_table => {
                     const bt = instr.imm.br_table;
                     try self.popExpect(.i32);
-                    // Every target (including default) must be a valid label,
-                    // and all must share one branch arity and result type.
+                    // Validate each target against the same operand stack.
+                    // Rechecking the target operands preserves concrete type
+                    // agreement on reachable paths, while the
+                    // polymorphic bottom after `unreachable` can meet labels
+                    // with different result types as Core 2 permits.
                     const def = try self.target(bt.default);
-                    for (bt.targets) |t| _ = try self.target(t);
                     for (bt.targets) |t| {
-                        const tf = self.frames[self.fr_len - 1 - t];
-                        if (!std.mem.eql(types.ValType, tf.branchTypes(), def.branchTypes()))
+                        const target_frame = try self.target(t);
+                        const branch_types = target_frame.branchTypes();
+                        if (branch_types.len != def.branchTypes().len)
                             return self.fail("type mismatch");
+                        try self.checkTypes(branch_types);
                     }
-                    try self.popTypes(def.branchTypes());
+                    try self.checkTypes(def.branchTypes());
                     self.setUnreachable();
                 },
                 .return_ => {
@@ -947,6 +972,21 @@ test "wasm.validate br_table arity mismatch" {
     const bytes = comptime (hdr ++ type_void ++ func0 ++
         code1("\x02\x7F\x02\x40\x41\x00\x0E\x01\x00\x01\x0B\x0B\x0B"));
     try expectInvalidAt(bytes, 0, 3, "type mismatch");
+}
+
+test "wasm.validate br_table accepts polymorphic bottom across result types" {
+    const bytes = comptime (hdr ++ type_void ++ func0 ++ code1("\x02\x7C" ++ // block (result f64)
+        "\x02\x7D" ++ // block (result f32)
+        "\x00" ++ // unreachable: polymorphic bottom
+        "\x41\x01" ++ // br_table selector
+        "\x0E\x02\x00\x01\x01" ++ // targets inner/outer, default outer
+        "\x0B" ++ // inner end
+        "\x1A" ++ // drop f32
+        "\x44\x00\x00\x00\x00\x00\x00\x00\x00" ++ // f64.const 0
+        "\x0B" ++ // outer end
+        "\x1A" ++ // drop f64
+        "\x0B"));
+    try expectValid(bytes);
 }
 
 test "wasm.validate if with result requires else" {
