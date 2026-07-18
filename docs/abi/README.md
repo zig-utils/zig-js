@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (285 implemented, 146 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (286 implemented, 145 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 285 private entries are implemented; the other 146 remain pending
+The first 286 private entries are implemented; the other 145 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 287/287 compiled fixture additionally
+sibling realms, GC, and reentry; the 288/288 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -608,6 +608,16 @@ fixture covers armed-state sharing across sibling realms, foreign-VM isolation,
 null tolerance, recursive reentry, cross-thread exclusion, and a real 30ms
 interruption of an unbounded loop attributed to the watchdog through the
 termination request.
+
+The process-wide default-timezone boundary mirrors `WTF::setTimeZoneOverride`:
+empty input clears the override, unknown names return false without disturbing
+state, and accepted names are case-normalized, alias-resolved, and stored in
+canonical IANA form exactly like the engine's Intl pipeline. The override
+supplies the default zone for `Intl.DateTimeFormat` — and therefore
+`Date#toLocaleString` — and for `Temporal.Now`, while explicit options keep
+precedence; foreign context groups observe the same process-wide zone, and the
+pinned date-cache reset is vacuous because zig-js caches none. zig-js `Date`
+local-time methods remain UTC-coincident by engine design.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -764,7 +774,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 287-symbol
+the same frame/script identity and own every returned string. The 288-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -809,7 +819,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (277 implemented, 144 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (278 implemented, 143 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
