@@ -59,6 +59,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-tail-call-opcodes.json",
     )
     parser.add_argument(
+        "--exception-handling-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-exception-handling-opcodes.json",
+    )
+    parser.add_argument(
         "--simd-movement-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
@@ -222,6 +227,58 @@ def main() -> int:
     require(
         sum(sum(entry.get("commands", {}).values()) for entry in corpus_files) == 119,
         "tail-call inventory: command breakdown drift",
+    )
+
+    exception_feature = next(feature for feature in features if feature["id"] == "exception_handling")
+    exception_inventory = json.loads(args.exception_handling_inventory.read_text())
+    require(exception_inventory.get("schema_version") == 1, "exception inventory: unsupported schema version")
+    require(exception_inventory.get("kind") == "webassembly_exception_handling_binary_inventory", "exception inventory: invalid kind")
+    exception_source = exception_inventory.get("source", {})
+    require(exception_source.get("repository") == exception_feature["repository"], "exception inventory/registry repository drift")
+    require(exception_source.get("commit") == exception_feature["commit"], "exception inventory/registry commit drift")
+    require(exception_source.get("corpus_files") == 4, "exception inventory: expected 4 corpus files")
+    require(exception_inventory.get("value_types") == [{"name": "exnref", "byte": 0x69, "reference": True}], "exception inventory: exnref drift")
+    require(
+        [(entry.get("name"), entry.get("id"), entry.get("order_after"), entry.get("order_before")) for entry in exception_inventory.get("sections", [])]
+        == [("tag", 13, "memory", "global")],
+        "exception inventory: tag section drift",
+    )
+    require(
+        [(entry.get("name"), entry.get("byte")) for entry in exception_inventory.get("external_kinds", [])]
+        == [("tag", 4)],
+        "exception inventory: external kind drift",
+    )
+    require(
+        [(entry.get("name"), entry.get("opcode"), entry.get("immediate")) for entry in exception_inventory.get("opcodes", [])]
+        == [("throw", 0x08, "tag_index"), ("throw_ref", 0x0A, "none"), ("try_table", 0x1F, "block_type_catch_vector")],
+        "exception inventory: opcode map drift",
+    )
+    require(
+        [(entry.get("name"), entry.get("kind"), entry.get("binary_fields")) for entry in exception_inventory.get("catch_clauses", [])]
+        == [
+            ("catch", 0, ["tag_index:u32", "label_index:u32"]),
+            ("catch_ref", 1, ["tag_index:u32", "label_index:u32"]),
+            ("catch_all", 2, ["label_index:u32"]),
+            ("catch_all_ref", 3, ["label_index:u32"]),
+        ],
+        "exception inventory: catch-clause drift",
+    )
+    exception_corpus = exception_inventory.get("corpus", {})
+    exception_files = exception_corpus.get("files", [])
+    require(exception_corpus.get("top_level_commands") == 86, "exception inventory: expected 86 corpus commands")
+    require(
+        [(entry.get("path"), entry.get("top_level_commands")) for entry in exception_files]
+        == [
+            ("test/core/tag.wast", 4),
+            ("test/core/throw.wast", 13),
+            ("test/core/throw_ref.wast", 15),
+            ("test/core/try_table.wast", 54),
+        ],
+        "exception inventory: corpus file/count drift",
+    )
+    require(
+        sum(sum(entry.get("commands", {}).values()) for entry in exception_files) == 86,
+        "exception inventory: command breakdown drift",
     )
 
     movement = json.loads(args.simd_movement_inventory.read_text())

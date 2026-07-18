@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_exception_handling_binary_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/exception-handling.git",
+    "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+    "binary_instruction_document": "document/core/binary/instructions.rst",
+    "binary_module_document": "document/core/binary/modules.rst",
+    "binary_type_document": "document/core/binary/types.rst",
+    "validation_document": "document/core/valid/instructions.rst",
+    "corpus_root": "test/core",
+    "corpus_files": 4,
+    "document_license": "W3C Software and Document Notice and License",
+    "corpus_license": "Apache-2.0"
+  },
+  "value_types": [
+    {
+      "name": "exnref",
+      "byte": 105,
+      "reference": true
+    }
+  ],
+  "sections": [
+    {
+      "name": "tag",
+      "id": 13,
+      "order_after": "memory",
+      "order_before": "global",
+      "entry_fields": [
+        "attribute:0x00",
+        "type_index:u32"
+      ]
+    }
+  ],
+  "external_kinds": [
+    {
+      "name": "tag",
+      "byte": 4,
+      "import_fields": [
+        "attribute:0x00",
+        "type_index:u32"
+      ],
+      "export_fields": [
+        "tag_index:u32"
+      ]
+    }
+  ],
+  "opcodes": [
+    {
+      "name": "throw",
+      "opcode": 8,
+      "immediate": "tag_index",
+      "binary_fields": [
+        "tag_index:u32"
+      ],
+      "stack": "[t1* payload*] -> [t2*]",
+      "stack_polymorphic": true
+    },
+    {
+      "name": "throw_ref",
+      "opcode": 10,
+      "immediate": "none",
+      "binary_fields": [],
+      "stack": "[t1* exnref] -> [t2*]",
+      "stack_polymorphic": true
+    },
+    {
+      "name": "try_table",
+      "opcode": 31,
+      "immediate": "block_type_catch_vector",
+      "binary_fields": [
+        "block_type:s33",
+        "catches:vec(catch_clause)"
+      ],
+      "structured": true,
+      "stack": "[params*] -> [results*]"
+    }
+  ],
+  "catch_clauses": [
+    {
+      "name": "catch",
+      "kind": 0,
+      "binary_fields": [
+        "tag_index:u32",
+        "label_index:u32"
+      ],
+      "branches_with": "payload*"
+    },
+    {
+      "name": "catch_ref",
+      "kind": 1,
+      "binary_fields": [
+        "tag_index:u32",
+        "label_index:u32"
+      ],
+      "branches_with": "payload* exnref"
+    },
+    {
+      "name": "catch_all",
+      "kind": 2,
+      "binary_fields": [
+        "label_index:u32"
+      ],
+      "branches_with": ""
+    },
+    {
+      "name": "catch_all_ref",
+      "kind": 3,
+      "binary_fields": [
+        "label_index:u32"
+      ],
+      "branches_with": "exnref"
+    }
+  ],
+  "validation_rules": [
+    "tag_type_index_defined",
+    "tag_function_type_has_empty_results",
+    "throw_tag_index_defined",
+    "throw_pops_tag_parameters",
+    "throw_ref_pops_exnref",
+    "try_table_block_type_defined",
+    "catch_tag_index_defined",
+    "catch_label_index_defined",
+    "catch_branch_types_match_label",
+    "try_table_body_matches_block_type",
+    "throw_and_throw_ref_are_stack_polymorphic"
+  ],
+  "corpus": {
+    "top_level_commands": 86,
+    "files": [
+      {
+        "path": "test/core/tag.wast",
+        "top_level_commands": 4,
+        "surface_occurrences": {
+          "tag": 8
+        },
+        "commands": {
+          "module": 2,
+          "register": 1,
+          "assert_invalid": 1
+        }
+      },
+      {
+        "path": "test/core/throw.wast",
+        "top_level_commands": 13,
+        "surface_occurrences": {
+          "tag": 8,
+          "try_table": 1,
+          "throw": 12,
+          "catch": 1
+        },
+        "commands": {
+          "module": 1,
+          "assert_return": 2,
+          "assert_exception": 7,
+          "assert_invalid": 3
+        }
+      },
+      {
+        "path": "test/core/throw_ref.wast",
+        "top_level_commands": 15,
+        "surface_occurrences": {
+          "tag": 2,
+          "try_table": 9,
+          "throw": 8,
+          "throw_ref": 10,
+          "catch_ref": 7,
+          "catch_all_ref": 2
+        },
+        "commands": {
+          "module": 1,
+          "assert_return": 5,
+          "assert_exception": 7,
+          "assert_invalid": 2
+        }
+      },
+      {
+        "path": "test/core/try_table.wast",
+        "top_level_commands": 54,
+        "surface_occurrences": {
+          "tag": 16,
+          "try_table": 37,
+          "throw": 20,
+          "catch": 21,
+          "catch_ref": 9,
+          "catch_all": 8,
+          "catch_all_ref": 4
+        },
+        "commands": {
+          "module": 4,
+          "register": 1,
+          "assert_return": 34,
+          "assert_trap": 2,
+          "assert_exception": 4,
+          "assert_invalid": 7,
+          "assert_malformed": 2
+        }
+      }
+    ]
+  }
+}
