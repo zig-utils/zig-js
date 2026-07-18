@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (264 implemented, 167 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (269 implemented, 162 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 264 private entries are implemented; the other 167 remain pending
+The first 269 private entries are implemented; the other 162 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -479,6 +479,15 @@ IteratorValue in order. Every yielded value retains stable encoded identity and
 receives exact VM/global/context metadata; callback exceptions close an open
 iterator while a throwing `return()` cannot replace the original exception.
 
+The non-indexed property boundary exposes exact JSType 7 GetterSetter and
+JSType 8 CustomGetterSetter cells plus their four null predicates. Traversal
+visits own string and Symbol keys in pinned order, filters indices, length,
+constructor, private/internal keys, and non-enumerable special cases, never
+invokes ordinary or C-class accessors, clears property-read failures where JSC
+does, and stops on callback-published exceptions. Descriptor identity survives
+sibling realms, GC, and reentry; the 270/270 compiled fixture additionally
+covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
+
 The ZigString JSON boundary decodes every tagged representation and constructs
 the parsed graph with selected-realm intrinsics. Its pinned exceptional contract
 returns the SyntaxError value after clearing the transient parse exception; an
@@ -694,7 +703,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 263-symbol
+the same frame/script identity and own every returned string. The 270-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -723,7 +732,8 @@ zig build test-private-jstype -Dprivate-abi-consumer=bun
 
 `JSC__JSValue__jsType` and `JSC__JSCell__getType` return the selected exact
 tags without exposing zig-js object flags. Both separately compiled runtime
-fixtures cover 20 real cell kinds, including strings, Symbols, BigInts,
+fixtures cover 20 real cell kinds, including GetterSetter,
+CustomGetterSetter, strings, Symbols, BigInts,
 ordinary objects, JavaScript/native functions, errors, arrays, buffers,
 typed arrays, DataView, RegExp, Date, Promise, Map/Set/weak collections, and a
 boxed string.
@@ -738,7 +748,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (258 implemented, 163 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (261 implemented, 160 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -755,5 +765,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 163
+not claim complete Bun runtime compatibility; #164 remains open for the 160
 pending core entries and later wider/generated profiles.
