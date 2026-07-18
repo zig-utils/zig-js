@@ -328,33 +328,51 @@ pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, d
         inst.globals[mod.imported_globals + j] = g;
     }
 
-    // 3. Element segments.
+    // 3. Preflight every active segment before mutating any store. A link
+    // failure must leave imported memories and tables untouched; start-function
+    // traps happen later and deliberately retain already-applied mutations.
     for (mod.elems) |e| {
         const tab = inst.tables[e.table];
         const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset)));
         tab.lockTable();
-        if (start + @as(u64, e.funcs.len) > tab.elems.len) {
-            tab.unlockTable();
+        const table_len: u64 = @intCast(tab.elems.len);
+        const available = if (start <= table_len) tab.elems.len - @as(usize, @intCast(start)) else 0;
+        const in_bounds = start <= table_len and e.funcs.len <= available;
+        tab.unlockTable();
+        if (!in_bounds) {
             diag.set(types.Diagnostic.no_offset, "out of bounds table index", .{});
             return error.Link;
         }
+    }
+    for (mod.datas) |d| {
+        const mem = inst.mems[d.mem];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset)));
+        const memory_len: u64 = @intCast(mem.bytes.len);
+        const available = if (start <= memory_len) mem.bytes.len - @as(usize, @intCast(start)) else 0;
+        if (start > memory_len or d.bytes.len > available) {
+            diag.set(types.Diagnostic.no_offset, "out of bounds memory index", .{});
+            return error.Link;
+        }
+    }
+
+    // 4. Apply element segments.
+    for (mod.elems) |e| {
+        const tab = inst.tables[e.table];
+        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, e.offset)));
+        tab.lockTable();
         for (e.funcs, 0..) |fidx, j| tab.elems[@intCast(start + j)] = inst.funcs[fidx];
         tab.unlockTable();
     }
 
-    // 4. Data segments.
+    // 5. Apply data segments.
     for (mod.datas) |d| {
         const mem = inst.mems[d.mem];
         const start: u64 = @as(u32, @truncate(evalConstExpr(inst, d.offset)));
-        if (start + @as(u64, d.bytes.len) > mem.bytes.len) {
-            diag.set(types.Diagnostic.no_offset, "out of bounds memory index", .{});
-            return error.Link;
-        }
         const lo: usize = @intCast(start);
         @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
     }
 
-    // 5. Start function; a trap propagates.
+    // 6. Start function; a trap propagates.
     if (mod.start) |sidx| try invoke(inst, sidx, &.{}, &.{}, diag);
     return inst;
 }
@@ -1312,14 +1330,40 @@ fn importSec(comptime entries: []const []const u8) []const u8 {
 
 fn elemSec0(comptime offset: i32, comptime funcs: []const u32) []const u8 {
     comptime {
-        var f: []const u8 = &.{};
-        for (funcs) |x| f = f ++ leb(x);
-        return sec(9, "\x01\x00" ++ i32c(offset) ++ "\x0B" ++ leb(funcs.len) ++ f);
+        return sec(9, "\x01" ++ elemEntry0(offset, funcs));
     }
 }
 
 fn dataSec0(comptime offset: i32, comptime bytes: []const u8) []const u8 {
-    comptime return sec(11, "\x01\x00" ++ i32c(offset) ++ "\x0B" ++ leb(bytes.len) ++ bytes);
+    comptime return sec(11, "\x01" ++ dataEntry0(offset, bytes));
+}
+
+fn elemEntry0(comptime offset: i32, comptime funcs: []const u32) []const u8 {
+    comptime {
+        var encoded: []const u8 = &.{};
+        for (funcs) |index| encoded = encoded ++ leb(index);
+        return "\x00" ++ i32c(offset) ++ "\x0B" ++ leb(funcs.len) ++ encoded;
+    }
+}
+
+fn elemSec(comptime entries: []const []const u8) []const u8 {
+    comptime {
+        var payload: []const u8 = leb(entries.len);
+        for (entries) |entry| payload = payload ++ entry;
+        return sec(9, payload);
+    }
+}
+
+fn dataEntry0(comptime offset: i32, comptime bytes: []const u8) []const u8 {
+    comptime return "\x00" ++ i32c(offset) ++ "\x0B" ++ leb(bytes.len) ++ bytes;
+}
+
+fn dataSec(comptime entries: []const []const u8) []const u8 {
+    comptime {
+        var payload: []const u8 = leb(entries.len);
+        for (entries) |entry| payload = payload ++ entry;
+        return sec(11, payload);
+    }
 }
 
 fn startSec(comptime funcidx: u32) []const u8 {
@@ -1706,6 +1750,31 @@ test "wasm.exec instantiate data at exact end succeeds" {
     // An empty segment at the exact end is in bounds.
     const b2 = try build(hdr ++ memSec(1, null) ++ dataSec0(65536, ""));
     defer destroyBuilt(b2);
+}
+
+test "wasm.exec link failure applies no earlier active segments" {
+    var diag: types.Diagnostic = .{};
+    const memory_module = try buildModule(comptime (hdr ++
+        importSec(&.{impMem("a", "m", 1, null)}) ++
+        dataSec(&.{ dataEntry0(0, "abc"), dataEntry0(65536, "x") })), &diag);
+    defer decode.destroyModule(talloc, memory_module);
+    const memory = try createMemory(talloc, 1, null);
+    defer destroyMemory(talloc, memory);
+    try std.testing.expectError(error.Link, instantiate(talloc, memory_module, .{ .mems = &.{memory} }, &diag));
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, memory.bytes[0..3]);
+
+    diag = .{};
+    const table_module = try buildModule(comptime (hdr ++
+        typesSec(&.{ft("", "")}) ++
+        importSec(&.{impTable("a", "t", 1, null)}) ++
+        funcSec(&.{0}) ++
+        elemSec(&.{ elemEntry0(0, &.{0}), elemEntry0(1, &.{0}) }) ++
+        codeSec(&.{""})), &diag);
+    defer decode.destroyModule(talloc, table_module);
+    const table = try createTable(talloc, 1, null);
+    defer destroyTable(talloc, table);
+    try std.testing.expectError(error.Link, instantiate(talloc, table_module, .{ .tables = &.{table} }, &diag));
+    try std.testing.expectEqual(@as(?*FuncInst, null), table.elems[0]);
 }
 
 fn hostInc(ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void {
