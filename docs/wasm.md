@@ -1,9 +1,9 @@
 # WebAssembly MVP Status
 
 WebAssembly support is being landed as independently verified slices under
-[issue #141](https://github.com/zig-utils/zig-js/issues/141). It is not yet a
-complete JavaScript WebAssembly API, and it is not included in the configured
-test262 score.
+[issue #141](https://github.com/zig-utils/zig-js/issues/141). The MVP binary
+runtime and JavaScript API are complete; WebAssembly remains separate from the
+configured test262 score because it has its own upstream specification corpus.
 
 ## Implemented
 
@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing slices on main through `2374c537` provide:
+The JS-facing MVP implementation on main through `9e16789e` provides:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -38,7 +38,8 @@ The JS-facing slices on main through `2374c537` provide:
   bounds checks, `get`, `set`, `grow`, and GC-visible atomic reference slots;
 - `WebAssembly.Instance` with all four import/export kinds, limit/type checks,
   active element/data segments, start functions, imported-store identity, and
-  immutable null-prototype exports;
+  immutable null-prototype exports, including primitive immutable-global
+  imports and failure-atomic linking;
 - callable exported functions with i32/i64/f32/f64 conversion, JS import calls,
   exception identity, indirect calls, and `RuntimeError` traps;
 - `WebAssembly.compile` and both `WebAssembly.instantiate` Promise overloads,
@@ -55,13 +56,23 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 120/120 at `2374c537`, covering the
+The focused WebAssembly unit suite passes 122/122 at `af689c4a`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
-classes. The most recent batched full engine suite passes 998/998 at `0835f411`.
-Both runs report zero failures, skips, and leaks; the complete suite will be
-rerun after the corpus slice instead of once per small WebAssembly checkpoint.
+classes. The same batched checkpoint passes the full engine suite 1,002/1,002.
+Both runs report zero failures, skips, and leaks.
+
+The checked-in [upstream inventory](.data/wasm-spec-inventory.json) pins
+`WebAssembly/spec` tag `wg-1.0` at
+`977f97014c962f7bd1291fcc6d28b41a924882bf` and WABT 1.0.12 at
+`cf261f2bd561297e0da7008ddde8c09ba5ea35a2`. At engine checkpoint `038ebaf3`,
+all 16,801 JavaScript-observable commands pass across all 73 MVP files, with
+zero failures and zero runner errors. The inventory accounts for every one of
+the 19,270 commands: 430 text-format syntax assertions are outside the binary
+JavaScript API, and 2,039 exact f32/f64 NaN payload/sign assertions are linked
+to the bit-exact runner work in
+[#261](https://github.com/zig-utils/zig-js/issues/261).
 
 Run the focused suite with:
 
@@ -69,13 +80,24 @@ Run the focused suite with:
 zig build test -Dtest-filter=wasm
 ```
 
-## Still open
+Build WABT 1.0.12 at the pinned commit above, then reproduce the deliberate
+complete corpus run with:
 
-The remaining gate before #141 can close is tracked by
-[#260](https://github.com/zig-utils/zig-js/issues/260):
+```sh
+zig build wasm-spec -Dwast2json=/path/to/wabt-1.0.12/wast2json
+```
 
-- a pinned upstream MVP specification corpus plus a machine-readable
-  pass/fail/skip inventory with no hidden exclusions.
+CI runs the bounded `linking.wast` smoke/drift gate; it verifies the corpus pin,
+converter compatibility, and 118 linking/store commands without putting the
+multi-minute complete inventory on every push.
+
+## Beyond the MVP
+
+The JavaScript `Number` boundary cannot carry every exact WebAssembly NaN
+payload and sign. A direct bit-exact corpus path is tracked by
+[#261](https://github.com/zig-utils/zig-js/issues/261); the public API inventory
+keeps those commands explicit rather than counting accidental canonicalization
+as a pass or an engine failure.
 
 Post-MVP feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249

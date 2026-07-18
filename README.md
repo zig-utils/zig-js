@@ -85,6 +85,8 @@ Representative green areas from the saved run:
 
 `zig build conformance` is a separate fast smoke suite; the July 4, 2026 verification run passed 33/33 cases. Use `zig build test262` for the full configured corpus.
 
+The pinned upstream WebAssembly wg-1.0 corpus is scored separately. All **16,801 / 16,801 JavaScript-observable commands pass** across all 73 MVP files, with **0 failures** and **0 runner errors**. The checked-in [19,270-command inventory](docs/.data/wasm-spec-inventory.json) explicitly classifies 430 text-format parser assertions outside the binary JavaScript API and 2,039 exact NaN payload/sign assertions that require the bit-exact runner tracked by [#261](https://github.com/zig-utils/zig-js/issues/261). See [WebAssembly MVP status](docs/wasm.md) for the exact specification/WABT pins and reproduction commands.
+
 ## Performance
 
 `zig build bench` currently times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
@@ -138,7 +140,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly API changes through `2374c537` do not execute in these
+The ABI and WebAssembly API changes through `9e16789e` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store APIs.
@@ -167,7 +169,7 @@ The configured test262 coverage for these surfaces is green.
 
 **Modules** - imports, exports, default/named/namespace re-exports, `export *`, live bindings, namespace objects, `import.meta`, dynamic `import()`, dynamic-import catch-target behavior, `import defer` async-module behavior, and top-level-await graph ordering covered by the configured runner.
 
-**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal` and `Intl` coverage, plus the documented [WebAssembly MVP work in progress](docs/wasm.md).
+**Built-ins** - `Object`, `Function`, `Array`, `String`, `RegExp` via [`zig-regex`](../zig-regex), `Number`, `Boolean`, `Math`, `JSON`, `Symbol`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Promise`, `Date`, errors, `Proxy`, `Reflect`, `globalThis`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, `Atomics`, `WeakRef`, `FinalizationRegistry`, broad `Temporal` and `Intl` coverage, plus the documented [WebAssembly MVP API](docs/wasm.md).
 
 ## Using It
 
@@ -832,11 +834,9 @@ and the final evidence-backed removal of this section is tracked by
 [issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
-- the upstream WebAssembly specification inventory and WebAssembly/JIT shell
-  hooks from the PR-249 reference corpus (the implemented decoder, validator,
-  executor, Promise compile/instantiate APIs, `Module`, `Instance`, `Memory`,
-  `Table`, `Global`, exported functions, linking, reflection, and error surface
-  are documented in [WebAssembly status](docs/wasm.md));
+- post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
+  the PR-249 reference corpus (the complete MVP binary runtime, JavaScript API,
+  and upstream inventory are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
 ## Used By
