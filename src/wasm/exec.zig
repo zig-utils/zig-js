@@ -799,6 +799,131 @@ fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: b
     return result;
 }
 
+const SimdRelation = enum { eq, ne, lt, gt, le, ge };
+
+const SimdComparison = struct {
+    width: u8,
+    signed: bool,
+    relation: SimdRelation,
+};
+
+fn simdComparison(op: simd.Op) ?SimdComparison {
+    return switch (op) {
+        .i8x16_eq => .{ .width = 8, .signed = false, .relation = .eq },
+        .i8x16_ne => .{ .width = 8, .signed = false, .relation = .ne },
+        .i8x16_lt_s => .{ .width = 8, .signed = true, .relation = .lt },
+        .i8x16_lt_u => .{ .width = 8, .signed = false, .relation = .lt },
+        .i8x16_gt_s => .{ .width = 8, .signed = true, .relation = .gt },
+        .i8x16_gt_u => .{ .width = 8, .signed = false, .relation = .gt },
+        .i8x16_le_s => .{ .width = 8, .signed = true, .relation = .le },
+        .i8x16_le_u => .{ .width = 8, .signed = false, .relation = .le },
+        .i8x16_ge_s => .{ .width = 8, .signed = true, .relation = .ge },
+        .i8x16_ge_u => .{ .width = 8, .signed = false, .relation = .ge },
+        .i16x8_eq => .{ .width = 16, .signed = false, .relation = .eq },
+        .i16x8_ne => .{ .width = 16, .signed = false, .relation = .ne },
+        .i16x8_lt_s => .{ .width = 16, .signed = true, .relation = .lt },
+        .i16x8_lt_u => .{ .width = 16, .signed = false, .relation = .lt },
+        .i16x8_gt_s => .{ .width = 16, .signed = true, .relation = .gt },
+        .i16x8_gt_u => .{ .width = 16, .signed = false, .relation = .gt },
+        .i16x8_le_s => .{ .width = 16, .signed = true, .relation = .le },
+        .i16x8_le_u => .{ .width = 16, .signed = false, .relation = .le },
+        .i16x8_ge_s => .{ .width = 16, .signed = true, .relation = .ge },
+        .i16x8_ge_u => .{ .width = 16, .signed = false, .relation = .ge },
+        .i32x4_eq => .{ .width = 32, .signed = false, .relation = .eq },
+        .i32x4_ne => .{ .width = 32, .signed = false, .relation = .ne },
+        .i32x4_lt_s => .{ .width = 32, .signed = true, .relation = .lt },
+        .i32x4_lt_u => .{ .width = 32, .signed = false, .relation = .lt },
+        .i32x4_gt_s => .{ .width = 32, .signed = true, .relation = .gt },
+        .i32x4_gt_u => .{ .width = 32, .signed = false, .relation = .gt },
+        .i32x4_le_s => .{ .width = 32, .signed = true, .relation = .le },
+        .i32x4_le_u => .{ .width = 32, .signed = false, .relation = .le },
+        .i32x4_ge_s => .{ .width = 32, .signed = true, .relation = .ge },
+        .i32x4_ge_u => .{ .width = 32, .signed = false, .relation = .ge },
+        .i64x2_eq => .{ .width = 64, .signed = false, .relation = .eq },
+        .i64x2_ne => .{ .width = 64, .signed = false, .relation = .ne },
+        .i64x2_lt_s => .{ .width = 64, .signed = true, .relation = .lt },
+        .i64x2_gt_s => .{ .width = 64, .signed = true, .relation = .gt },
+        .i64x2_le_s => .{ .width = 64, .signed = true, .relation = .le },
+        .i64x2_ge_s => .{ .width = 64, .signed = true, .relation = .ge },
+        else => null,
+    };
+}
+
+fn laneRelation(left: u64, right: u64, signed: bool, relation: SimdRelation) bool {
+    if (relation == .eq) return left == right;
+    if (relation == .ne) return left != right;
+    if (signed) {
+        const a: i64 = @bitCast(left);
+        const b: i64 = @bitCast(right);
+        return switch (relation) {
+            .lt => a < b,
+            .gt => a > b,
+            .le => a <= b,
+            .ge => a >= b,
+            else => unreachable,
+        };
+    }
+    return switch (relation) {
+        .lt => left < right,
+        .gt => left > right,
+        .le => left <= right,
+        .ge => left >= right,
+        else => unreachable,
+    };
+}
+
+fn compareSimdLanes(left: u128, right: u128, comparison: SimdComparison) u128 {
+    var result: u128 = 0;
+    const lanes = 128 / comparison.width;
+    for (0..lanes) |lane| {
+        var a = laneBits(left, @intCast(lane), comparison.width);
+        var b = laneBits(right, @intCast(lane), comparison.width);
+        if (comparison.signed) {
+            a = signExtendLane(a, comparison.width);
+            b = signExtendLane(b, comparison.width);
+        }
+        if (laneRelation(a, b, comparison.signed, comparison.relation))
+            result = replaceLaneBits(result, @intCast(lane), comparison.width, std.math.maxInt(u64));
+    }
+    return result;
+}
+
+fn allSimdLanesTrue(vector: u128, width: u8) bool {
+    for (0..128 / width) |lane|
+        if (laneBits(vector, @intCast(lane), width) == 0) return false;
+    return true;
+}
+
+fn simdLaneBitmask(vector: u128, width: u8) u32 {
+    var result: u32 = 0;
+    for (0..128 / width) |lane|
+        result |= @as(u32, @truncate(laneBits(vector, @intCast(lane), width) >> @intCast(width - 1))) << @intCast(lane);
+    return result;
+}
+
+fn executeSimdIntegerComparison(s: *State, op: simd.Op) ExecError!bool {
+    if (simdComparison(op)) |comparison| {
+        const right = popVector(s);
+        try pushVector(s, compareSimdLanes(popVector(s), right, comparison));
+        return true;
+    }
+    const reduction_width: ?u8 = switch (op) {
+        .i8x16_all_true, .i8x16_bitmask => 8,
+        .i16x8_all_true, .i16x8_bitmask => 16,
+        .i32x4_all_true, .i32x4_bitmask => 32,
+        .i64x2_all_true, .i64x2_bitmask => 64,
+        else => null,
+    };
+    const width = reduction_width orelse return false;
+    const vector = popVector(s);
+    switch (op) {
+        .i8x16_all_true, .i16x8_all_true, .i32x4_all_true, .i64x2_all_true => try pushBool(s, allSimdLanesTrue(vector, width)),
+        .i8x16_bitmask, .i16x8_bitmask, .i32x4_bitmask, .i64x2_bitmask => try pushI32(s, simdLaneBitmask(vector, width)),
+        else => unreachable,
+    }
+    return true;
+}
+
 fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
     const op = simdOp(instr);
     switch (op) {
@@ -882,6 +1007,7 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
 fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     if (try executeSimdMemory(s, inst, instr)) return;
     const op = simdOp(instr);
+    if (try executeSimdIntegerComparison(s, op)) return;
     switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
         .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
