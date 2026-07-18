@@ -227,6 +227,7 @@ pub const GcObject = struct {
     kind: GcAggregateKind,
     fields: []ValueSlot,
     next: ?*GcObject = null,
+    mark_epoch: u32 = 0,
 };
 
 pub const Imports = struct {
@@ -260,6 +261,7 @@ pub const Instance = struct {
     gc_objects: ?*GcObject = null,
     gc_object_count: usize = 0,
     gc_object_lock: std.atomic.Mutex = .unlocked,
+    gc_mark_epoch: u32 = 0,
 };
 
 fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fields: []const ValueSlot) error{OutOfMemory}!*GcObject {
@@ -290,6 +292,73 @@ fn destroyGcAggregates(inst: *Instance) void {
         inst.gpa.destroy(object);
         current = next;
     }
+}
+
+fn markGcSlot(
+    inst: *Instance,
+    slot: ValueSlot,
+    epoch: u32,
+    worklist: *std.ArrayListUnmanaged(*GcObject),
+) error{OutOfMemory}!void {
+    const raw = switch (slot) {
+        .gcref => |value| value orelse return,
+        else => return,
+    };
+    const object: *GcObject = @ptrCast(@alignCast(raw));
+    if (object.owner != inst or object.mark_epoch == epoch) return;
+    object.mark_epoch = epoch;
+    try worklist.append(inst.gpa, object);
+}
+
+/// Quiescent precise collection for one instance-owned aggregate heap. The
+/// caller supplies active/escaping slots; globals, tables, and published
+/// exception payloads are included automatically. Cross-instance objects are
+/// left to their owner. Mark allocation failure performs no sweep.
+fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
+    while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    defer inst.gc_object_lock.unlock();
+
+    if (inst.gc_mark_epoch == std.math.maxInt(u32)) {
+        var current = inst.gc_objects;
+        while (current) |object| : (current = object.next) object.mark_epoch = 0;
+        inst.gc_mark_epoch = 1;
+    } else {
+        inst.gc_mark_epoch += 1;
+        if (inst.gc_mark_epoch == 0) inst.gc_mark_epoch = 1;
+    }
+    const epoch = inst.gc_mark_epoch;
+    var worklist: std.ArrayListUnmanaged(*GcObject) = .empty;
+    defer worklist.deinit(inst.gpa);
+
+    for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+    for (inst.globals) |global| try markGcSlot(inst, global.value, epoch, &worklist);
+    for (inst.tables) |table| for (table.elems) |slot|
+        try markGcSlot(inst, slot, epoch, &worklist);
+    var exception_raw = inst.exception_head.load(.acquire);
+    while (exception_raw != 0) {
+        const exception: *js_value.WasmException = @ptrFromInt(exception_raw);
+        for (exception.payload) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+        exception_raw = if (exception.next) |next| @intFromPtr(next) else 0;
+    }
+    var cursor: usize = 0;
+    while (cursor < worklist.items.len) : (cursor += 1)
+        for (worklist.items[cursor].fields) |slot|
+            try markGcSlot(inst, slot, epoch, &worklist);
+
+    var reclaimed: usize = 0;
+    var link = &inst.gc_objects;
+    while (link.*) |object| {
+        if (object.mark_epoch == epoch) {
+            link = &object.next;
+        } else {
+            link.* = object.next;
+            inst.gpa.free(object.fields);
+            inst.gpa.destroy(object);
+            inst.gc_object_count -= 1;
+            reclaimed += 1;
+        }
+    }
+    return reclaimed;
 }
 
 // ---------------------------------------------------------------------------
@@ -6398,10 +6467,18 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     const first = try createGcAggregate(&inst, 3, .struct_, &.{.{ .gcref = null }});
     const second = try createGcAggregate(&inst, 7, .array, &.{.{ .gcref = @ptrCast(first) }});
     first.fields[0] = .{ .gcref = @ptrCast(second) };
-    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    _ = try createGcAggregate(&inst, 9, .struct_, &.{});
+    try std.testing.expectEqual(@as(usize, 3), inst.gc_object_count);
     try std.testing.expect(first.owner == &inst and second.owner == &inst);
     try std.testing.expect(first.fields[0].gcref == @as(*anyopaque, @ptrCast(second)));
     try std.testing.expect(second.fields[0].gcref == @as(*anyopaque, @ptrCast(first)));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try collectGcAggregatesQuiescent(&inst, &.{.{ .gcref = @ptrCast(first) }}),
+    );
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    try std.testing.expectEqual(@as(usize, 2), try collectGcAggregatesQuiescent(&inst, &.{}));
+    try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
 }
 
 test "wasm.exec GC aggregate allocation is failure atomic and cycle safe" {
