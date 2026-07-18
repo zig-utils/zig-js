@@ -56,12 +56,16 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 141/141 at `27eafb9d`, covering the
+The focused WebAssembly unit suite passes 145/145 at `e2f01223`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
-classes, the opt-in Core 2.0 numeric and multi-value operations, and the test-only bit-exact
-corpus boundary. The most recent batched
+classes, the opt-in Core 2.0 numeric and multi-value operations, tagged
+funcref/externref invocation and global slots, balanced root publication across
+return/checkpoint/trap paths, and the test-only bit-exact corpus boundary. A
+separate no-GIL filter passes 3/3 at the same checkpoint and proves a completed
+parallel mid-script collection retains an externref held only by a frozen Wasm
+frame, then reclaims it after that frame unregisters. The most recent batched
 full engine checkpoint passes 1,002/1,002 at `af689c4a`. Both runs report zero
 failures, skips, and leaks.
 
@@ -140,6 +144,13 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default, and enabling these switches does not imply that the remaining Core
 2.0 profile is complete.
+
+The reference-types runtime foundation uses explicitly tagged numeric,
+funcref, and externref slots. Active operand stacks, locals, arguments, results,
+and globals participate in ordinary and parallel precise-GC publication without
+permanently rooting dead externrefs. Reference instructions and the multi-table
+surface remain disabled until [#275](https://github.com/zig-utils/zig-js/issues/275)
+completes their decoder, validator, runtime, and JavaScript API behavior.
 
 Implementation is split into the shared gating foundation
 [#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
