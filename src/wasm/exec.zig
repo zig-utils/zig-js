@@ -1069,7 +1069,29 @@ fn slotIsNull(slot: WasmSlot) bool {
     };
 }
 
-fn executeGcScalar(s: *State, instr: types.Instr) ExecError!void {
+fn gcObjectFromSlot(s: *State, slot: WasmSlot) ExecError!*GcObject {
+    const raw = slot.gcref orelse return s.trap("null reference");
+    return @ptrCast(@alignCast(raw));
+}
+
+fn normalizePackedField(storage: types.StorageType, slot: WasmSlot) WasmSlot {
+    return switch (storage) {
+        .i8 => .{ .numeric = slot.numericBits() & 0xff },
+        .i16 => .{ .numeric = slot.numericBits() & 0xffff },
+        .value => slot,
+    };
+}
+
+fn readPackedField(storage: types.StorageType, signed: bool, slot: WasmSlot) u32 {
+    const raw: u32 = @truncate(slot.numericBits());
+    return switch (storage) {
+        .i8 => if (signed) @bitCast(@as(i32, @as(i8, @bitCast(@as(u8, @truncate(raw)))))) else raw & 0xff,
+        .i16 => if (signed) @bitCast(@as(i32, @as(i16, @bitCast(@as(u16, @truncate(raw)))))) else raw & 0xffff,
+        .value => unreachable,
+    };
+}
+
+fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     const op = switch (instr.imm) {
         .gc => |value| value,
         .gc_type => |value| value.op,
@@ -1080,6 +1102,98 @@ fn executeGcScalar(s: *State, instr: types.Instr) ExecError!void {
         else => unreachable,
     };
     switch (op) {
+        .struct_new, .struct_new_default => {
+            const type_index = instr.imm.gc_type.type_index;
+            const structure = inst.module.types[type_index].subtype.composite.struct_;
+            const fields = try s.alloc.alloc(ValueSlot, structure.fields.len);
+            if (op == .struct_new) {
+                var index = fields.len;
+                while (index > 0) {
+                    index -= 1;
+                    fields[index] = normalizePackedField(structure.fields[index].storage, popSlot(s));
+                }
+            } else for (structure.fields, fields) |field, *slot|
+                slot.* = zeroSlot(field.storage.unpacked());
+            const object = try createGcAggregate(inst, type_index, .struct_, fields);
+            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+        },
+        .struct_get, .struct_get_s, .struct_get_u => {
+            const immediate = instr.imm.gc_type_field;
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            const field = inst.module.types[immediate.type_index].subtype.composite.struct_.fields[immediate.field_index];
+            if (op == .struct_get) {
+                try pushSlot(s, object.fields[immediate.field_index]);
+            } else {
+                try pushI32(s, readPackedField(field.storage, op == .struct_get_s, object.fields[immediate.field_index]));
+            }
+        },
+        .struct_set => {
+            const immediate = instr.imm.gc_type_field;
+            const value = popSlot(s);
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            const field = inst.module.types[immediate.type_index].subtype.composite.struct_.fields[immediate.field_index];
+            object.fields[immediate.field_index] = normalizePackedField(field.storage, value);
+        },
+        .array_new, .array_new_default, .array_new_fixed => {
+            const immediate = if (op == .array_new_fixed)
+                instr.imm.gc_two_indices
+            else
+                types.Instr.GcTwoIndices{ .op = op, .first = instr.imm.gc_type.type_index, .second = 0 };
+            const array_type = inst.module.types[immediate.first].subtype.composite.array;
+            const count: u32 = switch (op) {
+                .array_new, .array_new_default => popI32(s),
+                .array_new_fixed => immediate.second,
+                else => unreachable,
+            };
+            const fields = try s.alloc.alloc(ValueSlot, count);
+            if (op == .array_new_fixed) {
+                var index = fields.len;
+                while (index > 0) {
+                    index -= 1;
+                    fields[index] = normalizePackedField(array_type.field.storage, popSlot(s));
+                }
+            } else {
+                const initial = if (op == .array_new)
+                    normalizePackedField(array_type.field.storage, popSlot(s))
+                else
+                    zeroSlot(array_type.field.storage.unpacked());
+                @memset(fields, initial);
+            }
+            const object = try createGcAggregate(inst, immediate.first, .array, fields);
+            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+        },
+        .array_get, .array_get_s, .array_get_u => {
+            const index = popI32(s);
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            if (index >= object.fields.len) return s.trap("out of bounds array access");
+            const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            if (op == .array_get) {
+                try pushSlot(s, object.fields[index]);
+            } else {
+                try pushI32(s, readPackedField(storage, op == .array_get_s, object.fields[index]));
+            }
+        },
+        .array_set => {
+            const value = popSlot(s);
+            const index = popI32(s);
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            if (index >= object.fields.len) return s.trap("out of bounds array access");
+            const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            object.fields[index] = normalizePackedField(storage, value);
+        },
+        .array_len => {
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            try pushI32(s, @intCast(object.fields.len));
+        },
+        .array_fill => {
+            const count = popI32(s);
+            const value = popSlot(s);
+            const start = popI32(s);
+            const object = try gcObjectFromSlot(s, popSlot(s));
+            const range = checkedRange(start, count, object.fields.len) orelse return s.trap("out of bounds array access");
+            const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            @memset(object.fields[range.start..range.end], normalizePackedField(storage, value));
+        },
         .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
         .i31_get_u => try pushI32(s, popSlot(s).i31ref),
         .i31_get_s => {
@@ -1087,7 +1201,7 @@ fn executeGcScalar(s: *State, instr: types.Instr) ExecError!void {
             const signed: i32 = @as(i32, @bitCast(raw << 1)) >> 1;
             try pushI32(s, @bitCast(signed));
         },
-        else => return s.trap("WebAssembly GC aggregate instruction is not implemented"),
+        else => return s.trap("WebAssembly GC instruction is not implemented"),
     }
 }
 
@@ -3351,7 +3465,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .i64_const => try pushI64(s, @bitCast(instr.imm.i64)),
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
-            .gc => try executeGcScalar(s, instr),
+            .gc => try executeGc(s, inst, instr),
             .ref_eq => {
                 const b = popSlot(s);
                 const a = popSlot(s);
@@ -6152,6 +6266,57 @@ test "wasm.exec GC aggregate allocation is failure atomic and cycle safe" {
         exerciseGcAggregateAllocation,
         .{},
     );
+}
+
+test "wasm.exec GC struct and array allocation access packed and bounds" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            "\x5F\x02\x7F\x00\x78\x01",
+            "\x5E\x7F\x01",
+            ft("", I32),
+        }) ++
+        funcSec(&.{ 2, 2, 2 }) ++
+        codeSec(&.{
+            i32c(10) ++ i32c(-1) ++ "\xFB\x00\x00\xFB\x03\x00\x01",
+            i32c(1) ++ i32c(2) ++ i32c(3) ++ "\xFB\x08\x01\x03" ++ i32c(1) ++ "\xFB\x0B\x01",
+            i32c(1) ++ i32c(2) ++ i32c(3) ++ "\xFB\x08\x01\x03" ++ i32c(3) ++ "\xFB\x0B\x01",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    var result: [1]u64 = undefined;
+    try invoke(inst, 0, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u32, @bitCast(@as(i32, -1))), @as(u32, @truncate(result[0])));
+    try invoke(inst, 1, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 2), result[0]);
+    try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &result, &diag));
+    try std.testing.expectEqualStrings("out of bounds array access", diag.message());
+
+    const mutation_bytes = comptime (hdr ++
+        typesSec(&.{ "\x5E\x7F\x01", ft("", I32) }) ++
+        funcSec(&.{1}) ++
+        codeSecL(
+            "\x01\x01\x63\x00",
+            i32c(0) ++ i32c(3) ++ "\xFB\x06\x00\x21\x00" ++
+                "\x20\x00" ++ i32c(0) ++ i32c(9) ++ i32c(3) ++ "\xFB\x10\x00" ++
+                "\x20\x00" ++ i32c(1) ++ i32c(7) ++ "\xFB\x0E\x00" ++
+                "\x20\x00" ++ i32c(1) ++ "\xFB\x0B\x00",
+        ));
+    var mutation_diag: types.Diagnostic = .{};
+    const mutation_mod = try buildModuleWithFeatures(mutation_bytes, features, &mutation_diag);
+    defer decode.destroyModule(talloc, mutation_mod);
+    const mutation_inst = try instantiate(talloc, mutation_mod, .{}, &mutation_diag);
+    defer destroyInstance(talloc, mutation_inst);
+    try invoke(mutation_inst, 0, &.{}, &result, &mutation_diag);
+    try std.testing.expectEqual(@as(u64, 7), result[0]);
 }
 
 test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {
