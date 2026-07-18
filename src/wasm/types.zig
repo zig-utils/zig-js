@@ -122,16 +122,24 @@ pub const ValType = enum(u8) {
     }
 };
 
-/// MVP block types: either empty or a single result value. Type-index block
-/// types (multi-value proposal) are rejected by the decoder.
+/// A block signature is either one of the compact inline forms or a function
+/// type index. The latter supplies both block parameters and results.
 pub const BlockType = union(enum) {
     empty,
     value: ValType,
+    type_index: u32,
 
-    pub fn resultArity(self: BlockType) u8 {
+    pub fn funcType(self: BlockType, mod: *const Module) ?FuncType {
         return switch (self) {
-            .empty => 0,
-            .value => 1,
+            .empty => .{ .params = &.{}, .results = &.{} },
+            .value => |value| .{ .params = &.{}, .results = switch (value) {
+                .i32 => &.{.i32},
+                .i64 => &.{.i64},
+                .f32 => &.{.f32},
+                .f64 => &.{.f64},
+                .funcref => &.{.funcref},
+            } },
+            .type_index => |index| if (index < mod.types.len) mod.types[index] else null,
         };
     }
 };

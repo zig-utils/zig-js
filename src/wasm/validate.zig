@@ -142,24 +142,18 @@ const FrameKind = enum { block, loop, if_ };
 
 const Frame = struct {
     kind: FrameKind,
-    result: ?types.ValType, // MVP: at most one result
+    params: []const types.ValType,
+    results: []const types.ValType,
     height: usize,
     unreach: bool = false,
     saw_else: bool = false,
 
     /// Types a branch to this frame must supply: a `loop` restarts, so its
     /// result only applies to fallthrough; block/if branch with their result.
-    fn branchResult(self: Frame) ?types.ValType {
-        return if (self.kind == .loop) null else self.result;
+    fn branchTypes(self: Frame) []const types.ValType {
+        return if (self.kind == .loop) self.params else self.results;
     }
 };
-
-fn blockResult(bt: types.BlockType) ?types.ValType {
-    return switch (bt) {
-        .empty => null,
-        .value => |v| v,
-    };
-}
 
 const MemInfo = struct { t: types.ValType, log2_bytes: u32 };
 
@@ -227,9 +221,23 @@ const FuncValidator = struct {
         if (v != .unknown and v != stackVal(t)) return self.fail("type mismatch");
     }
 
-    fn pushFrame(self: *FuncValidator, kind: FrameKind, result: ?types.ValType) void {
-        self.frames[self.fr_len] = .{ .kind = kind, .result = result, .height = self.op_len };
+    fn popTypes(self: *FuncValidator, values: []const types.ValType) Error!void {
+        var i = values.len;
+        while (i > 0) {
+            i -= 1;
+            try self.popExpect(values[i]);
+        }
+    }
+
+    fn pushTypes(self: *FuncValidator, values: []const types.ValType) void {
+        for (values) |value| self.push(stackVal(value));
+    }
+
+    fn pushFrame(self: *FuncValidator, kind: FrameKind, ft: types.FuncType) Error!void {
+        try self.popTypes(ft.params);
+        self.frames[self.fr_len] = .{ .kind = kind, .params = ft.params, .results = ft.results, .height = self.op_len };
         self.fr_len += 1;
+        self.pushTypes(ft.params);
     }
 
     /// End-of-frame rule: the operands above the frame height must be exactly
@@ -237,7 +245,7 @@ const FuncValidator = struct {
     fn popFrame(self: *FuncValidator) Error!Frame {
         std.debug.assert(self.fr_len > 0);
         const f = self.frames[self.fr_len - 1];
-        if (f.result) |t| try self.popExpect(t);
+        try self.popTypes(f.results);
         if (self.op_len != f.height) return self.fail("type mismatch");
         self.fr_len -= 1;
         return f;
@@ -274,7 +282,7 @@ const FuncValidator = struct {
             i -= 1;
             try self.popExpect(ft.params[i]);
         }
-        if (ft.results.len > 0) self.push(stackVal(ft.results[0]));
+        self.pushTypes(ft.results);
     }
 
     // Signature helpers.
@@ -307,11 +315,11 @@ const FuncValidator = struct {
             switch (instr.op) {
                 .unreachable_ => self.setUnreachable(),
                 .nop => {},
-                .block => self.pushFrame(.block, blockResult(instr.imm.block.type)),
-                .loop => self.pushFrame(.loop, blockResult(instr.imm.block.type)),
+                .block => try self.pushFrame(.block, instr.imm.block.type.funcType(self.mod) orelse return self.fail("unknown type")),
+                .loop => try self.pushFrame(.loop, instr.imm.block.type.funcType(self.mod) orelse return self.fail("unknown type")),
                 .if_ => {
                     try self.popExpect(.i32);
-                    self.pushFrame(.if_, blockResult(instr.imm.block.type));
+                    try self.pushFrame(.if_, instr.imm.block.type.funcType(self.mod) orelse return self.fail("unknown type"));
                 },
                 .else_ => {
                     // The decoder guarantees structure; stay defensive.
@@ -321,39 +329,36 @@ const FuncValidator = struct {
                     if (f.kind != .if_ or f.saw_else)
                         return self.fail("else opcode without matching if");
                     // The if-arm must produce the frame results.
-                    if (f.result) |t| try self.popExpect(t);
+                    try self.popTypes(f.results);
                     if (self.op_len != f.height) return self.fail("type mismatch");
                     self.op_len = f.height;
                     f.unreach = false;
                     f.saw_else = true;
+                    self.pushTypes(f.params);
                 },
                 .end => {
                     const f = try self.popFrame();
                     // An if with a result but no else can never produce the
                     // result when the condition is false.
-                    if (f.kind == .if_ and f.result != null and !f.saw_else)
+                    if (f.kind == .if_ and (f.params.len != 0 or f.results.len != 0) and !f.saw_else)
                         return self.fail("type mismatch");
                     if (self.fr_len == 0) {
                         // Function end: the decoder guarantees this is the
                         // final instruction.
                         std.debug.assert(self.pc == self.instrs.len - 1);
-                    } else if (f.result) |t| {
-                        self.push(stackVal(t));
-                    }
+                    } else self.pushTypes(f.results);
                 },
                 .br => {
                     const f = try self.target(instr.imm.idx);
-                    if (f.branchResult()) |t| try self.popExpect(t);
+                    try self.popTypes(f.branchTypes());
                     self.setUnreachable();
                 },
                 .br_if => {
                     try self.popExpect(.i32);
                     const f = try self.target(instr.imm.idx);
-                    if (f.branchResult()) |t| {
-                        // Pop-then-repush: the values stay for fallthrough.
-                        try self.popExpect(t);
-                        self.push(stackVal(t));
-                    }
+                    const branch_types = f.branchTypes();
+                    try self.popTypes(branch_types);
+                    self.pushTypes(branch_types);
                 },
                 .br_table => {
                     const bt = instr.imm.br_table;
@@ -364,15 +369,15 @@ const FuncValidator = struct {
                     for (bt.targets) |t| _ = try self.target(t);
                     for (bt.targets) |t| {
                         const tf = self.frames[self.fr_len - 1 - t];
-                        if (tf.branchResult() != def.branchResult())
+                        if (!std.mem.eql(types.ValType, tf.branchTypes(), def.branchTypes()))
                             return self.fail("type mismatch");
                     }
-                    if (def.branchResult()) |t| try self.popExpect(t);
+                    try self.popTypes(def.branchTypes());
                     self.setUnreachable();
                 },
                 .return_ => {
                     // Branch to the outermost (function) frame.
-                    if (self.frames[0].result) |t| try self.popExpect(t);
+                    try self.popTypes(self.frames[0].results);
                     self.setUnreachable();
                 },
                 .call => {
@@ -506,8 +511,13 @@ fn validateFunc(
     // validate() signature carries no allocator, so use the page allocator;
     // OOM surfaces as Invalid only on truly pathological modules.
     const n = body.instrs.len + 1;
+    var max_arity: usize = 1;
+    for (mod.types) |signature|
+        max_arity = @max(max_arity, signature.params.len, signature.results.len);
+    const operand_slots = std.math.mul(usize, n, max_arity) catch
+        return failMod(diag, "out of memory");
     const alloc = std.heap.page_allocator;
-    const opds = alloc.alloc(StackVal, n) catch return failMod(diag, "out of memory");
+    const opds = alloc.alloc(StackVal, operand_slots) catch return failMod(diag, "out of memory");
     defer alloc.free(opds);
     const frames = alloc.alloc(Frame, n) catch return failMod(diag, "out of memory");
     defer alloc.free(frames);
@@ -522,8 +532,7 @@ fn validateFunc(
         .opds = opds,
         .frames = frames,
     };
-    // The function frame branches with the function results (MVP: at most 1).
-    v.pushFrame(.block, if (ft.results.len > 0) ft.results[0] else null);
+    try v.pushFrame(.block, .{ .params = &.{}, .results = ft.results });
     try v.run();
 }
 
@@ -581,8 +590,12 @@ const table1 = sec(4, "\x01\x70\x00\x01"); // funcref min 1
 const mem1 = sec(5, "\x01\x00\x01"); // min 1
 
 fn expectValid(comptime bytes: []const u8) !void {
+    return expectValidWithFeatures(bytes, .{});
+}
+
+fn expectValidWithFeatures(comptime bytes: []const u8, features: types.Features) !void {
     var diag: types.Diagnostic = .{};
-    const mod = try decode.decode(std.testing.allocator, bytes, &diag);
+    const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
     defer decode.destroyModule(std.testing.allocator, mod);
     try validate(mod, &diag);
 }
@@ -856,6 +869,13 @@ test "wasm.validate multiple tables" {
 test "wasm.validate sign-extension operand types" {
     const i64_to_i32 = comptime (hdr ++ sec(1, "\x01\x60\x01\x7E\x01\x7F") ++ func0 ++ code1("\x20\x00\xC0\x0B"));
     try expectInvalidAtWithFeatures(i64_to_i32, .{ .sign_extension_ops = true }, 0, 1, "type mismatch");
+}
+
+test "wasm.validate multi-value type-index block" {
+    const bytes = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x02\x7F\x7E") ++ func0 ++
+        code1("\x02\x00\x41\x07\x42\x09\x0B\x0B"));
+    try expectValidWithFeatures(bytes, .{ .multi_value = true });
 }
 
 test "wasm.validate nontrapping conversion operand types" {

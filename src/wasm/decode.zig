@@ -248,7 +248,11 @@ const Reader = struct {
         const off = self.offset();
         const v = try self.readS33();
         if (v == -64) return .empty;
-        if (v >= 0) return self.unsupportedFeature(off, .multi_value);
+        if (v >= 0) {
+            if (!self.features.multi_value) return self.unsupportedFeature(off, .multi_value);
+            if (v > std.math.maxInt(u32)) return self.failAt(off, "invalid block type", .{});
+            return .{ .type_index = @intCast(v) };
+        }
         return switch (v) {
             -1 => .{ .value = .i32 },
             -2 => .{ .value = .i64 },
@@ -351,8 +355,8 @@ fn parseTypeSection(r: *Reader, a: Allocator) DecodeError![]const types.FuncType
         const rn = try r.readCount();
         const results = try a.alloc(types.ValType, rn);
         for (results) |*p| p.* = try r.readValType();
-        // Multiple results are the multi-value proposal.
-        if (rn > 1) return r.unsupportedFeature(res_off, .multi_value);
+        if (rn > 1 and !r.features.multi_value)
+            return r.unsupportedFeature(res_off, .multi_value);
         t.* = .{ .params = params, .results = results };
     }
     return ts;
@@ -935,13 +939,6 @@ test "wasm.decode malformed code bodies" {
 }
 
 test "wasm.decode feature gates distinguish disabled dependency and pending implementation" {
-    const multi_result = hdr ++ "\x01\x06\x01\x60\x00\x02\x7F\x7F";
-    try expectMalformedWithFeatures(
-        multi_result,
-        .{ .multi_value = true },
-        13,
-        "WebAssembly feature multi-value is enabled but not implemented",
-    );
     try expectMalformedWithFeatures(
         hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x08\x0B",
         .{ .bulk_memory = true },
@@ -954,6 +951,19 @@ test "wasm.decode feature gates distinguish disabled dependency and pending impl
         0,
         "WebAssembly feature gc requires typed-function-references",
     );
+}
+
+test "wasm.decode multi-value signatures and type-index blocks" {
+    const bytes = hdr ++
+        "\x01\x06\x01\x60\x00\x02\x7F\x7E" ++
+        func_sec_1 ++ "\x0A\x0B\x01\x09\x00\x02\x00\x41\x07\x42\x09\x0B\x0B";
+    try expectMalformed(bytes, 13, "WebAssembly feature multi-value is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .multi_value = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(@as(usize, 2), mod.types[0].results.len);
+    try std.testing.expectEqual(types.BlockType{ .type_index = 0 }, mod.code[0].instrs[0].imm.block.type);
 }
 
 test "wasm.decode sign-extension operations require and honor their feature" {

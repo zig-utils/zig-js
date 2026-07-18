@@ -630,8 +630,18 @@ fn jsImportCall(raw: *anyopaque, args: []const u64, results: []u64, _: *types.Di
     for (args, bridge.function_type.params, 0..) |bits, kind, i|
         js_args[i] = wasmBitsToJs(self, kind, bits) catch return error.Host;
     const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch return error.Host;
-    if (bridge.function_type.results.len > 0)
+    if (bridge.function_type.results.len == 1) {
         results[0] = coerceGlobalBits(self, bridge.function_type.results[0], result) catch return error.Host;
+    } else if (bridge.function_type.results.len > 1) {
+        var values: std.ArrayListUnmanaged(Value) = .empty;
+        self.spreadInto(&values, result) catch return error.Host;
+        if (values.items.len != bridge.function_type.results.len) {
+            _ = self.throwError("TypeError", "WebAssembly multi-value import returned the wrong number of values") catch {};
+            return error.Host;
+        }
+        for (bridge.function_type.results, values.items, 0..) |kind, item, i|
+            results[i] = coerceGlobalBits(self, kind, item) catch return error.Host;
+    }
 }
 
 fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
@@ -655,7 +665,12 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
         error.OutOfMemory => return error.OutOfMemory,
     };
     if (raw_results.len == 0) return Value.undef();
-    return wasmBitsToJs(self, owner.function_type.results[0], raw_results[0]);
+    if (raw_results.len == 1)
+        return wasmBitsToJs(self, owner.function_type.results[0], raw_results[0]);
+    const result = (try self.newArray()).asObj();
+    for (owner.function_type.results, raw_results) |kind, bits|
+        try result.appendElement(self.arena, try wasmBitsToJs(self, kind, bits));
+    return Value.obj(result);
 }
 
 fn rawBitsString(self: *Interpreter, kind: types.ValType, bits: u64) value.HostError!Value {
@@ -700,7 +715,12 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
             error.OutOfMemory => return error.OutOfMemory,
         };
         if (raw_results.len == 0) return Value.undef();
-        return rawBitsString(self, owner.function_type.results[0], raw_results[0]);
+        if (raw_results.len == 1)
+            return rawBitsString(self, owner.function_type.results[0], raw_results[0]);
+        const result = (try self.newArray()).asObj();
+        for (owner.function_type.results, raw_results) |kind, bits|
+            try result.appendElement(self.arena, try rawBitsString(self, kind, bits));
+        return Value.obj(result);
     }
 
     if (target.wasmGlobal()) |global_state| {
@@ -1504,20 +1524,22 @@ test "wasm api Context options gate post-MVP features explicitly" {
     );
 
     const store = try context.Context.createWith(std.testing.allocator, .{
-        .wasm_features = .{ .multi_value = true },
+        .wasm_features = .{ .bulk_memory = true },
     });
     defer store.destroy();
     const result = try store.evaluate(
         \\var bytes = new Uint8Array([
         \\  0,97,115,109,1,0,0,0,
-        \\  1,6,1,96,0,2,127,127
+        \\  1,4,1,96,0,0,
+        \\  3,2,1,0,
+        \\  10,6,1,4,0,252,8,11
         \\]);
         \\try {
         \\  new WebAssembly.Module(bytes);
         \\  false;
         \\} catch (error) {
         \\  error instanceof WebAssembly.CompileError &&
-        \\  error.message.includes('multi-value is enabled but not implemented');
+        \\  error.message.includes('bulk-memory is enabled but not implemented');
         \\}
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
@@ -1559,6 +1581,25 @@ test "wasm api executes opted-in Core 2.0 numeric operations" {
         \\exports.sat(NaN) === 0n && exports.sat(Infinity) === 9223372036854775807n;
     );
     try std.testing.expect(executed.isBoolean() and executed.asBool());
+}
+
+test "wasm api returns opted-in multi-value exports as arrays" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .multi_value = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,0,2,127,126,
+        \\  3,2,1,0,
+        \\  7,8,1,4,112,97,105,114,0,0,
+        \\  10,8,1,6,0,65,7,66,9,11
+        \\]);
+        \\const pair = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.pair();
+        \\Array.isArray(pair) && pair.length === 2 && pair[0] === 7 && pair[1] === 9n;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api compile snapshots bytes and rejects asynchronously" {

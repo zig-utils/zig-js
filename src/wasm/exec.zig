@@ -722,14 +722,14 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             .nop => {},
             .block => try s.labels.append(s.alloc, .{
                 .target_pc = instr.imm.block.end_pc,
-                .stack_height = s.stack.items.len,
-                .arity = instr.imm.block.type.resultArity(),
+                .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
+                .arity = instr.imm.block.type.funcType(mod).?.results.len,
                 .is_loop = false,
             }),
             .loop => try s.labels.append(s.alloc, .{
                 .target_pc = instr.imm.block.else_pc,
-                .stack_height = s.stack.items.len,
-                .arity = 0,
+                .stack_height = s.stack.items.len - instr.imm.block.type.funcType(mod).?.params.len,
+                .arity = instr.imm.block.type.funcType(mod).?.params.len,
                 .is_loop = true,
             }),
             .if_ => {
@@ -737,8 +737,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
                 if (popI32(s) != 0) {
                     try s.labels.append(s.alloc, .{
                         .target_pc = b.end_pc,
-                        .stack_height = s.stack.items.len,
-                        .arity = b.type.resultArity(),
+                        .stack_height = s.stack.items.len - b.type.funcType(mod).?.params.len,
+                        .arity = b.type.funcType(mod).?.results.len,
                         .is_loop = false,
                     });
                 } else if (b.else_pc == b.end_pc) {
@@ -746,8 +746,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
                 } else {
                     try s.labels.append(s.alloc, .{
                         .target_pc = b.end_pc,
-                        .stack_height = s.stack.items.len,
-                        .arity = b.type.resultArity(),
+                        .stack_height = s.stack.items.len - b.type.funcType(mod).?.params.len,
+                        .arity = b.type.funcType(mod).?.results.len,
                         .is_loop = false,
                     });
                     fr.pc = b.else_pc;
@@ -2379,6 +2379,11 @@ test "wasm.exec nontrapping float-to-integer conversions" {
     try unopWithFeatures(.i64_trunc_sat_f64_s, F64, I64, features, f64v(0x1p63), i64v(std.math.maxInt(i64)));
     try unopWithFeatures(.i64_trunc_sat_f64_u, F64, I64, features, f64v(-1.0), 0);
     try unopWithFeatures(.i64_trunc_sat_f64_u, F64, I64, features, f64v(0x1p64), std.math.maxInt(u64));
+}
+
+test "wasm.exec multi-value type-index block" {
+    const bytes = comptime arithModule("", I32 ++ I64, "\x02\x00\x41\x07\x42\x09\x0B");
+    try expectResultsWithFeatures(bytes, .{ .multi_value = true }, 0, &.{}, &.{ 7, 9 });
 }
 
 test "wasm.exec conversions trunc f32 to int" {
