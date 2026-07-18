@@ -431,10 +431,25 @@ top-level commands**: 88 modules, 408 return assertions, 100 trap assertions,
 occurrences for every instruction family are recorded in the inventory. These
 numbers describe the selected corpus and do not claim that it passes yet.
 `zig build wasm-feature-profiles-check` locks these facts against the feature
-registry. Type decoding/canonicalization/validation is tracked by
-[#298](https://github.com/zig-utils/zig-js/issues/298), runtime objects and
-precise tracing by [#299](https://github.com/zig-utils/zig-js/issues/299), and
-terminal corpus results by [#300](https://github.com/zig-utils/zig-js/issues/300).
+registry.
+
+The binary and validation boundary is complete. The decoder retains packed
+storage, nullability, concrete heap indices, field mutability, recursive-group
+membership, and all instruction immediates. Validation closes recursive groups
+independently of module indices so structurally equal iso-recursive types share
+canonical identity; it also enforces earlier non-final supertypes, function
+variance, struct width, immutable covariance, mutable invariance, packed-access
+extensions, defaultability, segment types, cast refinement, and every aggregate
+instruction stack. Forward references are legal only inside their declared
+recursive group. Focused evidence covers all instruction families,
+deterministic invalid diagnostics, validator allocation failure, and a
+512-level subtype chain: **8/8 GC validation tests pass**. The complete
+validator regression root passes **93/93 tests**.
+
+This boundary completes [#298](https://github.com/zig-utils/zig-js/issues/298).
+Runtime objects and precise tracing are tracked by
+[#299](https://github.com/zig-utils/zig-js/issues/299), and terminal corpus
+results by [#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
@@ -723,8 +738,8 @@ iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
 execution are separate scored profiles. Memory64 binary/validation is complete
-as the independently pinned boundary below, while its runtime/corpus score,
-Wasm GC, and shell-only hooks remain separate work.
+as the independently pinned boundary below, while its corpus score, Wasm GC
+runtime, and shell-only hooks remain separate work.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

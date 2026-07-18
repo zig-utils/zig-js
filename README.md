@@ -40,7 +40,7 @@ All figures below are checked-in, reproducible results. Full pins, runner bounda
 | WebAssembly tail calls | **108 / 108 applicable commands** | [inventory](docs/.data/wasm-tail-call-inventory.json) |
 | WebAssembly exceptions | **84 / 84 applicable commands** | [inventory](docs/.data/wasm-exception-handling-inventory.json) |
 
-Memory64 binary handling, validation, runtime, and JavaScript API behavior pass the focused **22 / 22** normal and ThreadSanitizer tests; terminal upstream scoring remains tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). The Wasm GC proposal is pinned at `756060f5`; its recursive type forms and full 33-instruction binary surface decode behind a feature gate, while validation and runtime work continue in [#298](https://github.com/zig-utils/zig-js/issues/298) and [#299](https://github.com/zig-utils/zig-js/issues/299). Inventory facts are not reported as pass scores.
+Memory64 binary handling, validation, runtime, and JavaScript API behavior pass the focused **22 / 22** normal and ThreadSanitizer tests; terminal upstream scoring remains tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). The Wasm GC proposal is pinned at `756060f5`; recursive groups, canonical type identity, subtyping, and all 33 instruction encodings now decode and validate behind the feature gate. Runtime objects and precise tracing continue in [#299](https://github.com/zig-utils/zig-js/issues/299). Inventory facts are not reported as pass scores.
 
 ## Performance
 
