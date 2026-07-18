@@ -48,6 +48,9 @@ def main() -> int:
     enum_body = source.split("pub const Feature = enum {", 1)[1].split("pub fn name", 1)[0]
     runtime_features = set(re.findall(r"^    ([a-z][a-z0-9_]*),$", enum_body, re.MULTILINE))
     require(runtime_features == known, f"registry/runtime feature drift: registry-only={sorted(known - runtime_features)}, runtime-only={sorted(runtime_features - known)}")
+    gate_source = (ROOT / "src/wasm/decode.zig").read_text() + (ROOT / "src/wasm/validate.zig").read_text()
+    ungated = sorted(feature_id for feature_id in known if re.search(rf"\.{re.escape(feature_id)}\b", gate_source) is None)
+    require(not ungated, f"registry features without decoder/validator gates: {ungated}")
     for feature in features:
         feature_id = feature.get("id")
         require(isinstance(feature_id, str) and feature_id, "feature id is required")
