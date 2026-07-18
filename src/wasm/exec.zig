@@ -222,7 +222,10 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) u64 {
     };
 }
 
-pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, diag: *types.Diagnostic) LinkError!*Instance {
+/// Allocate/link an instance and apply active segments without invoking its
+/// start function. Embedders that must retain store mutations after a trapping
+/// start (the JS API) take ownership here, then call `runStart` separately.
+pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Imports, diag: *types.Diagnostic) error{ OutOfMemory, Link }!*Instance {
     // 1. Import resolution.
     if (imports.funcs.len != mod.imported_funcs or
         imports.tables.len != mod.imported_tables or
@@ -372,8 +375,17 @@ pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, d
         @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
     }
 
-    // 6. Start function; a trap propagates.
-    if (mod.start) |sidx| try invoke(inst, sidx, &.{}, &.{}, diag);
+    return inst;
+}
+
+pub fn runStart(inst: *Instance, diag: *types.Diagnostic) ExecError!void {
+    if (inst.module.start) |sidx| try invoke(inst, sidx, &.{}, &.{}, diag);
+}
+
+pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, diag: *types.Diagnostic) LinkError!*Instance {
+    const inst = try instantiateStore(gpa, mod, imports, diag);
+    errdefer destroyInstance(gpa, inst);
+    try runStart(inst, diag);
     return inst;
 }
 

@@ -28,6 +28,7 @@ const TableDescriptor = struct { proto: *Object };
 const GlobalDescriptor = struct { proto: *Object };
 const InstanceDescriptor = struct {
     proto: *Object,
+    roots: *Object,
     function_proto: *Object,
     memory_proto: *Object,
     table_proto: *Object,
@@ -981,27 +982,24 @@ fn instantiateModuleObject(
     var bridges_owned = false;
     defer if (!bridges_owned) store.gpa.free(resolved.bridges);
 
+    try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
     var diag: types.Diagnostic = .{};
     const previous = store.wasm_active_interp;
     store.wasm_active_interp = @ptrCast(self);
-    const inst = exec.instantiate(store.gpa, module, .{
+    defer store.wasm_active_interp = previous;
+    const inst = exec.instantiateStore(store.gpa, module, .{
         .funcs = resolved.funcs,
         .tables = resolved.tables,
         .mems = resolved.mems,
         .globals = resolved.globals,
     }, &diag) catch |err| {
-        store.wasm_active_interp = previous;
         return switch (err) {
             error.Link => throwWasmWithProto(self, "LinkError", diag.message(), descriptor.link_error_proto),
-            error.Trap => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
-            error.Host => if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
             error.OutOfMemory => error.OutOfMemory,
         };
     };
-    store.wasm_active_interp = previous;
     var inst_transferred = false;
     defer if (!inst_transferred) exec.destroyInstance(store.gpa, inst);
-    try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
 
     const owner = try store.gpa.create(InstanceOwner);
     var owner_registered = false;
@@ -1013,6 +1011,7 @@ fn instantiateModuleObject(
     state.inst = @ptrCast(owner);
     state.module_obj = module_object;
     state.import_vals = resolved.values;
+    try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
     store.wasm_registry.appendAssumeCapacity(.{ .instance = @ptrCast(owner) });
     owner_registered = true;
     inst_transferred = true;
@@ -1030,6 +1029,12 @@ fn instantiateModuleObject(
     for (resolved.mem_values, 0..) |entry, i| memory_cache[i] = entry;
     for (resolved.global_values, 0..) |entry, i| global_cache[i] = entry;
     try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
+
+    exec.runStart(inst, &diag) catch |err| return switch (err) {
+        error.Trap => throwWasmWithProto(self, "RuntimeError", diag.message(), descriptor.runtime_error_proto),
+        error.Host => if (!self.exception.isUndefined()) error.Throw else error.OutOfMemory,
+        error.OutOfMemory => error.OutOfMemory,
+    };
 
     const exports = try gc.allocObj(self.arena);
     exports.* = .{ .proto = null };
@@ -1269,9 +1274,13 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try setData(env.arena, rs, namespace, "Global", Value.obj(global_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
     const instance_pair = try constructorPair(env, rs, "Instance", 1, instanceConstructor, object_proto, function_proto);
+    const instance_roots = try gc.allocObj(env.arena);
+    instance_roots.* = .{};
+    try namespace.appendInternalElement(env.arena, Value.obj(instance_roots));
     const instance_descriptor = try env.arena.create(InstanceDescriptor);
     instance_descriptor.* = .{
         .proto = instance_pair.proto,
+        .roots = instance_roots,
         .function_proto = function_proto,
         .memory_proto = memory_pair.proto,
         .table_proto = table_pair.proto,
@@ -1620,6 +1629,43 @@ test "wasm api exported traps become RuntimeError" {
         \\runtime;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api trapping start retains applied store mutations" {
+    const store = try context.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer store.destroy();
+    const setup = try store.evaluate(
+        \\const storeBytes = new Uint8Array([
+        \\  0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,0x01,0x05,0x01,0x60,0x00,0x01,0x7f,0x03,
+        \\  0x03,0x02,0x00,0x00,0x04,0x04,0x01,0x70,0x00,0x01,0x05,0x03,0x01,0x00,0x01,0x07,
+        \\  0x31,0x04,0x06,0x6d,0x65,0x6d,0x6f,0x72,0x79,0x02,0x00,0x05,0x74,0x61,0x62,0x6c,
+        \\  0x65,0x01,0x00,0x0d,0x67,0x65,0x74,0x20,0x6d,0x65,0x6d,0x6f,0x72,0x79,0x5b,0x30,
+        \\  0x5d,0x00,0x00,0x0c,0x67,0x65,0x74,0x20,0x74,0x61,0x62,0x6c,0x65,0x5b,0x30,0x5d,
+        \\  0x00,0x01,0x0a,0x11,0x02,0x07,0x00,0x41,0x00,0x2d,0x00,0x00,0x0b,0x07,0x00,0x41,
+        \\  0x00,0x11,0x00,0x00,0x0b
+        \\]);
+        \\const failingBytes = new Uint8Array([
+        \\  0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,0x01,0x08,0x02,0x60,0x00,0x01,0x7f,0x60,
+        \\  0x00,0x00,0x02,0x1b,0x02,0x02,0x4d,0x73,0x06,0x6d,0x65,0x6d,0x6f,0x72,0x79,0x02,
+        \\  0x00,0x01,0x02,0x4d,0x73,0x05,0x74,0x61,0x62,0x6c,0x65,0x01,0x70,0x00,0x01,0x03,
+        \\  0x03,0x02,0x00,0x01,0x08,0x01,0x01,0x09,0x07,0x01,0x00,0x41,0x00,0x0b,0x01,0x00,
+        \\  0x0a,0x0c,0x02,0x06,0x00,0x41,0xad,0xbd,0x03,0x0b,0x03,0x00,0x00,0x0b,0x0b,0x0b,
+        \\  0x01,0x00,0x41,0x00,0x0b,0x05,0x68,0x65,0x6c,0x6c,0x6f
+        \\]);
+        \\globalThis.startTrapStore = new WebAssembly.Instance(new WebAssembly.Module(storeBytes));
+        \\let trapped = false;
+        \\try {
+        \\  new WebAssembly.Instance(new WebAssembly.Module(failingBytes), { Ms: startTrapStore.exports });
+        \\} catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }
+        \\trapped;
+    );
+    try std.testing.expect(setup.isBoolean() and setup.asBool());
+    store.collectGarbage();
+    const retained = try store.evaluate(
+        \\startTrapStore.exports['get memory[0]']() === 104 &&
+        \\startTrapStore.exports['get table[0]']() === 0xdead;
+    );
+    try std.testing.expect(retained.isBoolean() and retained.asBool());
 }
 
 test "wasm api Instance wraps defined Memory Table and Global stores" {
