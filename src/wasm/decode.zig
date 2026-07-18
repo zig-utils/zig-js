@@ -1385,6 +1385,31 @@ test "wasm.decode memory64 feature gates and malformed u64 limits" {
         "\x01\x04\x81\x80\x80\x80\x80\x80\x40",
     ));
     try expectMalformedWithFeatures(too_many_pages, .{ .memory64 = true }, 12, "memory size exceeds address type limit");
+
+    const too_large = comptime (hdr ++ testSection(
+        5,
+        "\x01\x04\x80\x80\x80\x80\x80\x80\x80\x80\x80\x02",
+    ));
+    try expectMalformedWithFeatures(too_large, .{ .memory64 = true }, 12, "integer too large");
+}
+
+fn decodeMemory64WithFailingAllocator(gpa: Allocator) !void {
+    const bytes = comptime (hdr ++
+        testSection(4, "\x01\x70\x05\x01\x82\x01") ++
+        testSection(5, "\x01\x05\x01\x82\x01"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(gpa, bytes, .{ .memory64 = true }, &diag);
+    defer destroyModule(gpa, mod);
+    try std.testing.expectEqual(types.AddressType.i64, mod.mems[0].address);
+    try std.testing.expectEqual(types.AddressType.i64, mod.tables[0].address);
+}
+
+test "wasm.decode memory64 allocation failures are rollback safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        decodeMemory64WithFailingAllocator,
+        .{},
+    );
 }
 
 test "wasm.decode malformed code bodies" {
