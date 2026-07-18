@@ -206,6 +206,15 @@ python3 tools/wasm-spec.py \
   --inventory docs/.data/wasm-simd-movement-inventory.json
 ```
 
+The architecture-independent integer fallback is also complete at `08e29a5f`.
+Across 24 focused proposal files, all 4,380 applicable commands pass with zero
+failures, 65 explicit text-format n/a, and zero runner errors. That score covers
+all integer comparisons/reductions, shifts, wrapping and saturating arithmetic,
+min/max/average, narrowing, low/high signed and unsigned extension, pairwise
+extension-add, every extmul width, dot product, and q15 rounded saturation. No
+native SIMD acceleration exists yet, so the portable implementation is both the
+runtime path and the scalar oracle for future lane-by-lane differential checks.
+
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation,
 while a selected but unfinished feature produces a deterministic
