@@ -16,6 +16,7 @@
       "default": false,
       "status": "planned",
       "features": [
+        "sign_extension_ops",
         "nontrapping_float_to_int",
         "multi_value",
         "reference_types",
@@ -44,6 +45,15 @@
     }
   ],
   "features": [
+    {
+      "id": "sign_extension_ops",
+      "repository": "https://github.com/WebAssembly/sign-extension-ops.git",
+      "commit": "a09a028ee7106d3d3ab8fe11b8e18b2e5263aa07",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 263
+    },
     {
       "id": "nontrapping_float_to_int",
       "repository": "https://github.com/WebAssembly/nontrapping-float-to-int-conversions.git",

@@ -106,7 +106,7 @@ WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
-the official proposal tracker and 11 selected proposal repositories by exact
+the official proposal tracker and 12 selected proposal repositories by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
 keeps MVP as the only default/implemented profile until the corresponding
