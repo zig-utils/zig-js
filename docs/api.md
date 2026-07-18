@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 260
-private exports and 171 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 262
+private exports and 169 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 260 cover JSC64 identity, cell equality,
+The 262 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -225,6 +225,11 @@ The JSArray constructor pair adds failure-atomic packed construction from
 encoded slices and hole-only construction through the maximum u32 length,
 preserving selected-realm prototypes and same-VM sibling value identity while
 publishing foreign values and invalid lengths through the pending exception.
+The two contiguous-vector exports provide stable JSC64 snapshots for eligible
+packed arrays and require exact array/vector/length/backing/element
+revalidation before direct reads. Multiple snapshots coexist; GC preserves
+them, while mutation, holes, accessors, double/undecided storage, and indexed
+prototype pollution force the consumer back to ordinary indexed Get.
 Private ToNumber performs the complete number-hint object coercion path,
 including user hooks and thrown conversions, preserves primitive and ordinary
 NaN behavior, throws for Symbol/BigInt, and retains the first VM exception.

@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (260 implemented, 171 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (262 implemented, 169 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 260 private entries are implemented; the other 171 remain pending
+The first 262 private entries are implemented; the other 169 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -562,7 +562,12 @@ the complete encoded input slice before allocating the observable result, then
 preserves packed order and owned-cell identity; sibling-realm values from the
 same VM are accepted while foreign-VM values fail atomically with TypeError.
 `JSArray__constructEmptyArray` preserves exact hole-only logical lengths through
-the maximum u32 boundary. `Bun__JSValue__toNumber` implements full ToNumber:
+the maximum u32 boundary. The two contiguous-vector exports return independent
+stable JSC64 snapshots only for eligible packed Int32/boxed arrays. Revalidation
+checks the exact array, vector, length, backing identity, current encodings, and
+prototype safety; replacement, growth, holes, accessors, double/undecided
+storage, pollution, or mismatched pointers fall back without dereference.
+`Bun__JSValue__toNumber` implements full ToNumber:
 primitive conversions, number-hint ToPrimitive hook order, Symbol/BigInt
 TypeError, same-VM sibling values, foreign-value rejection, and exceptional NaN
 with VM pending state while ordinary NaN remains non-exceptional. The private
@@ -710,7 +715,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (254 implemented, 167 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (256 implemented, 165 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -727,5 +732,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 167
+not claim complete Bun runtime compatibility; #164 remains open for the 165
 pending core entries and later wider/generated profiles.

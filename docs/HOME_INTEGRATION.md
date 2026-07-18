@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 260 implemented / 171 pending under #163. The generated
+private imports are now 262 implemented / 169 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -233,7 +233,11 @@ bypasses inherited setters, observable prototype/getter reads with VM exception
 publication, sparse growth, and the maximum-u32 boundary. Two JSArray
 constructor shims add failure-atomic packed construction, selected-realm
 prototypes, same-VM sibling value identity, and hole-only construction through
-maximum u32 length. The ToNumber shim adds primitive and full object coercion,
+maximum u32 length. Two contiguous-vector shims expose stable encoded snapshots
+only for safe packed arrays, then revalidate vector identity, length, backing,
+elements, shape, and prototype safety before each direct read. Concurrent
+snapshots remain independent; mutation and exotic/indexed interception fall
+back safely. The ToNumber shim adds primitive and full object coercion,
 spec-ordered user hooks, Symbol/BigInt TypeError behavior, ordinary-versus-
 exceptional NaN distinction, same-VM sibling values, and first-exception
 preservation. Two predicates add JSC-exact internal has-instance prechecks and
