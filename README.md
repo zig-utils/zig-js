@@ -140,7 +140,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `e2f01223` do not execute in these
+The ABI and WebAssembly/conformance changes through `70a2fb1f` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store/reference-root APIs.
@@ -837,7 +837,8 @@ and the final evidence-backed removal of this section is tracked by
 - the remaining post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
   the PR-249 reference corpus (the complete MVP binary runtime, JavaScript API,
   opt-in Core 2.0 sign-extension, saturating-conversion, and multi-value support,
-  plus the precise-GC funcref/externref slot foundation,
+  plus the precise-GC funcref/externref slot foundation and feature-gated
+  reference instruction/multi-table validation core,
   upstream inventory, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
   are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.

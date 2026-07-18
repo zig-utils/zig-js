@@ -56,7 +56,7 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 145/145 at `e2f01223`, covering the
+The focused WebAssembly unit suite passes 149/149 at `70a2fb1f`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
@@ -148,9 +148,12 @@ default, and enabling these switches does not imply that the remaining Core
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,
 and globals participate in ordinary and parallel precise-GC publication without
-permanently rooting dead externrefs. Reference instructions and the multi-table
-surface remain disabled until [#275](https://github.com/zig-utils/zig-js/issues/275)
-completes their decoder, validator, runtime, and JavaScript API behavior.
+permanently rooting dead externrefs. The feature-gated binary and validator now
+cover reference value positions, typed select, `ref.*`, explicit table indices,
+multiple typed tables, and `table.get/set/grow/size/fill`; the interpreter
+executes the funcref instruction/table surface. [#275](https://github.com/zig-utils/zig-js/issues/275)
+remains open for arbitrary externref table storage, complete JavaScript
+Table/Global/function boundaries, and cross-instance evidence.
 
 Implementation is split into the shared gating foundation
 [#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
