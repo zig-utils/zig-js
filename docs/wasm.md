@@ -397,10 +397,44 @@ python3 tools/wasm-spec.py \
 Ordinary CI pins the same source/tool revisions and runs parser regressions plus
 `simple.wast`, `deeply_nested.wast`, and `wait_notify.wast`; the deliberate
 command above owns the complete score. The remaining full TSan matrix and
-scaling/system-JSC evidence are tracked by
+supported-host stress evidence are tracked by
 [#287](https://github.com/zig-utils/zig-js/issues/287). Parent
 [#265](https://github.com/zig-utils/zig-js/issues/265) closes only after that
 evidence lands.
+
+Performance is published separately from conformance. The
+[July 18, 2026 Threads report](.data/wasm-threads-benchmark-2026-07-18.md) and
+its [105 raw timing samples](.data/wasm-threads-benchmark-2026-07-18.tsv) were
+generated from clean benchmark commit `eb43a2f9` on an 11-core Apple M3 Pro.
+They run the same fixed shared-memory module at one owner thread and 2/4/8
+no-GIL shared-realm workers. All atomic medians exceed 50 ms, each row has seven
+samples, and the harness validates exact final counts, monotonic wait/notify
+generations, zero timeouts, and a per-process watchdog.
+
+| workers | contended add | contended CAS | disjoint add | pair handoffs/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 14.56 M/s | 8.81 M/s | 13.87 M/s | — |
+| 2 | 19.19 M/s | 7.22 M/s | 19.31 M/s | 259,476 |
+| 4 | 18.88 M/s | 6.18 M/s | 19.87 M/s | 1,067,241 |
+| 8 | 17.23 M/s | 4.74 M/s | 17.28 M/s | 287,444 |
+
+Multi-worker timing includes `Thread` construction, dispatch, joins, and final
+validation; the detailed report publishes medians, scaling, RSD, exact job
+counts, module hash, ownership boundaries, tool pins, and reproduction. The
+system JavaScriptCore public embedding context exposes `WebAssembly` but not
+`SharedArrayBuffer`, rejects the shared-memory atomic module, and has no
+shared-realm worker API. There is therefore no equivalent JSC Threads score;
+the report records `N/A` and points to the ordinary-JavaScript and SIMD panels
+where the two public APIs do expose equivalent concurrency.
+
+Reproduce the full or reduced benchmark matrix with:
+
+```sh
+zig build wasm-threads-benchmark -Doptimize=ReleaseFast
+zig build wasm-threads-benchmark \
+  -Doptimize=ReleaseFast \
+  -Dwasm-threads-benchmark-quick=true
+```
 
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation.

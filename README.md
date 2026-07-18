@@ -39,6 +39,7 @@ Current public status is evidence-scoped:
 - The exact excluded-file inventory is [docs/.data/test262-excluded.tsv](docs/.data/test262-excluded.tsv), currently zero.
 - VM/tree-walker numbers below come from [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt); the JSC comparison comes from the [July 17, 2026 structured-stack report](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.md) and its [1,540 raw timing samples](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv).
 - WebAssembly SIMD totals come from the [complete 56-file inventory](docs/.data/wasm-simd-inventory.json); performance comes from the [July 18, 2026 SIMD report](docs/.data/wasm-simd-benchmark-2026-07-18.md) and its [224 raw samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv).
+- WebAssembly Threads correctness comes from the [complete 551-command inventory](docs/.data/wasm-threads-inventory.json); performance comes from the [July 18, 2026 Threads report](docs/.data/wasm-threads-benchmark-2026-07-18.md) and its [105 raw samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv).
 - C API scope comes from the exported symbols in [src/c_api.zig](src/c_api.zig).
 - Threading and GC status are documented under [docs/threads](docs/threads) and [docs/architecture.md](docs/architecture.md).
 
@@ -136,7 +137,7 @@ JavaScript-API commands plus 29 proposal `(thread ...)` and 29 `(wait ...)`
 directives, including recursive nesting, shared module identity, litmus tests,
 and real wait/notify. The complete 1,069-test root also passes with zero skips,
 failures, or leaks, and focused overlapping-access TSan witnesses are clean.
-The terminal full TSan matrix and scaling/JSC evidence remain tracked by
+The terminal full host/TSan matrix remains tracked by
 [#287](https://github.com/zig-utils/zig-js/issues/287).
 
 ## Performance
@@ -215,6 +216,31 @@ presented as a JSC comparison. The result measures the current portable SIMD
 engine path; it is not a claim that zig-js has native architecture-specific
 vector lowering. The general 1,540-sample JavaScript matrix above remains the
 latest score for its unchanged non-Wasm workloads.
+
+### WebAssembly Threads scaling and JavaScriptCore boundary
+
+The dedicated [July 18 Threads report](docs/.data/wasm-threads-benchmark-2026-07-18.md)
+preserves all [105 raw timing samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)
+from clean benchmark commit `eb43a2f9`. Seven samples per row cover one owner
+thread and 2/4/8 no-GIL shared-realm workers over the exact same shared module
+and memory. Every atomic median exceeds 50 ms; checksums, monotonic
+wait/notify generations, timeouts, and a 120-second watchdog are validated.
+
+| workers | contended add | CAS increment | disjoint add | wait/notify pair handoffs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 14.56 M/s (1.00x) | 8.81 M/s (1.00x) | 13.87 M/s (1.00x) | — |
+| 2 | 19.19 M/s (1.32x) | 7.22 M/s (0.82x) | 19.31 M/s (1.39x) | 259,476/s |
+| 4 | 18.88 M/s (1.30x) | 6.18 M/s (0.70x) | 19.87 M/s (1.43x) | 1,067,241/s |
+| 8 | 17.23 M/s (1.18x) | 4.74 M/s (0.54x) | 17.28 M/s (1.25x) | 287,444/s |
+
+Higher throughput is better; parenthesized values are scaling over the
+one-thread row. Multi-worker timing deliberately includes `Thread` creation,
+dispatch, joins, and final validation. The macOS system JavaScriptCore public
+embedding context exposes `WebAssembly` but not `SharedArrayBuffer`, rejects the
+shared-memory atomic module, and has no shared-realm worker API. JSC is therefore
+reported as `N/A`, not as zero or a speed loss. Equivalent ordinary JavaScript
+and independent-context JSC comparisons remain in the main table above, and
+equivalent SIMD comparisons remain in the preceding section.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -814,6 +840,8 @@ zig build benchmark-comparison    # zig-js direct/independent/shared vs system J
 zig build benchmark-comparison -Dbenchmark-comparison-quick=true
 zig build benchmark-comparison-test
 python3 tools/wasm-simd-benchmark.py --samples 7 --lanes 8  # SIMD/scalar/JSC (macOS)
+zig build wasm-threads-benchmark # shared Wasm atomics/wait-notify + JSC boundary (macOS)
+zig build wasm-threads-benchmark -Dwasm-threads-benchmark-quick=true
 zig build c-api-audit            # pinned headers/inventory/export drift
 zig build test-c-api             # C and C++ compile-link-runtime ABI gate
 zig build home-public-abi-audit  # pinned Home revision-independent profile gate
@@ -908,7 +936,7 @@ and the final evidence-backed removal of this section is tracked by
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
   from the PR-249 reference corpus, including exceptions/tail calls and
-  memory64/GC, plus terminal Threads TSan/scaling evidence
+  memory64/GC, plus terminal Threads host-wide stress/TSan evidence
   tracked by [#287](https://github.com/zig-utils/zig-js/issues/287) (the complete
   MVP binary runtime, JavaScript API,
   opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
