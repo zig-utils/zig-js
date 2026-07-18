@@ -48,6 +48,11 @@ def main() -> int:
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-movement-inventory.json",
     )
+    parser.add_argument(
+        "--simd-complete-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-simd-inventory.json",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -118,6 +123,33 @@ def main() -> int:
     require(movement_totals.get("total") == 2604, "SIMD movement inventory: expected 2604 total commands")
     require(movement_totals.get("fail") == 0 and movement_totals.get("runner_error") == 0, "SIMD movement inventory: terminal score is not green")
     require(len(movement.get("files", [])) == 20, "SIMD movement inventory: file detail count drift")
+
+    complete = json.loads(args.simd_complete_inventory.read_text())
+    require(complete.get("schema_version") == 2, "complete SIMD inventory: unsupported schema version")
+    require(complete.get("kind") == "webassembly_fixed_width_simd_inventory", "complete SIMD inventory: invalid kind")
+    require(complete.get("profile") == "simd", "complete SIMD inventory: invalid profile")
+    require(complete.get("spec", {}).get("repository") == simd_feature["repository"], "complete SIMD inventory: repository drift")
+    require(complete.get("spec", {}).get("commit") == simd_feature["commit"], "complete SIMD inventory: commit drift")
+    require(complete.get("spec", {}).get("files_available") == 56, "complete SIMD inventory: expected 56 available files")
+    require(complete.get("spec", {}).get("files_scored") == 56, "complete SIMD inventory: expected 56 scored files")
+    require(SHA.fullmatch(complete.get("engine_commit", "")) is not None, "complete SIMD inventory: invalid engine commit")
+    complete_totals = complete.get("totals", {})
+    require(complete_totals.get("pass") == 25466, "complete SIMD inventory: expected 25466 passing commands")
+    require(complete_totals.get("not_applicable") == 510, "complete SIMD inventory: expected 510 explicit n/a commands")
+    require(complete_totals.get("total") == 25976, "complete SIMD inventory: expected 25976 total commands")
+    require(complete_totals.get("fail") == 0 and complete_totals.get("runner_error") == 0, "complete SIMD inventory: terminal score is not green")
+    complete_files = complete.get("files", [])
+    require(len(complete_files) == 56, "complete SIMD inventory: file detail count drift")
+    require(len({entry.get("path") for entry in complete_files}) == 56, "complete SIMD inventory: duplicate file detail")
+    complete_modes = {
+        command.get("mode")
+        for entry in complete_files
+        for command in entry.get("commands", [])
+    }
+    require(
+        complete_modes == {"javascript_api", "not_applicable", "vector_bits", "vector_nan_policy"},
+        f"complete SIMD inventory: execution-mode drift {sorted(complete_modes)}",
+    )
 
     profiles = document.get("profiles", [])
     profile_ids = [profile.get("id") for profile in profiles]
