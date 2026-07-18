@@ -104,3 +104,23 @@ Post-MVP feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249
 WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
+
+The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
+the official proposal tracker and 11 selected proposal repositories by exact
+commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
+Phase-4 Threads proposal, declares dependency closure and host constraints, and
+keeps MVP as the only default/implemented profile until the corresponding
+runtime child issue is actually complete. Validate registry drift with:
+
+```sh
+zig build wasm-feature-profiles-check
+```
+
+Implementation is split into the shared gating foundation
+[#262](https://github.com/zig-utils/zig-js/issues/262), the core 2.0 baseline
+[#263](https://github.com/zig-utils/zig-js/issues/263), SIMD
+[#264](https://github.com/zig-utils/zig-js/issues/264), Threads
+[#265](https://github.com/zig-utils/zig-js/issues/265), exceptions/tail calls
+[#266](https://github.com/zig-utils/zig-js/issues/266), memory64/GC
+[#267](https://github.com/zig-utils/zig-js/issues/267), and the final profile
+conformance matrix [#268](https://github.com/zig-utils/zig-js/issues/268).

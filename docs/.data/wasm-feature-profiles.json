@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "tracker": {
+    "repository": "https://github.com/WebAssembly/proposals.git",
+    "commit": "e007b5c9f2e510573869985cbc635c7f4fc0b566"
+  },
+  "profiles": [
+    {
+      "id": "mvp",
+      "default": true,
+      "status": "implemented",
+      "features": []
+    },
+    {
+      "id": "core_2_0",
+      "default": false,
+      "status": "planned",
+      "features": [
+        "nontrapping_float_to_int",
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "fixed_width_simd"
+      ]
+    },
+    {
+      "id": "threads",
+      "default": false,
+      "status": "planned",
+      "features": ["threads"]
+    },
+    {
+      "id": "core_3_0_selected",
+      "default": false,
+      "status": "planned",
+      "features": [
+        "reference_types",
+        "tail_calls",
+        "typed_function_references",
+        "gc",
+        "exception_handling",
+        "memory64"
+      ]
+    }
+  ],
+  "features": [
+    {
+      "id": "nontrapping_float_to_int",
+      "repository": "https://github.com/WebAssembly/nontrapping-float-to-int-conversions.git",
+      "commit": "aa25b24de97a53f359b0e37615f61a2aacce1ff8",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 263
+    },
+    {
+      "id": "multi_value",
+      "repository": "https://github.com/WebAssembly/multi-value.git",
+      "commit": "61975c83a286b96517659eded062f4e11dbac4c7",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 263
+    },
+    {
+      "id": "reference_types",
+      "repository": "https://github.com/WebAssembly/reference-types.git",
+      "commit": "c7a3558bb5cbacb9c8879a91e08d0ac7276b740c",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 263
+    },
+    {
+      "id": "bulk_memory",
+      "repository": "https://github.com/WebAssembly/bulk-memory-operations.git",
+      "commit": "dcaa1b6791401c29b67e8cd7929ec80949f1f849",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 263
+    },
+    {
+      "id": "fixed_width_simd",
+      "repository": "https://github.com/WebAssembly/simd.git",
+      "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+      "standardization": "finished",
+      "edition": "2.0",
+      "dependencies": [],
+      "issue": 264,
+      "hosts": ["portable-interpreter"]
+    },
+    {
+      "id": "threads",
+      "repository": "https://github.com/WebAssembly/threads.git",
+      "commit": "979d0fcb994439423d63b2f0a8a7332d6285dd84",
+      "standardization": "phase_4",
+      "edition": null,
+      "dependencies": [],
+      "issue": 265,
+      "hosts": ["threaded-context"]
+    },
+    {
+      "id": "tail_calls",
+      "repository": "https://github.com/WebAssembly/tail-call.git",
+      "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": [],
+      "issue": 266
+    },
+    {
+      "id": "typed_function_references",
+      "repository": "https://github.com/WebAssembly/function-references.git",
+      "commit": "74d2ec81d15efd3c0f2fba46a023f376101d8e46",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": [],
+      "issue": 267
+    },
+    {
+      "id": "gc",
+      "repository": "https://github.com/WebAssembly/gc.git",
+      "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": ["typed_function_references"],
+      "issue": 267
+    },
+    {
+      "id": "exception_handling",
+      "repository": "https://github.com/WebAssembly/exception-handling.git",
+      "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": ["reference_types"],
+      "issue": 266
+    },
+    {
+      "id": "memory64",
+      "repository": "https://github.com/WebAssembly/memory64.git",
+      "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": [],
+      "issue": 267,
+      "hosts": ["pointer_width_64"]
+    }
+  ]
+}

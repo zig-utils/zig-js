@@ -516,6 +516,16 @@ pub fn build(b: *std.Build) void {
     const wasm_spec_step = b.step("wasm-spec", "Run and inventory the pinned WebAssembly wg-1.0 core corpus");
     wasm_spec_step.dependOn(&wasm_spec_cmd.step);
 
+    const wasm_feature_profiles_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/wasm-feature-profiles.py",
+    });
+    const wasm_feature_profiles_step = b.step(
+        "wasm-feature-profiles-check",
+        "Validate the pinned WebAssembly feature/profile registry",
+    );
+    wasm_feature_profiles_step.dependOn(&wasm_feature_profiles_cmd.step);
+
     // Threads corpus: `zig build threads-test` runs the vendored WebKit
     // PR-249 thread tests (the green allowlist) against the Phase-6 API.
     // `-Dtsan` builds the corpus *and the engine it links* under

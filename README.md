@@ -836,7 +836,8 @@ and the final evidence-backed removal of this section is tracked by
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
   the PR-249 reference corpus (the complete MVP binary runtime, JavaScript API,
-  and upstream inventory are documented in [WebAssembly status](docs/wasm.md));
+  upstream inventory, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
+  are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 
 ## Used By
