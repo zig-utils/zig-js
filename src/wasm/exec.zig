@@ -3148,13 +3148,21 @@ test "wasm.exec call_indirect selects an explicit table across instances" {
         typesSec(&.{ft("", I32)}) ++
         importSec(&.{ impTable("a", "decoy", 1, null), impTable("a", "target", 1, null) }) ++
         funcSec(&.{0}) ++
-        codeSec(&.{i32c(0) ++ "\x11\x00\x01"}));
+        codeSec(&.{
+            "\xFC\x10\x01" ++ // table.size 1 => 1
+                "\xD0\x70" ++ i32c(1) ++ "\xFC\x0F\x01\x6A" ++ // table.grow 1 => old size 1; sum 2
+                i32c(1) ++ "\xD0\x70" ++ i32c(1) ++ "\xFC\x11\x01" ++ // table.fill 1[1] with null
+                i32c(1) ++ "\x25\x01\xD1\x6A" ++ // table.get 1[1] is null; sum 3
+                i32c(0) ++ "\x11\x00\x01\x6A", // call_indirect type 0 table 1 => 91; sum 94
+        }));
     var diag: types.Diagnostic = .{};
     const bmod = try buildModuleWithFeatures(b_bytes, .{ .reference_types = true }, &diag);
     defer decode.destroyModule(talloc, bmod);
     const binst = try instantiate(talloc, bmod, .{ .tables = &.{ decoy, target } }, &diag);
     defer destroyInstance(talloc, binst);
-    try std.testing.expectEqual(@as(u64, 91), try run1(binst, 0, &.{}));
+    try std.testing.expectEqual(@as(u64, 94), try run1(binst, 0, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), target.elems.len);
+    try std.testing.expect(target.elems[1] == .funcref and target.elems[1].funcref == null);
 }
 
 // -- Globals ---------------------------------------------------------------------
