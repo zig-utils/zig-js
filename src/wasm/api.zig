@@ -1,8 +1,7 @@
 //! JavaScript-facing WebAssembly MVP API (issue #141).
 //!
-//! This first store slice installs the namespace, WebAssembly error classes,
-//! Module construction/reflection, validate(), Memory, and Global. Instance,
-//! Table, and exported functions build on the same rare-state/store seams.
+//! The namespace includes synchronous constructors/reflection and Promise-based
+//! compilation/instantiation over the same context-owned native store.
 
 const std = @import("std");
 const value = @import("../value.zig");
@@ -10,6 +9,7 @@ const shape = @import("../shape.zig");
 const gc = @import("../gc.zig");
 const interpreter = @import("../interpreter.zig");
 const context = @import("../context.zig");
+const promise = @import("../promise.zig");
 const types = @import("types.zig");
 const decode = @import("decode.zig");
 const validate_mod = @import("validate.zig");
@@ -34,6 +34,10 @@ const InstanceDescriptor = struct {
     global_proto: *Object,
     link_error_proto: *Object,
     runtime_error_proto: *Object,
+};
+const AsyncDescriptor = struct {
+    module: *ModuleDescriptor,
+    instance: *InstanceDescriptor,
 };
 
 const MemoryOwner = struct {
@@ -122,6 +126,21 @@ fn setData(a: std.mem.Allocator, rs: *Shape, obj: *Object, name: []const u8, v: 
 fn installMethod(a: std.mem.Allocator, rs: *Shape, obj: *Object, name: []const u8, arity: usize, native: value.NativeFn) !void {
     const method = try gc.allocObj(a);
     method.* = .{ .native = native };
+    try interpreter.installNativeProps(a, rs, method, name, arity);
+    try setData(a, rs, obj, name, Value.obj(method), .{ .writable = true, .enumerable = false, .configurable = true });
+}
+
+fn installMethodWithData(
+    a: std.mem.Allocator,
+    rs: *Shape,
+    obj: *Object,
+    name: []const u8,
+    arity: usize,
+    native: value.NativeFn,
+    private_data: *anyopaque,
+) !void {
+    const method = try gc.allocObj(a);
+    method.* = .{ .native = native, .private_data = private_data };
     try interpreter.installNativeProps(a, rs, method, name, arity);
     try setData(a, rs, obj, name, Value.obj(method), .{ .writable = true, .enumerable = false, .configurable = true });
 }
@@ -264,12 +283,13 @@ fn moduleFromValue(self: *Interpreter, input: Value) value.HostError!*types.Modu
     return @ptrCast(@alignCast(erased));
 }
 
-fn moduleConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
-    const self = activeInterpreter(ctx);
-    const descriptor: *ModuleDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
-    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Module must be called with new");
-    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Module requires a BufferSource");
-    const copy = try copyBufferSource(self, args[0]);
+fn compileModuleObject(
+    self: *Interpreter,
+    input: Value,
+    descriptor: *ModuleDescriptor,
+    prototype: *Object,
+) value.HostError!Value {
+    const copy = try copyBufferSource(self, input);
     defer copy.deinit();
     const owner = self.wasm_store_ctx orelse return self.throwError("TypeError", "WebAssembly store is unavailable");
     const store: *context.Context = @ptrCast(@alignCast(owner));
@@ -282,10 +302,18 @@ fn moduleConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     validate_mod.validate(module, &diag) catch
         return throwCompileError(self, descriptor.compile_error_proto, &diag);
     const object = try gc.allocObj(self.arena);
-    object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
+    object.* = .{ .proto = prototype };
     try object.setWasmModule(self.arena, @ptrCast(module));
     try store.wasm_registry.append(store.gpa, .{ .module = @ptrCast(module) });
     return Value.obj(object);
+}
+
+fn moduleConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *ModuleDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Module must be called with new");
+    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Module requires a BufferSource");
+    return compileModuleObject(self, args[0], descriptor, try constructedPrototype(self, descriptor.proto));
 }
 
 fn validate(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
@@ -710,8 +738,10 @@ fn throwWasmWithProto(self: *Interpreter, name: []const u8, message: []const u8,
 }
 
 fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Module, import_object: Value, link_proto: *Object) value.HostError!ResolvedImports {
-    if (module.imports.len > 0 and languageObject(import_object) == null)
-        return throwWasmWithProto(self, "LinkError", "WebAssembly.Instance requires an imports object", link_proto);
+    if (!import_object.isUndefined() and languageObject(import_object) == null)
+        return self.throwError("TypeError", "WebAssembly imports must be an object");
+    if (module.imports.len > 0 and import_object.isUndefined())
+        return self.throwError("TypeError", "WebAssembly.Instance requires an imports object");
     const funcs = try store.gpa.alloc(exec.ImportFunc, module.imported_funcs);
     errdefer store.gpa.free(funcs);
     const tables = try store.gpa.alloc(*exec.TableInst, module.imported_tables);
@@ -931,15 +961,17 @@ fn syncImportedTables(
     }
 }
 
-fn instanceConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
-    const self = activeInterpreter(ctx);
-    const descriptor: *InstanceDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
-    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Instance must be called with new");
-    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
-    const module_object = languageObject(args[0]) orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
+fn instantiateModuleObject(
+    self: *Interpreter,
+    module_value: Value,
+    import_object: Value,
+    descriptor: *InstanceDescriptor,
+    prototype: *Object,
+) value.HostError!Value {
+    const module_object = languageObject(module_value) orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
     const module: *types.Module = @ptrCast(@alignCast(module_object.wasmModule() orelse return self.throwError("TypeError", "WebAssembly.Instance requires a Module")));
     const store = try storeFor(self);
-    var resolved = try resolveImports(self, store, module, if (args.len > 1) args[1] else Value.undef(), descriptor.link_error_proto);
+    var resolved = try resolveImports(self, store, module, import_object, descriptor.link_error_proto);
     defer resolved.deinitTemps();
     var bridges_owned = false;
     defer if (!bridges_owned) store.gpa.free(resolved.bridges);
@@ -971,7 +1003,7 @@ fn instanceConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Hos
     defer if (!owner_registered) store.gpa.destroy(owner);
     owner.* = .{ .store = store, .inst = inst, .bridges = resolved.bridges };
     const object = try gc.allocObj(self.arena);
-    object.* = .{ .proto = try constructedPrototype(self, descriptor.proto) };
+    object.* = .{ .proto = prototype };
     const state = try object.wasmInstanceState(self.arena);
     state.inst = @ptrCast(owner);
     state.module_obj = module_object;
@@ -1023,12 +1055,153 @@ fn instanceConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Hos
     return Value.obj(object);
 }
 
+fn instanceConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *InstanceDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Instance must be called with new");
+    if (args.len == 0) return self.throwError("TypeError", "WebAssembly.Instance requires a Module");
+    return instantiateModuleObject(
+        self,
+        args[0],
+        if (args.len > 1) args[1] else Value.undef(),
+        descriptor,
+        try constructedPrototype(self, descriptor.proto),
+    );
+}
+
 fn instanceExportsGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const object = languageObject(this) orelse return self.throwError("TypeError", "WebAssembly.Instance.prototype.exports getter requires an Instance");
     const state = object.wasmInstance() orelse return self.throwError("TypeError", "WebAssembly.Instance.prototype.exports getter requires an Instance");
     _ = state.inst orelse return self.throwError("TypeError", "WebAssembly.Instance is unavailable");
     return Value.obj(state.exports_obj orelse return self.throwError("TypeError", "WebAssembly.Instance exports are unavailable"));
+}
+
+fn rejectAsyncFailure(self: *Interpreter, target: *promise.Promise, failure: value.HostError) value.HostError!void {
+    if (failure != error.Throw) return failure;
+    const reason = self.exception;
+    self.exception = Value.undef();
+    try promise.reject(self, target, reason);
+}
+
+fn stableBufferSource(self: *Interpreter, input: Value) value.HostError!Value {
+    const copy = try copyBufferSource(self, input);
+    defer copy.deinit();
+    const stable = try self.makeArrayBuffer(copy.bytes.len);
+    @memcpy(stable.arrayBuffer().?.bytes(), copy.bytes);
+    return Value.obj(stable);
+}
+
+fn queueAsyncJob(
+    self: *Interpreter,
+    native: value.NativeFn,
+    descriptor: *AsyncDescriptor,
+    elements: []const Value,
+) value.HostError!void {
+    const job = try gc.allocObj(self.arena);
+    job.* = .{ .native = native, .private_data = descriptor };
+    for (elements) |element| try job.appendInternalElement(self.arena, element);
+    try promise.enqueueCallback(self, Value.obj(job));
+}
+
+fn asyncCompile(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const promise_object = try promise.newPromise(self);
+    const target = promise.promiseOf(Value.obj(promise_object)).?;
+    const stable = stableBufferSource(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.obj(promise_object);
+    };
+    try queueAsyncJob(self, asyncCompileJob, descriptor, &.{ Value.obj(promise_object), stable });
+    return Value.obj(promise_object);
+}
+
+fn asyncCompileJob(ctx: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const job = self.active_native.?;
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(job.private_data.?));
+    const target = promise.promiseOf(job.elementAt(0).?).?;
+    const result = compileModuleObject(self, job.elementAt(1).?, descriptor.module, descriptor.module.proto) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.undef();
+    };
+    try promise.resolve(self, target, result);
+    return Value.undef();
+}
+
+fn asyncInstantiate(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const promise_object = try promise.newPromise(self);
+    const target = promise.promiseOf(Value.obj(promise_object)).?;
+    const source = if (args.len > 0) args[0] else Value.undef();
+    const imports = if (args.len > 1) args[1] else Value.undef();
+    if (source.isObject() and source.asObj().wasmModule() != null) {
+        if (!imports.isUndefined() and languageObject(imports) == null) {
+            const failure = self.throwError("TypeError", "WebAssembly imports must be an object");
+            try rejectAsyncFailure(self, target, failure);
+            return Value.obj(promise_object);
+        }
+        try queueAsyncJob(self, asyncInstantiateModuleJob, descriptor, &.{ Value.obj(promise_object), source, imports });
+        return Value.obj(promise_object);
+    }
+    const stable = stableBufferSource(self, source) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.obj(promise_object);
+    };
+    if (!imports.isUndefined() and languageObject(imports) == null) {
+        const failure = self.throwError("TypeError", "WebAssembly imports must be an object");
+        try rejectAsyncFailure(self, target, failure);
+        return Value.obj(promise_object);
+    }
+    try queueAsyncJob(self, asyncInstantiateBytesJob, descriptor, &.{ Value.obj(promise_object), stable, imports });
+    return Value.obj(promise_object);
+}
+
+fn asyncInstantiateModuleJob(ctx: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const job = self.active_native.?;
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(job.private_data.?));
+    const target = promise.promiseOf(job.elementAt(0).?).?;
+    const instance = instantiateModuleObject(
+        self,
+        job.elementAt(1).?,
+        job.elementAt(2).?,
+        descriptor.instance,
+        descriptor.instance.proto,
+    ) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.undef();
+    };
+    try promise.resolve(self, target, instance);
+    return Value.undef();
+}
+
+fn asyncInstantiateBytesJob(ctx: *anyopaque, _: Value, _: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const job = self.active_native.?;
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(job.private_data.?));
+    const target = promise.promiseOf(job.elementAt(0).?).?;
+    const module = compileModuleObject(self, job.elementAt(1).?, descriptor.module, descriptor.module.proto) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.undef();
+    };
+    const instance = instantiateModuleObject(
+        self,
+        module,
+        job.elementAt(2).?,
+        descriptor.instance,
+        descriptor.instance.proto,
+    ) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.undef();
+    };
+    const result = try self.newObject();
+    try self.setProp(result.asObj(), "module", module);
+    try self.setProp(result.asObj(), "instance", instance);
+    try promise.resolve(self, target, result);
+    return Value.undef();
 }
 
 pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
@@ -1105,6 +1278,10 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try installAccessor(env.arena, rs, instance_pair.proto, "exports", instanceExportsGetter, null);
     try setData(env.arena, rs, namespace, "Instance", Value.obj(instance_pair.ctor), .{ .writable = true, .enumerable = false, .configurable = true });
 
+    const async_descriptor = try env.arena.create(AsyncDescriptor);
+    async_descriptor.* = .{ .module = module_descriptor, .instance = instance_descriptor };
+    try installMethodWithData(env.arena, rs, namespace, "compile", 1, asyncCompile, async_descriptor);
+    try installMethodWithData(env.arena, rs, namespace, "instantiate", 1, asyncInstantiate, async_descriptor);
     try installMethod(env.arena, rs, namespace, "validate", 1, validate);
 
     if (env.get("Symbol")) |symbol| if (symbol.isObject()) {
@@ -1174,6 +1351,112 @@ test "wasm api installs errors validates and reflects Module" {
         \\callType && compileType && sections.length === 1 && sections[0].byteLength === 2;
     );
     try std.testing.expect(boundaries.isBoolean() and boundaries.asBool());
+}
+
+test "wasm api compile snapshots bytes and rejects asynchronously" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.asyncCompile = { order: ['before'] };
+        \\const source = new Uint8Array([0,97,115,109,1,0,0,0]);
+        \\let validThrew = false, invalidThrew = false, typeThrew = false;
+        \\try {
+        \\  const pending = WebAssembly.compile(source);
+        \\  asyncCompile.isPromise = pending instanceof Promise;
+        \\  pending.then(module => {
+        \\    asyncCompile.module = module instanceof WebAssembly.Module;
+        \\    asyncCompile.order.push('fulfilled');
+        \\  });
+        \\} catch (_) { validThrew = true; }
+        \\source[0] = 1;
+        \\try {
+        \\  const invalid = WebAssembly.compile(new Uint8Array([0]));
+        \\  invalid.then(
+        \\    () => { asyncCompile.invalid = false; },
+        \\    error => { asyncCompile.invalid = error instanceof WebAssembly.CompileError; },
+        \\  );
+        \\} catch (_) { invalidThrew = true; }
+        \\try {
+        \\  const wrong = WebAssembly.compile(1);
+        \\  wrong.then(
+        \\    () => { asyncCompile.type = false; },
+        \\    error => { asyncCompile.type = error instanceof TypeError; },
+        \\  );
+        \\} catch (_) { typeThrew = true; }
+        \\asyncCompile.sync = !validThrew && !invalidThrew && !typeThrew;
+        \\asyncCompile.order.push('after');
+    );
+    const result = try store.evaluate(
+        \\asyncCompile.sync && asyncCompile.isPromise && asyncCompile.module &&
+        \\asyncCompile.invalid && asyncCompile.type &&
+        \\asyncCompile.order.join(',') === 'before,after,fulfilled';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api instantiate supports Module and byte Promise overloads" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.asyncInstantiate = { order: ['before'] };
+        \\const addBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+        \\const addModule = new WebAssembly.Module(addBytes);
+        \\const modulePromise = WebAssembly.instantiate(addModule);
+        \\const bytesPromise = WebAssembly.instantiate(addBytes);
+        \\asyncInstantiate.promises = modulePromise instanceof Promise && bytesPromise instanceof Promise;
+        \\modulePromise.then(instance => {
+        \\  asyncInstantiate.module = instance instanceof WebAssembly.Instance && instance.exports.add(20, 22) === 42;
+        \\});
+        \\bytesPromise.then(result => {
+        \\  asyncInstantiate.bytes = result.module instanceof WebAssembly.Module &&
+        \\    result.instance instanceof WebAssembly.Instance && result.instance.exports.add(19, 23) === 42;
+        \\});
+        \\let primitiveThrew = false;
+        \\try {
+        \\  WebAssembly.instantiate(addModule, null).then(
+        \\    () => { asyncInstantiate.primitive = false; },
+        \\    error => { asyncInstantiate.primitive = error instanceof TypeError; },
+        \\  );
+        \\} catch (_) { primitiveThrew = true; }
+        \\const importBytes = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,14,1,3,101,110,118,6,97,110,115,119,101,114,0,0,7,10,1,6,97,110,115,119,101,114,0,0]);
+        \\const importModule = new WebAssembly.Module(importBytes);
+        \\const imports = { get env() {
+        \\  asyncInstantiate.order.push('get');
+        \\  return { answer() { return 42; } };
+        \\} };
+        \\WebAssembly.instantiate(importModule, imports).then(instance => {
+        \\  asyncInstantiate.linked = instance.exports.answer() === 42;
+        \\});
+        \\WebAssembly.instantiate(new Uint8Array([0])).then(
+        \\  () => { asyncInstantiate.compileError = false; },
+        \\  error => { asyncInstantiate.compileError = error instanceof WebAssembly.CompileError; },
+        \\);
+        \\WebAssembly.instantiate(importModule).then(
+        \\  () => { asyncInstantiate.missingImports = false; },
+        \\  error => { asyncInstantiate.missingImports = error instanceof TypeError; },
+        \\);
+        \\WebAssembly.instantiate(importModule, { env: { answer: 1 } }).then(
+        \\  () => { asyncInstantiate.linkError = false; },
+        \\  error => { asyncInstantiate.linkError = error instanceof WebAssembly.LinkError; },
+        \\);
+        \\asyncInstantiate.primitiveThrew = primitiveThrew;
+        \\asyncInstantiate.order.push('after');
+    );
+    const result = try store.evaluate(
+        \\asyncInstantiate.promises && asyncInstantiate.module && asyncInstantiate.bytes &&
+        \\asyncInstantiate.primitive && !asyncInstantiate.primitiveThrew && asyncInstantiate.linked &&
+        \\asyncInstantiate.compileError && asyncInstantiate.missingImports && asyncInstantiate.linkError &&
+        \\asyncInstantiate.order.join(',') === 'before,after,get';
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+
+    const constructor_boundary = try store.evaluate(
+        \\let primitive = false, missing = false;
+        \\try { new WebAssembly.Instance(addModule, 1); } catch (error) { primitive = error instanceof TypeError; }
+        \\try { new WebAssembly.Instance(importModule); } catch (error) { missing = error instanceof TypeError; }
+        \\primitive && missing;
+    );
+    try std.testing.expect(constructor_boundary.isBoolean() and constructor_boundary.asBool());
 }
 
 test "wasm api Memory grows failure-atomically and detaches the old buffer" {
