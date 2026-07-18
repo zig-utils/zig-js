@@ -396,6 +396,8 @@ fn addressTypeFromDescriptor(self: *Interpreter, store: *context.Context, descri
     if (std.mem.eql(u8, name, "i64")) {
         if (!store.wasm_features.memory64)
             return self.throwError("TypeError", "WebAssembly memory64 is disabled");
+        if (!exec.memory64HostSupported())
+            return self.throwError("TypeError", "WebAssembly memory64 requires a 64-bit host");
         return .i64;
     }
     return self.throwError("TypeError", what);
@@ -3067,6 +3069,49 @@ test "wasm api memory64 table roots retain and release externrefs" {
     store.collectGarbage();
     const reclaimed = try store.evaluate("memory64Weak.deref() === undefined && memory64Table.get(0n) === null");
     try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
+}
+
+test "wasm api shared memory64 preserves BigInt growth buffers and cross-instance identity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .wasm_features = .{ .memory64 = true, .threads = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const memory = new WebAssembly.Memory({address: 'i64', initial: 1n, maximum: 3n, shared: true});
+        \\const first = memory.buffer;
+        \\const firstBytes = new Uint8Array(first);
+        \\firstBytes[31] = 41;
+        \\const firstPrevious = memory.grow(1n);
+        \\const second = memory.buffer;
+        \\const secondBytes = new Uint8Array(second);
+        \\secondBytes[31] = 42;
+        \\const secondPrevious = memory.grow(1n);
+        \\const third = memory.buffer;
+        \\const thirdBytes = new Uint8Array(third);
+        \\thirdBytes[32] = 43;
+        \\const importedBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  2,16,1,3,101,110,118,6,109,101,109,111,114,121,2,7,1,3,
+        \\  7,10,1,6,109,101,109,111,114,121,2,0,
+        \\]);
+        \\const linked = new WebAssembly.Instance(new WebAssembly.Module(importedBytes), {env: {memory}});
+        \\const worker = new Thread(buffer => {
+        \\  const bytes = new Uint8Array(buffer);
+        \\  bytes[33] = 44;
+        \\  return buffer.byteLength;
+        \\}, first);
+        \\let limit = false, hostLimit = false;
+        \\try { memory.grow(1n); } catch (error) { limit = error instanceof RangeError && memory.buffer === third; }
+        \\try { new WebAssembly.Memory({address: 'i64', initial: 1n, maximum: 262145n, shared: true}); }
+        \\catch (error) { hostLimit = error instanceof RangeError; }
+        \\firstPrevious === 1n && secondPrevious === 2n && memory.grow(0n) === 3n &&
+        \\  first !== second && second !== third && first.byteLength === 65536 &&
+        \\  second.byteLength === 131072 && third.byteLength === 196608 &&
+        \\  firstBytes[31] === 42 && firstBytes[32] === 43 && worker.join() === 65536 &&
+        \\  thirdBytes[33] === 44 && linked.exports.memory === memory && limit && hostLimit;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api shared Memory preserves fixed historical buffers and aliases backing" {

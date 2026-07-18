@@ -255,6 +255,17 @@ pub const Instance = struct {
 pub const MAX_HOST_MEMORY64_PAGES: u64 = 262_144; // 16 GiB
 pub const MAX_HOST_TABLE_ELEMENTS: u64 = 10_000_000;
 
+/// memory64 execution requires a host whose native address type can represent
+/// every address in an allocated backing. Decoding and validation remain
+/// available on narrower hosts, but runtime construction fails deterministically.
+pub fn memory64HostSupportedForPointerBits(pointer_bits: u16) bool {
+    return pointer_bits >= 64;
+}
+
+pub fn memory64HostSupported() bool {
+    return memory64HostSupportedForPointerBits(@bitSizeOf(usize));
+}
+
 pub fn createMemory(gpa: Allocator, min_pages: u32, max_pages: ?u32) error{OutOfMemory}!*MemoryInst {
     return createMemoryTyped(gpa, min_pages, if (max_pages) |value| value else null, false);
 }
@@ -266,6 +277,7 @@ pub fn createMemoryTyped(gpa: Allocator, min_pages: u64, max_pages: ?u64, shared
 pub fn createMemoryAddressed(gpa: Allocator, address: types.AddressType, min_pages: u64, max_pages: ?u64, shared: bool) error{OutOfMemory}!*MemoryInst {
     const m = try gpa.create(MemoryInst);
     errdefer gpa.destroy(m);
+    if (address == .i64 and !memory64HostSupported()) return error.OutOfMemory;
     const host_limit: u64 = if (address == .i64) MAX_HOST_MEMORY64_PAGES else types.MAX_PAGES;
     if (min_pages > host_limit) return error.OutOfMemory;
     const initial_len_u64 = std.math.mul(u64, min_pages, types.PAGE_SIZE) catch return error.OutOfMemory;
@@ -273,6 +285,10 @@ pub fn createMemoryAddressed(gpa: Allocator, address: types.AddressType, min_pag
     const initial_len: usize = @intCast(initial_len_u64);
     if (shared) {
         const max = max_pages orelse return error.OutOfMemory;
+        // This implementation reserves a shared memory's complete stable slab
+        // up front. Reject impossible host maxima before size conversion or an
+        // allocator call so failure is deterministic and mutation-free.
+        if (max > host_limit) return error.OutOfMemory;
         const max_len_u64 = std.math.mul(u64, max, types.PAGE_SIZE) catch return error.OutOfMemory;
         if (max_len_u64 > std.math.maxInt(usize)) return error.OutOfMemory;
         const storage = try SharedBufferStorage.create(initial_len, @intCast(max_len_u64));
@@ -375,6 +391,7 @@ pub fn createTableTyped(gpa: Allocator, elem_type: types.ValType, initial: u64, 
 pub fn createTableAddressed(gpa: Allocator, address: types.AddressType, elem_type: types.ValType, initial: u64, max: ?u64) error{OutOfMemory}!*TableInst {
     const t = try gpa.create(TableInst);
     errdefer gpa.destroy(t);
+    if (address == .i64 and !memory64HostSupported()) return error.OutOfMemory;
     if (initial > MAX_HOST_TABLE_ELEMENTS or initial > std.math.maxInt(usize)) return error.OutOfMemory;
     t.* = .{
         .elems = try gpa.alloc(ValueSlot, @intCast(initial)),
@@ -4062,6 +4079,10 @@ fn runTrap(comptime nres: usize, inst: *Instance, funcidx: u32, args: []const u6
 // -- Host-side constructors --------------------------------------------------
 
 test "wasm.exec memory64 addressed instances and host allocation limits" {
+    try std.testing.expect(!memory64HostSupportedForPointerBits(32));
+    try std.testing.expect(memory64HostSupportedForPointerBits(64));
+    try std.testing.expect(memory64HostSupported());
+
     const memory = try createMemoryAddressed(talloc, .i64, 1, 2, false);
     defer destroyMemory(talloc, memory);
     try std.testing.expectEqual(types.AddressType.i64, memory.address);
@@ -4074,6 +4095,10 @@ test "wasm.exec memory64 addressed instances and host allocation limits" {
     try std.testing.expectError(
         error.OutOfMemory,
         createMemoryAddressed(talloc, .i64, MAX_HOST_MEMORY64_PAGES + 1, null, false),
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        createMemoryAddressed(talloc, .i64, 1, MAX_HOST_MEMORY64_PAGES + 1, true),
     );
     try std.testing.expectError(
         error.OutOfMemory,
@@ -4090,6 +4115,32 @@ test "wasm.exec memory64 addressed instances and host allocation limits" {
     defer destroyInstance(talloc, inst);
     try std.testing.expectEqual(types.AddressType.i64, inst.mems[0].address);
     try std.testing.expectEqual(types.AddressType.i64, inst.tables[0].address);
+}
+
+test "wasm.exec shared memory64 grows concurrently without moving its backing" {
+    const mem = try createMemoryAddressed(talloc, .i64, 1, 9, true);
+    defer destroyMemory(talloc, mem);
+    const storage = mem.shared_storage.?;
+    const original_ptr = mem.bytes().ptr;
+    var previous: [8]u64 = undefined;
+    var threads: [8]std.Thread = undefined;
+
+    const Grower = struct {
+        fn run(memory: *MemoryInst, result: *u64) void {
+            result.* = memoryGrowAddressed(memory, 1) orelse std.math.maxInt(u64);
+        }
+    };
+    for (&threads, &previous) |*thread, *result|
+        thread.* = try std.Thread.spawn(.{}, Grower.run, .{ mem, result });
+    for (&threads) |*thread| thread.join();
+
+    std.mem.sort(u64, &previous, {}, std.sort.asc(u64));
+    for (previous, 1..) |observed, expected| try std.testing.expectEqual(@as(u64, expected), observed);
+    try std.testing.expectEqual(@as(u32, 9), mem.pages());
+    try std.testing.expectEqual(original_ptr, mem.bytes().ptr);
+    try std.testing.expectEqual(@as(usize, 9 * types.PAGE_SIZE), storage.len());
+    try std.testing.expectEqual(@as(?u64, 9), memoryGrowAddressed(mem, 0));
+    try std.testing.expectEqual(@as(?u64, null), memoryGrowAddressed(mem, 1));
 }
 
 fn instantiateMemory64WithFailingAllocator(gpa: Allocator) !void {
