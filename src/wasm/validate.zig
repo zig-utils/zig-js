@@ -957,6 +957,10 @@ test "wasm.validate fixed-width SIMD instruction signatures and immediates" {
         code1("\xFD\x0C" ++ zero ++ "\xFD\x15\x10\x1A\x0B"));
     try expectInvalidAtWithFeatures(bad_lane, .{ .fixed_width_simd = true }, 0, 1, "invalid lane index");
 
+    const bad_memory_lane = comptime (hdr ++ type_void ++ func0 ++ mem1 ++
+        code1("\x41\x00\xFD\x0C" ++ zero ++ "\xFD\x57\x00\x00\x02\x1A\x0B"));
+    try expectInvalidAtWithFeatures(bad_memory_lane, .{ .fixed_width_simd = true }, 0, 2, "invalid lane index");
+
     const bad_alignment = comptime (hdr ++ type_void ++ func0 ++ mem1 ++
         code1("\x41\x00\xFD\x00\x05\x00\x1A\x0B"));
     try expectInvalidAtWithFeatures(bad_alignment, .{ .fixed_width_simd = true }, 0, 1, "alignment must not be larger than natural");

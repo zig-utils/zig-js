@@ -1,5 +1,6 @@
 //! Validation metadata for the pinned fixed-width SIMD opcode inventory.
 
+const std = @import("std");
 const simd = @import("simd.zig");
 
 pub const Shape = enum {
@@ -56,10 +57,10 @@ pub fn shape(op: simd.Op) Shape {
 
 pub fn laneLimit(op: simd.Op) ?u8 {
     return switch (op) {
-        .i8x16_extract_lane_s, .i8x16_extract_lane_u, .i8x16_replace_lane, .v128_load8_lane, .v128_load16_lane, .v128_load32_lane, .v128_load64_lane, .v128_store8_lane, .v128_store16_lane, .v128_store32_lane, .v128_store64_lane => 16,
-        .i16x8_extract_lane_s, .i16x8_extract_lane_u, .i16x8_replace_lane => 8,
-        .i32x4_extract_lane, .i32x4_replace_lane, .f32x4_extract_lane, .f32x4_replace_lane => 4,
-        .i64x2_extract_lane, .i64x2_replace_lane, .f64x2_extract_lane, .f64x2_replace_lane => 2,
+        .i8x16_extract_lane_s, .i8x16_extract_lane_u, .i8x16_replace_lane, .v128_load8_lane, .v128_store8_lane => 16,
+        .i16x8_extract_lane_s, .i16x8_extract_lane_u, .i16x8_replace_lane, .v128_load16_lane, .v128_store16_lane => 8,
+        .i32x4_extract_lane, .i32x4_replace_lane, .f32x4_extract_lane, .f32x4_replace_lane, .v128_load32_lane, .v128_store32_lane => 4,
+        .i64x2_extract_lane, .i64x2_replace_lane, .f64x2_extract_lane, .f64x2_replace_lane, .v128_load64_lane, .v128_store64_lane => 2,
         else => null,
     };
 }
@@ -73,4 +74,15 @@ pub fn naturalAlignment(op: simd.Op) ?u32 {
         .v128_load32_splat, .v128_load32_lane, .v128_store32_lane, .v128_load32_zero => 2,
         else => null,
     };
+}
+
+test "SIMD memory lane limits follow access width" {
+    try std.testing.expectEqual(@as(?u8, 16), laneLimit(.v128_load8_lane));
+    try std.testing.expectEqual(@as(?u8, 16), laneLimit(.v128_store8_lane));
+    try std.testing.expectEqual(@as(?u8, 8), laneLimit(.v128_load16_lane));
+    try std.testing.expectEqual(@as(?u8, 8), laneLimit(.v128_store16_lane));
+    try std.testing.expectEqual(@as(?u8, 4), laneLimit(.v128_load32_lane));
+    try std.testing.expectEqual(@as(?u8, 4), laneLimit(.v128_store32_lane));
+    try std.testing.expectEqual(@as(?u8, 2), laneLimit(.v128_load64_lane));
+    try std.testing.expectEqual(@as(?u8, 2), laneLimit(.v128_store64_lane));
 }
