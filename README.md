@@ -140,10 +140,10 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `5374e601` do not execute in these
+The ABI and WebAssembly/conformance changes through `66237d21` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
-WebAssembly module/store/reference-root and reference-call APIs.
+WebAssembly module/store/reference-root, reference-call, or bulk-memory APIs.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -839,7 +839,8 @@ and the final evidence-backed removal of this section is tracked by
   opt-in Core 2.0 sign-extension, saturating-conversion, and multi-value support,
   plus complete feature-gated reference instructions, typed multi-table runtime,
   precise-GC funcref/externref slots, arbitrary externref Table/Global identity
-  and reclamation, and canonical reference-valued function calls,
+  and reclamation, canonical reference-valued function calls, and complete
+  DataCount/passive-segment bulk memory and table operations,
   upstream inventory, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
   are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.

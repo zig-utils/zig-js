@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing runtime on main through `5374e601` provides:
+The JS-facing runtime on main through `66237d21` provides:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -58,7 +58,7 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 153/153 at `d3736891`, covering the
+The focused WebAssembly unit suite passes 159/159 at `4c61bd90`, covering the
 decoder, validator, executor, JS API, store growth, linking, function calls,
 traps, imported/defined identity, precise-GC retention, stable asynchronous
 compilation inputs, Promise timing, overload result shapes, and rejection
@@ -66,8 +66,11 @@ classes, the opt-in Core 2.0 numeric and multi-value operations, tagged
 funcref/externref invocation and global slots, balanced root publication across
 return/checkpoint/trap paths, reference-valued JS/Wasm calls, explicit
 multi-table operations, cross-instance indirect calls, and the test-only
-bit-exact corpus boundary. The strengthened table-index witness passes its
-focused 3/3 filter at `5374e601`. The separately recorded no-GIL filter passes
+bit-exact corpus boundary, plus DataCount, every active/passive/declarative
+segment encoding, bulk memory/table operations, overlap and zero-length bounds,
+dropped-segment state, host-visible table synchronization, and precise-GC
+barriers. The strengthened cross-instance bulk-table witness passes its focused
+3/3 filter at `66237d21`. The separately recorded no-GIL filter passes
 3/3 at `d2fca189` and proves a completed parallel mid-script collection retains
 an externref held only by a frozen Wasm
 frame, then reclaims it after that frame unregisters. The most recent batched
@@ -143,7 +146,9 @@ const ctx = try js.Context.createWith(gpa, .{
 The five sign-extension instructions and eight nontrapping float-to-integer
 conversions are implemented behind their independent `sign_extension_ops` and
 `nontrapping_float_to_int` switches, and multi-result functions and type-index
-control signatures are implemented behind `multi_value`. They decode,
+control signatures are implemented behind `multi_value`. DataCount, passive and
+declarative segments, and `memory.init`/`data.drop`/`memory.copy`/`memory.fill`/
+`table.init`/`elem.drop`/`table.copy` are implemented behind `bulk_memory`. They decode,
 validate, instantiate, and execute through the public JavaScript API.
 Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
@@ -163,6 +168,15 @@ preserve arbitrary externref identity and canonical funcref identity, including
 mixed multi-value results. Explicit table indices select the intended table for
 get/grow/fill and cross-instance indirect calls. This reference-types slice was
 completed in [#275](https://github.com/zig-utils/zig-js/issues/275).
+
+Bulk memory uses explicit per-instance passive-segment state. Active segments
+are preflighted before any store mutation, declarative and active segments are
+dropped at instantiation, and passive segments retain/drop exactly. Memory and
+table copies use memmove overlap semantics, preflight both source and destination
+bounds, and keep zero-length-at-end behavior exact. Wasm table writes and grows
+synchronize JavaScript Table mirrors immediately, preserving cross-instance
+funcref identity and externref precise-GC roots. This slice was completed in
+[#272](https://github.com/zig-utils/zig-js/issues/272).
 
 Implementation is split into the shared gating foundation
 [#262](https://github.com/zig-utils/zig-js/issues/262), the Core 2.0 numeric
