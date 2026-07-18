@@ -1057,6 +1057,98 @@ fn executeSimdIntegerBasic(s: *State, op: simd.Op) ExecError!bool {
     return false;
 }
 
+const SimdBoundedBinary = enum {
+    add_sat_signed,
+    add_sat_unsigned,
+    sub_sat_signed,
+    sub_sat_unsigned,
+    min_signed,
+    min_unsigned,
+    max_signed,
+    max_unsigned,
+    average_unsigned,
+};
+
+const SimdBoundedBinaryOp = struct {
+    width: u8,
+    operation: SimdBoundedBinary,
+};
+
+fn simdBoundedBinary(op: simd.Op) ?SimdBoundedBinaryOp {
+    return switch (op) {
+        .i8x16_add_sat_s => .{ .width = 8, .operation = .add_sat_signed },
+        .i8x16_add_sat_u => .{ .width = 8, .operation = .add_sat_unsigned },
+        .i8x16_sub_sat_s => .{ .width = 8, .operation = .sub_sat_signed },
+        .i8x16_sub_sat_u => .{ .width = 8, .operation = .sub_sat_unsigned },
+        .i8x16_min_s => .{ .width = 8, .operation = .min_signed },
+        .i8x16_min_u => .{ .width = 8, .operation = .min_unsigned },
+        .i8x16_max_s => .{ .width = 8, .operation = .max_signed },
+        .i8x16_max_u => .{ .width = 8, .operation = .max_unsigned },
+        .i8x16_avgr_u => .{ .width = 8, .operation = .average_unsigned },
+        .i16x8_add_sat_s => .{ .width = 16, .operation = .add_sat_signed },
+        .i16x8_add_sat_u => .{ .width = 16, .operation = .add_sat_unsigned },
+        .i16x8_sub_sat_s => .{ .width = 16, .operation = .sub_sat_signed },
+        .i16x8_sub_sat_u => .{ .width = 16, .operation = .sub_sat_unsigned },
+        .i16x8_min_s => .{ .width = 16, .operation = .min_signed },
+        .i16x8_min_u => .{ .width = 16, .operation = .min_unsigned },
+        .i16x8_max_s => .{ .width = 16, .operation = .max_signed },
+        .i16x8_max_u => .{ .width = 16, .operation = .max_unsigned },
+        .i16x8_avgr_u => .{ .width = 16, .operation = .average_unsigned },
+        .i32x4_min_s => .{ .width = 32, .operation = .min_signed },
+        .i32x4_min_u => .{ .width = 32, .operation = .min_unsigned },
+        .i32x4_max_s => .{ .width = 32, .operation = .max_signed },
+        .i32x4_max_u => .{ .width = 32, .operation = .max_unsigned },
+        else => null,
+    };
+}
+
+fn signedSimdLane(value: u64, width: u8) i64 {
+    return @bitCast(signExtendLane(value, width));
+}
+
+fn signedLaneBits(value: i64) u64 {
+    return @bitCast(value);
+}
+
+fn boundedSimdLane(a: u64, b: u64, descriptor: SimdBoundedBinaryOp) u64 {
+    const unsigned_max = (@as(u64, 1) << @intCast(descriptor.width)) - 1;
+    const signed_min = -(@as(i64, 1) << @intCast(descriptor.width - 1));
+    const signed_max = (@as(i64, 1) << @intCast(descriptor.width - 1)) - 1;
+    const signed_a = signedSimdLane(a, descriptor.width);
+    const signed_b = signedSimdLane(b, descriptor.width);
+    return switch (descriptor.operation) {
+        .add_sat_signed => signedLaneBits(std.math.clamp(signed_a + signed_b, signed_min, signed_max)),
+        .add_sat_unsigned => @min(a + b, unsigned_max),
+        .sub_sat_signed => signedLaneBits(std.math.clamp(signed_a - signed_b, signed_min, signed_max)),
+        .sub_sat_unsigned => if (a < b) 0 else a - b,
+        .min_signed => signedLaneBits(@min(signed_a, signed_b)),
+        .min_unsigned => @min(a, b),
+        .max_signed => signedLaneBits(@max(signed_a, signed_b)),
+        .max_unsigned => @max(a, b),
+        .average_unsigned => (a + b + 1) >> 1,
+    };
+}
+
+fn mapSimdBoundedBinary(left: u128, right: u128, descriptor: SimdBoundedBinaryOp) u128 {
+    var result: u128 = 0;
+    for (0..128 / descriptor.width) |lane| {
+        const mapped = boundedSimdLane(
+            laneBits(left, @intCast(lane), descriptor.width),
+            laneBits(right, @intCast(lane), descriptor.width),
+            descriptor,
+        );
+        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
+    }
+    return result;
+}
+
+fn executeSimdIntegerBounded(s: *State, op: simd.Op) ExecError!bool {
+    const descriptor = simdBoundedBinary(op) orelse return false;
+    const right = popVector(s);
+    try pushVector(s, mapSimdBoundedBinary(popVector(s), right, descriptor));
+    return true;
+}
+
 fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
     const op = simdOp(instr);
     switch (op) {
@@ -1142,6 +1234,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     const op = simdOp(instr);
     if (try executeSimdIntegerComparison(s, op)) return;
     if (try executeSimdIntegerBasic(s, op)) return;
+    if (try executeSimdIntegerBounded(s, op)) return;
     switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
         .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
