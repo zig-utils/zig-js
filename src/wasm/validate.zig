@@ -340,7 +340,7 @@ const FuncValidator = struct {
                     const f = try self.popFrame();
                     // An if with a result but no else can never produce the
                     // result when the condition is false.
-                    if (f.kind == .if_ and (f.params.len != 0 or f.results.len != 0) and !f.saw_else)
+                    if (f.kind == .if_ and !std.mem.eql(types.ValType, f.params, f.results) and !f.saw_else)
                         return self.fail("type mismatch");
                     if (self.fr_len == 0) {
                         // Function end: the decoder guarantees this is the
@@ -876,6 +876,16 @@ test "wasm.validate multi-value type-index block" {
         sec(1, "\x01\x60\x00\x02\x7F\x7E") ++ func0 ++
         code1("\x02\x00\x41\x07\x42\x09\x0B\x0B"));
     try expectValidWithFeatures(bytes, .{ .multi_value = true });
+}
+
+test "wasm.validate multi-value loop parameters and branch vectors" {
+    const loop = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++
+        code1("\x20\x00\x03\x00\x21\x00\x20\x00\x41\x01\x6B\x22\x00\x20\x00\x0D\x00\x0B\x0B"));
+    try expectValidWithFeatures(loop, .{ .multi_value = true });
+
+    const bad_type_index = comptime (hdr ++ type_void ++ func0 ++ code1("\x02\x01\x0B\x0B"));
+    try expectInvalidAtWithFeatures(bad_type_index, .{ .multi_value = true }, 0, 0, "unknown type");
 }
 
 test "wasm.validate nontrapping conversion operand types" {

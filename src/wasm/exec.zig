@@ -2386,6 +2386,12 @@ test "wasm.exec multi-value type-index block" {
     try expectResultsWithFeatures(bytes, .{ .multi_value = true }, 0, &.{}, &.{ 7, 9 });
 }
 
+test "wasm.exec multi-value loop carries parameters" {
+    const body = "\x20\x00\x03\x00\x21\x00\x20\x00\x41\x01\x6B\x22\x00\x20\x00\x0D\x00\x0B";
+    const bytes = comptime arithModule(I32, I32, body);
+    try expectResultsWithFeatures(bytes, .{ .multi_value = true }, 0, &.{3}, &.{0});
+}
+
 test "wasm.exec conversions trunc f32 to int" {
     try unop(.i32_trunc_f32_s, F32, I32, f32v(1.5), 1);
     try unop(.i32_trunc_f32_s, F32, I32, f32v(-1.5), i32v(-1));

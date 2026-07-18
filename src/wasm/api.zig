@@ -1602,6 +1602,36 @@ test "wasm api returns opted-in multi-value exports as arrays" {
     try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
+test "wasm api converts iterable multi-value imports and checks arity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .multi_value = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,0,2,127,126,
+        \\  2,12,1,3,101,110,118,4,112,97,105,114,0,0,
+        \\  3,2,1,0,
+        \\  7,8,1,4,112,97,105,114,0,1,
+        \\  10,6,1,4,0,16,0,11
+        \\]);
+        \\const good = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+        \\  env: { pair: () => new Set([3, 4n]) }
+        \\}).exports.pair();
+        \\let arity = false;
+        \\try {
+        \\  new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+        \\    env: { pair: () => [1] }
+        \\  }).exports.pair();
+        \\} catch (error) {
+        \\  arity = error instanceof TypeError && error.message.includes('wrong number of values');
+        \\}
+        \\Array.isArray(good) && good[0] === 3 && good[1] === 4n && arity;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
 test "wasm api compile snapshots bytes and rejects asynchronously" {
     const store = try context.Context.create(std.testing.allocator);
     defer store.destroy();
