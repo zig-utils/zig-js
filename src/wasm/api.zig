@@ -2279,7 +2279,23 @@ test "wasm api bulk table mutations synchronize identity and precise roots" {
         \\const funTable = new WebAssembly.Table({ element: 'funcref', initial: 1 });
         \\const funInstance = new WebAssembly.Instance(new WebAssembly.Module(funBytes), { env: { t: funTable } });
         \\funInstance.exports.init();
-        \\copied && funTable.get(0) === funInstance.exports.f && funTable.get(0)() === 42;
+        \\const funCopyBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,4,1,96,0,0,
+        \\  2,29,2,3,101,110,118,4,100,101,115,116,1,112,0,1,3,101,110,118,6,115,111,117,114,99,101,1,112,0,1,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,0,
+        \\  10,14,1,12,0,65,0,65,0,65,1,252,14,0,1,11
+        \\]);
+        \\const funDest = new WebAssembly.Table({ element: 'funcref', initial: 1 });
+        \\const funSource = new WebAssembly.Table({ element: 'funcref', initial: 1 });
+        \\funSource.set(0, funInstance.exports.f);
+        \\const copyingInstance = new WebAssembly.Instance(new WebAssembly.Module(funCopyBytes), {
+        \\  env: { dest: funDest, source: funSource }
+        \\});
+        \\copyingInstance.exports.run();
+        \\copied && funTable.get(0) === funInstance.exports.f && funTable.get(0)() === 42 &&
+        \\  funDest.get(0) === funInstance.exports.f;
     );
     try std.testing.expect(initial.isBoolean() and initial.asBool());
     store.collectGarbage();
