@@ -16446,6 +16446,31 @@ test "enable_gc: WeakRef target clears when only weakly reachable" {
     try std.testing.expectEqual(true, r.asBool());
 }
 
+test "enable_gc: WebAssembly externref execution roots retain then release exactly" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const target = try ctx.evaluate(
+        \\globalThis.wasmRef = { tag: 17 };
+        \\globalThis.wasmWeak = new WeakRef(wasmRef);
+        \\wasmRef;
+    );
+    _ = try ctx.evaluate("globalThis.wasmRef = undefined");
+
+    var machine = ctx.interpreter();
+    const slots = [_]value.WasmSlot{.{ .externref = target }};
+    var roots: value.WasmExecutionRoots = .{ .stack = &slots };
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    try machine.pushWasmRoots(&roots);
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate("wasmWeak.deref()?.tag === 17")).asBool());
+
+    machine.popWasmRoots(&roots);
+    ctx.collectGarbage();
+    try std.testing.expect((try ctx.evaluate("wasmWeak.deref() === undefined")).asBool());
+}
+
 test "enable_gc: shell gc request runs at the evaluate-tail quiescent point" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();

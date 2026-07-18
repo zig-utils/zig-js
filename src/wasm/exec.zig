@@ -1392,6 +1392,26 @@ fn recordGlobalBarrier(raw: *anyopaque, slot: ValueSlot) void {
     if (slot == .externref) count.* += 1;
 }
 
+const RootLivenessProbe = struct {
+    externrefs: [4]usize = .{ 0, 0, 0, 0 },
+    len: usize = 0,
+
+    fn enter(_: *anyopaque, _: *js_value.WasmExecutionRoots) error{OutOfMemory}!void {}
+    fn leave(_: *anyopaque, _: *js_value.WasmExecutionRoots) void {}
+    fn checkpoint(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
+        const self: *RootLivenessProbe = @ptrCast(@alignCast(raw));
+        var count: usize = 0;
+        for (roots.stack) |slot| if (slot == .externref) {
+            count += 1;
+        };
+        for (roots.locals) |slot| if (slot == .externref) {
+            count += 1;
+        };
+        self.externrefs[self.len] = count;
+        self.len += 1;
+    }
+};
+
 fn leb(comptime v: u64) []const u8 {
     comptime {
         var buf: []const u8 = &.{};
@@ -2664,6 +2684,33 @@ test "wasm.exec global reference roots publish overwrite and barrier state" {
     setGlobalValue(global, .{ .numeric = 7 });
     try std.testing.expectEqual(js_value.Value.undef().bits, global.ref_root.load(.acquire));
     try std.testing.expectEqual(@as(usize, 1), barriers);
+}
+
+test "wasm.exec execution roots refresh after pop and local overwrite" {
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    var probe: RootLivenessProbe = .{};
+    var diag: types.Diagnostic = .{};
+    var state: State = .{
+        .alloc = arena.allocator(),
+        .diag = &diag,
+        .root_hooks = .{
+            .ctx = @ptrCast(&probe),
+            .enter = RootLivenessProbe.enter,
+            .leave = RootLivenessProbe.leave,
+            .checkpoint = RootLivenessProbe.checkpoint,
+        },
+    };
+    var object = js_value.Object{};
+    try pushSlot(&state, .{ .externref = js_value.Value.obj(&object) });
+    checkpoint(&state);
+    _ = popSlot(&state);
+    checkpoint(&state);
+    try state.locals.append(state.alloc, .{ .externref = js_value.Value.obj(&object) });
+    checkpoint(&state);
+    state.locals.items[0] = .{ .numeric = 0 };
+    checkpoint(&state);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 0, 1, 0 }, &probe.externrefs);
 }
 
 test "wasm.exec conversions trunc f32 to int" {
