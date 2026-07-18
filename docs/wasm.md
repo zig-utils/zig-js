@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing slices on main through `2736cf71` provide:
+The JS-facing slices on main through `0835f411` provide:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -33,9 +33,16 @@ The JS-facing slices on main through `2736cf71` provide:
   `structuredClone`, ArrayBuffer transfer methods, and the test host hook;
 - `WebAssembly.Global` for mutable and immutable `i32`, `i64`, `f32`, and `f64`
   values, including modulo integer conversion, BigInt boundaries, `valueOf`,
-  and numeric coercion; and
-- `WebAssembly`, `Module`, `Memory`, and `Global` branding and derived
-  constructor prototypes.
+  and numeric coercion;
+- `WebAssembly.Table` with `anyfunc` null/function references, exact JS identity,
+  bounds checks, `get`, `set`, `grow`, and GC-visible atomic reference slots;
+- `WebAssembly.Instance` with all four import/export kinds, limit/type checks,
+  active element/data segments, start functions, imported-store identity, and
+  immutable null-prototype exports;
+- callable exported functions with i32/i64/f32/f64 conversion, JS import calls,
+  exception identity, indirect calls, and `RuntimeError` traps; and
+- `WebAssembly`, `Module`, `Instance`, `Memory`, `Table`, and `Global` branding
+  and derived constructor prototypes.
 
 The module and its decoded data are owned by the creating context and released
 during deterministic context teardown. `customSections` returns fresh
@@ -44,12 +51,11 @@ during deterministic context teardown. `customSections` returns fresh
 
 ## Evidence
 
-The focused WebAssembly unit suite passes 113/113 at `2736cf71`, covering the
-decoder, validator, executor, JS API, Memory growth, and precise-GC buffer
-retention with zero failures, skips, or leaks. The most recent complete
-engine suite was 989/989 at `ed109b6d`; the full suite is intentionally batched
-after multiple WebAssembly store/API slices instead of being rerun for every
-small checkpoint.
+The focused WebAssembly unit suite passes 118/118 at `0835f411`, covering the
+decoder, validator, executor, JS API, store growth, linking, function calls,
+traps, imported/defined identity, and precise-GC retention. The batched full
+engine suite passes 998/998 at the same runtime checkpoint. Both runs report
+zero failures, skips, and leaks.
 
 Run the focused suite with:
 
@@ -61,9 +67,6 @@ zig build test -Dtest-filter=wasm
 
 The following remain required before #141 can close:
 
-- JS-facing `Instance`, `Table`, and exported function behavior;
-- import/export linking, JS/Wasm conversion, exception propagation, traps,
-  start functions, and Wasm-instruction growth visible through exported APIs;
 - `WebAssembly.compile` and both `WebAssembly.instantiate` overloads with
   Promise semantics; and
 - a pinned upstream MVP specification corpus plus a machine-readable
