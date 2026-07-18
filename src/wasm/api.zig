@@ -44,6 +44,7 @@ fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void 
     _ = raw;
     const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
     machine.serviceGcSafepoint();
+    if (machine.use_thread_gil) if (machine.gil) |g| g.yieldIfContended();
 }
 
 fn beginExecutionWait(raw: *anyopaque) void {
@@ -435,7 +436,7 @@ fn compileModuleObject(
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = prototype };
     try object.setWasmModule(self.arena, @ptrCast(module));
-    try store.wasm_registry.append(store.gpa, .{ .module = @ptrCast(module) });
+    try store.appendWasmOwned(.{ .module = @ptrCast(module) });
     return Value.obj(object);
 }
 
@@ -590,7 +591,7 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     state.buffer_obj = buffer;
     mem.on_grow = memoryDidGrow;
     mem.on_grow_ctx = @ptrCast(owner);
-    try store.wasm_registry.append(store.gpa, .{ .memory = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .memory = @ptrCast(owner) });
     return Value.obj(object);
 }
 
@@ -675,7 +676,7 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     const state = try object.wasmTableState(self.arena);
     state.table = @ptrCast(owner);
     state.refs = refs;
-    try store.wasm_registry.append(store.gpa, .{ .table = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .table = @ptrCast(owner) });
     if (fill.value.isObject()) gc.barrierValueFrom(object, fill.value);
     return Value.obj(object);
 }
@@ -1066,7 +1067,7 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     state.ref = &glob.ref_root;
     glob.barrier_ctx = @ptrCast(object);
     glob.barrier = barrierGlobalReference;
-    try store.wasm_registry.append(store.gpa, .{ .global = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .global = @ptrCast(owner) });
     return Value.obj(object);
 }
 
@@ -1281,9 +1282,9 @@ fn wrapDefinedMemory(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     state.mem = @ptrCast(owner);
     state.buffer_obj = buffer;
     state.owner_obj = instance_object;
+    try store.appendWasmOwned(.{ .memory = @ptrCast(owner) });
     mem.on_grow = memoryDidGrow;
     mem.on_grow_ctx = @ptrCast(owner);
-    store.wasm_registry.appendAssumeCapacity(.{ .memory = @ptrCast(owner) });
     return Value.obj(object);
 }
 
@@ -1297,7 +1298,7 @@ fn wrapDefinedGlobal(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     state.glob = @ptrCast(owner);
     state.ref = &glob.ref_root;
     state.owner_obj = instance_object;
-    store.wasm_registry.appendAssumeCapacity(.{ .global = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .global = @ptrCast(owner) });
     return Value.obj(object);
 }
 
@@ -1333,12 +1334,12 @@ fn wrapDefinedTable(
     const owner = try store.gpa.create(TableOwner);
     errdefer store.gpa.destroy(owner);
     owner.* = .{ .store = store, .arena = self.arena, .table = table, .wrapper = object, .owns_native = false, .refs = refs };
-    installTableHost(owner);
     const state = try object.wasmTableState(self.arena);
     state.table = @ptrCast(owner);
     state.refs = refs;
     state.owner_obj = instance_object;
-    store.wasm_registry.appendAssumeCapacity(.{ .table = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .table = @ptrCast(owner) });
+    installTableHost(owner);
     return Value.obj(object);
 }
 
@@ -1417,7 +1418,6 @@ fn instantiateModuleObject(
         store.gpa.free(resolved.coerced_globals);
     };
 
-    try store.wasm_registry.ensureUnusedCapacity(store.gpa, 1 + module.exports.len);
     var diag: types.Diagnostic = .{};
     const previous = active_wasm_interp;
     active_wasm_interp = @ptrCast(self);
@@ -1468,7 +1468,7 @@ fn instantiateModuleObject(
         global.barrier = barrierGlobalReference;
     }
     try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
-    store.wasm_registry.appendAssumeCapacity(.{ .instance = @ptrCast(owner) });
+    try store.appendWasmOwned(.{ .instance = @ptrCast(owner) });
     owner_registered = true;
     inst_transferred = true;
     bridges_owned = true;

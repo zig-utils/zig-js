@@ -2364,6 +2364,10 @@ pub const Context = struct {
     /// `teardownWasmStore` can free them (with `gpa`, never the arena) at
     /// context teardown.
     wasm_registry: std.ArrayListUnmanaged(WasmOwned) = .empty,
+    /// `Thread` interpreters share one WebAssembly store. Registration can
+    /// allocate, so reserve + append must remain one transaction instead of
+    /// exposing ArrayList's buffer and length to concurrent constructors.
+    wasm_registry_lock: std.atomic.Mutex = .unlocked,
     /// Explicit WebAssembly proposal gates for every module compiled in this
     /// realm. MVP is the empty/default set; module bytes never enable features.
     wasm_features: wasm_types.Features = .{},
@@ -3575,6 +3579,11 @@ pub const Context = struct {
         while (!m.tryLock()) : (spins += 1) {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+    }
+    pub fn appendWasmOwned(self: *Context, owned: WasmOwned) std.mem.Allocator.Error!void {
+        spinLockMutex(&self.wasm_registry_lock);
+        defer self.wasm_registry_lock.unlock();
+        try self.wasm_registry.append(self.gpa, owned);
     }
     pub fn realmLock(self: *Context) void {
         if (self.parallel_js) {
