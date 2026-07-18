@@ -1091,6 +1091,34 @@ fn readPackedField(storage: types.StorageType, signed: bool, slot: WasmSlot) u32
     };
 }
 
+fn fieldByteWidth(storage: types.StorageType) usize {
+    return switch (storage) {
+        .i8 => 1,
+        .i16 => 2,
+        .value => |value_type| switch (value_type) {
+            .i32, .f32 => 4,
+            .i64, .f64 => 8,
+            .v128 => 16,
+            else => unreachable,
+        },
+    };
+}
+
+fn fieldFromBytes(storage: types.StorageType, bytes: []const u8) WasmSlot {
+    var bits: u128 = 0;
+    for (bytes, 0..) |byte, index| bits |= @as(u128, byte) << @intCast(index * 8);
+    return switch (storage) {
+        .i8 => .{ .numeric = @as(u8, @truncate(bits)) },
+        .i16 => .{ .numeric = @as(u16, @truncate(bits)) },
+        .value => |value_type| switch (value_type) {
+            .i32, .f32 => .{ .numeric = @as(u32, @truncate(bits)) },
+            .i64, .f64 => .{ .numeric = @as(u64, @truncate(bits)) },
+            .v128 => .{ .vector = bits },
+            else => unreachable,
+        },
+    };
+}
+
 fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     const op = switch (instr.imm) {
         .gc => |value| value,
@@ -1162,6 +1190,31 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const object = try createGcAggregate(inst, immediate.first, .array, fields);
             try pushSlot(s, .{ .gcref = @ptrCast(object) });
         },
+        .array_new_data, .array_new_elem => {
+            const count = popI32(s);
+            const source = popI32(s);
+            const immediate = instr.imm.gc_two_indices;
+            const array_type = inst.module.types[immediate.first].subtype.composite.array;
+            const fields = try s.alloc.alloc(ValueSlot, count);
+            if (op == .array_new_data) {
+                const segment = &inst.data_segments[immediate.second];
+                const bytes = if (segment.dropped) &.{} else segment.bytes;
+                const width = fieldByteWidth(array_type.field.storage);
+                const byte_count = std.math.mul(u64, count, width) catch return s.trap("out of bounds array initialization");
+                const range = checkedRange(source, byte_count, bytes.len) orelse return s.trap("out of bounds array initialization");
+                for (fields, 0..) |*field, index| {
+                    const start = range.start + index * width;
+                    field.* = fieldFromBytes(array_type.field.storage, bytes[start..][0..width]);
+                }
+            } else {
+                const segment = &inst.elem_segments[immediate.second];
+                const elems = if (segment.dropped) &.{} else segment.elems;
+                const range = checkedRange(source, count, elems.len) orelse return s.trap("out of bounds array initialization");
+                @memcpy(fields, elems[range.start..range.end]);
+            }
+            const object = try createGcAggregate(inst, immediate.first, .array, fields);
+            try pushSlot(s, .{ .gcref = @ptrCast(object) });
+        },
         .array_get, .array_get_s, .array_get_u => {
             const index = popI32(s);
             const object = try gcObjectFromSlot(s, popSlot(s));
@@ -1193,6 +1246,47 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const range = checkedRange(start, count, object.fields.len) orelse return s.trap("out of bounds array access");
             const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
             @memset(object.fields[range.start..range.end], normalizePackedField(storage, value));
+        },
+        .array_copy => {
+            const count = popI32(s);
+            const source_index = popI32(s);
+            const source = try gcObjectFromSlot(s, popSlot(s));
+            const destination_index = popI32(s);
+            const destination = try gcObjectFromSlot(s, popSlot(s));
+            const source_range = checkedRange(source_index, count, source.fields.len) orelse return s.trap("out of bounds array access");
+            const destination_range = checkedRange(destination_index, count, destination.fields.len) orelse return s.trap("out of bounds array access");
+            const from = source.fields[source_range.start..source_range.end];
+            const to = destination.fields[destination_range.start..destination_range.end];
+            if (source != destination or destination_range.start <= source_range.start)
+                std.mem.copyForwards(ValueSlot, to, from)
+            else
+                std.mem.copyBackwards(ValueSlot, to, from);
+        },
+        .array_init_data, .array_init_elem => {
+            const count = popI32(s);
+            const source = popI32(s);
+            const destination_index = popI32(s);
+            const destination = try gcObjectFromSlot(s, popSlot(s));
+            const immediate = instr.imm.gc_two_indices;
+            const destination_range = checkedRange(destination_index, count, destination.fields.len) orelse
+                return s.trap("out of bounds array access");
+            if (op == .array_init_data) {
+                const segment = &inst.data_segments[immediate.second];
+                const bytes = if (segment.dropped) &.{} else segment.bytes;
+                const storage = inst.module.types[immediate.first].subtype.composite.array.field.storage;
+                const width = fieldByteWidth(storage);
+                const byte_count = std.math.mul(u64, count, width) catch return s.trap("out of bounds array initialization");
+                const source_range = checkedRange(source, byte_count, bytes.len) orelse return s.trap("out of bounds array initialization");
+                for (destination.fields[destination_range.start..destination_range.end], 0..) |*field, index| {
+                    const start = source_range.start + index * width;
+                    field.* = fieldFromBytes(storage, bytes[start..][0..width]);
+                }
+            } else {
+                const segment = &inst.elem_segments[immediate.second];
+                const elems = if (segment.dropped) &.{} else segment.elems;
+                const source_range = checkedRange(source, count, elems.len) orelse return s.trap("out of bounds array initialization");
+                @memcpy(destination.fields[destination_range.start..destination_range.end], elems[source_range.start..source_range.end]);
+            }
         },
         .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
         .i31_get_u => try pushI32(s, popSlot(s).i31ref),
@@ -6317,6 +6411,51 @@ test "wasm.exec GC struct and array allocation access packed and bounds" {
     defer destroyInstance(talloc, mutation_inst);
     try invoke(mutation_inst, 0, &.{}, &result, &mutation_diag);
     try std.testing.expectEqual(@as(u64, 7), result[0]);
+}
+
+test "wasm.exec GC array data element and overlapping copy operations" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .bulk_memory = true,
+        .gc = true,
+    };
+    const segment_bytes = comptime (hdr ++
+        typesSec(&.{ "\x5E\x7F\x01", "\x5E\x70\x01", ft("", I32) }) ++
+        funcSec(&.{ 2, 2 }) ++
+        sec(9, "\x01\x01\x00\x01\x00") ++
+        codeSec(&.{
+            i32c(0) ++ i32c(1) ++ "\xFB\x09\x00\x00" ++ i32c(0) ++ "\xFB\x0B\x00",
+            i32c(0) ++ i32c(1) ++ "\xFB\x0A\x01\x00\xFB\x0F",
+        }) ++
+        sec(11, "\x01\x01\x04A\x00\x00\x00"));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(segment_bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+    var result: [1]u64 = undefined;
+    try invoke(inst, 0, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 65), result[0]);
+    try invoke(inst, 1, &.{}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 1), result[0]);
+
+    const copy_bytes = comptime (hdr ++
+        typesSec(&.{ "\x5E\x7F\x01", ft("", I32) }) ++
+        funcSec(&.{1}) ++
+        codeSecL(
+            "\x01\x01\x63\x00",
+            i32c(1) ++ i32c(2) ++ i32c(3) ++ "\xFB\x08\x00\x03\x21\x00" ++
+                "\x20\x00" ++ i32c(1) ++ "\x20\x00" ++ i32c(0) ++ i32c(2) ++ "\xFB\x11\x00\x00" ++
+                "\x20\x00" ++ i32c(2) ++ "\xFB\x0B\x00",
+        ));
+    var copy_diag: types.Diagnostic = .{};
+    const copy_mod = try buildModuleWithFeatures(copy_bytes, features, &copy_diag);
+    defer decode.destroyModule(talloc, copy_mod);
+    const copy_inst = try instantiate(talloc, copy_mod, .{}, &copy_diag);
+    defer destroyInstance(talloc, copy_inst);
+    try invoke(copy_inst, 0, &.{}, &result, &copy_diag);
+    try std.testing.expectEqual(@as(u64, 2), result[0]);
 }
 
 test "wasm.exec bulk memory preserves overlap drop and zero-length bounds" {
