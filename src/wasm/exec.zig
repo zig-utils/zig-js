@@ -1878,6 +1878,15 @@ fn popF64(s: *State) f64 {
     return @bitCast(pop(s));
 }
 
+fn zeroSlot(val_type: types.ValType) WasmSlot {
+    return switch (val_type) {
+        .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
+        .v128 => .{ .vector = 0 },
+        .funcref => .{ .funcref = null },
+        .externref => .{ .externref = js_value.Value.nul() },
+    };
+}
+
 fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     if (s.frames.items.len >= MAX_FRAMES) return s.trap("call stack exhausted");
     const def = f.defined;
@@ -1890,12 +1899,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     const locals_base = s.locals.items.len;
     try s.locals.appendSlice(s.alloc, s.stack.items[arg_start..]);
     s.stack.items.len = arg_start;
-    for (body.locals) |local_type| try s.locals.append(s.alloc, switch (local_type) {
-        .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
-        .v128 => .{ .vector = 0 },
-        .funcref => .{ .funcref = null },
-        .externref => .{ .externref = js_value.Value.nul() },
-    });
+    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlot(local_type));
     try s.frames.append(s.alloc, .{
         .func = f,
         .pc = 0,
@@ -1968,6 +1972,97 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
             for (res) |slot| try pushSlot(s, slot);
         },
     }
+}
+
+/// Replace the active defined frame while preserving the caller-facing bases.
+/// Arguments are already on the operand stack in validation order. Array-list
+/// capacities grow only to the largest tail target encountered, then remain
+/// stable across arbitrarily deep tail recursion.
+fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
+    const current_index = s.frames.items.len - 1;
+    const current = s.frames.items[current_index];
+    const def = f.defined;
+    const mod = def.inst.module;
+    const body = &mod.code[def.idx];
+    const fty = mod.types[mod.funcs[def.idx]];
+    const arg_start = s.stack.items.len - fty.params.len;
+    const args = s.stack.items[arg_start..];
+
+    s.locals.items.len = current.locals_base;
+    try s.locals.appendSlice(s.alloc, args);
+    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlot(local_type));
+    s.stack.items.len = current.stack_base;
+    s.labels.items.len = current.label_base;
+    s.frames.items[current_index] = .{
+        .func = f,
+        .pc = 0,
+        .locals_base = current.locals_base,
+        .stack_base = current.stack_base,
+        .label_base = current.label_base,
+        .result_arity = fty.results.len,
+    };
+    try s.labels.append(s.alloc, .{
+        .target_pc = @intCast(body.instrs.len),
+        .stack_height = current.stack_base,
+        .arity = fty.results.len,
+        .is_loop = false,
+    });
+    checkpoint(s);
+}
+
+fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
+    switch (f.*) {
+        .defined => try replaceFrame(s, f),
+        .imported => |*imp| {
+            // Publish current locals and the argument stack before a host call,
+            // which may re-enter the runtime or request collection.
+            checkpoint(s);
+            const current = s.frames.items[s.frames.items.len - 1];
+            const arg_start = s.stack.items.len - imp.type.params.len;
+            const args = s.stack.items[arg_start..];
+            const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
+            if (!argumentsMatchSignature(imp.type, args, res.len))
+                return s.trap("function signature mismatch");
+            if (imp.call_slots) |call_slots|
+                try call_slots(imp.ctx, args, res, s.diag)
+            else
+                try callNumericImport(s.alloc, imp, args, res, s.diag);
+            for (res, imp.type.results) |slot, val_type|
+                if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
+
+            s.stack.items.len = current.stack_base;
+            for (res) |slot| try pushSlot(s, slot);
+            s.labels.items.len = current.label_base;
+            s.locals.items.len = current.locals_base;
+            s.frames.items.len -= 1;
+            checkpoint(s);
+        },
+    }
+}
+
+fn indirectCallable(
+    s: *State,
+    inst: *const Instance,
+    expected: types.FuncType,
+    immediate: types.Instr.CallIndirect,
+) ExecError!*const FuncInst {
+    const i = popI32(s);
+    const tab = inst.tables[immediate.table_index];
+    tab.lockTable();
+    const in_bounds = i < tab.elems.len;
+    const target = if (in_bounds) funcFromSlot(tab.elems[i]) else null;
+    tab.unlockTable();
+    if (!in_bounds) return s.trap("undefined element");
+    const callable = target orelse {
+        s.diag.set(types.Diagnostic.no_offset, "uninitialized element {d}", .{i});
+        return error.Trap;
+    };
+    const actual: types.FuncType = switch (callable.*) {
+        .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
+        .imported => |im| im.type,
+    };
+    if (!types.funcTypeEql(expected, actual)) return s.trap("indirect call type mismatch");
+    return callable;
 }
 
 fn effAddr(s: *State, mem: *const MemoryInst, addr: u32, offset: u32, size: u64) ExecError!usize {
@@ -2322,27 +2417,16 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             },
             .return_ => branchTo(s, @intCast(s.labels.items.len - 1 - fr.label_base)),
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
-            .return_call, .return_call_indirect => return s.trap("tail call execution not implemented"),
+            .return_call => try tailCallFunc(s, inst.funcs[instr.imm.idx]),
             .call_indirect => {
-                const i = popI32(s);
                 const immediate = instr.imm.call_indirect;
-                const tab = inst.tables[immediate.table_index];
-                tab.lockTable();
-                const in_bounds = i < tab.elems.len;
-                const target = if (in_bounds) funcFromSlot(tab.elems[i]) else null;
-                tab.unlockTable();
-                if (!in_bounds) return s.trap("undefined element");
-                const callable = target orelse {
-                    s.diag.set(types.Diagnostic.no_offset, "uninitialized element {d}", .{i});
-                    return error.Trap;
-                };
-                const actual: types.FuncType = switch (callable.*) {
-                    .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
-                    .imported => |im| im.type,
-                };
-                if (!types.funcTypeEql(mod.types[immediate.type_index], actual))
-                    return s.trap("indirect call type mismatch");
+                const callable = try indirectCallable(s, inst, mod.types[immediate.type_index], immediate);
                 try callFunc(s, callable);
+            },
+            .return_call_indirect => {
+                const immediate = instr.imm.call_indirect;
+                const callable = try indirectCallable(s, inst, mod.types[immediate.type_index], immediate);
+                try tailCallFunc(s, callable);
             },
             .drop => _ = popSlot(s),
             .select, .typed_select => {
@@ -2984,6 +3068,10 @@ fn echoReferenceSlot(_: *anyopaque, args: []const ValueSlot, results: []ValueSlo
     results[0] = args[0];
 }
 
+fn trapReferenceSlot(_: *anyopaque, _: []const ValueSlot, _: []ValueSlot, _: *types.Diagnostic) error{ Trap, Host }!void {
+    return error.Trap;
+}
+
 fn recordGlobalBarrier(raw: *anyopaque, slot: ValueSlot) void {
     const count: *usize = @ptrCast(@alignCast(raw));
     if (slot == .externref) count.* += 1;
@@ -3006,6 +3094,70 @@ const RootLivenessProbe = struct {
         };
         self.externrefs[self.len] = count;
         self.len += 1;
+    }
+};
+
+const TailRootProbe = struct {
+    checkpoint_limit: usize,
+    expected_externref: ?*js_value.Object = null,
+    expected_funcref: ?*anyopaque = null,
+    checkpoints: usize = 0,
+    max_stack: usize = 0,
+    max_locals: usize = 0,
+    max_externrefs: usize = 0,
+    max_funcrefs: usize = 0,
+    saw_expected_externref: bool = false,
+    saw_expected_funcref: bool = false,
+
+    fn enter(_: *anyopaque, roots: *js_value.WasmExecutionRoots) error{OutOfMemory}!void {
+        std.debug.assert(roots.stack.len == 0 and roots.locals.len == 0);
+    }
+
+    fn leave(_: *anyopaque, _: *js_value.WasmExecutionRoots) void {}
+
+    fn checkpoint(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
+        const self: *TailRootProbe = @ptrCast(@alignCast(raw));
+        self.checkpoints += 1;
+        // A finite checkpoint budget is the stress-test watchdog: incorrect
+        // tail dispatch cannot silently spin past the declared recursion input.
+        std.debug.assert(self.checkpoints <= self.checkpoint_limit);
+        self.max_stack = @max(self.max_stack, roots.stack.len);
+        self.max_locals = @max(self.max_locals, roots.locals.len);
+        var externrefs: usize = 0;
+        var funcrefs: usize = 0;
+        for (roots.stack) |slot| self.observe(slot, &externrefs, &funcrefs);
+        for (roots.locals) |slot| self.observe(slot, &externrefs, &funcrefs);
+        self.max_externrefs = @max(self.max_externrefs, externrefs);
+        self.max_funcrefs = @max(self.max_funcrefs, funcrefs);
+    }
+
+    fn observe(self: *TailRootProbe, slot: ValueSlot, externrefs: *usize, funcrefs: *usize) void {
+        switch (slot) {
+            .externref => |ref| {
+                externrefs.* += 1;
+                if (self.expected_externref) |expected| {
+                    if (ref.isObject() and ref.asObj() == expected)
+                        self.saw_expected_externref = true;
+                }
+            },
+            .funcref => |ref| {
+                funcrefs.* += 1;
+                if (self.expected_funcref) |expected| {
+                    if (ref == expected)
+                        self.saw_expected_funcref = true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn hooks(self: *TailRootProbe) RootHooks {
+        return .{
+            .ctx = @ptrCast(self),
+            .enter = TailRootProbe.enter,
+            .leave = TailRootProbe.leave,
+            .checkpoint = TailRootProbe.checkpoint,
+        };
     }
 };
 
@@ -3293,8 +3445,19 @@ fn expectResultsWithFeatures(comptime bytes: []const u8, features: types.Feature
 }
 
 fn expectTrap(comptime bytes: []const u8, comptime nres: usize, funcidx: u32, args: []const u64, msg: []const u8) !void {
+    return expectTrapWithFeatures(bytes, .{}, nres, funcidx, args, msg);
+}
+
+fn expectTrapWithFeatures(
+    comptime bytes: []const u8,
+    features: types.Features,
+    comptime nres: usize,
+    funcidx: u32,
+    args: []const u64,
+    msg: []const u8,
+) !void {
     var diag: types.Diagnostic = .{};
-    const mod = try buildModule(bytes, &diag);
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
     defer decode.destroyModule(talloc, mod);
     const inst = try instantiate(talloc, mod, .{}, &diag);
     defer destroyInstance(talloc, inst);
@@ -4449,6 +4612,237 @@ test "wasm.exec multi-value branches calls and implicit else" {
 
     const return_ = comptime arithModule("", I32 ++ I64, "\x41\x07\x42\x09\x0F\x00");
     try expectResultsWithFeatures(return_, features, 0, &.{}, &.{ 7, 9 });
+}
+
+test "wasm.exec tail calls keep deep mutual recursion storage bounded" {
+    const depth: u32 = 200_000;
+    const even =
+        "\x20\x00\x45\x04\x7F\x41\x01\x05" ++
+        "\x20\x00\x41\x01\x6B\x12\x01\x0B";
+    const odd =
+        "\x20\x00\x45\x04\x7F\x41\x00\x05" ++
+        "\x20\x00\x41\x01\x6B\x12\x00\x0B";
+    const bytes = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{ 0, 0 }) ++ codeSec(&.{ even, odd }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .tail_calls = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    var arena = std.heap.ArenaAllocator.init(talloc);
+    defer arena.deinit();
+    var probe: TailRootProbe = .{ .checkpoint_limit = depth + 1 };
+    var state: State = .{
+        .alloc = arena.allocator(),
+        .diag = &diag,
+        .root_hooks = probe.hooks(),
+    };
+    try state.root_hooks.?.enter(state.root_hooks.?.ctx, &state.roots);
+    defer state.root_hooks.?.leave(state.root_hooks.?.ctx, &state.roots);
+    var results: [1]ValueSlot = undefined;
+    try execute(&state, inst.funcs[0], &.{.{ .numeric = depth }}, &results);
+
+    try std.testing.expectEqual(@as(u64, 1), results[0].numericBits());
+    try std.testing.expectEqual(@as(usize, depth), probe.checkpoints);
+    try std.testing.expect(state.frames.capacity <= 64);
+    try std.testing.expect(state.labels.capacity <= 64);
+    try std.testing.expect(state.locals.capacity <= 64);
+    try std.testing.expect(state.stack.capacity <= 64);
+    try std.testing.expectEqual(@as(usize, 0), state.frames.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.labels.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.locals.items.len);
+}
+
+test "wasm.exec tail calls preserve indirect checks and host imports" {
+    const features: types.Features = .{ .tail_calls = true };
+    const nested_direct = comptime (hdr ++ typesSec(&.{ft("", I32)}) ++
+        funcSec(&.{ 0, 0, 0 }) ++ codeSec(&.{
+        "\x41\x0A\x10\x01\x6A",
+        "\x12\x02",
+        "\x41\x20",
+    }));
+    try expectResultsWithFeatures(nested_direct, features, 0, &.{}, &.{42});
+
+    const indirect = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{ 0, 0 }) ++ tableSec(1, null) ++ elemSec0(0, &.{0}) ++
+        codeSec(&.{
+            "\x20\x00\x41\x01\x6A",
+            "\x20\x00\x41\x00\x13\x00\x00",
+        }));
+    try expectResultsWithFeatures(indirect, features, 1, &.{41}, &.{42});
+
+    const out_of_bounds = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{ 0, 0 }) ++ tableSec(1, null) ++ elemSec0(0, &.{0}) ++
+        codeSec(&.{ "\x20\x00", "\x20\x00\x41\x01\x13\x00\x00" }));
+    try expectTrapWithFeatures(out_of_bounds, features, 1, 1, &.{41}, "undefined element");
+
+    const uninitialized = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{0}) ++ tableSec(1, null) ++
+        codeSec(&.{"\x20\x00\x41\x00\x13\x00\x00"}));
+    try expectTrapWithFeatures(uninitialized, features, 1, 0, &.{41}, "uninitialized element 0");
+
+    const mismatch = comptime (hdr ++ typesSec(&.{ ft(I32, I32), ft(I64, I32) }) ++
+        funcSec(&.{ 1, 0 }) ++ tableSec(1, null) ++ elemSec0(0, &.{0}) ++
+        codeSec(&.{ "\x41\x07", "\x20\x00\x41\x00\x13\x00\x00" }));
+    try expectTrapWithFeatures(mismatch, features, 1, 1, &.{41}, "indirect call type mismatch");
+
+    const imported = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        importSec(&.{impFunc("m", "double", 0)}) ++ funcSec(&.{ 0, 0 }) ++
+        codeSec(&.{
+            "\x20\x00\x12\x00",
+            "\x20\x00\x10\x01\x41\x01\x6A",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(imported, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{ .funcs = &.{double_import} }, &diag);
+    defer destroyInstance(talloc, inst);
+    var result: [1]u64 = undefined;
+    try invoke(inst, 2, &.{21}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 43), result[0]);
+
+    const target_bytes = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{0}) ++ codeSec(&.{"\x20\x00\x41\x01\x6A"}));
+    const target = try build(target_bytes);
+    defer destroyBuilt(target);
+    const table = try createTable(talloc, 1, null);
+    defer destroyTable(talloc, table);
+    table.elems[0] = .{ .funcref = @ptrCast(target.inst.funcs[0]) };
+    const cross_instance = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        importSec(&.{impTable("a", "t", 1, null)}) ++ funcSec(&.{0}) ++
+        codeSec(&.{"\x20\x00\x41\x00\x13\x00\x00"}));
+    const cross_mod = try buildModuleWithFeatures(cross_instance, features, &diag);
+    defer decode.destroyModule(talloc, cross_mod);
+    const cross_inst = try instantiate(talloc, cross_mod, .{ .tables = &.{table} }, &diag);
+    defer destroyInstance(talloc, cross_inst);
+    try invoke(cross_inst, 0, &.{41}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 42), result[0]);
+
+    // The indirect path must preserve the same host-import tail semantics and
+    // type checks even when the table points into a different instance.
+    table.elems[0] = .{ .funcref = @ptrCast(inst.funcs[0]) };
+    try invoke(cross_inst, 0, &.{21}, &result, &diag);
+    try std.testing.expectEqual(@as(u64, 42), result[0]);
+}
+
+test "wasm.exec tail replacement preserves reference roots and identity" {
+    const features: types.Features = .{ .tail_calls = true, .reference_types = true };
+    const extern_body =
+        "\x20\x01\x45\x04\x6F\x20\x00\x05" ++
+        "\x20\x00\x20\x01\x41\x01\x6B\x12\x00\x0B";
+    const extern_bytes = comptime (hdr ++ typesSec(&.{ft("\x6F" ++ I32, "\x6F")}) ++
+        funcSec(&.{0}) ++ codeSecL("\x01\x01\x6F", extern_body));
+    var diag: types.Diagnostic = .{};
+    const extern_mod = try buildModuleWithFeatures(extern_bytes, features, &diag);
+    defer decode.destroyModule(talloc, extern_mod);
+    const extern_inst = try instantiate(talloc, extern_mod, .{}, &diag);
+    defer destroyInstance(talloc, extern_inst);
+    var object = js_value.Object{};
+    var probe: TailRootProbe = .{
+        .checkpoint_limit = 5_001,
+        .expected_externref = &object,
+    };
+    extern_inst.root_hooks = probe.hooks();
+    var extern_result: [1]ValueSlot = undefined;
+    try invokeSlots(
+        extern_inst,
+        0,
+        &.{ .{ .externref = js_value.Value.obj(&object) }, .{ .numeric = 5_000 } },
+        &extern_result,
+        &diag,
+    );
+    try std.testing.expect(extern_result[0] == .externref);
+    try std.testing.expect(extern_result[0].externref.asObj() == &object);
+    try std.testing.expectEqual(@as(usize, 5_000), probe.checkpoints);
+    try std.testing.expectEqual(@as(usize, 3), probe.max_locals);
+    try std.testing.expect(probe.max_externrefs >= 1);
+    try std.testing.expect(probe.saw_expected_externref);
+
+    const funcref_body =
+        "\x20\x01\x45\x04\x70\x20\x00\x05" ++
+        "\x20\x00\x20\x01\x41\x01\x6B\x12\x00\x0B";
+    const funcref_bytes = comptime (hdr ++ typesSec(&.{ft("\x70" ++ I32, "\x70")}) ++
+        funcSec(&.{0}) ++ codeSec(&.{funcref_body}));
+    const funcref_mod = try buildModuleWithFeatures(funcref_bytes, features, &diag);
+    defer decode.destroyModule(talloc, funcref_mod);
+    const funcref_inst = try instantiate(talloc, funcref_mod, .{}, &diag);
+    defer destroyInstance(talloc, funcref_inst);
+    var funcref_probe: TailRootProbe = .{
+        .checkpoint_limit = 5_001,
+        .expected_funcref = @ptrCast(funcref_inst.funcs[0]),
+    };
+    funcref_inst.root_hooks = funcref_probe.hooks();
+    var funcref_result: [1]ValueSlot = undefined;
+    try invokeSlots(
+        funcref_inst,
+        0,
+        &.{ .{ .funcref = @ptrCast(funcref_inst.funcs[0]) }, .{ .numeric = 5_000 } },
+        &funcref_result,
+        &diag,
+    );
+    try std.testing.expect(funcref_result[0] == .funcref);
+    try std.testing.expect(funcref_result[0].funcref == @as(*anyopaque, @ptrCast(funcref_inst.funcs[0])));
+    try std.testing.expectEqual(@as(usize, 5_000), funcref_probe.checkpoints);
+    try std.testing.expect(funcref_probe.max_funcrefs >= 1);
+    try std.testing.expect(funcref_probe.saw_expected_funcref);
+
+    const imported = comptime (hdr ++ typesSec(&.{ft("\x6F", "\x6F")}) ++
+        importSec(&.{impFunc("m", "echo", 0)}) ++ funcSec(&.{0}) ++
+        codeSec(&.{"\x20\x00\x12\x00"}));
+    const imported_mod = try buildModuleWithFeatures(imported, features, &diag);
+    defer decode.destroyModule(talloc, imported_mod);
+    var marker: u8 = 0;
+    const echo_import: ImportFunc = .{
+        .ctx = @ptrCast(&marker),
+        .type = .{ .params = &.{.externref}, .results = &.{.externref} },
+        .call = rejectNumericReferenceCall,
+        .call_slots = echoReferenceSlot,
+    };
+    const imported_inst = try instantiate(talloc, imported_mod, .{ .funcs = &.{echo_import} }, &diag);
+    defer destroyInstance(talloc, imported_inst);
+    var import_probe: TailRootProbe = .{
+        .checkpoint_limit = 4,
+        .expected_externref = &object,
+    };
+    imported_inst.root_hooks = import_probe.hooks();
+    try invokeSlots(
+        imported_inst,
+        1,
+        &.{.{ .externref = js_value.Value.obj(&object) }},
+        &extern_result,
+        &diag,
+    );
+    try std.testing.expect(extern_result[0].externref.asObj() == &object);
+    try std.testing.expectEqual(@as(usize, 2), import_probe.checkpoints);
+    try std.testing.expect(import_probe.max_externrefs >= 1);
+    try std.testing.expect(import_probe.saw_expected_externref);
+
+    const trapping_import: ImportFunc = .{
+        .ctx = @ptrCast(&marker),
+        .type = echo_import.type,
+        .call = rejectNumericReferenceCall,
+        .call_slots = trapReferenceSlot,
+    };
+    const trapping_inst = try instantiate(talloc, imported_mod, .{ .funcs = &.{trapping_import} }, &diag);
+    defer destroyInstance(talloc, trapping_inst);
+    var trapping_probe: TailRootProbe = .{
+        .checkpoint_limit = 1,
+        .expected_externref = &object,
+    };
+    trapping_inst.root_hooks = trapping_probe.hooks();
+    try std.testing.expectError(
+        error.Trap,
+        invokeSlots(
+            trapping_inst,
+            1,
+            &.{.{ .externref = js_value.Value.obj(&object) }},
+            &extern_result,
+            &diag,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), trapping_probe.checkpoints);
+    try std.testing.expect(trapping_probe.saw_expected_externref);
 }
 
 test "wasm.exec execution root hooks balance across checkpoints and traps" {

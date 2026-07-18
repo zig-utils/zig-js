@@ -1966,6 +1966,43 @@ test "wasm api executes opted-in Core 2.0 numeric operations" {
     try std.testing.expect(executed.isBoolean() and executed.asBool());
 }
 
+test "wasm api executes opted-in bounded tail recursion" {
+    const bytes_source =
+        \\const bytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,6,1,96,1,127,1,127,
+        \\  3,2,1,0,
+        \\  7,7,1,3,114,117,110,0,0,
+        \\  10,20,1,18,0,32,0,69,4,127,65,7,5,32,0,65,1,107,18,0,11,11
+        \\]);
+    ;
+
+    const ordinary = try context.Context.create(std.testing.allocator);
+    defer ordinary.destroy();
+    const disabled = try ordinary.evaluate(bytes_source ++
+        \\WebAssembly.validate(bytes) === false && (() => {
+        \\  try { new WebAssembly.Module(bytes); } catch (error) {
+        \\    return error instanceof WebAssembly.CompileError && error.message.includes('tail-calls is disabled');
+        \\  }
+        \\  return false;
+        \\})();
+    );
+    try std.testing.expect(disabled.isBoolean() and disabled.asBool());
+
+    const enabled = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .tail_calls = true },
+    });
+    defer enabled.destroy();
+    const executed = try enabled.evaluate(bytes_source ++
+        \\const run = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.run;
+        \\let stable = WebAssembly.validate(bytes) && run(100000) === 7;
+        \\for (let round = 0; round < 32; round++)
+        \\  stable = stable && run(4096 + round) === 7;
+        \\stable;
+    );
+    try std.testing.expect(executed.isBoolean() and executed.asBool());
+}
+
 test "wasm api returns opted-in multi-value exports as arrays" {
     const store = try context.Context.createWith(std.testing.allocator, .{
         .wasm_features = .{ .multi_value = true },
