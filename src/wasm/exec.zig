@@ -235,6 +235,12 @@ const GcRootRegistration = struct {
     next: ?*GcRootRegistration = null,
 };
 
+pub const GcRootHandle = struct {
+    owner: *Instance,
+    object: *GcObject,
+    next: ?*GcRootHandle = null,
+};
+
 pub const Imports = struct {
     funcs: []const ImportFunc = &.{}, // in import declaration order, per kind
     tables: []const *TableInst = &.{},
@@ -268,7 +274,41 @@ pub const Instance = struct {
     gc_object_lock: std.atomic.Mutex = .unlocked,
     gc_mark_epoch: u32 = 0,
     gc_active_roots: ?*GcRootRegistration = null,
+    gc_external_roots: ?*GcRootHandle = null,
 };
+
+/// Stable external root indirection. A moving collector rewrites `object`
+/// without changing the handle held by a JavaScript/embedding wrapper.
+pub fn retainGcReference(slot: ValueSlot) error{OutOfMemory}!?*GcRootHandle {
+    const raw = switch (slot) {
+        .gcref => |value| value orelse return null,
+        else => return null,
+    };
+    const object: *GcObject = @ptrCast(@alignCast(raw));
+    const owner = object.owner;
+    const handle = try owner.gpa.create(GcRootHandle);
+    handle.* = .{ .owner = owner, .object = object };
+    while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    handle.next = owner.gc_external_roots;
+    owner.gc_external_roots = handle;
+    owner.gc_object_lock.unlock();
+    return handle;
+}
+
+pub fn releaseGcReference(handle: *GcRootHandle) void {
+    const owner = handle.owner;
+    while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    var link = &owner.gc_external_roots;
+    while (link.*) |candidate| {
+        if (candidate == handle) {
+            link.* = candidate.next;
+            break;
+        }
+        link = &candidate.next;
+    }
+    owner.gc_object_lock.unlock();
+    owner.gpa.destroy(handle);
+}
 
 fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fields: []const ValueSlot) error{OutOfMemory}!*GcObject {
     const owned_fields = try inst.gpa.dupe(ValueSlot, fields);
@@ -289,6 +329,13 @@ fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fi
 }
 
 fn destroyGcAggregates(inst: *Instance) void {
+    var root = inst.gc_external_roots;
+    inst.gc_external_roots = null;
+    while (root) |handle| {
+        const next = handle.next;
+        inst.gpa.destroy(handle);
+        root = next;
+    }
     var current = inst.gc_objects;
     inst.gc_objects = null;
     inst.gc_object_count = 0;
@@ -337,6 +384,9 @@ fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error
     defer worklist.deinit(inst.gpa);
 
     for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+    var external_root = inst.gc_external_roots;
+    while (external_root) |handle| : (external_root = handle.next)
+        try markGcSlot(inst, .{ .gcref = @ptrCast(handle.object) }, epoch, &worklist);
     var registration = inst.gc_active_roots;
     while (registration) |active| : (registration = active.next) {
         for (active.roots.stack) |slot| try markGcSlot(inst, slot, epoch, &worklist);
@@ -6547,6 +6597,10 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     try std.testing.expectEqual(@as(usize, 1), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
     inst.gc_active_roots = null;
+    const external_root = (try retainGcReference(.{ .gcref = @ptrCast(first) })).?;
+    try std.testing.expectEqual(@as(usize, 0), try collectGcAggregatesQuiescent(&inst, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    releaseGcReference(external_root);
     try std.testing.expectEqual(@as(usize, 2), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
 }
