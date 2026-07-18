@@ -82,7 +82,6 @@ const GlobalDescriptor = struct { proto: *Object };
 const TagDescriptor = struct { proto: *Object };
 const ExceptionDescriptor = struct {
     proto: *Object,
-    roots: *Object,
     js_tag: *exec.TagInst,
 };
 const InstanceDescriptor = struct {
@@ -1455,7 +1454,6 @@ fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     state.exception = exception;
     state.payload_values = try self.arena.dupe(Value, payload_values);
     exception.wrapper.store(object, .release);
-    try descriptor.roots.appendInternalElement(self.arena, Value.obj(object));
     store.appendWasmOwned(.{ .exception = @ptrCast(exception) }) catch |err| {
         state.exception = null;
         exception.wrapper.store(null, .release);
@@ -1924,7 +1922,6 @@ fn instantiateModuleObject(
     const global_refs = try self.arena.alloc(*std.atomic.Value(u64), inst.globals.len);
     for (inst.globals, 0..) |global, i| global_refs[i] = &global.ref_root;
     state.global_refs = global_refs;
-    state.exception_head = &inst.exception_head;
     state.gc_trace_context = @ptrCast(inst);
     state.gc_trace = exec.traceInstanceGcRoots;
     for (inst.globals[module.imported_globals..]) |global| {
@@ -2244,11 +2241,8 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     try namespace.setAttr(env.arena, "JSTag", .{ .enumerable = true, .configurable = true });
 
     const exception_pair = try constructorPair(env, rs, "Exception", 1, exceptionConstructor, object_proto, function_proto);
-    const exception_roots = try gc.allocObj(env.arena);
-    exception_roots.* = .{};
-    try namespace.appendInternalElement(env.arena, Value.obj(exception_roots));
     const exception_descriptor = try env.arena.create(ExceptionDescriptor);
-    exception_descriptor.* = .{ .proto = exception_pair.proto, .roots = exception_roots, .js_tag = js_tag_native };
+    exception_descriptor.* = .{ .proto = exception_pair.proto, .js_tag = js_tag_native };
     exception_pair.ctor.private_data = exception_descriptor;
     try installMethod(env.arena, rs, exception_pair.proto, "getArg", 2, exceptionGetArg);
     try installMethod(env.arena, rs, exception_pair.proto, "is", 1, exceptionIs);
@@ -2442,20 +2436,23 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
             .reference_types = true,
             .typed_function_references = true,
             .gc = true,
+            .exception_handling = true,
         },
     });
     defer store.destroy();
     const before = try store.evaluate(
         \\const gcBytes = new Uint8Array([
         \\  0,97,115,109,1,0,0,0,
-        \\  1,27,5,95,1,111,0,96,1,111,1,100,0,96,1,100,0,1,100,0,96,0,1,108,96,1,111,1,111,
-        \\  3,5,4,1,2,3,4,
+        \\  1,32,6,95,1,111,0,96,1,111,1,100,0,96,1,100,0,1,100,0,96,0,1,108,96,1,111,1,111,96,1,100,0,0,
+        \\  3,6,5,1,2,3,4,5,
         \\  4,5,1,99,0,0,1,
+        \\  13,3,1,0,5,
         \\  6,7,1,99,0,1,208,0,11,
-        \\  7,46,6,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
+        \\  7,60,8,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
         \\    5,116,97,98,108,101,1,0,6,103,108,111,98,97,108,3,0,5,114,111,117,110,100,0,3,
-        \\  10,30,4,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11,
-        \\    8,0,32,0,251,26,251,27,11
+        \\    3,116,97,103,4,0,5,116,104,114,111,119,0,4,
+        \\  10,37,5,7,0,32,0,251,0,0,11,4,0,32,0,11,6,0,65,127,251,28,11,
+        \\    8,0,32,0,251,26,251,27,11,6,0,32,0,8,0,11
         \\]);
         \\globalThis.gcExports = new WebAssembly.Instance(new WebAssembly.Module(gcBytes)).exports;
         \\const linkedBytes = new Uint8Array([
@@ -2474,9 +2471,11 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
         \\globalThis.gcWeak = new WeakRef(gcKeep);
         \\gcExports.table.set(0, gcKeep);
         \\gcExports.global.value = gcKeep;
+        \\try { gcExports.throw(gcKeep); } catch (error) { globalThis.gcGcException = error; }
         \\Object.getPrototypeOf(gcKeep) === null && !Object.isExtensible(gcKeep) &&
         \\  gcExports.echo(gcKeep) === gcKeep && gcExports.table.get(0) === gcKeep &&
         \\  gcExports.global.value === gcKeep && gcLinked.echo(gcKeep) === gcKeep &&
+        \\  gcGcException.getArg(gcExports.tag, 0) === gcKeep &&
         \\  gcExports.round(gcKeep) === gcKeep && gcExports.round(gcMarker) === gcMarker &&
         \\  gcLinked.table === gcExports.table && gcLinked.global === gcExports.global &&
         \\  gcExports.make() !== gcKeep && gcExports.i31() === -1;
@@ -2493,6 +2492,13 @@ test "wasm api GC references preserve identity and precise wrapper lifetime" {
     );
     try std.testing.expect(native_roots.isBoolean() and native_roots.asBool());
     _ = try store.evaluate("gcExports.table.set(0, null); gcExports.global.value = null; globalThis.gcRevived = undefined");
+    store.collectGarbage();
+    const exception_root = try store.evaluate(
+        "gcWeak.deref() === undefined && gcMarkerWeak.deref()?.issue === 299 && " ++
+            "(globalThis.gcExceptionRevived = gcGcException.getArg(gcExports.tag, 0)) !== undefined",
+    );
+    try std.testing.expect(exception_root.isBoolean() and exception_root.asBool());
+    _ = try store.evaluate("globalThis.gcExceptionRevived = undefined; globalThis.gcGcException = undefined");
     store.collectGarbage();
     const reclaimed = try store.evaluate("gcWeak.deref() === undefined && gcMarkerWeak.deref() === undefined");
     try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
@@ -2914,8 +2920,10 @@ test "wasm api exception payloads and wrappers survive precise GC" {
         \\globalThis.gcExceptionMarker = { issue: 291 };
         \\globalThis.gcExceptionWeak = new WeakRef(gcExceptionMarker);
         \\try { gcExceptionInstance.exports.run(gcExceptionMarker); } catch (error) { globalThis.gcNativeException = error; }
+        \\globalThis.gcNativeExceptionWeak = new WeakRef(gcNativeException);
         \\globalThis.gcJsTag = new WebAssembly.Tag({ parameters: ['externref'] });
         \\globalThis.gcJsException = new WebAssembly.Exception(gcJsTag, [gcExceptionMarker]);
+        \\globalThis.gcJsExceptionWeak = new WeakRef(gcJsException);
         \\gcNativeException.getArg(gcExceptionInstance.exports.tag, 0) === gcExceptionMarker &&
         \\  gcJsException.getArg(gcJsTag, 0) === gcExceptionMarker;
     );
@@ -2928,6 +2936,17 @@ test "wasm api exception payloads and wrappers survive precise GC" {
         \\  gcJsException.getArg(gcJsTag, 0) === gcExceptionWeak.deref();
     );
     try std.testing.expect(after.isBoolean() and after.asBool());
+    _ = try store.evaluate(
+        \\globalThis.gcNativeException = undefined;
+        \\globalThis.gcJsException = undefined;
+        \\globalThis.gcJsTag = undefined;
+    );
+    store.collectGarbage();
+    const reclaimed = try store.evaluate(
+        \\gcNativeExceptionWeak.deref() === undefined &&
+        \\  gcJsExceptionWeak.deref() === undefined && gcExceptionWeak.deref() === undefined;
+    );
+    try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
 }
 
 test "wasm api returns opted-in multi-value exports as arrays" {

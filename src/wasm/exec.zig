@@ -303,16 +303,19 @@ fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.Wa
     switch (slot) {
         .gcref => |reference| if (reference) |root| root.trace(root, visitor, mark_value),
         .externref, .hostref => |root| mark_value(visitor, root),
-        .exnref => |exception| if (exception) |ex|
-            for (ex.externrefs) |root| mark_value(visitor, root),
+        .exnref => |exception| if (exception) |ex| {
+            if (ex.wrapper.load(.acquire)) |wrapper| mark_value(visitor, js_value.Value.obj(wrapper));
+            for (ex.payload) |payload| traceGcRootSlot(payload, visitor, mark_value);
+        },
         .externalized_gcref => |root| root.trace(root, visitor, mark_value),
         .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     }
 }
 
 /// Type-erased host-GC entry point installed on the JavaScript Instance
-/// wrapper. Native globals, tables, and published exceptions are roots even
-/// when no exported aggregate wrapper is currently alive.
+/// wrapper. Native globals and tables are roots even when no exported
+/// aggregate wrapper is currently alive; exception payloads are reached only
+/// through live exnrefs or their JavaScript wrapper.
 pub fn traceInstanceGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
     const inst: *Instance = @ptrCast(@alignCast(raw));
     for (inst.globals) |global| traceGcRootSlot(global.value, visitor, mark_value);
@@ -328,12 +331,6 @@ pub fn traceInstanceGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: js
             table.unlockTable();
             traceGcRootSlot(slot, visitor, mark_value);
         }
-    }
-    var exception_raw = inst.exception_head.load(.acquire);
-    while (exception_raw != 0) {
-        const exception: *js_value.WasmException = @ptrFromInt(exception_raw);
-        for (exception.payload) |slot| traceGcRootSlot(slot, visitor, mark_value);
-        exception_raw = if (exception.next) |next| @intFromPtr(next) else 0;
     }
 }
 
@@ -508,10 +505,18 @@ fn markGcSlot(
     slot: ValueSlot,
     epoch: u32,
     worklist: *std.ArrayListUnmanaged(*GcObject),
+    exception_worklist: *std.ArrayListUnmanaged(*js_value.WasmException),
+    exception_seen: *std.AutoHashMapUnmanaged(*js_value.WasmException, void),
 ) error{OutOfMemory}!void {
     const reference = switch (slot) {
         .gcref => |value| value orelse return,
         .externalized_gcref => |value| value,
+        .exnref => |value| {
+            const exception = value orelse return;
+            const entry = try exception_seen.getOrPut(inst.gpa, exception);
+            if (!entry.found_existing) try exception_worklist.append(inst.gpa, exception);
+            return;
+        },
         else => return,
     };
     const object = gcObjectFromRef(reference);
@@ -521,9 +526,10 @@ fn markGcSlot(
 }
 
 /// Quiescent precise collection for one instance-owned aggregate heap. The
-/// caller supplies active/escaping slots; globals, tables, and published
-/// exception payloads are included automatically. Cross-instance objects are
-/// left to their owner. Mark allocation failure performs no sweep.
+/// caller supplies active/escaping slots; globals, tables, and exception
+/// payloads reachable through live wrappers or native exnrefs are included
+/// automatically. Cross-instance objects are left to their owner. Mark
+/// allocation failure performs no sweep.
 pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
     while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
     defer inst.gc_object_lock.unlock();
@@ -539,29 +545,40 @@ pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) e
     const epoch = inst.gc_mark_epoch;
     var worklist: std.ArrayListUnmanaged(*GcObject) = .empty;
     defer worklist.deinit(inst.gpa);
+    var exception_worklist: std.ArrayListUnmanaged(*js_value.WasmException) = .empty;
+    defer exception_worklist.deinit(inst.gpa);
+    var exception_seen: std.AutoHashMapUnmanaged(*js_value.WasmException, void) = .empty;
+    defer exception_seen.deinit(inst.gpa);
 
-    for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+    for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
     var external_root = inst.gc_external_roots;
     while (external_root) |handle| : (external_root = handle.next)
-        try markGcSlot(inst, .{ .gcref = gcObjectRef(handle.object) }, epoch, &worklist);
+        try markGcSlot(inst, .{ .gcref = gcObjectRef(handle.object) }, epoch, &worklist, &exception_worklist, &exception_seen);
     var registration = inst.gc_active_roots;
     while (registration) |active| : (registration = active.next) {
-        for (active.roots.stack) |slot| try markGcSlot(inst, slot, epoch, &worklist);
-        for (active.roots.locals) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+        for (active.roots.stack) |slot| try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
+        for (active.roots.locals) |slot| try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
     }
-    for (inst.globals) |global| try markGcSlot(inst, global.value, epoch, &worklist);
+    for (inst.globals) |global| try markGcSlot(inst, global.value, epoch, &worklist, &exception_worklist, &exception_seen);
     for (inst.tables) |table| for (table.elems) |slot|
-        try markGcSlot(inst, slot, epoch, &worklist);
+        try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
     var exception_raw = inst.exception_head.load(.acquire);
     while (exception_raw != 0) {
         const exception: *js_value.WasmException = @ptrFromInt(exception_raw);
-        for (exception.payload) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+        if (exception.wrapper.load(.acquire) != null)
+            try markGcSlot(inst, .{ .exnref = exception }, epoch, &worklist, &exception_worklist, &exception_seen);
         exception_raw = if (exception.next) |next| @intFromPtr(next) else 0;
     }
-    var cursor: usize = 0;
-    while (cursor < worklist.items.len) : (cursor += 1)
-        for (worklist.items[cursor].fields) |slot|
-            try markGcSlot(inst, slot, epoch, &worklist);
+    var object_cursor: usize = 0;
+    var exception_cursor: usize = 0;
+    while (object_cursor < worklist.items.len or exception_cursor < exception_worklist.items.len) {
+        while (exception_cursor < exception_worklist.items.len) : (exception_cursor += 1)
+            for (exception_worklist.items[exception_cursor].payload) |slot|
+                try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
+        while (object_cursor < worklist.items.len) : (object_cursor += 1)
+            for (worklist.items[object_cursor].fields) |slot|
+                try markGcSlot(inst, slot, epoch, &worklist, &exception_worklist, &exception_seen);
+    }
 
     var reclaimed: usize = 0;
     var link = &inst.gc_objects;

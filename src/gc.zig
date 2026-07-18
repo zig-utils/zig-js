@@ -189,22 +189,14 @@ pub fn traceObject(o: *Object, v: anytype) void {
     if (cold.data_view) |dv| v.mark(dv.buffer);
     // WebAssembly JS API rare-state edges (issue #141): the JS wrapper objects
     // keep their linked Module/exports/buffer/owner objects alive. The native
-    // payloads themselves are owned by the context-level wasm registry, not
-    // traced here.
+    // payload memory is registry-owned; live exception and GC-reference
+    // wrappers trace the JavaScript values reachable through that memory.
     v.mark(cold.wasm.module_obj);
     for (cold.wasm.import_vals) |import_val| markValue(v, import_val);
     for (cold.wasm.table_refs) |*ref| markValue(v, .{ .bits = @constCast(ref).load(.acquire) });
     for (cold.wasm.global_refs) |ref| markValue(v, .{ .bits = ref.load(.acquire) });
     if (cold.wasm.global_ref) |ref| markValue(v, .{ .bits = ref.load(.acquire) });
-    if (cold.wasm.exception_head) |head| {
-        var raw = @constCast(head).load(.acquire);
-        while (raw != 0) {
-            const exception: *const value.WasmException = @ptrFromInt(raw);
-            for (exception.externrefs) |root| markValue(v, root);
-            v.mark(@constCast(&exception.wrapper).load(.acquire));
-            raw = if (exception.next) |next| @intFromPtr(next) else 0;
-        }
-    }
+    if (cold.wasm.exception) |exception| traceWasmException(v, exception);
     v.mark(cold.wasm.exports_obj);
     v.mark(cold.wasm.buffer_obj);
     v.mark(cold.wasm.owner_obj);
@@ -225,6 +217,22 @@ pub fn traceObject(o: *Object, v: anytype) void {
             }
         };
         trace(trace_context, @ptrCast(v), Marker.mark);
+    };
+}
+
+fn traceWasmException(v: anytype, exception: *const value.WasmException) void {
+    const Marker = struct {
+        fn mark(raw: *anyopaque, child: Value) void {
+            const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+            markValue(visitor, child);
+        }
+    };
+    for (exception.payload) |slot| switch (slot) {
+        .externref, .hostref => |root| markValue(v, root),
+        .gcref => |reference| if (reference) |root| root.trace(root, @ptrCast(v), Marker.mark),
+        .externalized_gcref => |root| root.trace(root, @ptrCast(v), Marker.mark),
+        .exnref => |nested| if (nested) |child| traceWasmException(v, child),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     };
 }
 
@@ -1067,6 +1075,11 @@ pub const Binding = struct {
                     if (state.root) |root| if (state.release) |release| release(root, o);
                     state.root = null;
                     state.reference = null;
+                }
+                if (o.wasmException()) |state| {
+                    if (state.exception) |exception|
+                        _ = exception.wrapper.cmpxchgStrong(o, null, .acq_rel, .acquire);
+                    state.exception = null;
                 }
                 // Buffer metadata now lives in the cold sidecar. Release it
                 // before finalizeObjectBacking destroys that sidecar.
