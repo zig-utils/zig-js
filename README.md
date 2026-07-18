@@ -87,6 +87,17 @@ Representative green areas from the saved run:
 
 The pinned upstream WebAssembly wg-1.0 corpus is scored separately. All **18,840 / 18,840 applicable binary-runtime commands pass** across all 73 MVP files, with **0 failures** and **0 runner errors**. The checked-in [19,270-command inventory](docs/.data/wasm-spec-inventory.json) records each execution mode: 16,801 commands use the public JavaScript API, 2,039 exact NaN payload/sign commands use the test-only bit-exact path, and 430 text-format parser assertions are explicitly outside the binary API. See [WebAssembly MVP status](docs/wasm.md) for the exact specification/WABT pins and reproduction commands.
 
+The opt-in WebAssembly Core 2 structural profile is also complete against the
+official pinned corpus: **27,437 / 27,437 applicable binary-runtime commands
+pass** across all 90 `wg-2.0` core files, with **0 failures** and **0 runner
+errors**. Its checked-in [28,018-command inventory](docs/.data/wasm-core-2-structural-inventory.json)
+accounts for 25,350 public-JavaScript-API commands, 2,087 bit-exact float
+commands, and 581 explicitly non-applicable text-format parser commands. This
+score covers sign extension, nontrapping conversions, multi-value control,
+reference types, and bulk memory/table operations; it does not claim SIMD,
+Threads, exceptions/tail calls, memory64/GC, or shell-only hooks. Exact pins,
+feature-area subtotals, CI gates, and reproduction are in [WebAssembly status](docs/wasm.md).
+
 ## Performance
 
 `zig build bench` currently times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
@@ -140,10 +151,11 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `66237d21` do not execute in these
+The ABI and WebAssembly/conformance changes through `a593fdea` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
-WebAssembly module/store/reference-root, reference-call, or bulk-memory APIs.
+WebAssembly module/store/reference-root, reference-call, bulk-memory, or Core 2
+corpus paths.
 
 Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). One lazy storage wrapper owns cold/exotic state, external named-slot metadata, dense/internal element metadata, and backing-allocator bookkeeping; a plain object with four or fewer named properties keeps its values entirely inline and allocates none of those side states. In the current matrix, object churn favors zig-js at 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts. Its 243.603 versus 235.093 ms eight-lane cold lifecycle is the matrix's one JSC win. Shared object churn reaches 1,651.879 ms at eight lanes, 0.92x scaling, and 9.07% RSD, so it remains a clear contention target.
 
@@ -834,14 +846,14 @@ and the final evidence-backed removal of this section is tracked by
 [issue #246](https://github.com/zig-utils/zig-js/issues/246).
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
-- the remaining post-MVP WebAssembly feature profiles and WebAssembly/JIT shell hooks from
-  the PR-249 reference corpus (the complete MVP binary runtime, JavaScript API,
-  opt-in Core 2.0 sign-extension, saturating-conversion, and multi-value support,
-  plus complete feature-gated reference instructions, typed multi-table runtime,
+- the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
+  from the PR-249 reference corpus, including SIMD, Threads, exceptions/tail
+  calls, and memory64/GC (the complete MVP binary runtime, JavaScript API,
+  opt-in Core 2.0 structural profile, complete feature-gated reference instructions, typed multi-table runtime,
   precise-GC funcref/externref slots, arbitrary externref Table/Global identity
   and reclamation, canonical reference-valued function calls, and complete
   DataCount/passive-segment bulk memory and table operations,
-  upstream inventory, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
+  exact 27,437-command applicable upstream score, and [version-pinned planned profile registry](docs/.data/wasm-feature-profiles.json)
   are documented in [WebAssembly status](docs/wasm.md));
 - moving or multi-age generational GC, parallel mid-script minor collection, and any optimizing JIT.
 

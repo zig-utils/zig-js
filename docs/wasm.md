@@ -106,6 +106,51 @@ they verify the corpus pin, converter compatibility, 118 linking/store commands,
 and all 364 f32 bit-exact cases without putting the multi-minute complete
 inventory on every push.
 
+### Core 2 structural profile
+
+The checked-in [Core 2 structural inventory](.data/wasm-core-2-structural-inventory.json)
+pins `WebAssembly/spec` tag `wg-2.0` at
+`fffc6e12fa454e475455a7b58d3b5dc343980c10` and WABT 1.0.39 at
+`ad75c5edcdff96d73c245b57fbc07607aaca9f95`. At engine checkpoint
+`a593fdea`, every applicable binary-runtime command passes across all 90 core
+files: **27,437/27,437 pass, 0 fail, and 0 runner errors**. The inventory
+accounts for all 28,018 commands: 25,350 use the public JavaScript API, 2,087
+exact float payload/sign commands use the test-only bit-exact path, and 581
+text-format parser commands are explicitly non-applicable to the binary API.
+
+The file-area accounting is deliberately visible rather than hidden behind one
+headline:
+
+| Area | Pass | Text-format n/a | Total |
+| --- | ---: | ---: | ---: |
+| Shared core | 17,628 | 491 | 18,119 |
+| Numeric extensions | 619 | 0 | 619 |
+| Multi-value control | 1,553 | 90 | 1,643 |
+| Reference types | 222 | 0 | 222 |
+| Bulk memory/table | 7,415 | 0 | 7,415 |
+| **All 90 files** | **27,437** | **581** | **28,018** |
+
+Reproduce the complete score with exact checkouts (or equivalent paths to
+those exact commits):
+
+```sh
+git clone https://github.com/WebAssembly/spec.git /tmp/wasm-core-2
+git -C /tmp/wasm-core-2 checkout fffc6e12fa454e475455a7b58d3b5dc343980c10
+# Install/build WABT 1.0.39 commit ad75c5edcdff96d73c245b57fbc07607aaca9f95.
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py \
+  --profile core-2-structural \
+  --spec-root /tmp/wasm-core-2 \
+  --wast2json /path/to/wabt-1.0.39/wast2json
+```
+
+The profile defaults to a bounded 600-second per-file evaluator timeout because
+the official `memory_copy.wast` script alone contains 4,450 passing commands.
+CI keeps exact pin/version drift and representative behavior gated with 426
+applicable commands from `imports.wast`, `memory_init.wast`, `ref_func.wast`,
+and `unreached-valid.wast`, without rerunning that complete long-tail file on
+every push.
+
 ## Beyond the MVP
 
 The corpus evaluator keeps the standards-facing JavaScript API unchanged while
@@ -113,7 +158,7 @@ using a test-only Context hook for NaN payload/sign assertions that JavaScript
 `Number` cannot represent bit-exactly. This makes the full MVP binary-runtime
 score auditable without exposing a non-standard WebAssembly method to embedders.
 
-Post-MVP feature profiles are tracked separately by
+Post-Core-2 feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249
 WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
@@ -152,8 +197,9 @@ declarative segments, and `memory.init`/`data.drop`/`memory.copy`/`memory.fill`/
 validate, instantiate, and execute through the public JavaScript API.
 Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
-default, and enabling these switches does not imply that the remaining Core
-2.0 profile is complete.
+default. Together these switches form the structurally complete, independently
+scored Core 2 profile above; SIMD, Threads, exceptions/tail calls, memory64/GC,
+and shell-only hooks remain separate profiles.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,
@@ -170,8 +216,10 @@ get/grow/fill and cross-instance indirect calls. This reference-types slice was
 completed in [#275](https://github.com/zig-utils/zig-js/issues/275).
 
 Bulk memory uses explicit per-instance passive-segment state. Active segments
-are preflighted before any store mutation, declarative and active segments are
-dropped at instantiation, and passive segments retain/drop exactly. Memory and
+are applied in declaration order: each segment is bounds-atomic, while writes
+from completed earlier segments remain visible if a later segment traps, as
+Core 2 requires. Declarative and active segments are dropped at instantiation,
+and passive segments retain/drop exactly. Memory and
 table copies use memmove overlap semantics, preflight both source and destination
 bounds, and keep zero-length-at-end behavior exact. Wasm table writes and grows
 synchronize JavaScript Table mirrors immediately, preserving cross-instance
