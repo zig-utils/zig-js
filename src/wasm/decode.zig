@@ -6,6 +6,7 @@
 //! allocated from the module's arena, so `destroyModule` frees everything.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const types = @import("types.zig");
 
 const Allocator = std.mem.Allocator;
@@ -329,6 +330,38 @@ const Reader = struct {
         }
     }
 
+    fn readMemoryType(self: *Reader) DecodeError!types.MemType {
+        const flag_off = self.offset();
+        const flag = try self.readU8();
+        if (flag & 0x04 != 0) {
+            if (flag & 0x02 != 0 and !self.features.threads)
+                return self.unsupportedFeature(flag_off, .threads);
+            if (!self.features.memory64)
+                return self.unsupportedFeature(flag_off, .memory64);
+            return self.unsupportedFeature(flag_off, .memory64);
+        }
+        if (flag > 0x03)
+            return self.failAt(flag_off, "unsupported limits flag", .{});
+        const shared = flag & 0x02 != 0;
+        if (shared and !self.features.threads)
+            return self.unsupportedFeature(flag_off, .threads);
+
+        const min_off = self.offset();
+        const min = try self.readU32Leb();
+        if (min > types.MAX_PAGES)
+            return self.failAt(min_off, "memory size must be at most 65536 pages (4GiB)", .{});
+        const maximum = if (flag & 0x01 != 0) blk: {
+            const max_off = self.offset();
+            const max = try self.readU32Leb();
+            if (max > types.MAX_PAGES)
+                return self.failAt(max_off, "memory size must be at most 65536 pages (4GiB)", .{});
+            if (max < min)
+                return self.failAt(max_off, "size minimum must not be greater than maximum", .{});
+            break :blk max;
+        } else null;
+        return .{ .limits = .{ .min = min, .max = maximum }, .shared = shared };
+    }
+
     fn readTableType(self: *Reader) DecodeError!types.TableType {
         const et_off = self.offset();
         const elem = types.ValType.fromByte(try self.readU8()) orelse
@@ -432,7 +465,7 @@ fn parseImportSection(r: *Reader, a: Allocator, mod: *types.Module) DecodeError!
             },
             2 => blk: {
                 mod.imported_mems += 1;
-                break :blk .{ .mem = .{ .limits = try r.readLimits(.memory) } };
+                break :blk .{ .mem = try r.readMemoryType() };
             },
             3 => blk: {
                 mod.imported_globals += 1;
@@ -462,7 +495,7 @@ fn parseTableSection(r: *Reader, a: Allocator) DecodeError![]const types.TableTy
 fn parseMemorySection(r: *Reader, a: Allocator) DecodeError![]const types.MemType {
     const n = try r.readCount();
     const mems = try a.alloc(types.MemType, n);
-    for (mems) |*m| m.* = .{ .limits = try r.readLimits(.memory) };
+    for (mems) |*m| m.* = try r.readMemoryType();
     return mems;
 }
 
@@ -705,6 +738,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .sign_extension_ops);
         if (op == .simd and !r.features.fixed_width_simd)
             return r.unsupportedFeature(instr_off, .fixed_width_simd);
+        if (op == .atomic and !r.features.threads)
+            return r.unsupportedFeature(instr_off, .threads);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -853,6 +888,23 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                         .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU32Leb() },
                         .lane = try r.readU8(),
                     } },
+                }
+            },
+            .atomic => {
+                const subopcode_off = r.offset();
+                const atomic_op = atomic.Op.fromSubopcode(try r.readU32Leb()) orelse
+                    return r.failAt(subopcode_off, "invalid 0xfe subopcode", .{});
+                switch (atomic_op.immediate()) {
+                    .memarg => instr.imm = .{ .atomic_memarg = .{
+                        .op = atomic_op,
+                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU32Leb() },
+                    } },
+                    .fence => {
+                        const reserved_off = r.offset();
+                        if (try r.readU8() != 0)
+                            return r.failAt(reserved_off, "zero flag expected", .{});
+                        instr.imm = .{ .atomic = atomic_op };
+                    },
                 }
             },
             else => {
@@ -1173,6 +1225,53 @@ test "wasm.decode malformed declarations" {
     // Function/code section count mismatch, both directions.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x01\x00", 15, "function and code section have inconsistent lengths");
     try expectMalformed(hdr ++ "\x0A\x04\x01\x02\x00\x0B", 14, "function and code section have inconsistent lengths");
+}
+
+test "wasm.decode threads shared limits and atomic immediates" {
+    var diag: types.Diagnostic = .{};
+    const shared = try decodeWithFeatures(
+        std.testing.allocator,
+        hdr ++ "\x05\x04\x01\x03\x01\x02",
+        .{ .threads = true },
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, shared);
+    try std.testing.expectEqualDeep(
+        types.MemType{ .limits = .{ .min = 1, .max = 2 }, .shared = true },
+        shared.mems[0],
+    );
+
+    const atomic_module = hdr ++
+        "\x01\x06\x01\x60\x01\x7F\x01\x7F" ++
+        "\x03\x02\x01\x00" ++
+        "\x05\x04\x01\x03\x01\x01" ++
+        "\x0A\x0A\x01\x08\x00\x20\x00\xFE\x10\x02\x00\x0B";
+    const decoded = try decodeWithFeatures(std.testing.allocator, atomic_module, .{ .threads = true }, &diag);
+    defer destroyModule(std.testing.allocator, decoded);
+    const immediate = decoded.code[0].instrs[1].imm.atomic_memarg;
+    try std.testing.expectEqual(atomic.Op.i32_atomic_load, immediate.op);
+    try std.testing.expectEqualDeep(types.Instr.MemArg{ .align_ = 2, .offset = 0 }, immediate.memarg);
+
+    const fence_module = hdr ++
+        "\x01\x04\x01\x60\x00\x00" ++
+        "\x03\x02\x01\x00" ++
+        "\x0A\x07\x01\x05\x00\xFE\x03\x00\x0B";
+    const fence = try decodeWithFeatures(std.testing.allocator, fence_module, .{ .threads = true }, &diag);
+    defer destroyModule(std.testing.allocator, fence);
+    try std.testing.expectEqual(atomic.Op.memory_atomic_fence, fence.code[0].instrs[0].imm.atomic);
+
+    try expectMalformedWithFeatures(
+        fence_module[0 .. fence_module.len - 2] ++ "\x01\x0B",
+        .{ .threads = true },
+        fence_module.len - 2,
+        "zero flag expected",
+    );
+    try expectMalformedWithFeatures(
+        hdr ++ func_sec_1 ++ "\x0A\x07\x01\x05\x00\xFE\x04\x00\x0B",
+        .{ .threads = true },
+        18,
+        "invalid 0xfe subopcode",
+    );
 }
 
 test "wasm.decode malformed code bodies" {

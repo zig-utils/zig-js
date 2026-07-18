@@ -2357,6 +2357,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .f32_const => try push(s, instr.imm.f32),
             .f64_const => try push(s, instr.imm.f64),
             .simd => try executeSimd(s, inst, instr),
+            .atomic => return s.trap("WebAssembly threads execution is not implemented"),
             .i32_eqz => try pushBool(s, popI32(s) == 0),
             .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => {
                 const bu = popI32(s);

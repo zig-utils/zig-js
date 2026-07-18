@@ -8,6 +8,7 @@
 //! (`FuncBody.offsets`), module-level errors use `Diagnostic.no_offset`.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const types = @import("types.zig");
 const simd = @import("simd.zig");
 const simd_meta = @import("simd_validate.zig");
@@ -46,6 +47,11 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 2. MVP allows at most one table and one memory (imports + defined).
     if (mod.totalTables() > 1 and !mod.features.reference_types) return failMod(diag, "multiple tables");
     if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
+    for (0..mod.totalMems()) |memidx| {
+        const memory = mod.memoryType(@intCast(memidx));
+        if (memory.shared and memory.limits.max == null)
+            return failMod(diag, "shared memory must have maximum");
+    }
 
     // 3. Global initializers: typed constant expressions.
     for (mod.globals) |g| {
@@ -211,6 +217,19 @@ const SimdDecoded = struct {
     lane: ?u8 = null,
     shuffle: ?[16]u8 = null,
 };
+
+const AtomicDecoded = struct {
+    op: atomic.Op,
+    memarg: ?types.Instr.MemArg = null,
+};
+
+fn atomicDecoded(instr: types.Instr) AtomicDecoded {
+    return switch (instr.imm) {
+        .atomic => |op| .{ .op = op },
+        .atomic_memarg => |value| .{ .op = value.op, .memarg = value.memarg },
+        else => unreachable,
+    };
+}
 
 fn simdDecoded(instr: types.Instr) SimdDecoded {
     return switch (instr.imm) {
@@ -500,6 +519,73 @@ const FuncValidator = struct {
         }
     }
 
+    fn validateAtomic(self: *FuncValidator, instr: types.Instr) Error!void {
+        const decoded = atomicDecoded(instr);
+        if (decoded.memarg) |memarg| {
+            if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
+            if (memarg.align_ != decoded.op.naturalAlignment().?)
+                return self.fail("atomic alignment must be natural");
+        }
+        switch (decoded.op.shape()) {
+            .notify => {
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .wait32 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .wait64 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.i64);
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .fence => {},
+            .load_i32 => {
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .load_i64 => {
+                try self.popExpect(.i32);
+                self.push(.i64);
+            },
+            .store_i32 => {
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+            },
+            .store_i64 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.i32);
+            },
+            .rmw_i32 => {
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .rmw_i64 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.i32);
+                self.push(.i64);
+            },
+            .cmpxchg_i32 => {
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                try self.popExpect(.i32);
+                self.push(.i32);
+            },
+            .cmpxchg_i64 => {
+                try self.popExpect(.i64);
+                try self.popExpect(.i64);
+                try self.popExpect(.i32);
+                self.push(.i64);
+            },
+        }
+    }
+
     fn run(self: *FuncValidator) Error!void {
         while (self.pc < self.instrs.len) : (self.pc += 1) {
             const instr = self.instrs[self.pc];
@@ -762,6 +848,7 @@ const FuncValidator = struct {
                 .f32_const => self.push(.f32),
                 .f64_const => self.push(.f64),
                 .simd => try self.validateSimd(instr),
+                .atomic => try self.validateAtomic(instr),
                 .i32_eqz => try self.testop(.i32),
                 .i64_eqz => try self.testop(.i64),
                 .i32_eq, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u => try self.relop(.i32),
@@ -903,6 +990,34 @@ fn expectValidWithFeatures(comptime bytes: []const u8, features: types.Features)
     const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, features, &diag);
     defer decode.destroyModule(std.testing.allocator, mod);
     try validate(mod, &diag);
+}
+
+test "wasm.validate threads shared limits and atomic signatures" {
+    const features: types.Features = .{ .threads = true };
+    const shared_without_max = hdr ++ "\x05\x03\x01\x02\x01";
+    try expectInvalidWithFeatures(shared_without_max, features, "shared memory must have maximum");
+
+    const atomic_load = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++
+        sec(5, "\x01\x03\x01\x01") ++
+        code1("\x20\x00\xFE\x10\x02\x00\x0B"));
+    try expectValidWithFeatures(atomic_load, features);
+
+    const bad_alignment = comptime (hdr ++
+        sec(1, "\x01\x60\x01\x7F\x01\x7F") ++ func0 ++
+        sec(5, "\x01\x03\x01\x01") ++
+        code1("\x20\x00\xFE\x10\x01\x00\x0B"));
+    try expectInvalidAtWithFeatures(bad_alignment, features, 0, 1, "atomic alignment must be natural");
+
+    const fence_without_memory = comptime (hdr ++ type_void ++ func0 ++ code1("\xFE\x03\x00\x0B"));
+    try expectValidWithFeatures(fence_without_memory, features);
+
+    // Notify and wait validate against an ordinary memory; wait traps at runtime
+    // when that memory is not shared, as the threads specification requires.
+    const wait_unshared = comptime (hdr ++
+        sec(1, "\x01\x60\x03\x7F\x7F\x7E\x01\x7F") ++ func0 ++ mem1 ++
+        code1("\x20\x00\x20\x01\x20\x02\xFE\x01\x02\x00\x0B"));
+    try expectValidWithFeatures(wait_unshared, features);
 }
 
 /// Module-level failure: message + no_offset.

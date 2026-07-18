@@ -3,6 +3,7 @@
 //! decoded `Module` owns its memory through a single arena.
 
 const std = @import("std");
+const atomic = @import("atomic.zig");
 const simd = @import("simd.zig");
 
 pub const PAGE_SIZE: u32 = 65536;
@@ -182,6 +183,7 @@ pub const TableType = struct {
 
 pub const MemType = struct {
     limits: Limits,
+    shared: bool = false,
 };
 
 pub const ImportDesc = union(enum) {
@@ -324,6 +326,8 @@ pub const Instr = struct {
         simd_shuffle: SimdShuffle,
         simd_lane: SimdLane,
         simd_memarg_lane: SimdMemArgLane,
+        atomic: atomic.Op,
+        atomic_memarg: AtomicMemArg,
     };
 
     pub const MemArg = struct {
@@ -346,6 +350,7 @@ pub const Instr = struct {
     pub const SimdShuffle = struct { op: simd.Op, lanes: [16]u8 };
     pub const SimdLane = struct { op: simd.Op, lane: u8 };
     pub const SimdMemArgLane = struct { op: simd.Op, memarg: MemArg, lane: u8 };
+    pub const AtomicMemArg = struct { op: atomic.Op, memarg: MemArg };
 
     pub const Block = struct {
         type: BlockType,
@@ -566,6 +571,7 @@ pub const Op = enum(u16) {
     ref_is_null = 0xD1,
     ref_func = 0xD2,
     simd = 0xFD,
+    atomic = 0xFE,
     // Nontrapping float-to-integer conversions (0xfc prefix)
     i32_trunc_sat_f32_s = 0xFC00,
     i32_trunc_sat_f32_u = 0xFC01,
@@ -692,6 +698,21 @@ pub const Module = struct {
             }
         }
         return self.tables[i];
+    }
+
+    /// Memory type at any memory index (imports precede module-defined memories).
+    pub fn memoryType(self: *const Module, memidx: u32) MemType {
+        var i: u32 = memidx;
+        for (self.imports) |imp| {
+            switch (imp.desc) {
+                .mem => |memory| {
+                    if (i == 0) return memory;
+                    i -= 1;
+                },
+                else => {},
+            }
+        }
+        return self.mems[i];
     }
 };
 
