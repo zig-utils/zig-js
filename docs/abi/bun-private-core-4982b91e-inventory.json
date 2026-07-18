@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 293,
-      "pending": 143
+      "implemented": 295,
+      "pending": 141
     }
   },
   "home_comparison": {
@@ -2701,10 +2701,10 @@
       "line": 131,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__notifyNeedDebuggerBreak(vm: *VM) void;",
       "declaration_sha256": "1e3638d79a0df1f65a771857f7024062b3c8d9016302663542a961ea478d2e96",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__notifyNeedShellTimeoutCheck",
@@ -2734,10 +2734,10 @@
       "line": 124,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__notifyNeedWatchdogCheck(vm: *VM) void;",
       "declaration_sha256": "8186beaa8a6b6adb8e8d37da5712efd16ce9eb502fd55194f50d0b585b876cba",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__performOpportunisticallyScheduledTasks",

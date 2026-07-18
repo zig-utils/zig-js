@@ -2415,6 +2415,12 @@ pub const Context = struct {
     /// Cooperative termination for worker contexts: the owning Worker's stop
     /// word, polled at the engines' step checkpoints (src/worker.zig).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// Host-owned `JSC::VMTraps::NeedWatchdogCheck` plumbing (the c_api context
+    /// group owns both words): when the flag is set, the next step checkpoint
+    /// clears it and re-checks the armed deadline on the executing thread,
+    /// terminating evaluation once it has elapsed. Null = no trap plumbing.
+    watchdog_check_flag: ?*std.atomic.Value(bool) = null,
+    watchdog_deadline_ns: ?*const std.atomic.Value(u64) = null,
     /// Internal teardown stop word for shared-realm `Thread`s. `destroy()`
     /// sets this before waiting so unjoined parked/running threads unwind
     /// instead of keeping context teardown blocked forever after an abrupt
@@ -3145,6 +3151,8 @@ pub const Context = struct {
             .async_waiters = &self.async_waiters,
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
+            .watchdog_check_flag = self.watchdog_check_flag,
+            .watchdog_deadline_ns = self.watchdog_deadline_ns,
             .main_can_block = self.main_can_block,
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,

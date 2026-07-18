@@ -1103,6 +1103,15 @@ pub const Interpreter = struct {
     /// tree-walker's `eval` and the VM's dispatch loop both poll it every
     /// 1024 steps).
     stop_flag: ?*const std.atomic.Value(bool) = null,
+    /// `JSC::VMTraps::NeedWatchdogCheck` trap word (host-owned, c_api context
+    /// group): when set, the next 1024-step checkpoint clears it and re-checks
+    /// `watchdog_deadline_ns` on the executing thread — the executing-thread
+    /// half of the watchdog, redundant with the host watchdog thread exactly
+    /// like JSC's trap bit and `Watchdog` timer. Null = no trap plumbing.
+    watchdog_check_flag: ?*std.atomic.Value(bool) = null,
+    /// Armed monotonic-nanosecond execution deadline re-checked when the trap
+    /// above is consumed. Zero means no time limit (`Watchdog::noTimeLimit`).
+    watchdog_deadline_ns: ?*const std.atomic.Value(u64) = null,
     /// The Context's VM lock when `enable_threads` is on (Phase 6): the step
     /// checkpoints yield it when contended, and blocking operations release
     /// it while parked. Null = no threads, zero cost.
@@ -2532,6 +2541,20 @@ pub const Interpreter = struct {
         if ((self.steps & 1023) == 0) {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");
+            if (self.watchdog_check_flag) |wf| if (wf.swap(false, .acq_rel)) {
+                // JSC `VMTraps::NeedWatchdogCheck`: re-check the armed
+                // execution time limit on the executing thread; an elapsed
+                // limit terminates here instead of waiting for the host
+                // watchdog thread's next tick.
+                if (self.watchdog_deadline_ns) |dp| {
+                    const deadline = dp.load(.acquire);
+                    if (deadline != 0) {
+                        const now: u64 = @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+                        if (now >= deadline)
+                            return self.throwError("Error", "worker terminated");
+                    }
+                }
+            };
             if (self.use_thread_gil) if (self.gil) |g| g.yieldIfContended();
             // Mid-script GC: the tree-walker holds live `Value`s only as native
             // Zig locals/registers, which the conservative native-stack scan

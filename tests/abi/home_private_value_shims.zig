@@ -524,6 +524,8 @@ extern "c" fn JSC__VM__executionForbidden(?*anyopaque) bool;
 extern "c" fn JSC__VM__hasTerminationRequest(?*anyopaque) bool;
 extern "c" fn JSC__VM__isEntered(?*anyopaque) bool;
 extern "c" fn JSC__VM__notifyNeedTermination(?*anyopaque) void;
+extern "c" fn JSC__VM__notifyNeedWatchdogCheck(?*anyopaque) void;
+extern "c" fn JSC__VM__notifyNeedDebuggerBreak(?*anyopaque) void;
 extern "c" fn JSC__VM__setExecutionForbidden(?*anyopaque, bool) void;
 extern "c" fn JSC__VM__getAPILock(?*anyopaque) void;
 extern "c" fn JSC__VM__holdAPILock(?*anyopaque, ?*anyopaque, *const fn (?*anyopaque) callconv(.c) void) void;
@@ -5266,6 +5268,56 @@ pub fn main() void {
     }
     JSGlobalContextRelease(watchdog_context);
 
+    // VM trap notifications (#304): NeedWatchdogCheck re-checks the armed
+    // deadline on the executing thread at the next step checkpoint;
+    // NeedDebuggerBreak is inert without an attached debugger. Both tolerate
+    // a null VM.
+    JSC__VM__notifyNeedWatchdogCheck(null);
+    JSC__VM__notifyNeedDebuggerBreak(null);
+    JSC__VM__notifyNeedDebuggerBreak(vm);
+    JSC__VM__notifyNeedDebuggerBreak(sibling_vm);
+    JSC__VM__notifyNeedDebuggerBreak(foreign_vm);
+
+    // The watchdog trap consumed with no armed limit (cleared above, then
+    // mapped to noTimeLimit) must not disturb bounded evaluation, and the
+    // debugger-break trap stays inert while no realm has a debugger session.
+    JSC__VM__notifyNeedWatchdogCheck(vm);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "let ts = 0; for (let ti = 0; ti < 5000; ti += 1) ts += ti; ts === 12497500")))
+        fail("private watchdog trap disturbed disarmed evaluation");
+
+    // Consumed with a future deadline, the trap re-checks and keeps running.
+    JSC__VM__setExecutionTimeLimit(vm, 60.0);
+    JSC__VM__notifyNeedWatchdogCheck(vm);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "let tf = 0; for (let tj = 0; tj < 5000; tj += 1) tf += tj; tf === 12497500")))
+        fail("private watchdog trap fired before the armed deadline");
+    JSC__VM__clearExecutionTimeLimit(vm);
+
+    // Consumed with an elapsed deadline, the trap terminates unbounded
+    // evaluation; the host watchdog thread is the redundant second path to
+    // the same termination, exactly like JSC's trap bit and Watchdog timer.
+    const trap_context = JSGlobalContextCreate(null) orelse fail("trap context creation failed");
+    const trap_vm = JSC__JSGlobalObject__vm(trap_context) orelse fail("trap VM lookup failed");
+    JSC__VM__setExecutionTimeLimit(trap_vm, 0.0);
+    JSC__VM__notifyNeedWatchdogCheck(trap_vm);
+    {
+        const trap_script = JSStringCreateWithUTF8CString("while (true) {}") orelse fail("trap script creation failed");
+        defer JSStringRelease(trap_script);
+        var trap_exception: JSValueRef = null;
+        const trap_result = JSEvaluateScript(trap_context, trap_script, null, null, 1, &trap_exception);
+        if (trap_result != null or trap_exception == null)
+            fail("private watchdog trap did not terminate elapsed evaluation");
+        // Whichever half fired first, the host watchdog attributes the abort
+        // to the time limit within its nap bound.
+        var trap_spins: usize = 0;
+        while (!JSC__VM__hasTerminationRequest(trap_vm) and trap_spins < 100_000_000) : (trap_spins += 1)
+            std.atomic.spinLoopHint();
+        if (!JSC__VM__hasTerminationRequest(trap_vm))
+            fail("private watchdog trap abort was not attributed to the time limit");
+        JSC__VM__clearExecutionTimeLimit(trap_vm);
+        JSC__VM__clearHasTerminationRequest(trap_vm);
+    }
+    JSGlobalContextRelease(trap_context);
+
     // API lock: null-tolerant, recursive for the owner thread (JSLock
     // semantics), and real mutual exclusion against foreign threads.
     JSC__VM__getAPILock(null);
@@ -5342,5 +5394,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 288/288 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 290/290 symbols linked; runtime matrix passed\n", .{});
 }

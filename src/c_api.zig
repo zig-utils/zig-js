@@ -563,6 +563,11 @@ const CContextGroup = struct {
     watchdog_fired_ns: std.atomic.Value(u64) = .init(0),
     watchdog_stop: std.atomic.Value(bool) = .init(false),
     watchdog_thread: ?std.Thread = null,
+    /// `JSC::VMTraps::NeedWatchdogCheck` trap bit: set by
+    /// `JSC__VM__notifyNeedWatchdogCheck`, consumed (cleared + deadline
+    /// re-check) at the running interpreter's next step checkpoint. Every
+    /// context of this group points its `watchdog_check_flag` here.
+    need_watchdog_check: std.atomic.Value(bool) = .init(false),
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -686,7 +691,7 @@ const CInspectorState = struct {
     context: *Context,
     sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty,
     scripts: std.ArrayListUnmanaged(CInspectorScript) = .empty,
-    pause_requested: bool = false,
+    pause_requested: std.atomic.Value(bool) = .init(false),
     paused: bool = false,
     breakpoints: std.ArrayListUnmanaged(CInspectorBreakpoint) = .empty,
     resolved_breakpoints: std.ArrayListUnmanaged(CInspectorResolvedBreakpoint) = .empty,
@@ -8794,6 +8799,35 @@ export fn JSC__VM__hasExecutionTimeLimit(vm_ref: ?*anyopaque) callconv(.c) bool 
     return group.execution_deadline_ns.load(.acquire) != 0;
 }
 
+/// `(*arg0).notifyNeedWatchdogCheck()` (bindings.cpp:4992): sets the VM's
+/// `VMTraps::NeedWatchdogCheck` bit. The running evaluation consumes the trap
+/// at its next step checkpoint, re-checking the armed execution time limit on
+/// the executing thread and terminating once it has elapsed — the synchronous
+/// half of the watchdog, intentionally redundant with the host watchdog
+/// thread exactly like JSC's trap bit and `Watchdog` timer. With no armed
+/// limit the consumed trap is a no-op.
+export fn JSC__VM__notifyNeedWatchdogCheck(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.need_watchdog_check.store(true, .release);
+}
+
+/// `(*arg0).notifyNeedDebuggerBreak()` (bindings.cpp:4997): sets the VM's
+/// `VMTraps::NeedDebuggerBreak` bit. Every realm of this VM with an enabled
+/// debugger session pauses with reason "pause" at its next statement
+/// boundary — the same path as CDP `Debugger.pause`, with owner selection
+/// still going through `chooseInspectorPauseOwner`. Without an attached
+/// debugger the notify is inert, matching a JSC trap with no debugger.
+export fn JSC__VM__notifyNeedDebuggerBreak(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    privateNotifyDebuggerBreak(group.primary);
+    for (group.contexts.items) |context| privateNotifyDebuggerBreak(context);
+}
+
+fn privateNotifyDebuggerBreak(context: *Context) void {
+    const state = inspectorState(context) orelse return;
+    if (inspectorHasDebugger(state)) state.pause_requested.store(true, .release);
+}
+
 fn privateSaturatingAddAtomic(value_: *std.atomic.Value(usize), amount: usize) void {
     var current = value_.load(.monotonic);
     while (true) {
@@ -10379,6 +10413,8 @@ export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
         .atom_strings = strcell.InternTable.init(gpa),
     };
     primary.c_api_group = @ptrCast(group);
+    primary.watchdog_check_flag = &group.need_watchdog_check;
+    primary.watchdog_deadline_ns = &group.execution_deadline_ns;
     return @ptrCast(group);
 }
 
@@ -10459,6 +10495,8 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         return null;
     };
     ctx.c_api_group = @ptrCast(group);
+    ctx.watchdog_check_flag = &group.need_watchdog_check;
+    ctx.watchdog_deadline_ns = &group.execution_deadline_ns;
     ctx.initCApiRef();
     const ctx_ref: JSContextRef = @ptrCast(ctx);
     if (global_class != null) {
@@ -10874,7 +10912,7 @@ fn refreshInspectorDebuggerHook(state: *CInspectorState) void {
         context.debug_statement_ctx = null;
         context.debug_statement_hook = null;
         context.debug_exception_hook = null;
-        state.pause_requested = false;
+        state.pause_requested.store(false, .monotonic);
         state.paused = false;
         state.paused_machine = null;
         state.pause_owner = null;
@@ -11266,7 +11304,7 @@ fn inspectorStatementBoundary(
         .over => machine.depth <= state.step_depth,
         .out => machine.depth < state.step_depth,
     };
-    if (!location.debugger_statement and !state.pause_requested and hits.items.len == 0 and !step_hit) return;
+    if (!location.debugger_statement and !state.pause_requested.load(.monotonic) and hits.items.len == 0 and !step_hit) return;
     const reason: []const u8 = if (location.debugger_statement)
         "debuggerStatement"
     else if (hits.items.len > 0)
@@ -11275,7 +11313,7 @@ fn inspectorStatementBoundary(
         "step"
     else
         "pause";
-    state.pause_requested = false;
+    state.pause_requested.store(false, .monotonic);
     state.step_mode = .none;
     state.paused = true;
     state.paused_depth = machine.depth;
@@ -11400,7 +11438,7 @@ fn inspectorExceptionBoundary(
     state.paused_at_uncaught_boundary = uncaught;
     state.paused_machine = machine;
     state.pause_owner = chooseInspectorPauseOwner(state);
-    state.pause_requested = false;
+    state.pause_requested.store(false, .monotonic);
     state.step_mode = .none;
     var pause_arena = std.heap.ArenaAllocator.init(gpa);
     defer pause_arena.deinit();
@@ -11749,7 +11787,7 @@ export fn ZJSInspectorSessionDispatch(
     }
     if (std.mem.eql(u8, method, "Debugger.pause")) {
         if (!session.debugger_enabled) return sendInspectorError(session, id, -32000, "Debugger domain is not enabled");
-        session.state.pause_requested = true;
+        session.state.pause_requested.store(true, .release);
         session.state.next_pause_owner = session;
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
@@ -19665,6 +19703,8 @@ test "private embedding references retain strong targets and clear weak targets"
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
+            primary.watchdog_check_flag = &group.need_watchdog_check;
+            primary.watchdog_deadline_ns = &group.execution_deadline_ns;
             primary.initCApiRef();
             return group;
         }
@@ -22211,6 +22251,8 @@ test "private rooted native value containers retain and release exact cells" {
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
+            primary.watchdog_check_flag = &group.need_watchdog_check;
+            primary.watchdog_deadline_ns = &group.execution_deadline_ns;
             primary.initCApiRef();
             return group;
         }
