@@ -6865,6 +6865,121 @@ test "wasm.exec GC aggregate allocation is failure atomic and cycle safe" {
     );
 }
 
+test "wasm.exec GC deep graphs trace iteratively and reclaim exactly" {
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(talloc) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = talloc,
+        .arena = std.heap.ArenaAllocator.init(talloc),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+
+    var marker = js_value.Object{};
+    var current = try createGcAggregate(&inst, 0, .struct_, &.{.{ .externref = js_value.Value.obj(&marker) }});
+    const depth = 4096;
+    for (1..depth) |_| current = try createGcAggregate(&inst, 0, .struct_, &.{.{ .gcref = gcObjectRef(current) }});
+    try std.testing.expectEqual(@as(usize, depth), inst.gc_object_count);
+
+    const TraceProbe = struct {
+        marker: *js_value.Object,
+        seen: bool = false,
+
+        fn mark(raw: *anyopaque, child: js_value.Value) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (child.isObject() and child.asObj() == self.marker) self.seen = true;
+        }
+    };
+    var probe: TraceProbe = .{ .marker = &marker };
+    current.trace_ref.trace(&current.trace_ref, @ptrCast(&probe), TraceProbe.mark);
+    try std.testing.expect(probe.seen);
+    try std.testing.expectEqual(@as(usize, 0), try collectGcAggregatesQuiescent(&inst, &.{.{ .gcref = gcObjectRef(current) }}));
+    try std.testing.expectEqual(@as(usize, depth), try collectGcAggregatesQuiescent(&inst, &.{}));
+    try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
+}
+
+test "wasm.exec GC wrapper publication is canonical under contention" {
+    var mod: types.Module = .{ .arena = std.heap.ArenaAllocator.init(talloc) };
+    defer mod.deinit();
+    var inst: Instance = .{
+        .module = &mod,
+        .funcs = &.{},
+        .tables = &.{},
+        .mems = &.{},
+        .globals = &.{},
+        .tags = &.{},
+        .elem_segments = &.{},
+        .data_segments = &.{},
+        .gpa = talloc,
+        .arena = std.heap.ArenaAllocator.init(talloc),
+    };
+    defer inst.arena.deinit();
+    defer destroyGcAggregates(&inst);
+    const object = try createGcAggregate(&inst, 0, .struct_, &.{});
+    const slot: ValueSlot = .{ .gcref = gcObjectRef(object) };
+
+    const Worker = struct {
+        go: *std.atomic.Value(bool),
+        slot: ValueSlot,
+        candidate: *js_value.Object,
+        result: ?GcWrapperRetain = null,
+        failed: bool = false,
+
+        fn run(self: *@This()) void {
+            while (!self.go.load(.acquire)) std.atomic.spinLoopHint();
+            self.result = retainGcWrapper(self.slot, self.candidate) catch {
+                self.failed = true;
+                return;
+            };
+        }
+    };
+    var go = std.atomic.Value(bool).init(false);
+    var candidates: [8]js_value.Object = undefined;
+    var workers: [8]Worker = undefined;
+    var threads: [8]std.Thread = undefined;
+    var spawned: usize = 0;
+    errdefer {
+        go.store(true, .release);
+        for (threads[0..spawned]) |thread| thread.join();
+    }
+    for (&workers, &candidates, 0..) |*worker, *candidate, index| {
+        candidate.* = .{};
+        worker.* = .{ .go = &go, .slot = slot, .candidate = candidate };
+        threads[index] = try std.Thread.spawn(.{}, Worker.run, .{worker});
+        spawned += 1;
+    }
+    go.store(true, .release);
+    for (threads) |thread| thread.join();
+
+    var retained: ?*GcRootHandle = null;
+    var winner: ?*js_value.Object = null;
+    for (&workers, &candidates) |*worker, *candidate| {
+        try std.testing.expect(!worker.failed);
+        switch (worker.result.?) {
+            .retained => |handle| {
+                try std.testing.expect(retained == null);
+                retained = handle;
+                winner = candidate;
+            },
+            .existing => {},
+        }
+    }
+    for (workers) |worker| switch (worker.result.?) {
+        .retained => {},
+        .existing => |existing| try std.testing.expect(existing == winner.?),
+    };
+    releaseGcWrapper(@ptrCast(retained.?), winner.?);
+    try std.testing.expectEqual(@as(usize, 1), try collectGcAggregatesQuiescent(&inst, &.{}));
+}
+
 test "wasm.exec GC struct and array allocation access packed and bounds" {
     const features: types.Features = .{
         .reference_types = true,
