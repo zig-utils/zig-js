@@ -139,6 +139,12 @@ pub const TAKind = enum {
 /// `release` is idempotent because both paths can observe the same record.
 pub const ExternalBufferDeallocator = *const fn (bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void;
 
+pub const ExternalBufferLease = struct {
+    bytes: ?*anyopaque,
+    deallocator: ?ExternalBufferDeallocator,
+    deallocator_context: ?*anyopaque,
+};
+
 pub const ExternalBufferOwner = struct {
     bytes: ?*anyopaque,
     deallocator: ?ExternalBufferDeallocator,
@@ -149,6 +155,197 @@ pub const ExternalBufferOwner = struct {
         if (self.released.swap(true, .acq_rel)) return false;
         if (self.deallocator) |deallocator| deallocator(self.bytes, self.deallocator_context);
         return true;
+    }
+
+    /// Transfer the callback obligation into a backing handle without running
+    /// it. Context teardown then sees an already-released owner while the
+    /// independently refcounted handle may outlive the VM.
+    pub fn take(self: *ExternalBufferOwner) ?ExternalBufferLease {
+        if (self.released.swap(true, .acq_rel)) return null;
+        return .{
+            .bytes = self.bytes,
+            .deallocator = self.deallocator,
+            .deallocator_context = self.deallocator_context,
+        };
+    }
+};
+
+/// Opaque native equivalent of JSC's independently refcounted ArrayBuffer
+/// backing object. It has three ownership domains: the JS wrapper, the owning
+/// Context's tracking list, and the generated binding's transferred +1. Native
+/// ref/deref operations touch only `external_refs`, so an imbalanced consumer
+/// cannot steal the wrapper/tracker references before an underflow is detected.
+pub const NativeArrayBufferHandle = struct {
+    const global_allocator = std.heap.page_allocator;
+
+    const Storage = union(enum) {
+        owned: []u8,
+        external: struct {
+            lease: ExternalBufferLease,
+            len: usize,
+        },
+        shared: *SharedBufferStorage,
+    };
+
+    refcount: std.atomic.Value(usize) = .init(3),
+    external_refs: std.atomic.Value(usize) = .init(1),
+    wrapper_released: std.atomic.Value(bool) = .init(false),
+    tracking_released: std.atomic.Value(bool) = .init(false),
+    lock: std.atomic.Mutex = .unlocked,
+    storage: Storage,
+    max_byte_length: ?usize,
+    shared: bool = false,
+
+    pub fn createOwned(bytes: []const u8, max_byte_length: ?usize) error{OutOfMemory}!*NativeArrayBufferHandle {
+        const self = try global_allocator.create(NativeArrayBufferHandle);
+        errdefer global_allocator.destroy(self);
+        const copy = try global_allocator.alloc(u8, bytes.len);
+        errdefer global_allocator.free(copy);
+        @memcpy(copy, bytes);
+        self.* = .{ .storage = .{ .owned = copy }, .max_byte_length = max_byte_length };
+        return self;
+    }
+
+    pub fn createExternal(bytes: []u8, max_byte_length: ?usize) error{OutOfMemory}!*NativeArrayBufferHandle {
+        const self = try global_allocator.create(NativeArrayBufferHandle);
+        self.* = .{
+            .storage = .{ .external = .{
+                .lease = .{
+                    .bytes = if (bytes.len == 0) null else bytes.ptr,
+                    .deallocator = null,
+                    .deallocator_context = null,
+                },
+                .len = bytes.len,
+            } },
+            .max_byte_length = max_byte_length,
+        };
+        return self;
+    }
+
+    pub fn createShared(storage: *SharedBufferStorage) error{OutOfMemory}!*NativeArrayBufferHandle {
+        const retained = storage.tryRetain() orelse return error.OutOfMemory;
+        errdefer retained.release();
+        const self = try global_allocator.create(NativeArrayBufferHandle);
+        self.* = .{
+            .storage = .{ .shared = retained },
+            .max_byte_length = if (storage.growable) storage.capacity else null,
+            .shared = true,
+        };
+        return self;
+    }
+
+    pub fn armExternal(self: *NativeArrayBufferHandle, lease: ExternalBufferLease) void {
+        self.lockHandle();
+        defer self.lock.unlock();
+        std.debug.assert(self.storage == .external);
+        self.storage.external.lease = lease;
+    }
+
+    pub fn tryRetainExternal(self: *NativeArrayBufferHandle) bool {
+        var total = self.refcount.load(.acquire);
+        while (true) {
+            if (total == 0 or total == std.math.maxInt(usize)) return false;
+            if (self.refcount.cmpxchgWeak(total, total + 1, .acq_rel, .acquire)) |observed| {
+                total = observed;
+                continue;
+            }
+            break;
+        }
+        var external = self.external_refs.load(.acquire);
+        while (true) {
+            if (external == std.math.maxInt(usize)) {
+                self.releaseTotal();
+                return false;
+            }
+            if (self.external_refs.cmpxchgWeak(external, external + 1, .acq_rel, .acquire)) |observed| {
+                external = observed;
+                continue;
+            }
+            return true;
+        }
+    }
+
+    pub fn releaseExternal(self: *NativeArrayBufferHandle) bool {
+        var current = self.external_refs.load(.acquire);
+        while (true) {
+            if (current == 0) return false;
+            if (self.external_refs.cmpxchgWeak(current, current - 1, .acq_rel, .acquire)) |observed| {
+                current = observed;
+                continue;
+            }
+            self.releaseTotal();
+            return true;
+        }
+    }
+
+    pub fn releaseWrapper(self: *NativeArrayBufferHandle) void {
+        if (!self.wrapper_released.swap(true, .acq_rel)) self.releaseTotal();
+    }
+
+    pub fn releaseTracking(self: *NativeArrayBufferHandle) void {
+        if (!self.tracking_released.swap(true, .acq_rel)) self.releaseTotal();
+    }
+
+    fn releaseTotal(self: *NativeArrayBufferHandle) void {
+        if (self.refcount.fetchSub(1, .release) != 1) return;
+        _ = self.refcount.load(.acquire);
+        self.destroy();
+    }
+
+    fn destroy(self: *NativeArrayBufferHandle) void {
+        switch (self.storage) {
+            .owned => |bytes| global_allocator.free(bytes),
+            .external => |entry| if (entry.lease.deallocator) |deallocator|
+                deallocator(entry.lease.bytes, entry.lease.deallocator_context),
+            .shared => |storage| storage.release(),
+        }
+        global_allocator.destroy(self);
+    }
+
+    fn lockHandle(self: *NativeArrayBufferHandle) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    pub fn snapshotBytes(self: *NativeArrayBufferHandle) []u8 {
+        self.lockHandle();
+        defer self.lock.unlock();
+        return switch (self.storage) {
+            .owned => |bytes| bytes,
+            .external => |entry| if (entry.lease.bytes) |ptr| @as([*]u8, @ptrCast(ptr))[0..entry.len] else &.{},
+            .shared => |storage| storage.slice(),
+        };
+    }
+
+    pub fn isShared(self: *const NativeArrayBufferHandle) bool {
+        return self.shared;
+    }
+
+    pub fn isResizable(self: *const NativeArrayBufferHandle) bool {
+        return self.max_byte_length != null;
+    }
+
+    pub fn resize(self: *NativeArrayBufferHandle, new_len: usize) error{ OutOfMemory, NotResizable, OutOfRange }!void {
+        const max = self.max_byte_length orelse return error.NotResizable;
+        if (new_len > max) return error.OutOfRange;
+        self.lockHandle();
+        defer self.lock.unlock();
+        switch (self.storage) {
+            .owned => |old| {
+                const fresh = try global_allocator.alloc(u8, new_len);
+                @memset(fresh, 0);
+                @memcpy(fresh[0..@min(old.len, fresh.len)], old[0..@min(old.len, fresh.len)]);
+                self.storage = .{ .owned = fresh };
+                global_allocator.free(old);
+            },
+            else => return error.NotResizable,
+        }
     }
 };
 
@@ -178,6 +375,9 @@ pub const ArrayBufferData = struct {
     /// metadata and invokes the embedder deallocator exactly once, either from
     /// the GC finalizer or from Context teardown in arena mode.
     external_owner: ?*ExternalBufferOwner = null,
+    /// Lazily installed when a generated IDLArrayBufferRef binding transfers a
+    /// native +1. The handle owns a backing that can outlive this wrapper/VM.
+    native_handle: std.atomic.Value(?*NativeArrayBufferHandle) = .init(null),
     detached_flag: std.atomic.Value(bool) = .init(false),
     /// For a resizable ArrayBuffer (or growable SharedArrayBuffer), the maximum
     /// byte length; null means fixed-length (not resizable/growable).
@@ -200,6 +400,7 @@ pub const ArrayBufferData = struct {
     /// no re-entrancy, no deadlock.
     pub inline fn bytes(self: *const ArrayBufferData) []u8 {
         if (self.shared) |s| return s.slice();
+        if (@constCast(&self.native_handle).load(.acquire)) |handle| return handle.snapshotBytes();
         if (!Object.element_locks_enabled.load(.monotonic)) return self.local_data;
         // Seqlock read: ptr+len accessed with relaxed atomics (a plain mov each,
         // so even a retried read is a non-racing atomic access — TSan-clean), and
@@ -728,6 +929,12 @@ pub const ObjectRareTag = enum(u8) {
     sparse_array,
     js_function,
     regex,
+    wasm_module,
+    wasm_instance,
+    wasm_memory,
+    wasm_table,
+    wasm_global,
+    wasm_function,
 };
 
 /// Structured JavaScript stack metadata retained when an Error is created.
@@ -799,6 +1006,16 @@ pub const ObjectRareState = union(ObjectRareTag) {
     sparse_array: struct { holes: ?*std.AutoHashMapUnmanaged(usize, void) = null },
     js_function: struct { ptr: ?*anyopaque = null },
     regex: ObjectRegexState,
+    // WebAssembly JS API (issue #141). Native payloads are type-erased
+    // (*wasm/types.Module, *wasm/exec.Instance/MemoryInst/TableInst/GlobalInst/
+    // FuncInst); a context-level registry owns their memory, so these slots are
+    // weak views — only the Object edges below participate in GC tracing.
+    wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
+    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null },
+    wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null },
+    wasm_table: struct { table: ?*anyopaque = null, owner_obj: ?*Object = null },
+    wasm_global: struct { glob: ?*anyopaque = null, owner_obj: ?*Object = null },
+    wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.FuncInst
 };
 
 /// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
@@ -1447,6 +1664,17 @@ pub const Object = struct {
         return &@field(cold.rare, @tagName(tag));
     }
 
+    /// GC-visible Object edges out of the WebAssembly rare states (issue #141).
+    /// At most one wasm rare tag is active per object, so a single flat
+    /// snapshot covers all of them; null/empty fields mark nothing.
+    pub const WasmTraceSnapshot = struct {
+        module_obj: ?*Object = null,
+        import_vals: []const Value = &.{},
+        exports_obj: ?*Object = null,
+        buffer_obj: ?*Object = null,
+        owner_obj: ?*Object = null,
+    };
+
     /// Stable snapshot of every GC-visible cold/rare edge. The concurrent
     /// marker uses one backing-lock section and releases it before acquiring
     /// property or element locks, preserving the mutator's lock order.
@@ -1468,6 +1696,7 @@ pub const Object = struct {
         data_view: ?*DataViewData,
         getter_setter_getter: ?Value,
         getter_setter_setter: ?Value,
+        wasm: WasmTraceSnapshot,
     };
 
     pub fn traceColdSnapshot(self: *Object, concurrent: bool) TraceColdSnapshot {
@@ -1492,6 +1721,27 @@ pub const Object = struct {
             .data_view = self.dataView(),
             .getter_setter_getter = if (self.getterSetterCellData()) |cell| cell.getterValue() else null,
             .getter_setter_setter = if (self.getterSetterCellData()) |cell| cell.setterValue() else null,
+            .wasm = if (cold) |state| wasmTraceSnapshot(state) else .{},
+        };
+    }
+
+    /// Copy the active wasm rare state's Object edges into a flat snapshot.
+    /// Called under the backing lock (concurrent mark) or in a quiescent world.
+    fn wasmTraceSnapshot(cold: *ObjectColdState) WasmTraceSnapshot {
+        return switch (cold.rare_tag.load(.acquire)) {
+            .wasm_instance => .{
+                .module_obj = cold.rare.wasm_instance.module_obj,
+                .import_vals = cold.rare.wasm_instance.import_vals,
+                .exports_obj = cold.rare.wasm_instance.exports_obj,
+            },
+            .wasm_memory => .{
+                .buffer_obj = cold.rare.wasm_memory.buffer_obj,
+                .owner_obj = cold.rare.wasm_memory.owner_obj,
+            },
+            .wasm_table => .{ .owner_obj = cold.rare.wasm_table.owner_obj },
+            .wasm_global => .{ .owner_obj = cold.rare.wasm_global.owner_obj },
+            .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
+            else => .{},
         };
     }
 
@@ -1747,6 +1997,73 @@ pub const Object = struct {
     pub fn clearDataView(self: *Object) void {
         const cold = self.coldState() orelse return;
         if (cold.hasRare(.buffer_view)) cold.rare.buffer_view.data_view = null;
+    }
+
+    // ---- WebAssembly JS API rare-state accessors (issue #141) ----------------
+    // Getter/setter pairs mirror the buffer_view pattern above: the getter
+    // probes the published tag, the setter ensures the sidecar payload. For
+    // payloads with Object edges the state accessor hands out the mutable
+    // payload struct so the wasm API can fill several fields in one ensure.
+
+    pub inline fn wasmModule(self: *const Object) ?*anyopaque {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_module)) return null;
+        return cold.rare.wasm_module.mod;
+    }
+
+    pub fn setWasmModule(self: *Object, fallback: std.mem.Allocator, mod: *anyopaque) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .wasm_module, .{});
+        state.mod = mod;
+    }
+
+    pub inline fn wasmInstance(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_instance") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_instance)) return null;
+        return &cold.rare.wasm_instance;
+    }
+
+    pub fn wasmInstanceState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_instance") {
+        return self.ensureRare(fallback, .wasm_instance, .{});
+    }
+
+    pub inline fn wasmMemory(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_memory") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_memory)) return null;
+        return &cold.rare.wasm_memory;
+    }
+
+    pub fn wasmMemoryState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_memory") {
+        return self.ensureRare(fallback, .wasm_memory, .{});
+    }
+
+    pub inline fn wasmTable(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_table") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_table)) return null;
+        return &cold.rare.wasm_table;
+    }
+
+    pub fn wasmTableState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_table") {
+        return self.ensureRare(fallback, .wasm_table, .{});
+    }
+
+    pub inline fn wasmGlobal(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_global") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_global)) return null;
+        return &cold.rare.wasm_global;
+    }
+
+    pub fn wasmGlobalState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_global") {
+        return self.ensureRare(fallback, .wasm_global, .{});
+    }
+
+    pub inline fn wasmFunction(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_function") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_function)) return null;
+        return &cold.rare.wasm_function;
+    }
+
+    pub fn wasmFunctionState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_function") {
+        return self.ensureRare(fallback, .wasm_function, .{});
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {

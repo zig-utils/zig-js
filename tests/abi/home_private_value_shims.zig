@@ -234,6 +234,7 @@ const JSStringIterator = extern struct {
 };
 
 const PrivateCallFrame = opaque {};
+const PrivateArrayBufferHandle = opaque {};
 const JSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
 const ImplementationVisibility = enum(u8) {
     public = 0,
@@ -358,6 +359,10 @@ extern "c" fn JSC__JSValue__createUninitializedUint8Array(JSContextRef, usize) E
 extern "c" fn Bun__makeArrayBufferWithBytesNoCopy(JSContextRef, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
 extern "c" fn Bun__makeTypedArrayWithBytesNoCopy(JSContextRef, PrivateTypedArrayType, ?*anyopaque, usize, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, ?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__asArrayBuffer(EncodedValue, JSContextRef, *PrivateBunArrayBuffer) bool;
+extern "c" fn JSC__IDLArrayBufferRef__convertToExtern(EncodedValue, JSContextRef) ?*PrivateArrayBufferHandle;
+extern "c" fn JSC__ArrayBuffer__ref(*PrivateArrayBufferHandle) void;
+extern "c" fn JSC__ArrayBuffer__deref(*PrivateArrayBufferHandle) void;
+extern "c" fn JSC__ArrayBuffer__asBunArrayBuffer(*PrivateArrayBufferHandle, *PrivateBunArrayBuffer) void;
 extern "c" fn JSObjectGetTypedArrayBytesPtr(JSContextRef, JSObjectRef, [*c]JSValueRef) ?*anyopaque;
 extern "c" fn JSObjectGetTypedArrayLength(JSContextRef, JSObjectRef, [*c]JSValueRef) usize;
 extern "c" fn JSObjectGetTypedArrayBuffer(JSContextRef, JSObjectRef, [*c]JSValueRef) JSObjectRef;
@@ -1707,6 +1712,44 @@ pub fn main() void {
     if (JSC__JSValue__asArrayBuffer(.undefined, context, &untouched_projection) or
         untouched_projection.len != 77 or untouched_projection.byte_len != 88)
         fail("invalid ArrayBuffer projection modified output");
+
+    // The pinned generated path converts IDLArrayBufferRef to RefPtr and then
+    // leaks one native +1 into each field. Exercise required, optional, and
+    // union-shaped adopters plus an explicit clone before destroying the VM.
+    const GeneratedFields = struct {
+        required: *PrivateArrayBufferHandle,
+        optional: ?*PrivateArrayBufferHandle,
+        variant: union(enum) { none, buffer: *PrivateArrayBufferHandle },
+    };
+    const handle_context = JSGlobalContextCreate(null) orelse fail("ArrayBuffer handle context creation failed");
+    const generated_value = evaluate(handle_context, "globalThis.__native_backing = new ArrayBuffer(6, { maxByteLength: 12 });" ++
+        "new Uint8Array(__native_backing).fill(37); new Uint8Array(__native_backing)");
+    var generated = GeneratedFields{
+        .required = JSC__IDLArrayBufferRef__convertToExtern(generated_value, handle_context) orelse
+            fail("required ArrayBuffer handle conversion failed"),
+        .optional = JSC__IDLArrayBufferRef__convertToExtern(generated_value, handle_context) orelse
+            fail("optional ArrayBuffer handle conversion failed"),
+        .variant = .{ .buffer = JSC__IDLArrayBufferRef__convertToExtern(generated_value, handle_context) orelse
+            fail("union ArrayBuffer handle conversion failed") },
+    };
+    if (generated.required != generated.optional.? or generated.required != generated.variant.buffer or
+        JSC__IDLArrayBufferRef__convertToExtern(EncodedValue.fromInt32(1), handle_context) != null)
+        fail("generated ArrayBuffer producer identity/rejection mismatch");
+    JSC__ArrayBuffer__ref(generated.required);
+    JSGlobalContextRelease(handle_context);
+    var generated_projection = PrivateBunArrayBuffer{};
+    JSC__ArrayBuffer__asBunArrayBuffer(generated.required, &generated_projection);
+    if (generated_projection.ptr == null or generated_projection.len != 6 or
+        generated_projection.byte_len != 6 or generated_projection.encoded_value != .empty or
+        generated_projection.cell_type != 48 or generated_projection.shared or !generated_projection.resizable or
+        !std.mem.eql(u8, generated_projection.ptr.?[0..6], &[_]u8{ 37, 37, 37, 37, 37, 37 }))
+        fail("generated ArrayBuffer handle did not survive VM teardown");
+    JSC__ArrayBuffer__deref(generated.required); // explicit clone
+    JSC__ArrayBuffer__deref(generated.required); // required field
+    JSC__ArrayBuffer__deref(generated.optional.?); // optional field
+    JSC__ArrayBuffer__deref(generated.variant.buffer); // union field
+    generated.optional = null;
+    generated.variant = .none;
 
     const typeof_cases = [_]struct { EncodedValue, []const u8, EncodedValue }{
         .{ .undefined, "undefined", evaluate(context, "'undefined'") },
@@ -4995,5 +5038,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 270/270 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 274/274 symbols linked; runtime matrix passed\n", .{});
 }

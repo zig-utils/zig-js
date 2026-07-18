@@ -2336,6 +2336,10 @@ pub const Context = struct {
     /// object finalizers may release a record early; Context teardown releases
     /// any remaining arena-mode records and destroys every record exactly once.
     external_buffer_owners: std.ArrayListUnmanaged(*value.ExternalBufferOwner) = .empty,
+    /// Globally allocated backing handles installed by generated
+    /// IDLArrayBufferRef conversion. The tracking reference keeps each list
+    /// entry valid until teardown even after JS GC and native drops.
+    native_array_buffer_handles: std.ArrayListUnmanaged(*value.NativeArrayBufferHandle) = .empty,
     /// Context-owned records for public C-API class instances. A GC finalizer
     /// may finish a record early; teardown finishes arena-mode survivors and
     /// destroys every record after all object cells are gone.
@@ -3230,6 +3234,11 @@ pub const Context = struct {
             self.gpa.destroy(state);
             self.gc_state = null;
         }
+        for (self.native_array_buffer_handles.items) |handle| {
+            handle.releaseWrapper();
+            handle.releaseTracking();
+        }
+        self.native_array_buffer_handles.deinit(self.gpa);
         for (self.c_api_object_owners.items) |owner| {
             owner.finishOnce();
             self.gpa.destroy(owner);
@@ -3280,6 +3289,11 @@ pub const Context = struct {
         self.private_weak_roots.deinit(self.gpa);
         for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
         self.private_commonjs_functions.deinit(self.gpa);
+        for (self.native_array_buffer_handles.items) |handle| {
+            handle.releaseWrapper();
+            handle.releaseTracking();
+        }
+        self.native_array_buffer_handles.deinit(self.gpa);
         for (self.c_api_object_owners.items) |owner| {
             owner.finishOnce();
             self.gpa.destroy(owner);
@@ -3348,6 +3362,12 @@ pub const Context = struct {
         };
         try self.external_buffer_owners.append(self.gpa, owner);
         return owner;
+    }
+
+    pub fn trackNativeArrayBufferHandle(self: *Context, handle: *value.NativeArrayBufferHandle) !void {
+        self.realmLock();
+        defer self.realmUnlock();
+        try self.native_array_buffer_handles.append(self.gpa, handle);
     }
 
     pub fn createCApiObjectOwner(

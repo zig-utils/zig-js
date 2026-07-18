@@ -187,6 +187,15 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
     if (cold.typed_array) |ta| v.mark(ta.buffer);
     if (cold.data_view) |dv| v.mark(dv.buffer);
+    // WebAssembly JS API rare-state edges (issue #141): the JS wrapper objects
+    // keep their linked Module/exports/buffer/owner objects alive. The native
+    // payloads themselves are owned by the context-level wasm registry, not
+    // traced here.
+    v.mark(cold.wasm.module_obj);
+    for (cold.wasm.import_vals) |import_val| markValue(v, import_val);
+    v.mark(cold.wasm.exports_obj);
+    v.mark(cold.wasm.buffer_obj);
+    v.mark(cold.wasm.owner_obj);
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
@@ -999,6 +1008,7 @@ pub const Binding = struct {
                         stats.array_buffers += 1;
                         if (ab.shared != null) stats.shared_array_buffers += 1;
                     }
+                    if (ab.native_handle.swap(null, .acq_rel)) |handle| handle.releaseWrapper();
                     if (ab.shared) |storage| {
                         const sab_released = self.context.sab_retains.releaseTracked(storage);
                         std.debug.assert(sab_released);

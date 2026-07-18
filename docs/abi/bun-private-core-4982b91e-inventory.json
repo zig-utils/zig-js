@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 276,
-      "pending": 160
+      "implemented": 279,
+      "pending": 157
     }
   },
   "home_comparison": {
@@ -1106,10 +1106,10 @@
       "line": 669,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__ArrayBuffer__asBunArrayBuffer(self: *Self, out: *ArrayBuffer) void;",
       "declaration_sha256": "ff4e170e88cc9340f8f9a0267ac0b0fcd354daa0d403d890be5a520a2679012a",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__ArrayBuffer__deref",
@@ -1117,10 +1117,10 @@
       "line": 671,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__ArrayBuffer__deref(self: *Self) void;",
       "declaration_sha256": "12fb5bede07915c69df976da7f124ca2326e5fe32a0817ce9581d06346934a4d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__ArrayBuffer__ref",
@@ -1128,10 +1128,10 @@
       "line": 670,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__ArrayBuffer__ref(self: *Self) void;",
       "declaration_sha256": "453734586fb404df6cafd296db2735ce0f17e2e0f256d4f44f1e77fa40cc8aa1",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__Exception__asJSValue",

@@ -21910,6 +21910,17 @@ fn arrayBufferResizeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
     if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
     if (new_len > ab.max_byte_length.?) return self.throwError("RangeError", "resize exceeds maxByteLength");
     const nl: usize = @intCast(new_len);
+    if (ab.native_handle.load(.acquire)) |handle| {
+        ab.lockBuffer();
+        defer ab.unlockBuffer();
+        if (ab.isDetached()) return self.throwError("TypeError", "ArrayBuffer is detached");
+        handle.resize(nl) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NotResizable => return self.throwError("TypeError", "ArrayBuffer is not resizable"),
+            error.OutOfRange => return self.throwError("RangeError", "resize exceeds maxByteLength"),
+        };
+        return Value.undef();
+    }
     const fresh = try self.allocArrayBufferBytes(nl);
     errdefer self.freeArrayBufferBytes(fresh, ab.gc_owned);
     ab.lockBuffer();

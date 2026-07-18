@@ -12896,6 +12896,131 @@ export fn JSC__JSValue__asArrayBuffer(
     return true;
 }
 
+fn privateArrayBufferBacking(input: Value) ?*value.ArrayBufferData {
+    if (!input.isObject()) return null;
+    const object = input.asObj();
+    if (object.arrayBuffer()) |buffer| return buffer;
+    if (object.typedArray()) |typed| return typed.buffer.arrayBuffer();
+    if (object.dataView()) |view| return view.buffer.arrayBuffer();
+    return null;
+}
+
+fn privateDiscardNativeArrayBufferHandle(handle: *value.NativeArrayBufferHandle) void {
+    _ = handle.releaseExternal();
+    handle.releaseWrapper();
+    handle.releaseTracking();
+}
+
+fn privateEnsureNativeArrayBufferHandle(
+    context: *Context,
+    backing: *value.ArrayBufferData,
+) ?*value.NativeArrayBufferHandle {
+    backing.lockBuffer();
+    defer backing.unlockBuffer();
+    if (backing.native_handle.load(.acquire)) |existing| {
+        if (existing.tryRetainExternal()) return existing;
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return null;
+    }
+
+    const current = backing.bytes();
+    const candidate = if (backing.shared) |storage|
+        value.NativeArrayBufferHandle.createShared(storage)
+    else if (backing.external_owner != null)
+        value.NativeArrayBufferHandle.createExternal(current, backing.max_byte_length)
+    else
+        value.NativeArrayBufferHandle.createOwned(current, backing.max_byte_length) catch {
+            privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+            return null;
+        };
+    const handle = candidate catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return null;
+    };
+    context.trackNativeArrayBufferHandle(handle) catch {
+        privateDiscardNativeArrayBufferHandle(handle);
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return null;
+    };
+
+    if (backing.external_owner) |owner| {
+        const lease = owner.take() orelse {
+            // The context tracking reference deliberately keeps this failed
+            // candidate valid until teardown; it was never published.
+            _ = handle.releaseExternal();
+            handle.releaseWrapper();
+            privateSetPendingValue(context, Value.staticStr("TypeError"));
+            return null;
+        };
+        handle.armExternal(lease);
+        backing.external_owner = null;
+    }
+
+    // Publish the independent backing before retiring the wrapper's previous
+    // storage. Readers then switch directly from the old bytes to the handle.
+    backing.native_handle.store(handle, .release);
+    if (backing.shared == null) {
+        const old = backing.local_data;
+        backing.swapLocalData(&.{});
+        if (backing.gc_owned and backing.external_owner == null and old.len > 0) {
+            // External storage was transferred rather than allocated by gpa.
+            const handle_bytes = handle.snapshotBytes();
+            if (old.ptr != handle_bytes.ptr) {
+                context.gpa.rawFree(old, .@"8", @returnAddress());
+                _ = @atomicRmw(usize, &context.gc_array_buffer_bytes_live, .Sub, old.len, .monotonic);
+            }
+        }
+    }
+    return handle;
+}
+
+/// Production generated-binding seam for the pinned
+/// IDLArrayBufferRef -> RefPtr<ArrayBuffer> -> leakRef() conversion. The
+/// returned pointer carries the transferred native +1.
+export fn JSC__IDLArrayBufferRef__convertToExtern(
+    encoded: EncodedValue,
+    global: JSContextRef,
+) callconv(.c) ?*value.NativeArrayBufferHandle {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const group = privatePropertyBoundaryGroup(context) orelse return null;
+    if (group.pending_exception != null) return null;
+    const input = privateValueFrom(global, encoded) orelse return null;
+    const backing = privateArrayBufferBacking(input) orelse return null;
+    // The pinned IDL converter is explicitly unshared and rejects detached
+    // ArrayBuffers/views before ExternTraits transfers the RefPtr.
+    if (backing.is_shared or backing.isDetached()) return null;
+    return privateEnsureNativeArrayBufferHandle(context, backing);
+}
+
+export fn JSC__ArrayBuffer__ref(handle: ?*value.NativeArrayBufferHandle) callconv(.c) void {
+    if (handle) |entry| _ = entry.tryRetainExternal();
+}
+
+export fn JSC__ArrayBuffer__deref(handle: ?*value.NativeArrayBufferHandle) callconv(.c) void {
+    if (handle) |entry| _ = entry.releaseExternal();
+}
+
+export fn JSC__ArrayBuffer__asBunArrayBuffer(
+    handle: ?*value.NativeArrayBufferHandle,
+    out: ?*PrivateBunArrayBuffer,
+) callconv(.c) void {
+    const output = out orelse return;
+    const entry = handle orelse {
+        output.* = .{};
+        return;
+    };
+    const bytes = entry.snapshotBytes();
+    output.* = .{
+        .ptr = if (bytes.len == 0) null else bytes.ptr,
+        .len = bytes.len,
+        .byte_len = bytes.len,
+        .encoded_value = .empty,
+        .cell_type = private_jstype.selectedTag(.ArrayBuffer),
+        .shared = entry.isShared(),
+        .resizable = entry.isResizable(),
+    };
+}
+
 fn makeExternalArrayBuffer(
     c: *Context,
     bytes: ?*anyopaque,
@@ -19366,6 +19491,91 @@ test "private JSValue ArrayBuffer projection preserves views offsets metadata an
     try std.testing.expectEqual(EncodedValue.fromInt32(219), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
 
     JSGlobalContextRelease(context);
+}
+
+test "private generated ArrayBuffer handles transfer backing ownership beyond the VM" {
+    const context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const internal = ctxForEvaluation(context) orelse return error.JSCInitFailed;
+    const buffer_value = try internal.evaluate(
+        "globalThis.nativeBuffer = new ArrayBuffer(8, { maxByteLength: 16 });" ++
+            "new Uint8Array(nativeBuffer).fill(7); nativeBuffer",
+    );
+    const encoded = privateEncodedFromValue(internal, buffer_value);
+    const handle = JSC__IDLArrayBufferRef__convertToExtern(encoded, context) orelse return error.ArrayBufferHandleCreateFailed;
+    var projected = PrivateBunArrayBuffer{};
+    JSC__ArrayBuffer__asBunArrayBuffer(handle, &projected);
+    try std.testing.expectEqual(@as(usize, 8), projected.len);
+    try std.testing.expectEqual(@as(usize, 8), projected.byte_len);
+    try std.testing.expectEqual(EncodedValue.empty, projected.encoded_value);
+    try std.testing.expectEqual(private_jstype.selectedTag(.ArrayBuffer), projected.cell_type);
+    try std.testing.expect(!projected.shared and projected.resizable);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 7, 7, 7, 7, 7, 7, 7, 7 }, projected.ptr.?[0..8]);
+
+    const view_value = try internal.evaluate("new Uint8Array(nativeBuffer)");
+    const same = JSC__IDLArrayBufferRef__convertToExtern(privateEncodedFromValue(internal, view_value), context) orelse
+        return error.ArrayBufferHandleCreateFailed;
+    try std.testing.expectEqual(@intFromPtr(handle), @intFromPtr(same));
+    try std.testing.expect((try internal.evaluate("nativeBuffer.resize(12); new Uint8Array(nativeBuffer)[10] = 99; nativeBuffer.byteLength")).asNum() == 12);
+    JSC__ArrayBuffer__asBunArrayBuffer(handle, &projected);
+    try std.testing.expectEqual(@as(usize, 12), projected.len);
+    try std.testing.expectEqual(@as(u8, 99), projected.ptr.?[10]);
+
+    // Two transferred refs are balanced, and one extra deref cannot consume
+    // the wrapper/tracking domains. A later ref remains valid.
+    JSC__ArrayBuffer__deref(same);
+    JSC__ArrayBuffer__deref(handle);
+    JSC__ArrayBuffer__deref(handle);
+    JSC__ArrayBuffer__ref(handle);
+    JSGlobalContextRelease(context);
+    JSC__ArrayBuffer__asBunArrayBuffer(handle, &projected);
+    try std.testing.expectEqual(@as(usize, 12), projected.len);
+    try std.testing.expectEqual(@as(u8, 99), projected.ptr.?[10]);
+    JSC__ArrayBuffer__deref(handle);
+
+    const State = struct {
+        calls: usize = 0,
+        fn release(bytes: ?*anyopaque, raw: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            std.c.free(bytes);
+        }
+    };
+    var state = State{};
+    const external_context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const external_pointer = std.c.malloc(6) orelse return error.OutOfMemory;
+    @memset(@as([*]u8, @ptrCast(external_pointer))[0..6], 0x5a);
+    const external_value = Bun__makeArrayBufferWithBytesNoCopy(
+        external_context,
+        external_pointer,
+        6,
+        State.release,
+        &state,
+    );
+    const external_handle = JSC__IDLArrayBufferRef__convertToExtern(external_value, external_context) orelse
+        return error.ArrayBufferHandleCreateFailed;
+    JSGlobalContextRelease(external_context);
+    try std.testing.expectEqual(@as(usize, 0), state.calls);
+    JSC__ArrayBuffer__asBunArrayBuffer(external_handle, &projected);
+    try std.testing.expectEqual(@intFromPtr(external_pointer), @intFromPtr(projected.ptr.?));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x5a, 0x5a, 0x5a, 0x5a, 0x5a, 0x5a }, projected.ptr.?[0..6]);
+    JSC__ArrayBuffer__deref(external_handle);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+
+    const shared_context = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+    const shared_internal = ctxForEvaluation(shared_context) orelse return error.JSCInitFailed;
+    const shared_value = try shared_internal.evaluate("new SharedArrayBuffer(4, { maxByteLength: 12 })");
+    const shared_backing = shared_value.asObj().arrayBuffer().?;
+    try std.testing.expect(JSC__IDLArrayBufferRef__convertToExtern(
+        privateEncodedFromValue(shared_internal, shared_value),
+        shared_context,
+    ) == null);
+    const shared_handle = privateEnsureNativeArrayBufferHandle(shared_internal, shared_backing) orelse
+        return error.ArrayBufferHandleCreateFailed;
+    JSGlobalContextRelease(shared_context);
+    JSC__ArrayBuffer__asBunArrayBuffer(shared_handle, &projected);
+    try std.testing.expect(projected.shared and projected.resizable);
+    try std.testing.expectEqual(@as(usize, 4), projected.len);
+    JSC__ArrayBuffer__deref(shared_handle);
 }
 
 test "private typeof string projection is exact VM-owned and exception neutral" {

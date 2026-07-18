@@ -32,6 +32,9 @@ PRIVATE_SUPPORT_EXPORTS = {
     # Generated/native exception projection entry used beside the inventoried
     # ZigException methods; it is absent from the consumer extern inventories.
     "JSC__JSValue__toZigException",
+    # Generated bindgen adapter: the consumer inventories the three methods on
+    # the leaked ArrayBuffer pointer, while C++ performs this producer step.
+    "JSC__IDLArrayBufferRef__convertToExtern",
 }
 INCLUDE = ROOT / "include/JavaScriptCore"
 SOURCE = ROOT / "src/c_api.zig"

@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "contract": "idl-array-buffer-ref-leaked-refptr",
+  "profiles": [
+    {
+      "name": "home-private-7ed99c02",
+      "revision": "7ed99c02",
+      "files": {
+        "packages/runtime/upstream/src/jsc/bindings/BunIDLTypes.h": "334dbf1400bb736e6fcb724ded152e5bf6b1119ffa3fa34c12714b2d4cc66fe2",
+        "packages/runtime/upstream/src/jsc/bindings/BunIDLConvert.h": "e5eaeff632dedebbddff32d82f43255c600488613ac85418726b50f191463bac",
+        "packages/runtime/upstream/src/jsc/bindings/Bindgen/ExternTraits.h": "5073312c2cdf2d8409f1f1d2bbd42003bc4a155d1b4b315eaf113c12539a9767",
+        "packages/runtime/upstream/src/codegen/bindgenv2/internal/dictionary.ts": "b144730e8e8be5953e62349bac743489f02277d205ae8a7fd9057d1f360cdb91"
+      }
+    },
+    {
+      "name": "bun-private-core-4982b91e",
+      "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+      "files": {
+        "src/jsc/bindings/BunIDLTypes.h": "334dbf1400bb736e6fcb724ded152e5bf6b1119ffa3fa34c12714b2d4cc66fe2",
+        "src/jsc/bindings/BunIDLConvert.h": "e5eaeff632dedebbddff32d82f43255c600488613ac85418726b50f191463bac",
+        "src/jsc/bindings/Bindgen/ExternTraits.h": "5073312c2cdf2d8409f1f1d2bbd42003bc4a155d1b4b315eaf113c12539a9767",
+        "src/codegen/bindgenv2/internal/dictionary.ts": "66570f7cf2f1cac385e6e53b32e1934f7081a659927c86f9b53dcbb642f626de"
+      }
+    }
+  ],
+  "idl_type": {
+    "name": "Bun::IDLArrayBufferRef",
+    "implementation": "WTF::RefPtr<JSC::ArrayBuffer>",
+    "accepted_values": [
+      "unshared ArrayBuffer",
+      "unshared JSArrayBufferView backing",
+      "unshared JSDataView backing"
+    ]
+  },
+  "producer": {
+    "dictionary_step": "ExternTraits<MemberType>::convertToExtern(std::move(member))",
+    "extern_trait": "WTF::RefPtr<T>::leakRef()",
+    "extern_type": "JSC::ArrayBuffer*",
+    "transferred_references": 1,
+    "zig_js_export": "JSC__IDLArrayBufferRef__convertToExtern"
+  },
+  "consumer": {
+    "methods": [
+      "JSC__ArrayBuffer__ref",
+      "JSC__ArrayBuffer__deref",
+      "JSC__ArrayBuffer__asBunArrayBuffer"
+    ],
+    "projection_size": 40,
+    "projection_alignment": 8,
+    "encoded_value": "empty",
+    "cell_type": "profile-selected ArrayBuffer",
+    "length_fields": [
+      "len",
+      "byte_len"
+    ]
+  }
+}
