@@ -75,6 +75,7 @@ pub const MemoryInst = struct {
     /// and read their stable, process-wide slab through `shared_storage`.
     local_bytes: []u8,
     shared_storage: ?*SharedBufferStorage = null,
+    address: types.AddressType = .i32,
     limits: types.Limits,
     gpa: Allocator,
     grow_lock: std.atomic.Mutex = .unlocked,
@@ -166,6 +167,7 @@ fn copyMemoryUnordered(dest: *MemoryInst, dest_offset: usize, source: *const Mem
 
 pub const TableInst = struct {
     elems: []ValueSlot,
+    address: types.AddressType = .i32,
     type: types.ValType = .funcref,
     limits: types.Limits,
     gpa: Allocator,
@@ -247,13 +249,25 @@ pub const Instance = struct {
 // Host-side constructors
 // ---------------------------------------------------------------------------
 
+/// Exact limits required by the Wasm 3.0 JavaScript embedding. Valid core
+/// modules may declare larger maxima, but allocation/growth never crosses
+/// these deterministic host boundaries.
+pub const MAX_HOST_MEMORY64_PAGES: u64 = 262_144; // 16 GiB
+pub const MAX_HOST_TABLE_ELEMENTS: u64 = 10_000_000;
+
 pub fn createMemory(gpa: Allocator, min_pages: u32, max_pages: ?u32) error{OutOfMemory}!*MemoryInst {
     return createMemoryTyped(gpa, min_pages, if (max_pages) |value| value else null, false);
 }
 
 pub fn createMemoryTyped(gpa: Allocator, min_pages: u64, max_pages: ?u64, shared: bool) error{OutOfMemory}!*MemoryInst {
+    return createMemoryAddressed(gpa, .i32, min_pages, max_pages, shared);
+}
+
+pub fn createMemoryAddressed(gpa: Allocator, address: types.AddressType, min_pages: u64, max_pages: ?u64, shared: bool) error{OutOfMemory}!*MemoryInst {
     const m = try gpa.create(MemoryInst);
     errdefer gpa.destroy(m);
+    const host_limit: u64 = if (address == .i64) MAX_HOST_MEMORY64_PAGES else types.MAX_PAGES;
+    if (min_pages > host_limit) return error.OutOfMemory;
     const initial_len_u64 = std.math.mul(u64, min_pages, types.PAGE_SIZE) catch return error.OutOfMemory;
     if (initial_len_u64 > std.math.maxInt(usize)) return error.OutOfMemory;
     const initial_len: usize = @intCast(initial_len_u64);
@@ -265,12 +279,14 @@ pub fn createMemoryTyped(gpa: Allocator, min_pages: u64, max_pages: ?u64, shared
         m.* = .{
             .local_bytes = &.{},
             .shared_storage = storage,
+            .address = address,
             .limits = .{ .min = min_pages, .max = max_pages },
             .gpa = gpa,
         };
     } else {
         m.* = .{
             .local_bytes = try gpa.alloc(u8, initial_len),
+            .address = address,
             .limits = .{ .min = min_pages, .max = max_pages },
             .gpa = gpa,
         };
@@ -340,11 +356,16 @@ pub fn createTable(gpa: Allocator, initial: u32, max: ?u32) error{OutOfMemory}!*
 }
 
 pub fn createTableTyped(gpa: Allocator, elem_type: types.ValType, initial: u64, max: ?u64) error{OutOfMemory}!*TableInst {
+    return createTableAddressed(gpa, .i32, elem_type, initial, max);
+}
+
+pub fn createTableAddressed(gpa: Allocator, address: types.AddressType, elem_type: types.ValType, initial: u64, max: ?u64) error{OutOfMemory}!*TableInst {
     const t = try gpa.create(TableInst);
     errdefer gpa.destroy(t);
-    if (initial > std.math.maxInt(usize)) return error.OutOfMemory;
+    if (initial > MAX_HOST_TABLE_ELEMENTS or initial > std.math.maxInt(usize)) return error.OutOfMemory;
     t.* = .{
         .elems = try gpa.alloc(ValueSlot, @intCast(initial)),
+        .address = address,
         .type = elem_type,
         .limits = .{ .min = initial, .max = max },
         .gpa = gpa,
@@ -530,7 +551,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
             switch (imp.desc) {
                 .func => {},
                 .table => |tt| {
-                    if (imports.tables[ti].type != tt.elem or
+                    if (imports.tables[ti].address != tt.address or
+                        imports.tables[ti].type != tt.elem or
                         !limitsCompatible(imports.tables[ti].limits, tt.limits))
                     {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
@@ -539,7 +561,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                     ti += 1;
                 },
                 .mem => |mt| {
-                    if (imports.mems[mi].isShared() != mt.shared or
+                    if (imports.mems[mi].address != mt.address or
+                        imports.mems[mi].isShared() != mt.shared or
                         !limitsCompatible(imports.mems[mi].limits, mt.limits))
                     {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
@@ -618,7 +641,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.tables = try a.alloc(*TableInst, mod.totalTables());
     for (imports.tables, 0..) |t, k| inst.tables[k] = t;
     for (mod.tables, 0..) |tt, j| {
-        const t = try createTableTyped(gpa, tt.elem, tt.limits.min, tt.limits.max);
+        const t = try createTableAddressed(gpa, tt.address, tt.elem, tt.limits.min, tt.limits.max);
         created_tables += 1;
         inst.tables[mod.imported_tables + j] = t;
     }
@@ -626,7 +649,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.mems = try a.alloc(*MemoryInst, mod.totalMems());
     for (imports.mems, 0..) |m, k| inst.mems[k] = m;
     for (mod.mems, 0..) |mt, j| {
-        const m = try createMemoryTyped(gpa, mt.limits.min, mt.limits.max, mt.shared);
+        const m = try createMemoryAddressed(gpa, mt.address, mt.limits.min, mt.limits.max, mt.shared);
         created_mems += 1;
         inst.mems[mod.imported_mems + j] = m;
     }
@@ -678,7 +701,10 @@ pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}
             .passive, .declarative => continue,
         };
         const tab = inst.tables[active.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
+        const start = switch (tab.address) {
+            .i32 => @as(u64, @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()))),
+            .i64 => evalConstExpr(inst, active.offset).numericBits(),
+        };
         tab.lockTable();
         const table_len: u64 = @intCast(tab.elems.len);
         const available = if (start <= table_len) tab.elems.len - @as(usize, @intCast(start)) else 0;
@@ -697,7 +723,10 @@ pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}
             .passive => continue,
         };
         const mem = inst.mems[active.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
+        const start = switch (mem.address) {
+            .i32 => @as(u64, @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()))),
+            .i64 => evalConstExpr(inst, active.offset).numericBits(),
+        };
         const memory_len: u64 = @intCast(mem.bytes().len);
         const available = if (start <= memory_len) mem.bytes().len - @as(usize, @intCast(start)) else 0;
         if (start > memory_len or d.bytes.len > available) {
@@ -3963,6 +3992,48 @@ fn runTrap(comptime nres: usize, inst: *Instance, funcidx: u32, args: []const u6
 }
 
 // -- Host-side constructors --------------------------------------------------
+
+test "wasm.exec memory64 addressed instances and host allocation limits" {
+    const memory = try createMemoryAddressed(talloc, .i64, 1, 2, false);
+    defer destroyMemory(talloc, memory);
+    try std.testing.expectEqual(types.AddressType.i64, memory.address);
+    try std.testing.expectEqual(@as(u32, 1), memory.pages());
+
+    const table = try createTableAddressed(talloc, .i64, .funcref, 1, 2);
+    defer destroyTable(talloc, table);
+    try std.testing.expectEqual(types.AddressType.i64, table.address);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        createMemoryAddressed(talloc, .i64, MAX_HOST_MEMORY64_PAGES + 1, null, false),
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        createTableAddressed(talloc, .i64, .funcref, MAX_HOST_TABLE_ELEMENTS + 1, null),
+    );
+
+    const bytes = comptime (hdr ++
+        sec(4, "\x01\x70\x04\x01") ++
+        sec(5, "\x01\x04\x01"));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .memory64 = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+    try std.testing.expectEqual(types.AddressType.i64, inst.mems[0].address);
+    try std.testing.expectEqual(types.AddressType.i64, inst.tables[0].address);
+}
+
+test "wasm.exec memory64 active offsets retain all address bits" {
+    const bytes = comptime (hdr ++
+        sec(5, "\x01\x04\x01") ++
+        sec(11, "\x01\x00\x42\x80\x80\x80\x80\x10\x0B\x01A"));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .memory64 = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    try std.testing.expectError(error.Trap, instantiate(talloc, mod, .{}, &diag));
+    try std.testing.expectEqualStrings("out of bounds memory index", diag.message());
+}
 
 test "wasm.exec host constructors memory table global" {
     const mem = try createMemory(talloc, 1, 2);
