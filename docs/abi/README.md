@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (278 implemented, 153 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (279 implemented, 152 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 278 private entries are implemented; the other 153 remain pending
+The first 279 private entries are implemented; the other 152 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -350,6 +350,12 @@ leaves. The read takes each realm's existing active-interpreter registry lock,
 keeps separate VMs isolated, returns false for null handles, and never changes
 exception or termination state.
 
+The owning-VM query resolves any realm—including sibling realms in one context
+group—to the single VM identity every `JSC__VM__*` boundary consumes, matching
+the pointer `JSC__JSGlobalObject__vm` publishes. It allocates nothing, rejects
+invalid handles with null and separate context groups by identity, and never
+touches exception or termination state.
+
 The private JSFunction boundary exposes the parser-captured source span rather
 than reconstructing text through `Function.prototype.toString`. Ordinary,
 arrow, method, generator, async, and class-constructor functions return stable
@@ -510,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 280/280 compiled fixture additionally
+sibling realms, GC, and reentry; the 281/281 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -784,7 +790,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (270 implemented, 151 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (271 implemented, 150 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
