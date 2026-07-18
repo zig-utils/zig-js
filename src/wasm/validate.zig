@@ -484,6 +484,10 @@ const FuncValidator = struct {
                 .f64_reinterpret_i64 => try self.cvtop(.i64, .f64),
                 .i32_extend8_s, .i32_extend16_s => try self.unop(.i32),
                 .i64_extend8_s, .i64_extend16_s, .i64_extend32_s => try self.unop(.i64),
+                .i32_trunc_sat_f32_s, .i32_trunc_sat_f32_u => try self.cvtop(.f32, .i32),
+                .i32_trunc_sat_f64_s, .i32_trunc_sat_f64_u => try self.cvtop(.f64, .i32),
+                .i64_trunc_sat_f32_s, .i64_trunc_sat_f32_u => try self.cvtop(.f32, .i64),
+                .i64_trunc_sat_f64_s, .i64_trunc_sat_f64_u => try self.cvtop(.f64, .i64),
             }
         }
         // The final `end` closed the function frame exactly at instrs.len.
@@ -852,6 +856,11 @@ test "wasm.validate multiple tables" {
 test "wasm.validate sign-extension operand types" {
     const i64_to_i32 = comptime (hdr ++ sec(1, "\x01\x60\x01\x7E\x01\x7F") ++ func0 ++ code1("\x20\x00\xC0\x0B"));
     try expectInvalidAtWithFeatures(i64_to_i32, .{ .sign_extension_ops = true }, 0, 1, "type mismatch");
+}
+
+test "wasm.validate nontrapping conversion operand types" {
+    const i32_to_i64 = comptime (hdr ++ sec(1, "\x01\x60\x01\x7F\x01\x7E") ++ func0 ++ code1("\x20\x00\xFC\x07\x0B"));
+    try expectInvalidAtWithFeatures(i32_to_i64, .{ .nontrapping_float_to_int = true }, 0, 1, "type mismatch");
 }
 
 test "wasm.validate elem unknown function" {

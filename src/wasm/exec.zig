@@ -681,6 +681,33 @@ fn truncI64U(s: *State, x: anytype) ExecError!u64 {
     return s.trap("integer overflow");
 }
 
+fn truncSatI32S(x: anytype) i32 {
+    if (std.math.isNan(x)) return 0;
+    if (x >= 2147483648.0) return std.math.maxInt(i32);
+    const lower = if (@TypeOf(x) == f32) -2147483648.0 else -2147483649.0;
+    if (x <= lower) return std.math.minInt(i32);
+    return @intFromFloat(x);
+}
+
+fn truncSatI32U(x: anytype) u32 {
+    if (std.math.isNan(x) or x <= -1.0) return 0;
+    if (x >= 4294967296.0) return std.math.maxInt(u32);
+    return @intFromFloat(x);
+}
+
+fn truncSatI64S(x: anytype) i64 {
+    if (std.math.isNan(x)) return 0;
+    if (x <= -0x1p63) return std.math.minInt(i64);
+    if (x >= 0x1p63) return std.math.maxInt(i64);
+    return @intFromFloat(x);
+}
+
+fn truncSatI64U(x: anytype) u64 {
+    if (std.math.isNan(x) or x <= -1.0) return 0;
+    if (x >= 0x1p64) return std.math.maxInt(u64);
+    return @intFromFloat(x);
+}
+
 fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64) ExecError!void {
     for (args) |v| try push(s, v);
     try pushFrame(s, entry);
@@ -1176,6 +1203,14 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
                 const value: i32 = @bitCast(@as(u32, @truncate(pop(s))));
                 try pushI64(s, @bitCast(@as(i64, value)));
             },
+            .i32_trunc_sat_f32_s => try pushI32(s, @bitCast(truncSatI32S(popF32(s)))),
+            .i32_trunc_sat_f32_u => try pushI32(s, truncSatI32U(popF32(s))),
+            .i32_trunc_sat_f64_s => try pushI32(s, @bitCast(truncSatI32S(popF64(s)))),
+            .i32_trunc_sat_f64_u => try pushI32(s, truncSatI32U(popF64(s))),
+            .i64_trunc_sat_f32_s => try pushI64(s, @bitCast(truncSatI64S(popF32(s)))),
+            .i64_trunc_sat_f32_u => try pushI64(s, truncSatI64U(popF32(s))),
+            .i64_trunc_sat_f64_s => try pushI64(s, @bitCast(truncSatI64S(popF64(s)))),
+            .i64_trunc_sat_f64_u => try pushI64(s, truncSatI64U(popF64(s))),
         }
     }
     @memcpy(results, s.stack.items[s.stack.items.len - results.len ..]);
@@ -1238,7 +1273,12 @@ fn ft(comptime params: []const u8, comptime results: []const u8) []const u8 {
 }
 
 fn ob(comptime op: types.Op) []const u8 {
-    comptime return &[_]u8{@intFromEnum(op)};
+    comptime {
+        const raw = @intFromEnum(op);
+        if (raw <= 0xFF) return &[_]u8{@intCast(raw)};
+        std.debug.assert(raw >> 8 == 0xFC);
+        return "\xFC" ++ leb(raw & 0xFF);
+    }
 }
 
 fn typesSec(comptime defs: []const []const u8) []const u8 {
@@ -2318,6 +2358,27 @@ test "wasm.exec sign-extension operations" {
     try unopWithFeatures(.i64_extend16_s, I64, I64, features, 0x8000, 0xFFFFFFFFFFFF8000);
     try unopWithFeatures(.i64_extend32_s, I64, I64, features, 0x80000000, 0xFFFFFFFF80000000);
     try unopWithFeatures(.i64_extend32_s, I64, I64, features, 0xFFFFFFFF7FFFFFFF, 0x000000007FFFFFFF);
+}
+
+test "wasm.exec nontrapping float-to-integer conversions" {
+    const features: types.Features = .{ .nontrapping_float_to_int = true };
+
+    try unopWithFeatures(.i32_trunc_sat_f32_s, F32, I32, features, f32nan, 0);
+    try unopWithFeatures(.i32_trunc_sat_f32_s, F32, I32, features, f32v(-1.9), i32v(-1));
+    try unopWithFeatures(.i32_trunc_sat_f32_s, F32, I32, features, f32v(-std.math.inf(f32)), i32v(std.math.minInt(i32)));
+    try unopWithFeatures(.i32_trunc_sat_f32_u, F32, I32, features, f32v(std.math.inf(f32)), std.math.maxInt(u32));
+
+    try unopWithFeatures(.i32_trunc_sat_f64_s, F64, I32, features, f64v(-2147483648.9), i32v(std.math.minInt(i32)));
+    try unopWithFeatures(.i32_trunc_sat_f64_s, F64, I32, features, f64v(2147483648.0), std.math.maxInt(i32));
+    try unopWithFeatures(.i32_trunc_sat_f64_u, F64, I32, features, f64v(-0.9), 0);
+    try unopWithFeatures(.i32_trunc_sat_f64_u, F64, I32, features, f64v(4294967296.0), std.math.maxInt(u32));
+
+    try unopWithFeatures(.i64_trunc_sat_f32_s, F32, I64, features, f32v(-std.math.inf(f32)), i64v(std.math.minInt(i64)));
+    try unopWithFeatures(.i64_trunc_sat_f32_u, F32, I64, features, f32v(std.math.inf(f32)), std.math.maxInt(u64));
+    try unopWithFeatures(.i64_trunc_sat_f64_s, F64, I64, features, f64nan, 0);
+    try unopWithFeatures(.i64_trunc_sat_f64_s, F64, I64, features, f64v(0x1p63), i64v(std.math.maxInt(i64)));
+    try unopWithFeatures(.i64_trunc_sat_f64_u, F64, I64, features, f64v(-1.0), 0);
+    try unopWithFeatures(.i64_trunc_sat_f64_u, F64, I64, features, f64v(0x1p64), std.math.maxInt(u64));
 }
 
 test "wasm.exec conversions trunc f32 to int" {

@@ -492,9 +492,23 @@ pub const Op = enum(u16) {
     i64_extend8_s = 0xC2,
     i64_extend16_s = 0xC3,
     i64_extend32_s = 0xC4,
+    // Nontrapping float-to-integer conversions (0xfc prefix)
+    i32_trunc_sat_f32_s = 0xFC00,
+    i32_trunc_sat_f32_u = 0xFC01,
+    i32_trunc_sat_f64_s = 0xFC02,
+    i32_trunc_sat_f64_u = 0xFC03,
+    i64_trunc_sat_f32_s = 0xFC04,
+    i64_trunc_sat_f32_u = 0xFC05,
+    i64_trunc_sat_f64_s = 0xFC06,
+    i64_trunc_sat_f64_u = 0xFC07,
 
     pub fn fromByte(b: u8) ?Op {
         return std.enums.fromInt(Op, @as(u16, b));
+    }
+
+    pub fn fromFC(subopcode: u32) ?Op {
+        if (subopcode > 0xFF) return null;
+        return std.enums.fromInt(Op, 0xFC00 | @as(u16, @intCast(subopcode)));
     }
 };
 

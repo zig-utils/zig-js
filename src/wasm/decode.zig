@@ -524,11 +524,15 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.fail("unexpected end of section or function", .{});
         const instr_off = r.offset();
         const b = try r.readU8();
-        const op = types.Op.fromByte(b) orelse {
+        const op = types.Op.fromByte(b) orelse proposal: {
             if (b == 0xFB) return r.unsupportedFeature(instr_off, .gc);
             if (b == 0xFC) {
                 const subopcode = try r.readU32Leb();
-                if (subopcode <= 7) return r.unsupportedFeature(instr_off, .nontrapping_float_to_int);
+                if (subopcode <= 7) {
+                    if (!r.features.nontrapping_float_to_int)
+                        return r.unsupportedFeature(instr_off, .nontrapping_float_to_int);
+                    break :proposal types.Op.fromFC(subopcode).?;
+                }
                 if (subopcode <= 14) return r.unsupportedFeature(instr_off, .bulk_memory);
                 if (subopcode <= 17) return r.unsupportedFeature(instr_off, .reference_types);
                 return r.failAt(instr_off, "invalid 0xfc subopcode {d}", .{subopcode});
@@ -960,6 +964,16 @@ test "wasm.decode sign-extension operations require and honor their feature" {
     const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .sign_extension_ops = true }, &diag);
     defer destroyModule(std.testing.allocator, mod);
     try std.testing.expectEqual(types.Op.i32_extend8_s, mod.code[0].instrs[0].op);
+}
+
+test "wasm.decode nontrapping conversions require and honor their feature" {
+    const bytes = hdr ++ func_sec_1 ++ "\x0A\x06\x01\x04\x00\xFC\x07\x0B";
+    try expectMalformed(bytes, 17, "WebAssembly feature nontrapping-float-to-int is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .nontrapping_float_to_int = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(types.Op.i64_trunc_sat_f64_u, mod.code[0].instrs[0].op);
 }
 
 test "wasm.decode malformed constant expressions" {
