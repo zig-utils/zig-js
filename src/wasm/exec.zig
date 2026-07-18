@@ -2411,6 +2411,9 @@ test "wasm.exec multi-value branches calls and implicit else" {
     const call = comptime (hdr ++ typesSec(&.{ft("", I32 ++ I64)}) ++ funcSec(&.{ 0, 0 }) ++
         codeSec(&.{ "\x41\x07\x42\x09", "\x10\x00" }));
     try expectResultsWithFeatures(call, features, 1, &.{}, &.{ 7, 9 });
+
+    const return_ = comptime arithModule("", I32 ++ I64, "\x41\x07\x42\x09\x0F\x00");
+    try expectResultsWithFeatures(return_, features, 0, &.{}, &.{ 7, 9 });
 }
 
 test "wasm.exec conversions trunc f32 to int" {
