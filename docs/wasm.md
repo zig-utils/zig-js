@@ -174,6 +174,20 @@ post-MVP profile are implemented. Validate registry drift with:
 zig build wasm-feature-profiles-check
 ```
 
+The fixed-width-SIMD foundation additionally checks in an exact
+[236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
+`WebAssembly/simd` revision. Its verifier locks the 56-file corpus count,
+subopcode/name pairs, reserved holes, and immediate shapes to the runtime enum.
+The decoder and validator cover v128 signatures, locals, globals, constants,
+all six immediate forms, lane/shuffle bounds, memory alignment, and stack
+signatures across the complete inventory. A distinct `u128` execution slot and
+test-only raw-lane boundary preserve every bit; ordinary JavaScript function
+and Global access rejects opaque v128 values with `TypeError`. This foundation
+is complete in [#279](https://github.com/zig-utils/zig-js/issues/279); execution
+families and terminal corpus/performance evidence remain tracked by
+[#280](https://github.com/zig-utils/zig-js/issues/280) through
+[#283](https://github.com/zig-utils/zig-js/issues/283).
+
 Zig embedders opt into an exact feature set per realm; module bytes never
 self-enable proposals. Invalid dependency sets fail during Context creation,
 while a selected but unfinished feature produces a deterministic

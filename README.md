@@ -151,7 +151,7 @@ Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm
 zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
 <!-- benchmark-comparison:end -->
 
-The ABI and WebAssembly/conformance changes through `a593fdea` do not execute in these
+The ABI and WebAssembly/conformance changes through `b1f3933f` do not execute in these
 benchmark workloads, so the validated 1,540-sample July 17 matrix remains the
 latest score set; no unchanged benchmark was rerun for debugger metadata or
 WebAssembly module/store/reference-root, reference-call, bulk-memory, or Core 2
@@ -847,9 +847,10 @@ and the final evidence-backed removal of this section is tracked by
 
 - full JavaScriptCore framework/private internals and Bun/Home private JSC ABI;
 - the remaining post-Core-2 WebAssembly profiles and WebAssembly/JIT shell hooks
-  from the PR-249 reference corpus, including SIMD, Threads, exceptions/tail
+  from the PR-249 reference corpus, including SIMD execution, Threads, exceptions/tail
   calls, and memory64/GC (the complete MVP binary runtime, JavaScript API,
-  opt-in Core 2.0 structural profile, complete feature-gated reference instructions, typed multi-table runtime,
+  opt-in Core 2.0 structural profile, the exact pinned 236-opcode SIMD
+  type/decoder/validator foundation, complete feature-gated reference instructions, typed multi-table runtime,
   precise-GC funcref/externref slots, arbitrary externref Table/Global identity
   and reclamation, canonical reference-valued function calls, and complete
   DataCount/passive-segment bulk memory and table operations,
