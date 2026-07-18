@@ -4,7 +4,8 @@
 //! deliberately tiny executable keeps the measured engine path identical to an
 //! ordinary zig-js Context and prints the script's final JSON string verbatim.
 //! `WASM_SPEC_PROFILE=core-2-structural` enables the completed structural set;
-//! `WASM_SPEC_PROFILE=simd` adds the fixed-width SIMD proposal gate.
+//! `WASM_SPEC_PROFILE=simd` adds fixed-width SIMD; `threads` selects shared
+//! memories and atomic execution.
 
 const std = @import("std");
 const js = @import("js");
@@ -22,9 +23,12 @@ pub fn main(init: std.process.Init) !void {
     const structural = std.mem.eql(u8, profile, "core-2-structural") or
         std.mem.eql(u8, profile, "simd");
     const simd = std.mem.eql(u8, profile, "simd");
+    const threads = std.mem.eql(u8, profile, "threads");
     const ctx = try js.Context.createWithTestingOptions(gpa, .{
         .wasm_spec_bit_exact = true,
-        .wasm_features = if (structural) .{
+        .wasm_features = if (threads) .{
+            .threads = true,
+        } else if (structural) .{
             .sign_extension_ops = true,
             .nontrapping_float_to_int = true,
             .multi_value = true,

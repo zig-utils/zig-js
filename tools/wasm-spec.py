@@ -105,6 +105,18 @@ PROFILES = {
         ],
         "corpus_glob": "test/core/simd/*.wast",
     },
+    "threads": {
+        "kind": "webassembly_threads_inventory",
+        "repository": "https://github.com/WebAssembly/threads.git",
+        "tag": "proposal-revision",
+        "commit": "979d0fcb994439423d63b2f0a8a7332d6285dd84",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "threads",
+        "features": ["threads"],
+        "corpus_glob": "test/core/threads/*.wast",
+        "converter_args": ["--enable-threads"],
+    },
 }
 
 
@@ -551,22 +563,30 @@ def run_file(
     timeout: float,
     spec_root: Path,
     evaluator_profile: str | None,
+    converter_args: list[str],
 ) -> dict:
     stem = wast.stem
     directory = work_root / stem
     directory.mkdir()
     json_path = directory / f"{stem}.json"
     converted = subprocess.run(
-        [str(converter), str(wast), "-o", str(json_path)],
+        [str(converter), *converter_args, str(wast), "-o", str(json_path)],
         text=True,
         capture_output=True,
     )
     if converted.returncode != 0:
+        detail = converted.stderr.strip()
         return {
             "path": wast.relative_to(spec_root).as_posix(),
             "status": "conversion_failed",
-            "detail": converted.stderr.strip(),
-            "commands": [],
+            "detail": detail,
+            "commands": [{
+                "index": 0,
+                "line": 0,
+                "type": "conversion",
+                "status": "runner_error",
+                "detail": detail,
+            }],
         }
     document = json.loads(json_path.read_text())
     script_path = directory / f"{stem}.js"
@@ -639,6 +659,8 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "fixed_width_simd_movement"
     if profile_name == "simd":
         return "fixed_width_simd"
+    if profile_name == "threads":
+        return "threads"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -692,6 +714,7 @@ def main() -> int:
         "core-2-structural": ROOT / "docs/.data/wasm-core-2-structural-inventory.json",
         "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
         "simd": ROOT / "docs/.data/wasm-simd-inventory.json",
+        "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
     }
     inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
@@ -727,6 +750,7 @@ def main() -> int:
             timeout,
             spec_root,
             profile["evaluator_profile"],
+            profile.get("converter_args", []),
         )
         area = feature_area(args.profile, wast.name)
         entry["feature_area"] = area
