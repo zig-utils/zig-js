@@ -1203,8 +1203,8 @@ pub const Interpreter = struct {
     /// suffix alive until later loop entries consume it.
     gc_object_reserve: std.ArrayListUnmanaged(*value.Object) = .empty,
     /// Number of currently running shared-realm Thread workers. Fixed-shape
-    /// allocation uses a larger reserve only when publication is genuinely
-    /// contended, keeping a lone worker on the checkpoint-sized batch.
+    /// allocation uses a larger reserve as soon as a worker can overlap its
+    /// creator, while creator-only execution stays on checkpoint-sized batches.
     parallel_worker_count: ?*std.atomic.Value(usize) = null,
     /// GC-owned lexical environments that are live for spec cleanup but no
     /// longer reachable through `self.env`'s parent chain, such as a `for` head

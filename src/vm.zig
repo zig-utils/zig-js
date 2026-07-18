@@ -2647,7 +2647,12 @@ fn tryQuickObjectAllocationLoopMode(
             if (vm.gc_object_reserve.items.len == 0) {
                 if (builtin.is_test) _ = quick_object_allocation_reserve_refills.fetchAdd(1, .monotonic);
                 const workers = if (vm.parallel_worker_count) |count| count.load(.acquire) else 1;
-                const reserve_limit: usize = if (workers > 1) max_allocation_batch else 17;
+                // The first spawned worker is already concurrent with its
+                // creator (or can shortly overlap another worker). Waiting for
+                // a second worker made the batching decision depend on startup
+                // scheduling and intermittently fell back to 17-cell refills
+                // for an entire lane on slower CI runners.
+                const reserve_limit: usize = if (workers != 0) max_allocation_batch else 17;
                 var wanted: usize = 0;
                 var probe = counter;
                 while (wanted < reserve_limit and probe < bound) : (wanted += 1)
