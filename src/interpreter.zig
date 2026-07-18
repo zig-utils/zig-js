@@ -2353,6 +2353,7 @@ pub const Interpreter = struct {
         try frames.append(self.arena, .{
             .function_name = frame.function_name,
             .source_url = if (location) |loc| loc.source_url else "",
+            .script_id = if (location) |loc| loc.script_id else 0,
             .line_zero_based = line,
             .column_zero_based = column,
             .line_start_byte = line_start,

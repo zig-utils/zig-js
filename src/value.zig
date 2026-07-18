@@ -741,6 +741,7 @@ pub const ErrorStackFrameCode = enum(u8) {
 pub const ErrorStackFrame = struct {
     function_name: []const u8 = "",
     source_url: []const u8 = "",
+    script_id: u64 = 0,
     line_zero_based: i32 = -1,
     column_zero_based: i32 = -1,
     line_start_byte: i32 = -1,

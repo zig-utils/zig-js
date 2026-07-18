@@ -166,6 +166,63 @@ const PrivateZigStackTrace = extern struct {
     referenced_source_provider: ?*anyopaque = null,
 };
 
+const PrivateJSErrorCode = enum(u8) {
+    error_ = 0,
+    eval_error = 1,
+    range_error = 2,
+    reference_error = 3,
+    syntax_error = 4,
+    type_error = 5,
+    uri_error = 6,
+    aggregate_error = 7,
+    out_of_memory_error = 8,
+    bundler_error = 252,
+    stack_overflow = 253,
+    user_error = 254,
+    _,
+};
+
+const PrivateJSRuntimeType = enum(u16) {
+    nothing = 0x0,
+    function = 0x1,
+    undefined = 0x2,
+    null = 0x4,
+    boolean = 0x8,
+    any_int = 0x10,
+    number = 0x20,
+    string = 0x40,
+    object = 0x80,
+    symbol = 0x100,
+    bigint = 0x200,
+    _,
+};
+
+/// Exact current Home/Bun by-value exception record. `browser_url` was added
+/// after WebKit's handwritten C header and is part of both pinned Zig consumers.
+const PrivateZigException = extern struct {
+    type: PrivateJSErrorCode = .user_error,
+    runtime_type: PrivateJSRuntimeType = .nothing,
+    errno: c_int = 0,
+    syscall: PrivateBunString = .empty(),
+    system_code: PrivateBunString = .empty(),
+    path: PrivateBunString = .empty(),
+    name: PrivateBunString = .empty(),
+    message: PrivateBunString = .empty(),
+    stack: PrivateZigStackTrace = .{
+        .source_lines_ptr = null,
+        .source_lines_numbers = null,
+        .source_lines_len = 0,
+        .source_lines_to_collect = 0,
+        .frames_ptr = null,
+        .frames_len = 0,
+        .frames_cap = 0,
+    },
+    exception: ?*anyopaque = null,
+    remapped: bool = false,
+    fd: i32 = -1,
+    browser_url: PrivateBunString = .empty(),
+};
+
 const PrivateImplementationVisibility = enum(u8) {
     public = 0,
     private = 1,
@@ -240,6 +297,14 @@ comptime {
         @offsetOf(PrivateZigStackTrace, "frames_ptr") != 24 or
         @offsetOf(PrivateZigStackTrace, "referenced_source_provider") != 40)
         @compileError("private ZigStackTrace layout drifted from the pinned ABI");
+    if (@sizeOf(PrivateZigException) != 216 or @alignOf(PrivateZigException) != 8 or
+        @offsetOf(PrivateZigException, "errno") != 4 or
+        @offsetOf(PrivateZigException, "syscall") != 8 or
+        @offsetOf(PrivateZigException, "stack") != 128 or
+        @offsetOf(PrivateZigException, "exception") != 176 or
+        @offsetOf(PrivateZigException, "fd") != 188 or
+        @offsetOf(PrivateZigException, "browser_url") != 192)
+        @compileError("private ZigException layout drifted from the pinned Home/Bun ABI");
     if (@offsetOf(PrivateWTFStringImpl, "m_ref_count") != 0 or
         @offsetOf(PrivateWTFStringImpl, "m_length") != 4 or
         @offsetOf(PrivateWTFStringImpl, "m_ptr") != 8 or
@@ -8419,26 +8484,129 @@ fn privateDerefBunString(string: PrivateBunString) void {
     if (string.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
 }
 
-/// Project the Error's creation-time structured stack into Bun/Home's exact
-/// `ZigStackTrace` storage. Like upstream's `OnlyPosition` path, the caller owns
-/// the frame buffer and receives no source-line payload/provider reference.
-export fn JSC__Exception__getStackTrace(
-    exception: ?*anyopaque,
-    global: JSContextRef,
-    trace: ?*PrivateZigStackTrace,
-) callconv(.c) void {
-    const output = trace orelse return;
+fn privateRuntimeTypeForValue(input: Value) PrivateJSRuntimeType {
+    return switch (input.kind()) {
+        .undefined => .undefined,
+        .null => .null,
+        .boolean => .boolean,
+        .number => if (std.math.isFinite(input.asNum()) and @trunc(input.asNum()) == input.asNum()) .any_int else .number,
+        .string => .string,
+        .object => object: {
+            const object = input.asObj();
+            if (object.is_symbol) break :object .symbol;
+            if (object.is_bigint) break :object .bigint;
+            if (object.isCallableObject()) break :object .function;
+            break :object .object;
+        },
+    };
+}
+
+fn privateErrorCodeForName(name: []const u8) PrivateJSErrorCode {
+    if (std.mem.eql(u8, name, "EvalError")) return .eval_error;
+    if (std.mem.eql(u8, name, "RangeError")) return .range_error;
+    if (std.mem.eql(u8, name, "ReferenceError")) return .reference_error;
+    if (std.mem.eql(u8, name, "SyntaxError")) return .syntax_error;
+    if (std.mem.eql(u8, name, "TypeError")) return .type_error;
+    if (std.mem.eql(u8, name, "URIError")) return .uri_error;
+    if (std.mem.eql(u8, name, "AggregateError")) return .aggregate_error;
+    if (std.mem.eql(u8, name, "OutOfMemoryError")) return .out_of_memory_error;
+    if (std.mem.eql(u8, name, "StackOverflow")) return .stack_overflow;
+    return .error_;
+}
+
+fn privateDirectString(object: *Object, name: []const u8) ?[]const u8 {
+    const property = object.getOwn(name) orelse return null;
+    return if (property.isString()) property.asStr() else null;
+}
+
+fn privateDirectInt(object: *Object, name: []const u8) ?i32 {
+    const property = object.getOwn(name) orelse return null;
+    if (!property.isNumber() or !std.math.isFinite(property.asNum())) return null;
+    const truncated = @trunc(property.asNum());
+    if (truncated < std.math.minInt(i32) or truncated > std.math.maxInt(i32)) return null;
+    return @intFromFloat(truncated);
+}
+
+fn privateSetProjectedString(output: *PrivateBunString, bytes: []const u8) bool {
+    output.* = privateOwnedWTF8String(bytes) catch return false;
+    return true;
+}
+
+fn privateProjectExceptionValue(
+    context: *Context,
+    input: Value,
+    exception_cell: ?*anyopaque,
+    output: *PrivateZigException,
+) bool {
+    output.type = .user_error;
+    output.runtime_type = .nothing;
+    output.errno = 0;
+    output.syscall = .empty();
+    output.system_code = .empty();
+    output.path = .empty();
+    output.name = .empty();
+    output.message = .empty();
+    output.exception = exception_cell;
+    output.remapped = false;
+    output.fd = -1;
+    output.browser_url = .empty();
+
+    if (input.isObject()) {
+        const object = input.asObj();
+        const name = privateDirectString(object, "name") orelse if (object.behavior.is_error) object.errorName() else "Error";
+        const message = privateDirectString(object, "message") orelse if (object.behavior.is_error)
+            (privateDirectString(object, "\x00dommsg") orelse "")
+        else
+            "";
+        output.type = privateErrorCodeForName(name);
+        if (!privateSetProjectedString(&output.name, name)) return false;
+        if (!privateSetProjectedString(&output.message, message)) return false;
+
+        if (object.getOwn("cause")) |cause| output.runtime_type = privateRuntimeTypeForValue(cause);
+        if (privateDirectString(object, "syscall")) |text|
+            if (!privateSetProjectedString(&output.syscall, text)) return false;
+        if (object.getOwn("code")) |code| {
+            const text = if (code.isString()) code.asStr() else if (code.isNumber())
+                code.toString(context.arena()) catch return false
+            else
+                "";
+            if (!privateSetProjectedString(&output.system_code, text)) return false;
+        }
+        if (privateDirectString(object, "path")) |text|
+            if (!privateSetProjectedString(&output.path, text)) return false;
+        output.errno = privateDirectInt(object, "errno") orelse 0;
+        output.fd = privateDirectInt(object, "fd") orelse -1;
+        return true;
+    }
+
+    output.type = .error_;
+    const message = input.toString(context.arena()) catch return false;
+    if (!privateSetProjectedString(&output.name, "Error")) return false;
+    if (!privateSetProjectedString(&output.message, message)) return false;
+    return true;
+}
+
+fn privateExceptionInput(global: JSContextRef, encoded: EncodedValue) ?struct { context: *Context, value: Value, cell: ?*anyopaque } {
+    const context = ctxForHandleInspection(global) orelse return null;
+    if (encoded.asCellAddress()) |address| {
+        const boxed = privateBoxedFrom(encoded) orelse return null;
+        if (boxed.owner.c_api_group != context.c_api_group) return null;
+        return .{
+            .context = boxed.owner,
+            .value = boxed.value,
+            .cell = if (boxed.private_kind == .exception) @ptrFromInt(address) else null,
+        };
+    } else |_| {}
+    const input = privateValueFrom(global, encoded) orelse return null;
+    return .{ .context = context, .value = input, .cell = null };
+}
+
+fn privatePopulateRetainedStack(input: Value, output: *PrivateZigStackTrace) void {
     output.frames_len = 0;
-    output.source_lines_len = 0;
     output.referenced_source_provider = null;
-    if (output.frames_cap == 0 or output.frames_ptr == null) return;
+    if (output.frames_cap == 0 or output.frames_ptr == null or !input.isObject() or !input.asObj().behavior.is_error) return;
 
-    const context = ctxForHandleInspection(global) orelse return;
-    const boxed = privateBoxFromCell(exception) orelse return;
-    if (boxed.private_kind != .exception or boxed.owner.c_api_group != context.c_api_group) return;
-    if (!boxed.value.isObject() or !boxed.value.asObj().behavior.is_error) return;
-
-    const retained = boxed.value.asObj().errorStackFrames();
+    const retained = input.asObj().errorStackFrames();
     const count = @min(retained.len, @as(usize, output.frames_cap));
     for (retained[0..count], output.frames_ptr[0..count]) |source, *destination| {
         const function_name = privateOwnedWTF8String(source.function_name) catch break;
@@ -8461,6 +8629,110 @@ export fn JSC__Exception__getStackTrace(
         };
         output.frames_len += 1;
     }
+}
+
+/// Project the Error's creation-time structured stack into Bun/Home's exact
+/// `ZigStackTrace` storage. Like upstream's `OnlyPosition` path, the caller owns
+/// the frame buffer and receives no source-line payload/provider reference.
+export fn JSC__Exception__getStackTrace(
+    exception: ?*anyopaque,
+    global: JSContextRef,
+    trace: ?*PrivateZigStackTrace,
+) callconv(.c) void {
+    const output = trace orelse return;
+    output.frames_len = 0;
+    output.source_lines_len = 0;
+    output.referenced_source_provider = null;
+
+    const context = ctxForHandleInspection(global) orelse return;
+    const boxed = privateBoxFromCell(exception) orelse return;
+    if (boxed.private_kind != .exception or boxed.owner.c_api_group != context.c_api_group) return;
+    privatePopulateRetainedStack(boxed.value, output);
+}
+
+/// Full Home/Bun exception projection. Caller-provided stack buffers are
+/// preserved while scalar/string fields and retained frames are populated.
+export fn JSC__JSValue__toZigException(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: ?*PrivateZigException,
+) callconv(.c) void {
+    const destination = output orelse return;
+    const input = privateExceptionInput(global, encoded) orelse return;
+    if (!privateProjectExceptionValue(input.context, input.value, input.cell, destination)) return;
+    privatePopulateRetainedStack(input.value, &destination.stack);
+}
+
+fn privateDebugScriptForFrame(context: *Context, frame: value.ErrorStackFrame) ?Context.DebugScript {
+    if (frame.script_id != 0) {
+        for (context.debug_scripts.items) |script| if (script.id == frame.script_id) return script;
+    }
+    var index = context.debug_scripts.items.len;
+    while (index > 0) {
+        index -= 1;
+        const script = context.debug_scripts.items[index];
+        if (std.mem.eql(u8, script.url, frame.source_url)) return script;
+    }
+    return null;
+}
+
+fn privateLineBounds(source: []const u8, offset: usize) struct { start: usize, end: usize } {
+    var start = @min(offset, source.len);
+    while (start > 0 and source[start - 1] != '\n') start -= 1;
+    var end = @min(offset, source.len);
+    while (end < source.len and source[end] != '\n') end += 1;
+    if (end > start and source[end - 1] == '\r') end -= 1;
+    return .{ .start = start, .end = end };
+}
+
+/// Second-phase source collection corresponding to upstream
+/// `PopulateStackTraceFlags::OnlySourceLines`. Source lines are owned BunStrings,
+/// so no SourceProvider reference is needed and consumer deinit remains exact.
+export fn ZigException__collectSourceLines(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    output: ?*PrivateZigException,
+) callconv(.c) void {
+    const destination = output orelse return;
+    const storage_cap = @min(destination.stack.source_lines_len, destination.stack.source_lines_to_collect);
+    destination.stack.source_lines_len = 0;
+    destination.stack.referenced_source_provider = null;
+    if (storage_cap == 0 or destination.stack.source_lines_ptr == null or destination.stack.source_lines_numbers == null or destination.stack.frames_len == 0) return;
+
+    const input = privateExceptionInput(global, encoded) orelse return;
+    if (!input.value.isObject() or !input.value.asObj().behavior.is_error) return;
+    const retained = input.value.asObj().errorStackFrames();
+    const retained_index = destination.stack.frames_ptr[0].jsc_stack_frame_index;
+    if (retained_index < 0 or retained_index >= retained.len) return;
+    const frame = retained[@intCast(retained_index)];
+    const script = privateDebugScriptForFrame(input.context, frame) orelse return;
+    if (frame.line_start_byte < 0) return;
+
+    var bounds = privateLineBounds(script.source, @intCast(frame.line_start_byte));
+    var line = frame.line_zero_based;
+    var written: u8 = 0;
+    while (written < storage_cap) : (written += 1) {
+        const owned = privateOwnedWTF8String(script.source[bounds.start..bounds.end]) catch break;
+        destination.stack.source_lines_ptr[written] = owned;
+        destination.stack.source_lines_numbers[written] = line;
+        destination.stack.source_lines_len += 1;
+        if (bounds.start == 0) break;
+        var previous_end = bounds.start - 1;
+        if (previous_end > 0 and script.source[previous_end - 1] == '\r') previous_end -= 1;
+        bounds = privateLineBounds(script.source, previous_end -| 1);
+        line -= 1;
+    }
+}
+
+/// By-value conversion used when the caller has only an exception cell and no
+/// frame/source buffers. Owned strings and the stable cell pointer are returned;
+/// the zero-capacity trace makes the absence of caller storage explicit.
+export fn ZigException__fromException(exception: ?*anyopaque) callconv(.c) PrivateZigException {
+    var output = PrivateZigException{};
+    const boxed = privateBoxFromCell(exception) orelse return output;
+    if (boxed.private_kind != .exception) return output;
+    _ = privateProjectExceptionValue(boxed.owner, boxed.value, exception, &output);
+    return output;
 }
 
 export fn JSC__JSValue__isException(encoded: EncodedValue, vm_ref: ?*anyopaque) callconv(.c) bool {

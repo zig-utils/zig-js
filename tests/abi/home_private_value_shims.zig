@@ -115,6 +115,59 @@ const ZigStackTrace = extern struct {
     referenced_source_provider: ?*anyopaque = null,
 };
 
+const JSErrorCode = enum(u8) {
+    Error = 0,
+    EvalError = 1,
+    RangeError = 2,
+    ReferenceError = 3,
+    SyntaxError = 4,
+    TypeError = 5,
+    URIError = 6,
+    AggregateError = 7,
+    OutOfMemoryError = 8,
+    UserErrorCode = 254,
+    _,
+};
+
+const JSRuntimeType = enum(u16) {
+    Nothing = 0,
+    Function = 1,
+    Undefined = 2,
+    Null = 4,
+    Boolean = 8,
+    AnyInt = 16,
+    Number = 32,
+    String = 64,
+    Object = 128,
+    Symbol = 256,
+    BigInt = 512,
+    _,
+};
+
+const ZigException = extern struct {
+    type: JSErrorCode,
+    runtime_type: JSRuntimeType,
+    errno: c_int = 0,
+    syscall: BunString,
+    system_code: BunString,
+    path: BunString,
+    name: BunString,
+    message: BunString,
+    stack: ZigStackTrace,
+    exception: ?*anyopaque,
+    remapped: bool = false,
+    fd: i32 = -1,
+    browser_url: BunString,
+};
+
+comptime {
+    if (@sizeOf(ZigException) != 216 or @alignOf(ZigException) != 8 or
+        @offsetOf(ZigException, "stack") != 128 or
+        @offsetOf(ZigException, "exception") != 176 or
+        @offsetOf(ZigException, "browser_url") != 192)
+        @compileError("pinned ZigException layout drifted");
+}
+
 const StringBuilder = extern struct {
     bytes: [24]u8 align(8),
 };
@@ -357,6 +410,9 @@ extern "c" fn JSGlobalObject__throwStackOverflow(JSContextRef) void;
 extern "c" fn JSGlobalObject__tryTakeException(JSContextRef) EncodedValue;
 extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
 extern "c" fn JSC__Exception__getStackTrace(?*anyopaque, JSContextRef, *ZigStackTrace) void;
+extern "c" fn JSC__JSValue__toZigException(EncodedValue, JSContextRef, *ZigException) void;
+extern "c" fn ZigException__collectSourceLines(EncodedValue, JSContextRef, *ZigException) void;
+extern "c" fn ZigException__fromException(?*anyopaque) ZigException;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__isTerminationException(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
@@ -567,6 +623,32 @@ fn hostFunctionForeign(global: JSContextRef, frame: *PrivateCallFrame) callconv(
 fn fail(message: []const u8) noreturn {
     std.debug.print("Home private value shims: {s}\n", .{message});
     std.process.exit(1);
+}
+
+fn emptyBunString() BunString {
+    return .{ .tag = .empty, .value = .{ .zig_string = .{ .tagged_ptr = 0, .len = 0 } } };
+}
+
+fn derefBunString(string: BunString) void {
+    if (string.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
+}
+
+fn releaseZigException(exception: *ZigException) void {
+    derefBunString(exception.syscall);
+    derefBunString(exception.system_code);
+    derefBunString(exception.path);
+    derefBunString(exception.name);
+    derefBunString(exception.message);
+    derefBunString(exception.browser_url);
+    if (exception.stack.source_lines_ptr != null) {
+        for (exception.stack.source_lines_ptr[0..exception.stack.source_lines_len]) |line| derefBunString(line);
+    }
+    if (exception.stack.frames_ptr != null) {
+        for (exception.stack.frames_ptr[0..exception.stack.frames_len]) |frame| {
+            derefBunString(frame.function_name);
+            derefBunString(frame.source_url);
+        }
+    }
 }
 
 fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
@@ -2998,6 +3080,119 @@ pub fn main() void {
     JSC__Exception__getStackTrace(traced_exception.cellPointer(), foreign_context, &trace);
     if (trace.frames_len != 0) fail("structured exception stack accepted foreign VM");
 
+    var projected_frames: [4]ZigStackFrame = undefined;
+    var projected_source_lines: [3]BunString = @splat(emptyBunString());
+    var projected_source_numbers: [3]i32 = @splat(-1);
+    var projected = ZigException{
+        .type = .UserErrorCode,
+        .runtime_type = .Nothing,
+        .syscall = emptyBunString(),
+        .system_code = emptyBunString(),
+        .path = emptyBunString(),
+        .name = emptyBunString(),
+        .message = emptyBunString(),
+        .stack = .{
+            .source_lines_ptr = &projected_source_lines,
+            .source_lines_numbers = &projected_source_numbers,
+            .source_lines_len = projected_source_lines.len,
+            .source_lines_to_collect = projected_source_lines.len,
+            .frames_ptr = &projected_frames,
+            .frames_len = 0,
+            .frames_cap = projected_frames.len,
+        },
+        .exception = null,
+        .browser_url = emptyBunString(),
+    };
+    JSC__JSValue__toZigException(traced_exception, sibling_context, &projected);
+    if (projected.type != .Error or projected.runtime_type != .Nothing or
+        projected.exception != traced_exception.cellPointer() or projected.stack.frames_len != 3 or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &projected.name), evaluate(context, "'Error'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &projected.message), evaluate(context, "'stack-249'"), context))
+        fail("complete ZigException projection mismatch");
+    ZigException__collectSourceLines(traced_exception, context, &projected);
+    if (projected.stack.source_lines_len != 1 or projected_source_numbers[0] != 40 or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &projected_source_lines[0]), evaluate(context, "\"(function outer249(){ return (function inner249(){ return new Error('stack-249'); })(); })()\""), context))
+        fail("ZigException source-line projection mismatch");
+
+    var by_value = ZigException__fromException(traced_exception.cellPointer());
+    if (by_value.type != .Error or by_value.exception != traced_exception.cellPointer() or by_value.stack.frames_len != 0 or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &by_value.message), evaluate(context, "'stack-249'"), context))
+        fail("by-value ZigException projection mismatch");
+    releaseZigException(&by_value);
+
+    var primitive_projection = ZigException__fromException(primitive_exception_cell);
+    if (primitive_projection.type != .Error or primitive_projection.exception != primitive_exception_cell or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &primitive_projection.name), evaluate(context, "'Error'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &primitive_projection.message), evaluate(context, "'42'"), context))
+        fail("primitive ZigException projection mismatch");
+    releaseZigException(&primitive_projection);
+
+    var system_projection = ZigException__fromException(null);
+    const system_error = evaluate(context, "Object.assign(new TypeError('disk'), { cause: 1.5, errno: -2, syscall: 'open', code: 'ENOENT', path: '/tmp/x', fd: 9 })");
+    JSC__JSValue__toZigException(system_error, context, &system_projection);
+    if (system_projection.type != .TypeError or system_projection.runtime_type != .Number or
+        system_projection.errno != -2 or system_projection.fd != 9 or system_projection.exception != null or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &system_projection.syscall), evaluate(context, "'open'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &system_projection.system_code), evaluate(context, "'ENOENT'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &system_projection.path), evaluate(context, "'/tmp/x'"), context))
+        fail("system-like ZigException projection mismatch");
+    releaseZigException(&system_projection);
+
+    var dom_projection = ZigException__fromException(null);
+    const dom_error = evaluate(context, "new DOMException('gone', 'AbortError')");
+    JSC__JSValue__toZigException(dom_error, context, &dom_projection);
+    if (dom_projection.type != .Error or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &dom_projection.name), evaluate(context, "'AbortError'"), context) or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &dom_projection.message), evaluate(context, "'gone'"), context))
+        fail("DOM ZigException projection mismatch");
+    releaseZigException(&dom_projection);
+
+    var syntax_projection = ZigException__fromException(null);
+    JSC__JSValue__toZigException(evaluate(context, "new SyntaxError('parse')"), context, &syntax_projection);
+    if (syntax_projection.type != .SyntaxError or
+        !JSC__JSValue__isStrictEqual(BunString__toJS(context, &syntax_projection.message), evaluate(context, "'parse'"), context))
+        fail("SyntaxError ZigException projection mismatch");
+    releaseZigException(&syntax_projection);
+
+    const line_script = JSStringCreateWithUTF8CString("const pre250 = 1;\nconst mid250 = 2;\nnew Error('lines-250');") orelse fail("source-line script creation failed");
+    defer JSStringRelease(line_script);
+    const line_url = JSStringCreateWithUTF8CString("lines-250.js") orelse fail("source-line URL creation failed");
+    defer JSStringRelease(line_url);
+    const line_error_ref = JSEvaluateScript(context, line_script, null, line_url, 70, &traced_eval_exception) orelse fail("source-line evaluation failed");
+    if (traced_eval_exception != null) fail("source-line evaluation threw");
+    const line_error = EncodedValue.fromRef(line_error_ref);
+    var line_frames: [2]ZigStackFrame = undefined;
+    var line_strings: [3]BunString = @splat(emptyBunString());
+    var line_numbers: [3]i32 = @splat(-1);
+    var line_projection = ZigException__fromException(null);
+    line_projection.stack = .{
+        .source_lines_ptr = &line_strings,
+        .source_lines_numbers = &line_numbers,
+        .source_lines_len = line_strings.len,
+        .source_lines_to_collect = line_strings.len,
+        .frames_ptr = &line_frames,
+        .frames_len = 0,
+        .frames_cap = line_frames.len,
+    };
+    JSC__JSValue__toZigException(line_error, context, &line_projection);
+    ZigException__collectSourceLines(line_error, sibling_context, &line_projection);
+    if (line_projection.stack.source_lines_len != 3) fail("multi-line ZigException source count mismatch");
+    if (line_numbers[0] != 71 or line_numbers[1] != 70 or line_numbers[2] != 69)
+        fail("multi-line ZigException source numbers mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[0]), evaluate(context, "\"new Error('lines-250');\""), context))
+        fail("multi-line ZigException current source mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[1]), evaluate(context, "'const mid250 = 2;'"), context))
+        fail("multi-line ZigException previous source mismatch");
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[2]), evaluate(context, "'const pre250 = 1;'"), context))
+        fail("multi-line ZigException first source mismatch");
+    releaseZigException(&line_projection);
+
+    var rejected_projection = projected;
+    rejected_projection.type = .AggregateError;
+    JSC__JSValue__toZigException(traced_exception, foreign_context, &rejected_projection);
+    if (rejected_projection.type != .AggregateError) fail("complete ZigException projection accepted foreign VM");
+    releaseZigException(&projected);
+
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(1));
     JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2));
     const first_exception = JSGlobalObject__tryTakeException(context);
@@ -3862,5 +4057,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 249/249 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 251/251 symbols linked; runtime matrix passed\n", .{});
 }
