@@ -608,8 +608,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             f.unlockSlots(held);
         }
     }
-    for (machine.gc_wasm_roots.items) |roots|
-        for (roots.values) |root| markValue(v, root);
+    for (machine.gc_wasm_roots.items) |roots| traceWasmExecutionRoots(roots, v);
     if (machine.microtasks) |q| {
         machine.lockMicrotasks();
         for (q.pendingItems()) |mt| traceMicrotask(mt, v);
@@ -677,6 +676,17 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.home_object) |o| v.mark(o);
     if (machine.super_ctor) |o| v.mark(o);
     for (machine.with_stack.items) |o| v.mark(o);
+}
+
+fn traceWasmExecutionRoots(roots: *const value.WasmExecutionRoots, v: anytype) void {
+    for (roots.stack) |slot| switch (slot) {
+        .externref => |root| markValue(v, root),
+        .numeric, .funcref => {},
+    };
+    for (roots.locals) |slot| switch (slot) {
+        .externref => |root| markValue(v, root),
+        .numeric, .funcref => {},
+    };
 }
 
 /// A `Visitor`-shaped adapter that routes every root it is handed through the
@@ -1526,4 +1536,41 @@ test "gc traces only the active microtask variant" {
     try std.testing.expect(next_tick_marks.contains(&next_tick_first));
     try std.testing.expect(next_tick_marks.contains(&next_tick_second));
     try std.testing.expect(!next_tick_marks.contains(&inactive_argument));
+}
+
+test "gc traces only externref WebAssembly slots" {
+    const Recorder = struct {
+        marked: [4]?*anyopaque = .{ null, null, null, null },
+        len: usize = 0,
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            const ptr = cell orelse return;
+            self.marked[self.len] = ptr;
+            self.len += 1;
+        }
+
+        fn contains(self: *const @This(), cell: *anyopaque) bool {
+            for (self.marked[0..self.len]) |marked|
+                if (marked == cell) return true;
+            return false;
+        }
+    };
+
+    var stack_ref = Object{};
+    var local_ref = Object{};
+    var numeric_only = Object{};
+    var funcref_only = Object{};
+    const stack = [_]value.WasmSlot{
+        .{ .numeric = @intFromPtr(&numeric_only) },
+        .{ .funcref = @ptrCast(&funcref_only) },
+        .{ .externref = Value.obj(&stack_ref) },
+    };
+    const locals = [_]value.WasmSlot{.{ .externref = Value.obj(&local_ref) }};
+    const roots: value.WasmExecutionRoots = .{ .stack = &stack, .locals = &locals };
+    var recorder: Recorder = .{};
+    traceWasmExecutionRoots(&roots, &recorder);
+    try std.testing.expect(recorder.contains(&stack_ref));
+    try std.testing.expect(recorder.contains(&local_ref));
+    try std.testing.expect(!recorder.contains(&numeric_only));
+    try std.testing.expect(!recorder.contains(&funcref_only));
 }

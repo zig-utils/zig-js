@@ -20,6 +20,7 @@ const decode = @import("decode.zig");
 const validate = @import("validate.zig");
 
 const Allocator = std.mem.Allocator;
+const WasmSlot = js_value.WasmSlot;
 
 pub const ExecError = error{ OutOfMemory, Trap, Host };
 
@@ -479,8 +480,8 @@ const Frame = struct {
 const State = struct {
     alloc: Allocator, // per-invocation arena
     diag: *types.Diagnostic,
-    stack: std.ArrayListUnmanaged(u64) = .empty,
-    locals: std.ArrayListUnmanaged(u64) = .empty,
+    stack: std.ArrayListUnmanaged(WasmSlot) = .empty,
+    locals: std.ArrayListUnmanaged(WasmSlot) = .empty,
     frames: std.ArrayListUnmanaged(Frame) = .empty,
     labels: std.ArrayListUnmanaged(Label) = .empty,
     roots: js_value.WasmExecutionRoots = .{},
@@ -493,15 +494,25 @@ const State = struct {
 };
 
 fn checkpoint(s: *State) void {
+    s.roots.stack = s.stack.items;
+    s.roots.locals = s.locals.items;
     if (s.root_hooks) |hooks| hooks.checkpoint(hooks.ctx, &s.roots);
 }
 
 fn push(s: *State, v: u64) ExecError!void {
+    try pushSlot(s, .{ .numeric = v });
+}
+
+fn pushSlot(s: *State, slot: WasmSlot) ExecError!void {
     if (s.stack.items.len >= MAX_OPERAND_SLOTS) return s.trap("operand stack exhausted");
-    try s.stack.append(s.alloc, v);
+    try s.stack.append(s.alloc, slot);
 }
 
 fn pop(s: *State) u64 {
+    return popSlot(s).numericBits();
+}
+
+fn popSlot(s: *State) WasmSlot {
     const v = s.stack.items[s.stack.items.len - 1];
     s.stack.items.len -= 1;
     return v;
@@ -551,7 +562,10 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     const locals_base = s.locals.items.len;
     try s.locals.appendSlice(s.alloc, s.stack.items[arg_start..]);
     s.stack.items.len = arg_start;
-    if (body.locals.len > 0) @memset(try s.locals.addManyAsSlice(s.alloc, body.locals.len), 0);
+    for (body.locals) |local_type| try s.locals.append(s.alloc, switch (local_type) {
+        .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
+        .funcref => .{ .funcref = null },
+    });
     try s.frames.append(s.alloc, .{
         .func = f,
         .pc = 0,
@@ -574,7 +588,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
 fn returnFrame(s: *State) void {
     const fr = s.frames.items[s.frames.items.len - 1];
     const top = s.stack.items.len;
-    std.mem.copyForwards(u64, s.stack.items[fr.stack_base..][0..fr.result_arity], s.stack.items[top - fr.result_arity ..]);
+    std.mem.copyForwards(WasmSlot, s.stack.items[fr.stack_base..][0..fr.result_arity], s.stack.items[top - fr.result_arity ..]);
     s.stack.items.len = fr.stack_base + fr.result_arity;
     s.labels.items.len = fr.label_base;
     s.locals.items.len = fr.locals_base;
@@ -588,7 +602,7 @@ fn branchTo(s: *State, depth: u32) void {
     const li = s.labels.items.len - 1 - depth;
     const lab = s.labels.items[li];
     const top = s.stack.items.len;
-    std.mem.copyForwards(u64, s.stack.items[lab.stack_height..][0..lab.arity], s.stack.items[top - lab.arity ..]);
+    std.mem.copyForwards(WasmSlot, s.stack.items[lab.stack_height..][0..lab.arity], s.stack.items[top - lab.arity ..]);
     s.stack.items.len = lab.stack_height + lab.arity;
     if (li == fr.label_base) {
         s.labels.items.len = fr.label_base;
@@ -610,8 +624,10 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
         .defined => try pushFrame(s, f),
         .imported => |*imp| {
             const arg_start = s.stack.items.len - imp.type.params.len;
+            const args = try s.alloc.alloc(u64, imp.type.params.len);
+            for (s.stack.items[arg_start..], 0..) |slot, i| args[i] = slot.numericBits();
             const res = try s.alloc.alloc(u64, imp.type.results.len);
-            try imp.call(imp.ctx, s.stack.items[arg_start..], res, s.diag);
+            try imp.call(imp.ctx, args, res, s.diag);
             s.stack.items.len = arg_start;
             for (res) |v| try push(s, v);
         },
@@ -811,15 +827,15 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
                     return s.trap("indirect call type mismatch");
                 try callFunc(s, callable);
             },
-            .drop => _ = pop(s),
+            .drop => _ = popSlot(s),
             .select => {
                 const c = popI32(s);
-                const v2 = pop(s);
-                const v1 = pop(s);
-                try push(s, if (c != 0) v1 else v2);
+                const v2 = popSlot(s);
+                const v1 = popSlot(s);
+                try pushSlot(s, if (c != 0) v1 else v2);
             },
-            .local_get => try push(s, s.locals.items[fr.locals_base + instr.imm.idx]),
-            .local_set => s.locals.items[fr.locals_base + instr.imm.idx] = pop(s),
+            .local_get => try pushSlot(s, s.locals.items[fr.locals_base + instr.imm.idx]),
+            .local_set => s.locals.items[fr.locals_base + instr.imm.idx] = popSlot(s),
             .local_tee => s.locals.items[fr.locals_base + instr.imm.idx] = s.stack.items[s.stack.items.len - 1],
             .global_get => try push(s, inst.globals[instr.imm.idx].value),
             .global_set => inst.globals[instr.imm.idx].value = pop(s),
@@ -972,7 +988,9 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             },
             .memory_size => try pushI32(s, inst.mems[0].pages()),
             .memory_grow => {
-                const r = memoryGrow(inst.mems[0], popI32(s));
+                const delta = popI32(s);
+                checkpoint(s);
+                const r = memoryGrow(inst.mems[0], delta);
                 try pushI32(s, @bitCast(r));
             },
             .i32_const => try pushI32(s, @bitCast(instr.imm.i32)),
@@ -1234,7 +1252,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const u64, results: []u64)
             .i64_trunc_sat_f64_u => try pushI64(s, truncSatI64U(popF64(s))),
         }
     }
-    @memcpy(results, s.stack.items[s.stack.items.len - results.len ..]);
+    for (s.stack.items[s.stack.items.len - results.len ..], 0..) |slot, i|
+        results[i] = slot.numericBits();
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,19 +1279,19 @@ const RootHookProbe = struct {
     fn enter(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) error{OutOfMemory}!void {
         const self: *RootHookProbe = @ptrCast(@alignCast(raw));
         self.enters += 1;
-        std.debug.assert(roots.values.len == 0);
+        std.debug.assert(roots.stack.len == 0 and roots.locals.len == 0);
     }
 
     fn leave(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
         const self: *RootHookProbe = @ptrCast(@alignCast(raw));
         self.leaves += 1;
-        std.debug.assert(roots.values.len == 0);
+        std.debug.assert(roots.stack.len <= MAX_OPERAND_SLOTS);
     }
 
     fn checkpoint(raw: *anyopaque, roots: *js_value.WasmExecutionRoots) void {
         const self: *RootHookProbe = @ptrCast(@alignCast(raw));
         self.checkpoints += 1;
-        std.debug.assert(roots.values.len == 0);
+        std.debug.assert(roots.stack.len <= MAX_OPERAND_SLOTS);
     }
 };
 

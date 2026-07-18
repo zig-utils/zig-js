@@ -44,8 +44,22 @@ pub const NativeFn = *const fn (ctx: *anyopaque, this: Value, args: []const Valu
 /// The Wasm executor refreshes this stable descriptor before every GC
 /// checkpoint; the active Interpreter then publishes it through the same
 /// precise-root path as VM operand stacks and frame locals.
+pub const WasmSlot = union(enum) {
+    numeric: u64,
+    funcref: ?*anyopaque,
+    externref: Value,
+
+    pub fn numericBits(self: WasmSlot) u64 {
+        return switch (self) {
+            .numeric => |bits| bits,
+            else => unreachable,
+        };
+    }
+};
+
 pub const WasmExecutionRoots = struct {
-    values: []const Value = &.{},
+    stack: []const WasmSlot = &.{},
+    locals: []const WasmSlot = &.{},
 };
 
 pub const HostClassGetResult = union(enum) {
