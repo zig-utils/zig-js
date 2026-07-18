@@ -1923,7 +1923,10 @@ pub const Interpreter = struct {
     /// represented as object-tagged primitives internally, so they still need
     /// fresh wrappers here.
     pub fn toObject(self: *Interpreter, v: Value) EvalError!*value.Object {
-        if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint) return v.asObj();
+        if (v.isObject() and !v.asObj().is_symbol and !v.asObj().is_bigint and
+            v.asObj().getterSetterCellData() == null) return v.asObj();
+        if (v.isObject() and v.asObj().getterSetterCellData() != null)
+            return self.throwError("TypeError", "Cannot convert an internal accessor cell to an object");
         if (v.isNull() or v.isUndefined())
             return self.throwError("TypeError", "Cannot convert undefined or null to object");
         const ctor_name: []const u8 = switch (v.kind()) {
@@ -6813,7 +6816,24 @@ pub const Interpreter = struct {
     /// getOwnPropertySymbols / proxy traps), then return that key.
     fn registerSymbol(self: *Interpreter, sym: *value.Object) []const u8 {
         self.symbols.put(self.arena, sym.symbolKey(), sym) catch {};
+        if (self.symbolIdentityRegistry()) |symbol_registry| {
+            const storage_key = self.symbolRegistryStorageKey(sym.symbolKey()) catch return sym.symbolKey();
+            symbol_registry.setOwn(self.arena, self.root_shape, storage_key, Value.obj(sym)) catch {};
+        }
         return sym.symbolKey();
+    }
+
+    fn symbolRegistryStorageKey(self: *Interpreter, key: []const u8) EvalError![]const u8 {
+        return std.fmt.allocPrint(self.arena, "\x00r{s}", .{key});
+    }
+
+    fn symbolIdentityRegistry(self: *Interpreter) ?*value.Object {
+        const symbol_namespace = self.env.get("Symbol") orelse return null;
+        if (!symbol_namespace.isObject()) return null;
+        if (symbol_namespace.asObj().getOwn("\x00registry")) |shared| {
+            if (shared.isObject()) return shared.asObj();
+        }
+        return symbol_namespace.asObj();
     }
 
     /// Allocate a fresh plain object. The single creation point so later tiers
@@ -9813,6 +9833,18 @@ pub const Interpreter = struct {
         // `keyOf` when it was used as a property key); other keys are strings.
         if (value.isSymbolKey(key)) {
             if (self.symbols.get(key)) |sym| return Value.obj(sym);
+            // Context embedding calls create short-lived Interpreter values.
+            // Recover Symbols used by a previous call from a reflection-hidden
+            // registry on the realm-rooted Symbol intrinsic.
+            if (self.symbolIdentityRegistry()) |symbol_registry| {
+                const storage_key = try self.symbolRegistryStorageKey(key);
+                if (symbol_registry.getOwn(storage_key)) |registered| {
+                    if (registered.isObject() and registered.asObj().is_symbol) {
+                        self.symbols.put(self.arena, key, registered.asObj()) catch {};
+                        return registered;
+                    }
+                }
+            }
             // Fallback: a well-known symbol (Symbol.iterator / toStringTag / …)
             // whose key wasn't registered via `keyOf` this evaluation — find the
             // canonical Symbol object on the global `Symbol` so identity holds

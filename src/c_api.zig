@@ -49,6 +49,14 @@ const Object = value.Object;
 const EncodedValue = private_encoded_value.EncodedValue;
 const PrivatePromiseWrapCallback = *const fn (*anyopaque, JSContextRef) callconv(.c) EncodedValue;
 const PrivateMicrotaskCallback = *const fn (?*anyopaque) callconv(.c) void;
+const PrivateForEachPropertyCallback = *const fn (
+    JSContextRef,
+    ?*anyopaque,
+    *PrivateZigString,
+    EncodedValue,
+    bool,
+    bool,
+) callconv(.c) void;
 
 const PrivateCommonAbortReason = enum(u8) {
     timeout = 1,
@@ -2367,6 +2375,8 @@ fn privateBigIntComparisonResult(order: std.math.Order) u8 {
 fn privateObjectJSType(object: *Object) private_jstype.Kind {
     if (object.is_symbol) return .Symbol;
     if (object.is_bigint) return .HeapBigInt;
+    if (object.getterSetterCellData()) |cell|
+        return if (cell.isCustom()) .CustomGetterSetter else .GetterSetter;
     if (object.behavior.is_error) return .ErrorInstance;
     if (object.arrayBuffer() != null) return .ArrayBuffer;
     if (object.typedArray()) |typed_array| return switch (typed_array.kind) {
@@ -2423,6 +2433,47 @@ fn privateJSType(encoded: EncodedValue) u8 {
 export fn JSC__JSValue__eqlCell(encoded: EncodedValue, cell: ?*anyopaque) callconv(.c) bool {
     const address = encoded.asCellAddress() catch return false;
     return cell != null and address == @intFromPtr(cell.?);
+}
+
+fn privateGetterSetterCellFromBox(cell: ?*anyopaque, custom: bool) ?value.GetterSetterCellData {
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    const data = boxed.value.asObj().getterSetterCellData() orelse return null;
+    return if (data.isCustom() == custom) data else null;
+}
+
+export fn JSC__JSValue__isGetterSetter(encoded: EncodedValue) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return false;
+    const data = boxed.value.asObj().getterSetterCellData() orelse return false;
+    return !data.isCustom();
+}
+
+export fn JSC__JSValue__isCustomGetterSetter(encoded: EncodedValue) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return false;
+    const data = boxed.value.asObj().getterSetterCellData() orelse return false;
+    return data.isCustom();
+}
+
+export fn JSC__GetterSetter__isGetterNull(cell: ?*anyopaque) callconv(.c) bool {
+    const data = privateGetterSetterCellFromBox(cell, false) orelse return true;
+    return data.getterValue() == null;
+}
+
+export fn JSC__GetterSetter__isSetterNull(cell: ?*anyopaque) callconv(.c) bool {
+    const data = privateGetterSetterCellFromBox(cell, false) orelse return true;
+    return data.setterValue() == null;
+}
+
+export fn JSC__CustomGetterSetter__isGetterNull(cell: ?*anyopaque) callconv(.c) bool {
+    const data = privateGetterSetterCellFromBox(cell, true) orelse return true;
+    return data.customGetter() == null;
+}
+
+export fn JSC__CustomGetterSetter__isSetterNull(cell: ?*anyopaque) callconv(.c) bool {
+    const data = privateGetterSetterCellFromBox(cell, true) orelse return true;
+    return data.customSetter() == null;
 }
 
 export fn JSC__JSValue__eqlValue(left: EncodedValue, right: EncodedValue) callconv(.c) bool {
@@ -5129,6 +5180,223 @@ export fn JSC__JSValue__symbolKeyFor(
     return true;
 }
 
+const PrivateCustomAccessor = struct {
+    data: value.GetterSetterCellData,
+    enumerable: bool,
+};
+
+fn privateCustomAccessor(object: *Object, key: []const u8) ?PrivateCustomAccessor {
+    // Own ordinary data/accessor properties win before embedding class hooks.
+    if (object.getOwn(key) != null or object.getAccessor(key) != null) return null;
+    var class = classForObject(object);
+    while (class) |item| : (class = item.parent) {
+        for (item.static_values) |entry| {
+            const name = entry.name orelse continue;
+            if (!std.mem.eql(u8, std.mem.span(name), key)) continue;
+            return .{
+                .data = .native(
+                    if (entry.get_property) |callback| @ptrCast(callback) else null,
+                    if (entry.set_property) |callback| @ptrCast(callback) else null,
+                ),
+                .enumerable = (entry.attributes & kJSPropertyAttributeDontEnum) == 0,
+            };
+        }
+        if (item.definition.get_property != null or item.definition.set_property != null) {
+            return .{
+                .data = .native(
+                    if (item.definition.get_property) |callback| @ptrCast(callback) else null,
+                    if (item.definition.set_property) |callback| @ptrCast(callback) else null,
+                ),
+                .enumerable = true,
+            };
+        }
+    }
+    return null;
+}
+
+fn privateCreateGetterSetterCell(
+    machine: *interp.Interpreter,
+    data: value.GetterSetterCellData,
+) std.mem.Allocator.Error!*Object {
+    const object = try gc_mod.allocObj(machine.arena);
+    object.setGetterSetterCellData(data);
+    return object;
+}
+
+fn privateCustomGetterSetterCell(
+    machine: *interp.Interpreter,
+    owner: *Object,
+    key: []const u8,
+    data: value.GetterSetterCellData,
+) std.mem.Allocator.Error!*Object {
+    if (owner.customAccessorDescriptorCell(key)) |existing| return existing;
+    const candidate = try privateCreateGetterSetterCell(machine, data);
+    return owner.installCustomAccessorDescriptorCell(key, candidate);
+}
+
+fn privateOrdinaryGetterSetterCell(
+    machine: *interp.Interpreter,
+    owner: *Object,
+    key: []const u8,
+    initial: value.Accessor,
+) std.mem.Allocator.Error!?*Object {
+    var accessor = initial;
+    var attempts: u8 = 0;
+    while (attempts < 3) : (attempts += 1) {
+        if (accessor.descriptor_cell) |existing| return existing;
+        const candidate = try privateCreateGetterSetterCell(machine, .ordinary(accessor.get, accessor.set));
+        if (owner.installAccessorDescriptorCell(key, accessor.get, accessor.set, candidate)) |canonical|
+            return canonical;
+        accessor = owner.getAccessor(key) orelse return null;
+    }
+    return null;
+}
+
+fn privateTraversalKeyBytes(machine: *interp.Interpreter, key: []const u8) []const u8 {
+    if (!value.isRealSymbolKey(key)) return key;
+    const symbol = machine.keyToValue(key) catch return "";
+    if (!symbol.isObject() or !symbol.asObj().is_symbol) return "";
+    return symbol.asObj().symbolDescription() orelse "";
+}
+
+/// Traverse the starting value's own, non-index properties using JSC's private
+/// PropertySlot contract. Ordinary accessors are returned as internal
+/// GetterSetter cells and never invoked; embedding callbacks are represented by
+/// CustomGetterSetter cells. Property-read exceptions are deliberately cleared
+/// to match the pinned upstream helper, while exceptions published by the host
+/// callback stop traversal immediately.
+export fn JSC__JSValue__forEachPropertyNonIndexed(
+    encoded: EncodedValue,
+    global: JSContextRef,
+    callback_context: ?*anyopaque,
+    callback: ?PrivateForEachPropertyCallback,
+) callconv(.c) void {
+    const visit = callback orelse return;
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const target = privateValueFrom(global, encoded) orelse return;
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint or
+        target.asObj().getterSetterCellData() != null) return;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const target_address: ?usize = encoded.asCellAddress() catch null;
+    const target_ref: JSValueRef = if (target_address) |address| @ptrFromInt(address) else null;
+    const target_protected = target_ref != null and valueProtect(global, target_ref);
+    if (context.gc != null and !target_protected) {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return;
+    }
+    defer {
+        if (target_protected) _ = valueUnprotect(global, target_ref);
+    }
+
+    const keys = machine.objectOwnKeysList(target.asObj()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    const to_string_tag = interp.objectToStringTagKey(&machine);
+    for (keys) |key| {
+        if (value.canonicalIndex(key) != null or value.isPrivateKey(key)) continue;
+        if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
+        if (std.mem.eql(u8, key, "length") or std.mem.eql(u8, key, "constructor")) continue;
+        if (seen.contains(key)) continue;
+        seen.put(machine.arena, key, {}) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+
+        var enumerable = true;
+        var result = Value.undef();
+        if (target.asObj().getAccessor(key)) |accessor| {
+            enumerable = target.asObj().getAttr(key).enumerable;
+            const cell = privateOrdinaryGetterSetterCell(&machine, target.asObj(), key, accessor) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return;
+            } orelse continue;
+            result = Value.obj(cell);
+        } else if (privateCustomAccessor(target.asObj(), key)) |custom| {
+            enumerable = custom.enumerable;
+            const cell = privateCustomGetterSetterCell(&machine, target.asObj(), key, custom.data) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return;
+            };
+            result = Value.obj(cell);
+        } else if (target.asObj().proxyHandler() != null or target.asObj().proxy_revoked) proxy: {
+            const descriptor = builtins.objectGetOwnPropertyDescriptor(
+                @ptrCast(&machine),
+                Value.undef(),
+                &.{ target, machine.keyToValue(key) catch |err| {
+                    privateSetPendingAbrupt(context, &machine, err);
+                    return;
+                } },
+            ) catch {
+                machine.exception = Value.undef();
+                result = Value.undef();
+                break :proxy;
+            };
+            if (!descriptor.isObject()) continue;
+            const descriptor_object = descriptor.asObj();
+            enumerable = if (descriptor_object.getOwn("enumerable")) |flag| flag.toBoolean() else false;
+            const getter = descriptor_object.getOwn("get");
+            const setter = descriptor_object.getOwn("set");
+            if (getter != null or setter != null) {
+                const cell = privateCreateGetterSetterCell(&machine, .ordinary(getter, setter)) catch |err| {
+                    privateSetPendingAbrupt(context, &machine, err);
+                    return;
+                };
+                result = Value.obj(cell);
+            } else {
+                result = machine.getProperty(target, key) catch {
+                    machine.exception = Value.undef();
+                    break :proxy;
+                };
+            }
+        } else {
+            enumerable = target.asObj().getAttr(key).enumerable;
+            result = machine.getProperty(target, key) catch value_error: {
+                machine.exception = Value.undef();
+                break :value_error Value.undef();
+            };
+        }
+
+        if (!enumerable and (std.mem.eql(u8, key, "__proto__") or
+            std.mem.eql(u8, key, "__esModule") or
+            (to_string_tag != null and std.mem.eql(u8, key, to_string_tag.?)))) continue;
+
+        const result_encoded = privateEncodeResult(context, &machine, result);
+        if (result_encoded == .empty) return;
+        const result_address: ?usize = result_encoded.asCellAddress() catch null;
+        const result_ref: JSValueRef = if (result_address) |address| @ptrFromInt(address) else null;
+        const result_protected = result_ref != null and valueProtect(global, result_ref);
+        if (context.gc != null and result_ref != null and !result_protected) {
+            privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+            return;
+        }
+        defer {
+            if (result_protected) _ = valueUnprotect(global, result_ref);
+        }
+
+        var zig_key = privateBorrowedZigStringView(group, privateTraversalKeyBytes(&machine, key)) catch |err| {
+            privatePublishBunStringError(context, err);
+            return;
+        };
+        visit(global, callback_context, &zig_key, result_encoded, value.isRealSymbolKey(key), false);
+        if (group.pending_exception != null) return;
+    }
+}
+
 const PrivateDOMExceptionDescription = struct {
     name: []const u8,
     message: []const u8,
@@ -6587,7 +6855,7 @@ const PrivateDeepMapEntry = struct {
 fn privateDeepObject(input: Value) ?*Object {
     if (!input.isObject()) return null;
     const object = input.asObj();
-    if (object.is_symbol or object.is_bigint) return null;
+    if (object.is_symbol or object.is_bigint or object.getterSetterCellData() != null) return null;
     return object;
 }
 
@@ -11549,7 +11817,12 @@ export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: Excep
 export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const val = valueArgFrom(c, v, exception) orelse return null;
-    if (val.isObject() and !val.asObj().is_symbol and !val.asObj().is_bigint) return v;
+    if (val.isObject() and !val.asObj().is_symbol and !val.asObj().is_bigint and
+        val.asObj().getterSetterCellData() == null) return v;
+    if (val.isObject() and val.asObj().getterSetterCellData() != null) {
+        setException(c, exception, "TypeError");
+        return null;
+    }
     const gc_saved = gc_mod.setActiveHeap(c.gc);
     defer _ = gc_mod.setActiveHeap(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());

@@ -4,6 +4,53 @@ const JSContextRef = ?*anyopaque;
 const JSValueRef = ?*anyopaque;
 const JSObjectRef = ?*anyopaque;
 const JSStringRef = ?*anyopaque;
+const JSClassRef = ?*anyopaque;
+const ExceptionRef = [*c]JSValueRef;
+
+const JSObjectInitializeCallback = ?*const fn (JSContextRef, JSObjectRef) callconv(.c) void;
+const JSObjectFinalizeCallback = ?*const fn (JSObjectRef) callconv(.c) void;
+const JSObjectHasPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef) callconv(.c) bool;
+const JSObjectGetPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, ExceptionRef) callconv(.c) JSValueRef;
+const JSObjectSetPropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, JSValueRef, ExceptionRef) callconv(.c) bool;
+const JSObjectDeletePropertyCallback = ?*const fn (JSContextRef, JSObjectRef, JSStringRef, ExceptionRef) callconv(.c) bool;
+const JSObjectGetPropertyNamesCallback = ?*const fn (JSContextRef, JSObjectRef, ?*anyopaque) callconv(.c) void;
+const JSObjectCallAsFunctionCallback = ?*const fn (JSContextRef, JSObjectRef, JSObjectRef, usize, [*c]const JSValueRef, ExceptionRef) callconv(.c) JSValueRef;
+const JSObjectCallAsConstructorCallback = ?*const fn (JSContextRef, JSObjectRef, usize, [*c]const JSValueRef, ExceptionRef) callconv(.c) JSObjectRef;
+const JSObjectHasInstanceCallback = ?*const fn (JSContextRef, JSObjectRef, JSValueRef, ExceptionRef) callconv(.c) bool;
+const JSObjectConvertToTypeCallback = ?*const fn (JSContextRef, JSObjectRef, c_uint, ExceptionRef) callconv(.c) JSValueRef;
+
+const JSStaticValue = extern struct {
+    name: ?[*:0]const u8 = null,
+    get_property: JSObjectGetPropertyCallback = null,
+    set_property: JSObjectSetPropertyCallback = null,
+    attributes: c_uint = 0,
+};
+
+const JSStaticFunction = extern struct {
+    name: ?[*:0]const u8 = null,
+    call_as_function: JSObjectCallAsFunctionCallback = null,
+    attributes: c_uint = 0,
+};
+
+const JSClassDefinition = extern struct {
+    version: c_int = 0,
+    attributes: c_uint = 0,
+    class_name: ?[*:0]const u8 = null,
+    parent_class: JSClassRef = null,
+    static_values: [*c]const JSStaticValue = null,
+    static_functions: [*c]const JSStaticFunction = null,
+    initialize: JSObjectInitializeCallback = null,
+    finalize: JSObjectFinalizeCallback = null,
+    has_property: JSObjectHasPropertyCallback = null,
+    get_property: JSObjectGetPropertyCallback = null,
+    set_property: JSObjectSetPropertyCallback = null,
+    delete_property: JSObjectDeletePropertyCallback = null,
+    get_property_names: JSObjectGetPropertyNamesCallback = null,
+    call_as_function: JSObjectCallAsFunctionCallback = null,
+    call_as_constructor: JSObjectCallAsConstructorCallback = null,
+    has_instance: JSObjectHasInstanceCallback = null,
+    convert_to_type: JSObjectConvertToTypeCallback = null,
+};
 
 extern "c" fn tmpfile() ?*std.c.FILE;
 extern "c" fn fileno(*std.c.FILE) c_int;
@@ -76,6 +123,7 @@ const WTFStringImpl = extern struct {
 
 const ZigString = extern struct { tagged_ptr: usize, len: usize };
 const IterableCallback = *const fn (?*anyopaque, JSContextRef, ?*anyopaque, EncodedValue) callconv(.c) void;
+const PropertyCallback = *const fn (JSContextRef, ?*anyopaque, *ZigString, EncodedValue, bool, bool) callconv(.c) void;
 
 const BunStringImpl = extern union {
     zig_string: ZigString,
@@ -230,6 +278,8 @@ extern "c" fn JSValueToNumber(JSContextRef, JSValueRef, [*c]JSValueRef) f64;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
 extern "c" fn JSStringRelease(JSStringRef) void;
 extern "c" fn JSObjectMake(JSContextRef, ?*anyopaque, ?*anyopaque) JSObjectRef;
+extern "c" fn JSClassCreate(?*const JSClassDefinition) JSClassRef;
+extern "c" fn JSClassRelease(JSClassRef) void;
 extern "c" fn JSObjectGetPrototype(JSContextRef, JSObjectRef) JSValueRef;
 extern "c" fn JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef) void;
 extern "c" fn JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef, [*c]JSValueRef) JSValueRef;
@@ -349,6 +399,14 @@ extern "c" fn Bun__JSObject__getCodePropertyVMInquiry(JSContextRef, ?*anyopaque)
 extern "c" fn JSC__JSValue__symbolFor(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn JSC__JSValue__symbolKeyFor(EncodedValue, JSContextRef, *ZigString) bool;
 extern "c" fn JSC__JSValue__getSymbolDescription(EncodedValue, JSContextRef, *ZigString) void;
+extern "c" fn JSC__JSValue__forEachPropertyNonIndexed(EncodedValue, JSContextRef, ?*anyopaque, ?PropertyCallback) void;
+extern "c" fn JSC__JSValue__isGetterSetter(EncodedValue) bool;
+extern "c" fn JSC__JSValue__isCustomGetterSetter(EncodedValue) bool;
+extern "c" fn JSC__JSValue__jsType(EncodedValue) u8;
+extern "c" fn JSC__GetterSetter__isGetterNull(?*anyopaque) bool;
+extern "c" fn JSC__GetterSetter__isSetterNull(?*anyopaque) bool;
+extern "c" fn JSC__CustomGetterSetter__isGetterNull(?*anyopaque) bool;
+extern "c" fn JSC__CustomGetterSetter__isSetterNull(?*anyopaque) bool;
 extern "c" fn JSC__JSValue__asString(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSFunction__getSourceCode(EncodedValue, *ZigString) bool;
 extern "c" fn JSC__JSFunction__optimizeSoon(EncodedValue) void;
@@ -559,6 +617,97 @@ const IterableFixtureState = struct {
     values: [2]EncodedValue = @splat(.empty),
     calls: usize = 0,
 };
+
+const PropertyFixtureEntry = struct {
+    name: [32]u8 = @splat(0),
+    name_len: usize = 0,
+    value: EncodedValue = .empty,
+    is_symbol: bool = false,
+};
+
+const PropertyFixtureState = struct {
+    global: JSContextRef,
+    vm: ?*anyopaque,
+    entries: [16]PropertyFixtureEntry = @splat(.{}),
+    calls: usize = 0,
+    run_gc: bool = false,
+    reenter: bool = false,
+    throw_at: ?usize = null,
+};
+
+fn copyPropertyKey(key: ZigString, output: *[32]u8) usize {
+    const utf16 = (key.tagged_ptr & (@as(usize, 1) << 63)) != 0;
+    const pointer = key.tagged_ptr & ~(@as(usize, 1) << 63);
+    if (key.len > output.len) fail("private property traversal key exceeded fixture capacity");
+    if (utf16) {
+        const units: [*]const u16 = @ptrFromInt(pointer);
+        for (units[0..key.len], output[0..key.len]) |unit, *byte| {
+            if (unit > 0x7f) fail("private property traversal fixture expected ASCII key");
+            byte.* = @intCast(unit);
+        }
+    } else if (key.len > 0) {
+        const bytes: [*]const u8 = @ptrFromInt(pointer);
+        @memcpy(output[0..key.len], bytes[0..key.len]);
+    }
+    return key.len;
+}
+
+fn propertyFixtureCallback(
+    global: JSContextRef,
+    raw_state: ?*anyopaque,
+    key: *ZigString,
+    property_value: EncodedValue,
+    is_symbol: bool,
+    is_private_symbol: bool,
+) callconv(.c) void {
+    const state: *PropertyFixtureState = @ptrCast(@alignCast(raw_state.?));
+    if (global != state.global or is_private_symbol or state.calls >= state.entries.len)
+        fail("private property traversal callback metadata mismatch");
+    const index = state.calls;
+    state.entries[index].name_len = copyPropertyKey(key.*, &state.entries[index].name);
+    state.entries[index].value = property_value;
+    state.entries[index].is_symbol = is_symbol;
+    state.calls += 1;
+    if (state.run_gc) {
+        state.run_gc = false;
+        _ = JSC__VM__runGC(state.vm, true);
+    }
+    if (state.reenter) {
+        state.reenter = false;
+        if (!JSC__JSValue__isStrictEqual(evaluate(global, "__private_property_258.data + 1"), EncodedValue.fromInt32(259), global))
+            fail("private property traversal reentry mismatch");
+    }
+    if (state.throw_at != null and state.throw_at.? == index)
+        JSC__VM__throwError(state.vm, global, EncodedValue.fromInt32(2581));
+}
+
+fn propertyEntryName(entry: *const PropertyFixtureEntry) []const u8 {
+    return entry.name[0..entry.name_len];
+}
+
+var custom_property_get_calls: usize = 0;
+var custom_property_set_calls: usize = 0;
+
+fn customPropertyGetter(
+    _: JSContextRef,
+    _: JSObjectRef,
+    _: JSStringRef,
+    _: ExceptionRef,
+) callconv(.c) JSValueRef {
+    custom_property_get_calls += 1;
+    return null;
+}
+
+fn customPropertySetter(
+    _: JSContextRef,
+    _: JSObjectRef,
+    _: JSStringRef,
+    _: JSValueRef,
+    _: ExceptionRef,
+) callconv(.c) bool {
+    custom_property_set_calls += 1;
+    return true;
+}
 
 fn iterableFixtureCallback(vm: ?*anyopaque, global: JSContextRef, raw: ?*anyopaque, item: EncodedValue) callconv(.c) void {
     const state: *IterableFixtureState = @ptrCast(@alignCast(raw.?));
@@ -3274,6 +3423,162 @@ pub fn main() void {
         symbol_output.tagged_ptr != untouched_symbol_output.tagged_ptr or symbol_output.len != untouched_symbol_output.len)
         fail("private Symbol bridges replaced pending exception or modified output");
 
+    const property_target = evaluate(context,
+        \\globalThis.__private_property_258_hits = 0;
+        \\globalThis.__private_property_258_symbol = Symbol('symbol258');
+        \\globalThis.__private_property_258 = {};
+        \\Object.defineProperty(__private_property_258, '2', { value: 2, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'data', { value: 258, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'hidden', { value: 259, enumerable: false, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'getOnly', { get() { __private_property_258_hits++; return 260; }, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'setOnly', { set(v) { __private_property_258_hits += v; }, enumerable: false, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'both', { get() { __private_property_258_hits++; return 261; }, set(v) { __private_property_258_hits += v; }, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'neither', { get: undefined, set: undefined, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, '__proto__', { value: 1, enumerable: false, configurable: true });
+        \\Object.defineProperty(__private_property_258, '__esModule', { value: true, enumerable: false, configurable: true });
+        \\Object.defineProperty(__private_property_258, Symbol.toStringTag, { value: 'Filtered', enumerable: false, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'constructor', { value: 1, enumerable: true, configurable: true });
+        \\Object.defineProperty(__private_property_258, 'length', { value: 1, enumerable: true, configurable: true });
+        \\__private_property_258[__private_property_258_symbol] = 262;
+        \\__private_property_258;
+    );
+    var property_state = PropertyFixtureState{
+        .global = context,
+        .vm = vm,
+        .run_gc = true,
+        .reenter = true,
+    };
+    JSC__JSValue__forEachPropertyNonIndexed(property_target, context, &property_state, propertyFixtureCallback);
+    const expected_property_names = [_][]const u8{ "data", "hidden", "getOnly", "setOnly", "both", "neither", "symbol258" };
+    if (property_state.calls != expected_property_names.len or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_property_258_hits === 0")))
+        fail("private property traversal count/filter/getter-purity mismatch");
+    for (expected_property_names, property_state.entries[0..property_state.calls], 0..) |expected, *entry, index| {
+        if (!std.mem.eql(u8, propertyEntryName(entry), expected) or entry.is_symbol != (index == expected_property_names.len - 1))
+            fail("private property traversal key order/flags mismatch");
+    }
+    if (!JSC__JSValue__isStrictEqual(property_state.entries[0].value, EncodedValue.fromInt32(258), context) or
+        !JSC__JSValue__isStrictEqual(property_state.entries[1].value, EncodedValue.fromInt32(259), context) or
+        !JSC__JSValue__isStrictEqual(property_state.entries[6].value, EncodedValue.fromInt32(262), context))
+        fail("private property traversal data value mismatch");
+    const getter_cells = property_state.entries[2..6];
+    for (getter_cells) |entry| {
+        if (!JSC__JSValue__isGetterSetter(entry.value) or JSC__JSValue__isCustomGetterSetter(entry.value) or
+            JSC__JSValue__jsType(entry.value) != 7)
+            fail("private property traversal GetterSetter classification mismatch");
+    }
+    if (JSC__GetterSetter__isGetterNull(getter_cells[0].value.cellPointer()) or
+        !JSC__GetterSetter__isSetterNull(getter_cells[0].value.cellPointer()) or
+        !JSC__GetterSetter__isGetterNull(getter_cells[1].value.cellPointer()) or
+        JSC__GetterSetter__isSetterNull(getter_cells[1].value.cellPointer()) or
+        JSC__GetterSetter__isGetterNull(getter_cells[2].value.cellPointer()) or
+        JSC__GetterSetter__isSetterNull(getter_cells[2].value.cellPointer()) or
+        !JSC__GetterSetter__isGetterNull(getter_cells[3].value.cellPointer()) or
+        !JSC__GetterSetter__isSetterNull(getter_cells[3].value.cellPointer()))
+        fail("private property traversal GetterSetter null-slot mismatch");
+    if (!JSC__CustomGetterSetter__isGetterNull(getter_cells[0].value.cellPointer()) or
+        !JSC__CustomGetterSetter__isSetterNull(getter_cells[0].value.cellPointer()))
+        fail("private property traversal wrong-kind custom null safety mismatch");
+
+    var property_repeat = PropertyFixtureState{ .global = sibling_context, .vm = vm };
+    JSC__JSValue__forEachPropertyNonIndexed(property_target, sibling_context, &property_repeat, propertyFixtureCallback);
+    if (property_repeat.calls != property_state.calls) fail("private property traversal sibling count mismatch");
+    for (expected_property_names, property_repeat.entries[0..property_repeat.calls], 0..) |expected, *entry, index| {
+        if (!std.mem.eql(u8, propertyEntryName(entry), expected) or entry.is_symbol != (index == expected_property_names.len - 1))
+            fail("private property traversal sibling Symbol recovery mismatch");
+    }
+    for (getter_cells, property_repeat.entries[2..6]) |first, second| {
+        if (!JSC__JSValue__isStrictEqual(first.value, second.value, sibling_context))
+            fail("private property traversal stable sibling descriptor identity mismatch");
+    }
+
+    var property_throw = PropertyFixtureState{ .global = context, .vm = vm, .throw_at = 1 };
+    JSC__JSValue__forEachPropertyNonIndexed(property_target, context, &property_throw, propertyFixtureCallback);
+    if (property_throw.calls != 2 or !JSGlobalObject__hasException(context))
+        fail("private property traversal callback exception stop mismatch");
+    const property_callback_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(property_callback_exception.cellPointer()) != EncodedValue.fromInt32(2581))
+        fail("private property traversal callback exception identity mismatch");
+
+    var property_blocked = PropertyFixtureState{ .global = context, .vm = vm };
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2582));
+    JSC__JSValue__forEachPropertyNonIndexed(property_target, context, &property_blocked, propertyFixtureCallback);
+    JSC__JSValue__forEachPropertyNonIndexed(evaluate(foreign_context, "({ foreign: 1 })"), context, &property_blocked, propertyFixtureCallback);
+    JSC__JSValue__forEachPropertyNonIndexed(EncodedValue.fromInt32(1), context, &property_blocked, propertyFixtureCallback);
+    const property_preserved_exception = JSGlobalObject__tryTakeException(context);
+    if (property_blocked.calls != 0 or
+        JSC__Exception__asJSValue(property_preserved_exception.cellPointer()) != EncodedValue.fromInt32(2582))
+        fail("private property traversal pending/foreign/primitive boundary mismatch");
+
+    const property_proxy = evaluate(context,
+        \\globalThis.__private_property_258_proxy_hits = 0;
+        \\globalThis.__private_property_258_proxy = new Proxy({}, {
+        \\  ownKeys() { return ['proxyData', 'proxyAccessor', 'proxyThrow']; },
+        \\  getOwnPropertyDescriptor(target, key) {
+        \\    if (key === 'proxyAccessor') return { get() { __private_property_258_proxy_hits += 100; return 302; }, set: undefined, enumerable: false, configurable: true };
+        \\    return { value: key === 'proxyData' ? 300 : 303, writable: true, enumerable: true, configurable: true };
+        \\  },
+        \\  get(target, key) {
+        \\    if (key === 'proxyThrow') throw 2583;
+        \\    __private_property_258_proxy_hits++;
+        \\    return 301;
+        \\  }
+        \\});
+        \\__private_property_258_proxy;
+    );
+    var proxy_property_state = PropertyFixtureState{ .global = context, .vm = vm };
+    JSC__JSValue__forEachPropertyNonIndexed(property_proxy, context, &proxy_property_state, propertyFixtureCallback);
+    if (proxy_property_state.calls != 3 or
+        !std.mem.eql(u8, propertyEntryName(&proxy_property_state.entries[0]), "proxyData") or
+        !std.mem.eql(u8, propertyEntryName(&proxy_property_state.entries[1]), "proxyAccessor") or
+        !std.mem.eql(u8, propertyEntryName(&proxy_property_state.entries[2]), "proxyThrow") or
+        !JSC__JSValue__isStrictEqual(proxy_property_state.entries[0].value, EncodedValue.fromInt32(301), context) or
+        !JSC__JSValue__isGetterSetter(proxy_property_state.entries[1].value) or
+        proxy_property_state.entries[2].value != .undefined or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_property_258_proxy_hits === 1")) or
+        JSGlobalObject__hasException(context))
+        fail("private property traversal Proxy descriptor/get-exception mismatch");
+
+    var throwing_keys_state = PropertyFixtureState{ .global = context, .vm = vm };
+    const throwing_keys = evaluate(context, "new Proxy({}, { ownKeys() { throw 2584; } })");
+    JSC__JSValue__forEachPropertyNonIndexed(throwing_keys, context, &throwing_keys_state, propertyFixtureCallback);
+    const throwing_keys_exception = JSGlobalObject__tryTakeException(context);
+    if (throwing_keys_state.calls != 0 or
+        JSC__Exception__asJSValue(throwing_keys_exception.cellPointer()) != EncodedValue.fromInt32(2584))
+        fail("private property traversal Proxy ownKeys exception mismatch");
+
+    const custom_values = [_]JSStaticValue{
+        .{ .name = "customGet", .get_property = customPropertyGetter },
+        .{ .name = "customSet", .set_property = customPropertySetter, .attributes = 1 << 2 },
+        .{},
+    };
+    var custom_definition = JSClassDefinition{ .static_values = &custom_values };
+    const custom_class = JSClassCreate(&custom_definition) orelse fail("private property traversal custom class creation failed");
+    defer JSClassRelease(custom_class);
+    const custom_object = JSObjectMake(context, custom_class, null) orelse fail("private property traversal custom object creation failed");
+    var custom_state = PropertyFixtureState{ .global = context, .vm = vm, .run_gc = true };
+    JSC__JSValue__forEachPropertyNonIndexed(EncodedValue.fromRef(custom_object), context, &custom_state, propertyFixtureCallback);
+    if (custom_state.calls != 2 or
+        !std.mem.eql(u8, propertyEntryName(&custom_state.entries[0]), "customGet") or
+        !std.mem.eql(u8, propertyEntryName(&custom_state.entries[1]), "customSet") or
+        custom_property_get_calls != 0 or custom_property_set_calls != 0)
+        fail("private property traversal custom accessor order/purity mismatch");
+    const custom_get = custom_state.entries[0].value;
+    const custom_set = custom_state.entries[1].value;
+    if (!JSC__JSValue__isCustomGetterSetter(custom_get) or !JSC__JSValue__isCustomGetterSetter(custom_set) or
+        JSC__JSValue__isGetterSetter(custom_get) or JSC__JSValue__jsType(custom_get) != 8 or
+        JSC__CustomGetterSetter__isGetterNull(custom_get.cellPointer()) or
+        !JSC__CustomGetterSetter__isSetterNull(custom_get.cellPointer()) or
+        !JSC__CustomGetterSetter__isGetterNull(custom_set.cellPointer()) or
+        JSC__CustomGetterSetter__isSetterNull(custom_set.cellPointer()))
+        fail("private property traversal CustomGetterSetter classification/null-slot mismatch");
+    var custom_repeat = PropertyFixtureState{ .global = sibling_context, .vm = vm };
+    JSC__JSValue__forEachPropertyNonIndexed(EncodedValue.fromRef(custom_object), sibling_context, &custom_repeat, propertyFixtureCallback);
+    if (custom_repeat.calls != 2 or
+        !JSC__JSValue__isStrictEqual(custom_get, custom_repeat.entries[0].value, sibling_context) or
+        !JSC__JSValue__isStrictEqual(custom_set, custom_repeat.entries[1].value, sibling_context))
+        fail("private property traversal stable custom sibling identity mismatch");
+
     const sibling_dom_exception = ZigString__toDOMExceptionInstance(&empty_zig_string, sibling_context, 16);
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
@@ -4690,5 +4995,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 263/263 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 270/270 symbols linked; runtime matrix passed\n", .{});
 }

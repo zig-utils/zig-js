@@ -671,14 +671,19 @@ pub const FinalizationRecord = struct {
 /// the instance's retained JSClassRef.
 pub const CApiObjectOwner = struct {
     finalized: std.atomic.Value(bool) = .init(false),
+    allocator: std.mem.Allocator,
     object_ref: ?*anyopaque = null,
     class_ref: ?*anyopaque,
     payload: ?*anyopaque = null,
     hooks: ?*const HostClassHooks = null,
+    custom_accessor_cells: std.StringHashMapUnmanaged(*Object) = .empty,
     finish_fn: *const fn (*CApiObjectOwner) void,
 
     pub fn finishOnce(self: *CApiObjectOwner) void {
         if (self.finalized.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            var keys = self.custom_accessor_cells.keyIterator();
+            while (keys.next()) |key| self.allocator.free(key.*);
+            self.custom_accessor_cells.deinit(self.allocator);
             self.finish_fn(self);
         }
     }
@@ -796,6 +801,53 @@ pub const ObjectRareState = union(ObjectRareTag) {
     regex: ObjectRegexState,
 };
 
+/// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
+/// Ordinary accessor cells retain JavaScript callable values; custom cells
+/// retain only native callback addresses. The latter are owned by the class or
+/// binding definition and use nullness only at this private ABI boundary.
+pub const GetterSetterCellData = struct {
+    first: u64 = 0,
+    second: u64 = 0,
+    custom: bool = false,
+
+    pub fn ordinary(getter: ?Value, setter: ?Value) GetterSetterCellData {
+        return .{
+            .first = if (getter) |entry| entry.bits else Value.undef().bits,
+            .second = if (setter) |entry| entry.bits else Value.undef().bits,
+        };
+    }
+
+    pub fn native(getter: ?*const anyopaque, setter: ?*const anyopaque) GetterSetterCellData {
+        return .{
+            .first = if (getter) |entry| @intFromPtr(entry) else 0,
+            .second = if (setter) |entry| @intFromPtr(entry) else 0,
+            .custom = true,
+        };
+    }
+
+    pub inline fn isCustom(self: GetterSetterCellData) bool {
+        return self.custom;
+    }
+
+    pub inline fn getterValue(self: GetterSetterCellData) ?Value {
+        if (self.isCustom() or self.first == Value.undef().bits) return null;
+        return .{ .bits = self.first };
+    }
+
+    pub inline fn setterValue(self: GetterSetterCellData) ?Value {
+        if (self.isCustom() or self.second == Value.undef().bits) return null;
+        return .{ .bits = self.second };
+    }
+
+    pub inline fn customGetter(self: GetterSetterCellData) ?*const anyopaque {
+        return if (self.isCustom() and self.first != 0) @ptrFromInt(@as(usize, @intCast(self.first))) else null;
+    }
+
+    pub inline fn customSetter(self: GetterSetterCellData) ?*const anyopaque {
+        return if (self.isCustom() and self.second != 0) @ptrFromInt(@as(usize, @intCast(self.second))) else null;
+    }
+};
+
 pub const ObjectColdState = struct {
     /// One-time publication tag for `rare`. Exotic state is initialized while
     /// `Object.backing_lock` is held, then this tag is released. Unlocked
@@ -829,7 +881,9 @@ pub const ObjectColdState = struct {
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     finalization_callback: Value = Value.undef(),
-    finalization_records: std.ArrayListUnmanaged(FinalizationRecord) = .empty,
+    /// FinalizationRegistry is uncommon, so keep its 24-byte list header behind
+    /// the backing flag instead of charging every cold object for it.
+    finalization_records: ?*std.ArrayListUnmanaged(FinalizationRecord) = null,
     pub inline fn hasRare(self: *const ObjectColdState, tag: ObjectRareTag) bool {
         return @constCast(&self.rare_tag).load(.acquire) == tag;
     }
@@ -903,7 +957,9 @@ pub const ObjectBehaviorFlags = packed struct(u16) {
     is_weak_ref: bool = false,
     is_finalization_registry: bool = false,
     is_shadow_realm: bool = false,
-    _padding: u6 = 0,
+    is_getter_setter: bool = false,
+    is_custom_getter_setter: bool = false,
+    _padding: u4 = 0,
 };
 
 pub const ObjectPrivateDataTag = enum(u8) {
@@ -1410,6 +1466,8 @@ pub const Object = struct {
         arg_map_env: ?*anyopaque,
         typed_array: ?*TypedArrayData,
         data_view: ?*DataViewData,
+        getter_setter_getter: ?Value,
+        getter_setter_setter: ?Value,
     };
 
     pub fn traceColdSnapshot(self: *Object, concurrent: bool) TraceColdSnapshot {
@@ -1432,7 +1490,26 @@ pub const Object = struct {
             .arg_map_env = if (cold) |state| state.arg_map_env else null,
             .typed_array = self.typedArray(),
             .data_view = self.dataView(),
+            .getter_setter_getter = if (self.getterSetterCellData()) |cell| cell.getterValue() else null,
+            .getter_setter_setter = if (self.getterSetterCellData()) |cell| cell.setterValue() else null,
         };
+    }
+
+    pub inline fn getterSetterCellData(self: *const Object) ?GetterSetterCellData {
+        if (!self.behavior.is_getter_setter) return null;
+        return .{
+            .first = self.inline_slots[0].bits,
+            .second = self.inline_slots[1].bits,
+            .custom = self.behavior.is_custom_getter_setter,
+        };
+    }
+
+    pub fn setGetterSetterCellData(self: *Object, data: GetterSetterCellData) void {
+        std.debug.assert(self.shape == null);
+        self.inline_slots[0] = .{ .bits = data.first };
+        self.inline_slots[1] = .{ .bits = data.second };
+        self.behavior.is_getter_setter = true;
+        self.behavior.is_custom_getter_setter = data.custom;
     }
 
     pub inline fn symbolKey(self: *const Object) []const u8 {
@@ -2405,7 +2482,21 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = try self.ensureCold(fallback);
-        try cold.finalization_records.append(try self.finalizationRecordsAllocator(fallback), record);
+        const allocator = try self.finalizationRecordsAllocator(fallback);
+        var created = false;
+        if (cold.finalization_records == null) {
+            const records = try allocator.create(std.ArrayListUnmanaged(FinalizationRecord));
+            records.* = .empty;
+            cold.finalization_records = records;
+            created = true;
+        }
+        const records = cold.finalization_records.?;
+        errdefer if (created) {
+            records.deinit(allocator);
+            allocator.destroy(records);
+            cold.finalization_records = null;
+        };
+        try records.append(allocator, record);
     }
 
     /// FinalizationRegistry `unregister`: remove every record whose token matches
@@ -2414,17 +2505,18 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = self.coldState() orelse return false;
+        const records = cold.finalization_records orelse return false;
         var removed = false;
         var write: usize = 0;
-        for (cold.finalization_records.items, 0..) |record, read| {
+        for (records.items, 0..) |record, read| {
             if (record.token == token) {
                 removed = true;
                 continue;
             }
-            if (write != read) cold.finalization_records.items[write] = record;
+            if (write != read) records.items[write] = record;
             write += 1;
         }
-        if (removed) cold.finalization_records.shrinkRetainingCapacity(write);
+        if (removed) records.shrinkRetainingCapacity(write);
         return removed;
     }
 
@@ -2435,10 +2527,11 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const cold = self.coldState() orelse return null;
+        const records = cold.finalization_records orelse return null;
         var i: usize = 0;
-        while (i < cold.finalization_records.items.len) : (i += 1) {
-            if (cold.finalization_records.items[i].ready)
-                return cold.finalization_records.orderedRemove(i);
+        while (i < records.items.len) : (i += 1) {
+            if (records.items[i].ready)
+                return records.orderedRemove(i);
         }
         return null;
     }
@@ -3015,6 +3108,56 @@ pub const Object = struct {
         return m.get(name);
     }
 
+    /// Publish a lazily allocated descriptor cell only if the accessor still
+    /// has the getter/setter snapshot used to build it. Repeated traversals then
+    /// observe JSC's stable GetterSetter cell identity.
+    pub fn installAccessorDescriptorCell(
+        self: *Object,
+        name: []const u8,
+        getter: ?Value,
+        setter: ?Value,
+        candidate: *Object,
+    ) ?*Object {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const accessors = self.accessorsMap() orelse return null;
+        const accessor = accessors.getPtr(name) orelse return null;
+        const same_optional = struct {
+            fn f(left: ?Value, right: ?Value) bool {
+                if (left == null or right == null) return left == null and right == null;
+                return left.?.bits == right.?.bits;
+            }
+        }.f;
+        if (!same_optional(accessor.get, getter) or !same_optional(accessor.set, setter)) return null;
+        if (accessor.descriptor_cell) |existing| return existing;
+        gcBarrier(self, Value.obj(candidate));
+        accessor.descriptor_cell = candidate;
+        return candidate;
+    }
+
+    pub fn customAccessorDescriptorCell(self: *const Object, name: []const u8) ?*Object {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const owner = self.cApiObjectOwner() orelse return null;
+        return owner.custom_accessor_cells.get(name);
+    }
+
+    pub fn installCustomAccessorDescriptorCell(
+        self: *Object,
+        name: []const u8,
+        candidate: *Object,
+    ) std.mem.Allocator.Error!*Object {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const owner = self.cApiObjectOwner() orelse return error.OutOfMemory;
+        if (owner.custom_accessor_cells.get(name)) |existing| return existing;
+        const owned_name = try owner.allocator.dupe(u8, name);
+        errdefer owner.allocator.free(owned_name);
+        gcBarrier(self, Value.obj(candidate));
+        try owner.custom_accessor_cells.put(owner.allocator, owned_name, candidate);
+        return candidate;
+    }
+
     /// Snapshot this object's own accessor keys (dup'd into `arena`) under
     /// `property_lock`. Callers that need to iterate accessor keys while also
     /// mutating the object (e.g. `seal`/`freeze`, which `setAttr` each key) must
@@ -3072,10 +3215,12 @@ pub const Object = struct {
         if (get) |g| {
             gcBarrier(self, g);
             value_ptr.get = g;
+            value_ptr.descriptor_cell = null;
         }
         if (set) |s| {
             gcBarrier(self, s);
             value_ptr.set = s;
+            value_ptr.descriptor_cell = null;
         }
     }
 
@@ -3306,8 +3451,14 @@ fn appendOwnedKey(
     };
 }
 
-/// An accessor property: getter and/or setter functions.
-pub const Accessor = struct { get: ?Value = null, set: ?Value = null };
+/// An accessor property: getter and/or setter functions. The private JSC ABI
+/// lazily caches the internal descriptor cell without affecting ordinary
+/// property reads.
+pub const Accessor = struct {
+    get: ?Value = null,
+    set: ?Value = null,
+    descriptor_cell: ?*Object = null,
+};
 
 /// A symbol's internal property-key encoding is a NUL-led string, which can't
 /// be produced by user code — so symbol-keyed properties never collide with
@@ -4341,7 +4492,6 @@ test "FinalizationRegistry unregister stable-compacts matching records" {
     const cold = try o.ensureCold(a);
     defer a.destroy(o.storageState().?);
     defer a.destroy(cold);
-    defer cold.finalization_records.deinit(a);
 
     var token_a: u8 = 1;
     var token_b: u8 = 2;
@@ -4352,21 +4502,24 @@ test "FinalizationRegistry unregister stable-compacts matching records" {
     var target4: u8 = 14;
     var target5: u8 = 15;
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target1), .held = Value.num(1), .token = @ptrCast(&token_a) });
+    const records = cold.finalization_records.?;
+    defer a.destroy(records);
+    defer records.deinit(a);
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target2), .held = Value.num(2), .token = @ptrCast(&token_b) });
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target3), .held = Value.num(3), .token = @ptrCast(&token_a) });
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target4), .held = Value.num(4), .token = @ptrCast(&token_c) });
     try o.finRecordAppend(a, .{ .target = @ptrCast(&target5), .held = Value.num(5), .token = @ptrCast(&token_a) });
 
     try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_a)));
-    try std.testing.expectEqual(@as(usize, 2), cold.finalization_records.items.len);
-    try std.testing.expectEqual(@as(f64, 2), cold.finalization_records.items[0].held.asNum());
-    try std.testing.expectEqual(@as(f64, 4), cold.finalization_records.items[1].held.asNum());
-    try std.testing.expectEqual(@intFromPtr(&token_b), @intFromPtr(cold.finalization_records.items[0].token.?));
-    try std.testing.expectEqual(@intFromPtr(&token_c), @intFromPtr(cold.finalization_records.items[1].token.?));
+    try std.testing.expectEqual(@as(usize, 2), records.items.len);
+    try std.testing.expectEqual(@as(f64, 2), records.items[0].held.asNum());
+    try std.testing.expectEqual(@as(f64, 4), records.items[1].held.asNum());
+    try std.testing.expectEqual(@intFromPtr(&token_b), @intFromPtr(records.items[0].token.?));
+    try std.testing.expectEqual(@intFromPtr(&token_c), @intFromPtr(records.items[1].token.?));
 
     var missing: u8 = 4;
     try std.testing.expect(!o.finRecordUnregister(@ptrCast(&missing)));
     try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_b)));
-    try std.testing.expectEqual(@as(usize, 1), cold.finalization_records.items.len);
-    try std.testing.expectEqual(@as(f64, 4), cold.finalization_records.items[0].held.asNum());
+    try std.testing.expectEqual(@as(usize, 1), records.items.len);
+    try std.testing.expectEqual(@as(f64, 4), records.items[0].held.asNum());
 }

@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 273,
-      "pending": 163
+      "implemented": 276,
+      "pending": 160
     }
   },
   "home_comparison": {
@@ -1161,10 +1161,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__GetterSetter__isGetterNull(this: *GetterSetter) bool;",
       "declaration_sha256": "647368e2a2974f757cfa3a591a70a8f01db2e563ece5f0995c0eac45b9a131e1",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__GetterSetter__isSetterNull",
@@ -1172,10 +1172,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__GetterSetter__isSetterNull(this: *GetterSetter) bool;",
       "declaration_sha256": "d26487e41b2eda804b7b79600a1201a411f39e418dfd69633ded187d4b819ba0",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSBigInt__fromJS",
@@ -1898,10 +1898,10 @@
       "line": 85,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__forEachPropertyNonIndexed(JSValue0: JSValue, arg1: *JSGlobalObject, arg2: ?*anyopaque, ArgFn3: ?*const fn (*JSGlobalObject, ?*anyopaque, *ZigString, JSValue, bool, bool) callconv(.c) void) void;",
       "declaration_sha256": "0275deb4534d70ee2d96ecff2d5d91830e7433d556c24d1c45450ad9c3ea9ce3",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__fromEntries",

@@ -3357,7 +3357,7 @@ pub const Context = struct {
     ) !*value.CApiObjectOwner {
         const owner = try self.gpa.create(value.CApiObjectOwner);
         errdefer self.gpa.destroy(owner);
-        owner.* = .{ .class_ref = class_ref, .finish_fn = finish_fn };
+        owner.* = .{ .allocator = self.gpa, .class_ref = class_ref, .finish_fn = finish_fn };
         try self.c_api_object_owners.append(self.gpa, owner);
         return owner;
     }

@@ -25,6 +25,13 @@ PRIVATE_SUPPORT_EXPORTS = {
     "Bun__WTFStringImpl__ref",
     "Bun__WTFStringImpl__deref",
     "Bun__WTFStringImpl__destroy",
+    # Generated bun.cpp adapters classify the exact internal descriptor cells;
+    # the consumer Zig inventories only declare the four methods on the casts.
+    "JSC__JSValue__isGetterSetter",
+    "JSC__JSValue__isCustomGetterSetter",
+    # Generated/native exception projection entry used beside the inventoried
+    # ZigException methods; it is absent from the consumer extern inventories.
+    "JSC__JSValue__toZigException",
 }
 INCLUDE = ROOT / "include/JavaScriptCore"
 SOURCE = ROOT / "src/c_api.zig"
