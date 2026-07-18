@@ -26,10 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 259
-private exports and 172 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 260
+private exports and 171 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
-The 259 cover JSC64 identity, cell equality,
+The 260 cover JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact
 JavaScript strict/SameValue equality across primitives and owned cells, plus
@@ -257,7 +257,11 @@ or directly settled native promises, downcast exact Promise cells, preserve
 result/reason identity, and implement the pinned callback wrappers.
 `JSPromise__wrap` passes Promise results through and rejects callback Errors or
 throws; `AnyPromise__wrap` performs normal settlement, including thenable
-assimilation and self-resolution rejection. The seven Home-only native Map
+assimilation and self-resolution rejection. `JSC__JSValue___then` registers a
+detached native reaction pair and invokes only the selected JSHostFn at the next
+Promise checkpoint with `(settlement value, retained context)` in an exact
+JSC64 CallFrame. FIFO order, GC roots, sibling-realm identity, reentry, callback
+throws, and the pending-exception boundary are covered. The seven Home-only native Map
 operations bypass mutable userland prototypes and preserve SameValueZero keys,
 exact identity, insertion order, live size, sibling values, and failure-atomic
 foreign-VM rejection. The shared FFI slow paths perform exact signed/unsigned

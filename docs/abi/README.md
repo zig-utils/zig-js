@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (259 implemented, 172 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (260 implemented, 171 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 250 private entries are implemented; the other 181 remain pending
+The first 260 private entries are implemented; the other 171 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -588,7 +588,13 @@ returned Errors or pending callback exceptions into rejections, whereas
 `AnyPromise__wrap` settles an existing Promise through normal resolution and
 therefore assimilates thenables and rejects self-resolution. Invalid or
 foreign-VM inputs fail safely, callback exceptions are cleared exactly once,
-and already-settled targets remain unchanged. The Home-only JSMap slice adds all
+and already-settled targets remain unchanged. `JSC__JSValue___then` adds the
+detached reaction bridge shared by Home and Bun: the selected JSHostFn runs
+asynchronously with exact `(settlement value, retained context)` JSC64
+arguments. The handlers and context remain precise roots across pending
+settlement and collection; sibling realms, FIFO/reentrant registration,
+callback throws, non-Promise no-ops, and first-exception preservation are
+covered. The Home-only JSMap slice adds all
 seven direct native operations. It creates selected-realm Map cells and bypasses
 mutable userland prototypes while preserving SameValueZero keys, exact stored
 identity, insertion/reinsertion order, live size, sibling values, foreign-VM
@@ -704,7 +710,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (253 implemented, 168 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (254 implemented, 167 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -721,5 +727,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 207
+not claim complete Bun runtime compatibility; #164 remains open for the 167
 pending core entries and later wider/generated profiles.
