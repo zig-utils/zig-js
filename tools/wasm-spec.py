@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -180,6 +181,250 @@ def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) 
         fail(f"missing evaluator at {engine}; run `zig build wasm-spec-eval`")
 
 
+@dataclass(frozen=True)
+class SExpr:
+    start: int
+    end: int
+    line: int
+    items: tuple["SExpr | str", ...]
+
+    @property
+    def head(self) -> str | None:
+        return self.items[0] if self.items and isinstance(self.items[0], str) else None
+
+
+class WastSyntaxError(ValueError):
+    pass
+
+
+def parse_wast_forms(source: str) -> list[SExpr]:
+    """Parse enough WAST S-expressions to isolate script thread directives.
+
+    Atoms remain strings; nested lists retain exact source spans and line
+    numbers. Strings, line comments, and nested block comments are skipped
+    without interpreting module syntax, which remains WABT's responsibility.
+    """
+
+    length = len(source)
+
+    def skip(index: int) -> int:
+        while index < length:
+            if source[index].isspace():
+                index += 1
+            elif source.startswith(";;", index):
+                newline = source.find("\n", index + 2)
+                index = length if newline < 0 else newline + 1
+            elif source.startswith("(;", index):
+                depth = 1
+                index += 2
+                while index < length and depth:
+                    if source.startswith("(;", index):
+                        depth += 1
+                        index += 2
+                    elif source.startswith(";)", index):
+                        depth -= 1
+                        index += 2
+                    elif source[index] == '"':
+                        index = string_end(index)
+                    else:
+                        index += 1
+                if depth:
+                    raise WastSyntaxError("unterminated block comment")
+            else:
+                break
+        return index
+
+    def string_end(index: int) -> int:
+        index += 1
+        while index < length:
+            if source[index] == "\\":
+                index += 2
+            elif source[index] == '"':
+                return index + 1
+            else:
+                index += 1
+        raise WastSyntaxError("unterminated string")
+
+    def expression(index: int) -> tuple[SExpr, int]:
+        if source[index] != "(":
+            raise WastSyntaxError("expected (")
+        start = index
+        line = source.count("\n", 0, start) + 1
+        index += 1
+        items: list[SExpr | str] = []
+        while True:
+            index = skip(index)
+            if index >= length:
+                raise WastSyntaxError(f"unterminated expression at line {line}")
+            if source[index] == ")":
+                return SExpr(start, index + 1, line, tuple(items)), index + 1
+            if source[index] == "(":
+                child, index = expression(index)
+                items.append(child)
+                continue
+            atom_start = index
+            if source[index] == '"':
+                index = string_end(index)
+            else:
+                while index < length and not source[index].isspace() and source[index] not in "()":
+                    index += 1
+            items.append(source[atom_start:index])
+
+    forms: list[SExpr] = []
+    index = 0
+    while True:
+        index = skip(index)
+        if index >= length:
+            return forms
+        if source[index] != "(":
+            raise WastSyntaxError(f"unexpected token at line {source.count(chr(10), 0, index) + 1}")
+        form, index = expression(index)
+        forms.append(form)
+
+
+def named_module(form: SExpr) -> str | None:
+    if form.head != "module" or len(form.items) < 2 or not isinstance(form.items[1], str):
+        return None
+    name = form.items[1]
+    return name if name.startswith("$") else None
+
+
+def thread_parts(form: SExpr) -> tuple[str, list[str], list[SExpr]]:
+    if form.head != "thread" or len(form.items) < 2 or not isinstance(form.items[1], str):
+        raise WastSyntaxError(f"malformed thread at line {form.line}")
+    name = form.items[1]
+    shared: list[str] = []
+    body: list[SExpr] = []
+    for item in form.items[2:]:
+        if not isinstance(item, SExpr):
+            raise WastSyntaxError(f"malformed thread item at line {form.line}")
+        if item.head == "shared":
+            if (
+                len(item.items) != 2
+                or not isinstance(item.items[1], SExpr)
+                or item.items[1].head != "module"
+                or len(item.items[1].items) != 2
+                or not isinstance(item.items[1].items[1], str)
+            ):
+                raise WastSyntaxError(f"malformed shared module at line {item.line}")
+            shared.append(item.items[1].items[1])
+        else:
+            body.append(item)
+    return name, shared, body
+
+
+def masked_scope_source(source: str, forms: list[SExpr]) -> str:
+    chars = ["\n" if char == "\n" else " " for char in source]
+    for form in forms:
+        if form.head not in ("thread", "wait"):
+            chars[form.start:form.end] = source[form.start:form.end]
+    return "".join(chars)
+
+
+def rewrite_binary_paths(document: dict, directory: Path) -> None:
+    for command in document.get("commands", []):
+        if "filename" in command:
+            command["filename"] = str((directory / command["filename"]).resolve())
+
+
+def compile_thread_scope(
+    source: str,
+    forms: list[SExpr],
+    inherited_modules: dict[str, str],
+    converter: Path,
+    converter_args: list[str],
+    directory: Path,
+    scope_id: list[int],
+) -> dict:
+    local_modules = dict(inherited_modules)
+    for form in forms:
+        if (name := named_module(form)) is not None:
+            local_modules[name] = source[form.start:form.end]
+
+    injected = list(inherited_modules.items())
+    prefix = "".join(module_source + "\n" for _, module_source in injected)
+    prefix_lines = prefix.count("\n")
+    scope_number = scope_id[0]
+    scope_id[0] += 1
+    scope_dir = directory / f"scope-{scope_number}"
+    scope_dir.mkdir(parents=True)
+    wast_path = scope_dir / "scope.wast"
+    json_path = scope_dir / "scope.json"
+    wast_path.write_text(prefix + masked_scope_source(source, forms))
+    converted = subprocess.run(
+        [str(converter), *converter_args, str(wast_path), "-o", str(json_path)],
+        text=True,
+        capture_output=True,
+    )
+    if converted.returncode != 0:
+        raise WastSyntaxError(converted.stderr.strip())
+    document = json.loads(json_path.read_text())
+    commands = document.get("commands", [])
+    if len(commands) < len(injected) or any(command.get("type") != "module" for command in commands[: len(injected)]):
+        raise WastSyntaxError("injected shared module prefix did not convert canonically")
+    commands = commands[len(injected) :]
+    for command in commands:
+        command["line"] = max(0, int(command.get("line", 0)) - prefix_lines)
+    document["commands"] = commands
+    rewrite_binary_paths(document, scope_dir)
+
+    specials: list[dict] = []
+    for ordinal, form in enumerate(forms):
+        if form.head == "thread":
+            name, shared_names, body = thread_parts(form)
+            missing = [shared_name for shared_name in shared_names if shared_name not in local_modules]
+            if missing:
+                raise WastSyntaxError(f"unknown shared module(s) at line {form.line}: {missing}")
+            nested_modules = {shared_name: local_modules[shared_name] for shared_name in shared_names}
+            nested = compile_thread_scope(
+                source,
+                body,
+                nested_modules,
+                converter,
+                converter_args,
+                directory,
+                scope_id,
+            )
+            specials.append({
+                "type": "thread",
+                "line": form.line,
+                "name": name,
+                "shared": shared_names,
+                "document": nested,
+                "_ordinal": ordinal,
+            })
+        elif form.head == "wait":
+            if len(form.items) != 2 or not isinstance(form.items[1], str):
+                raise WastSyntaxError(f"malformed wait at line {form.line}")
+            specials.append({
+                "type": "wait",
+                "line": form.line,
+                "name": form.items[1],
+                "_ordinal": ordinal,
+            })
+
+    merged = commands + specials
+    for ordinal, command in enumerate(merged):
+        command.setdefault("_ordinal", len(forms) + ordinal)
+    merged.sort(key=lambda command: (int(command.get("line", 0)), int(command["_ordinal"])))
+    for command in merged:
+        command.pop("_ordinal", None)
+    document["commands"] = merged
+    return document
+
+
+def compile_thread_script(source: str, converter: Path, converter_args: list[str], directory: Path) -> dict:
+    return compile_thread_scope(
+        source,
+        parse_wast_forms(source),
+        {},
+        converter,
+        converter_args,
+        directory,
+        [0],
+    )
+
+
 def js_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
@@ -292,6 +537,7 @@ PRELUDE = r"""
 const __report = { commands: [] };
 const __modules = Object.create(null);
 const __registry = Object.create(null);
+const __threads = Object.create(null);
 let __last = null;
 const __scratch = new ArrayBuffer(8);
 const __externrefs = new Map();
@@ -356,7 +602,7 @@ function __sameV128Bits(actual, laneType, expected) {
   }
   return true;
 }
-__registry.spectest = {
+const __spectest = {
   print() {}, print_i32() {}, print_i64() {}, print_f32() {}, print_f64() {},
   print_i32_f32() {}, print_f64_f64() {},
   global_i32: 666,
@@ -366,6 +612,7 @@ __registry.spectest = {
   table: new WebAssembly.Table({ initial: 10, maximum: 20, element: 'anyfunc' }),
   memory: new WebAssembly.Memory({ initial: 1, maximum: 2 }),
 };
+__registry.spectest = __spectest;
 """
 
 
@@ -405,6 +652,45 @@ def expected_exception(
 def generate_command(index: int, command: dict, directory: Path) -> str:
     kind = command["type"]
     try:
+        if kind == "thread":
+            shared = command.get("shared", [])
+            shared_values = ",".join(f"__modules[{js_string(name)}]" for name in shared)
+            shared_init = "".join(
+                f"__modules[{js_string(name)}]=__shared[{position}];"
+                for position, name in enumerate(shared)
+            )
+            body = generate_scope_body(command["document"], directory)
+            passed = record_line(index, command, "pass", mode="proposal_thread")
+            failed = (
+                f"__record({index},{int(command.get('line', 0))},{js_string(kind)},"
+                "'fail',__message(__error),'proposal_thread');"
+            )
+            return (
+                "{try{"
+                f"__threads[{js_string(command['name'])}]=new Thread((__shared)=>{{"
+                "const __report={commands:[]};const __modules=Object.create(null);"
+                "const __registry=Object.create(null);const __threads=Object.create(null);"
+                "let __last=null;__registry.spectest=__spectest;"
+                "function __record(index,line,type,status,detail,mode){"
+                "const entry={index,line,type,status,mode:mode||'javascript_api'};"
+                "if(detail)entry.detail=detail;__report.commands.push(entry);}"
+                f"{shared_init}{body}return __report.commands;}},[{shared_values}]);{passed}"
+                f"}}catch(__error){{{failed}}}}}"
+            )
+        if kind == "wait":
+            passed = record_line(index, command, "pass", mode="proposal_wait")
+            failed = (
+                f"__record({index},{int(command.get('line', 0))},{js_string(kind)},"
+                "'fail',__message(__error),'proposal_wait');"
+            )
+            return (
+                "{try{"
+                f"const __child=__threads[{js_string(command['name'])}];"
+                "if(!__child)throw new Error('unknown thread');"
+                "const __commands=__child.join();"
+                "for(const __command of __commands)__report.commands.push(__command);"
+                f"{passed}}}catch(__error){{{failed}}}}}"
+            )
         if kind == "module":
             binary = binary_expression(directory / command["filename"])
             name = command.get("name")
@@ -489,9 +775,17 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                     f"{js_string(kind)},'fail',__message(__error),'bit_exact');}}}}"
                 )
             expression = action_expression(command["action"])
-            expected = json.dumps(command.get("expected", []), separators=(",", ":"))
+            if "either" in command:
+                choices = command["either"]
+                comparison = "||".join(
+                    f"__same(__actual,{json.dumps([choice] if isinstance(choice, dict) else choice, separators=(',', ':'))})"
+                    for choice in choices
+                ) or "false"
+            else:
+                expected = json.dumps(command.get("expected", []), separators=(",", ":"))
+                comparison = f"__same(__actual,{expected})"
             return (
-                f"{{try{{const __actual={expression};if(__same(__actual,{expected})){{"
+                f"{{try{{const __actual={expression};if({comparison}){{"
                 f"{record_line(index, command, 'pass')}"
                 f"}}else{{{record_line(index, command, 'fail', 'result mismatch')}}}"
                 f"}}catch(__error){{__record({index},{int(command.get('line', 0))},"
@@ -548,10 +842,13 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
 
 
 def generate_script(document: dict, directory: Path) -> str:
-    lines = [PRELUDE]
+    return PRELUDE + "\n" + generate_scope_body(document, directory) + "\nJSON.stringify(__report);"
+
+
+def generate_scope_body(document: dict, directory: Path) -> str:
+    lines = []
     for index, command in enumerate(document["commands"]):
         lines.append(generate_command(index, command, directory))
-    lines.append("JSON.stringify(__report);")
     return "\n".join(lines)
 
 
@@ -569,26 +866,44 @@ def run_file(
     directory = work_root / stem
     directory.mkdir()
     json_path = directory / f"{stem}.json"
-    converted = subprocess.run(
-        [str(converter), *converter_args, str(wast), "-o", str(json_path)],
-        text=True,
-        capture_output=True,
-    )
-    if converted.returncode != 0:
-        detail = converted.stderr.strip()
-        return {
-            "path": wast.relative_to(spec_root).as_posix(),
-            "status": "conversion_failed",
-            "detail": detail,
-            "commands": [{
-                "index": 0,
-                "line": 0,
-                "type": "conversion",
-                "status": "runner_error",
+    if evaluator_profile == "threads" and ("(thread" in wast.read_text() or "(wait" in wast.read_text()):
+        try:
+            document = compile_thread_script(wast.read_text(), converter, converter_args, directory)
+        except WastSyntaxError as error:
+            detail = str(error)
+            return {
+                "path": wast.relative_to(spec_root).as_posix(),
+                "status": "conversion_failed",
                 "detail": detail,
-            }],
-        }
-    document = json.loads(json_path.read_text())
+                "commands": [{
+                    "index": 0,
+                    "line": 0,
+                    "type": "conversion",
+                    "status": "runner_error",
+                    "detail": detail,
+                }],
+            }
+    else:
+        converted = subprocess.run(
+            [str(converter), *converter_args, str(wast), "-o", str(json_path)],
+            text=True,
+            capture_output=True,
+        )
+        if converted.returncode != 0:
+            detail = converted.stderr.strip()
+            return {
+                "path": wast.relative_to(spec_root).as_posix(),
+                "status": "conversion_failed",
+                "detail": detail,
+                "commands": [{
+                    "index": 0,
+                    "line": 0,
+                    "type": "conversion",
+                    "status": "runner_error",
+                    "detail": detail,
+                }],
+            }
+        document = json.loads(json_path.read_text())
     script_path = directory / f"{stem}.js"
     script_path.write_text(generate_script(document, directory))
     try:
@@ -641,6 +956,8 @@ def run_file(
             for index, command in enumerate(document["commands"])
         ]
         return {"path": wast.relative_to(spec_root).as_posix(), "commands": commands}
+    for index, command in enumerate(report["commands"]):
+        command["index"] = index
     return {"path": wast.relative_to(spec_root).as_posix(), "commands": report["commands"]}
 
 

@@ -1,0 +1,4618 @@
+{
+  "converter": {
+    "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+    "repository": "https://github.com/WebAssembly/wabt.git",
+    "version": "1.0.39"
+  },
+  "engine_commit": "fd1e20eafea0589885404fd1189fc430a9f08769",
+  "features": [
+    "threads"
+  ],
+  "files": [
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 23,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 41,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 42,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/LB.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 23,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 41,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 42,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 65,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/LB_atomic.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 18,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 38,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 39,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 60,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/MP.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 18,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 38,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 39,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 62,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/MP_atomic.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 23,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 41,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 42,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/SB.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 23,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 41,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 42,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 65,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/SB_atomic.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 94,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 100,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 14,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 15,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 16,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 17,
+          "line": 111,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 18,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 19,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 20,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 21,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 22,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 23,
+          "line": 120,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 24,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 25,
+          "line": 123,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 26,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 27,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 28,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 29,
+          "line": 129,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 30,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 31,
+          "line": 134,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 32,
+          "line": 135,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 33,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 34,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 35,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 36,
+          "line": 141,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 37,
+          "line": 142,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 38,
+          "line": 143,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 39,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 40,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 41,
+          "line": 147,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 42,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 43,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 44,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 45,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 46,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 47,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 48,
+          "line": 157,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 49,
+          "line": 158,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 50,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 51,
+          "line": 163,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 52,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 53,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 54,
+          "line": 167,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 55,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 56,
+          "line": 169,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 57,
+          "line": 171,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 58,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 59,
+          "line": 173,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 60,
+          "line": 175,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 61,
+          "line": 176,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 62,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 63,
+          "line": 179,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 64,
+          "line": 180,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 65,
+          "line": 181,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 66,
+          "line": 183,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 67,
+          "line": 184,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 68,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 69,
+          "line": 187,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 70,
+          "line": 188,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 71,
+          "line": 189,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 72,
+          "line": 193,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 73,
+          "line": 194,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 74,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 75,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 76,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 77,
+          "line": 199,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 78,
+          "line": 201,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 79,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 80,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 81,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 82,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 83,
+          "line": 207,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 84,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 85,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 86,
+          "line": 211,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 87,
+          "line": 213,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 88,
+          "line": 214,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 89,
+          "line": 215,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 90,
+          "line": 217,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 91,
+          "line": 218,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 92,
+          "line": 219,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 93,
+          "line": 223,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 94,
+          "line": 224,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 95,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 96,
+          "line": 227,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 97,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 98,
+          "line": 229,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 99,
+          "line": 231,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 100,
+          "line": 232,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 101,
+          "line": 233,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 102,
+          "line": 235,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 103,
+          "line": 236,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 104,
+          "line": 237,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 105,
+          "line": 239,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 106,
+          "line": 240,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 107,
+          "line": 241,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 108,
+          "line": 243,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 109,
+          "line": 244,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 110,
+          "line": 245,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 111,
+          "line": 247,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 112,
+          "line": 248,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 113,
+          "line": 249,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 114,
+          "line": 253,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 115,
+          "line": 254,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 116,
+          "line": 255,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 117,
+          "line": 257,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 118,
+          "line": 258,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 119,
+          "line": 259,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 120,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 121,
+          "line": 262,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 122,
+          "line": 263,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 123,
+          "line": 265,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 124,
+          "line": 266,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 125,
+          "line": 267,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 126,
+          "line": 269,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 127,
+          "line": 270,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 128,
+          "line": 271,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 129,
+          "line": 273,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 130,
+          "line": 274,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 131,
+          "line": 275,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 132,
+          "line": 277,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 133,
+          "line": 278,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 134,
+          "line": 279,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 135,
+          "line": 283,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 136,
+          "line": 284,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 137,
+          "line": 285,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 138,
+          "line": 287,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 139,
+          "line": 288,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 140,
+          "line": 289,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 141,
+          "line": 291,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 142,
+          "line": 292,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 143,
+          "line": 293,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 144,
+          "line": 295,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 145,
+          "line": 296,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 146,
+          "line": 297,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 147,
+          "line": 299,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 148,
+          "line": 300,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 149,
+          "line": 301,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 150,
+          "line": 303,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 151,
+          "line": 304,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 152,
+          "line": 305,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 153,
+          "line": 307,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 154,
+          "line": 308,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 155,
+          "line": 309,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 156,
+          "line": 313,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 157,
+          "line": 314,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 158,
+          "line": 315,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 159,
+          "line": 317,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 160,
+          "line": 318,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 161,
+          "line": 319,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 162,
+          "line": 321,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 163,
+          "line": 322,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 164,
+          "line": 323,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 165,
+          "line": 325,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 166,
+          "line": 326,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 167,
+          "line": 327,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 168,
+          "line": 329,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 169,
+          "line": 330,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 170,
+          "line": 331,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 171,
+          "line": 333,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 172,
+          "line": 334,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 173,
+          "line": 335,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 174,
+          "line": 337,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 175,
+          "line": 338,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 176,
+          "line": 339,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 177,
+          "line": 341,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 178,
+          "line": 342,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 179,
+          "line": 343,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 180,
+          "line": 345,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 181,
+          "line": 346,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 182,
+          "line": 347,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 183,
+          "line": 349,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 184,
+          "line": 350,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 185,
+          "line": 351,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 186,
+          "line": 353,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 187,
+          "line": 354,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 188,
+          "line": 355,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 189,
+          "line": 357,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 190,
+          "line": 358,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 191,
+          "line": 359,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 192,
+          "line": 363,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 193,
+          "line": 364,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 194,
+          "line": 365,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 195,
+          "line": 367,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 196,
+          "line": 368,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 197,
+          "line": 369,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 198,
+          "line": 371,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 199,
+          "line": 372,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 200,
+          "line": 373,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 201,
+          "line": 375,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 202,
+          "line": 376,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 203,
+          "line": 377,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 204,
+          "line": 379,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 205,
+          "line": 380,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 206,
+          "line": 381,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 207,
+          "line": 383,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 208,
+          "line": 384,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 209,
+          "line": 385,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 210,
+          "line": 387,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 211,
+          "line": 388,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 212,
+          "line": 389,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 213,
+          "line": 394,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 214,
+          "line": 395,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 215,
+          "line": 396,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 216,
+          "line": 397,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 217,
+          "line": 398,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 218,
+          "line": 399,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 219,
+          "line": 400,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 220,
+          "line": 401,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 221,
+          "line": 402,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 222,
+          "line": 403,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 223,
+          "line": 404,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 224,
+          "line": 405,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 225,
+          "line": 406,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 226,
+          "line": 407,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 227,
+          "line": 408,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 228,
+          "line": 409,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 229,
+          "line": 410,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 230,
+          "line": 411,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 231,
+          "line": 412,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 232,
+          "line": 413,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 233,
+          "line": 414,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 234,
+          "line": 415,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 235,
+          "line": 416,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 236,
+          "line": 417,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 237,
+          "line": 418,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 238,
+          "line": 419,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 239,
+          "line": 420,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 240,
+          "line": 421,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 241,
+          "line": 422,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 242,
+          "line": 423,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 243,
+          "line": 424,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 244,
+          "line": 425,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 245,
+          "line": 426,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 246,
+          "line": 427,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 247,
+          "line": 428,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 248,
+          "line": 429,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 249,
+          "line": 430,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 250,
+          "line": 431,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 251,
+          "line": 432,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 252,
+          "line": 433,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 253,
+          "line": 434,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 254,
+          "line": 435,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 255,
+          "line": 436,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 256,
+          "line": 437,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 257,
+          "line": 438,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 258,
+          "line": 443,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 259,
+          "line": 452,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 260,
+          "line": 461,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 261,
+          "line": 470,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 262,
+          "line": 479,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 263,
+          "line": 488,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 264,
+          "line": 497,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 265,
+          "line": 506,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 266,
+          "line": 515,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 267,
+          "line": 524,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 268,
+          "line": 533,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 269,
+          "line": 542,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 270,
+          "line": 551,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 271,
+          "line": 560,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 272,
+          "line": 569,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 273,
+          "line": 578,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 274,
+          "line": 587,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 275,
+          "line": 596,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 276,
+          "line": 605,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 277,
+          "line": 614,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 278,
+          "line": 623,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 279,
+          "line": 632,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 280,
+          "line": 641,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 281,
+          "line": 650,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 282,
+          "line": 659,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 283,
+          "line": 668,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 284,
+          "line": 677,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 285,
+          "line": 686,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 286,
+          "line": 695,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 287,
+          "line": 704,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 288,
+          "line": 713,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 289,
+          "line": 722,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 290,
+          "line": 731,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 291,
+          "line": 740,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 292,
+          "line": 749,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 293,
+          "line": 758,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 294,
+          "line": 767,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 295,
+          "line": 776,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 296,
+          "line": 785,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 297,
+          "line": 794,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 298,
+          "line": 803,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 299,
+          "line": 812,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 300,
+          "line": 821,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 301,
+          "line": 830,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 302,
+          "line": 839,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 303,
+          "line": 849,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 304,
+          "line": 862,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 305,
+          "line": 865,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 306,
+          "line": 866,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 307,
+          "line": 869,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 308,
+          "line": 872,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 309,
+          "line": 873,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 310,
+          "line": 876,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 311,
+          "line": 879,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 312,
+          "line": 880,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 313,
+          "line": 882,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 314,
+          "line": 885,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 315,
+          "line": 898,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 316,
+          "line": 900,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 317,
+          "line": 901,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 318,
+          "line": 904,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 319,
+          "line": 907,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 320,
+          "line": 908,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "threads",
+          "index": 321,
+          "line": 911,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 322,
+          "line": 964,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 323,
+          "line": 968,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 324,
+          "line": 971,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 325,
+          "line": 972,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 326,
+          "line": 973,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 327,
+          "line": 974,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 328,
+          "line": 975,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 329,
+          "line": 976,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 330,
+          "line": 977,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 331,
+          "line": 978,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 332,
+          "line": 979,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 333,
+          "line": 980,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 334,
+          "line": 981,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 335,
+          "line": 982,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 336,
+          "line": 983,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 337,
+          "line": 984,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 338,
+          "line": 985,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 339,
+          "line": 986,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 340,
+          "line": 987,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 341,
+          "line": 988,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 342,
+          "line": 989,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 343,
+          "line": 990,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 344,
+          "line": 991,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 345,
+          "line": 992,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 346,
+          "line": 993,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 347,
+          "line": 994,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 348,
+          "line": 995,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 349,
+          "line": 996,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 350,
+          "line": 997,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 351,
+          "line": 998,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 352,
+          "line": 999,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 353,
+          "line": 1000,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 354,
+          "line": 1001,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 355,
+          "line": 1002,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 356,
+          "line": 1003,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 357,
+          "line": 1004,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 358,
+          "line": 1005,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 359,
+          "line": 1006,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 360,
+          "line": 1007,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 361,
+          "line": 1008,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 362,
+          "line": 1009,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 363,
+          "line": 1010,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 364,
+          "line": 1011,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 365,
+          "line": 1012,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 366,
+          "line": 1013,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 367,
+          "line": 1014,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 368,
+          "line": 1015,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 369,
+          "line": 1016,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 370,
+          "line": 1017,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "threads",
+          "index": 371,
+          "line": 1018,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 372,
+        "runner_error": 0,
+        "total": 372
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/atomic.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 8,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 75,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 9,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 10,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 22,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 33,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 70,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 14,
+          "line": 42,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 15,
+          "line": 52,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 16,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 17,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 18,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 19,
+          "line": 63,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 20,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 21,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 22,
+          "line": 60,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 23,
+          "line": 64,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 24,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 25,
+          "line": 71,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 26,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 27,
+          "line": 92,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 28,
+          "line": 76,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 29,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 30,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 31,
+          "line": 93,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 32,
+        "runner_error": 0,
+        "total": 32
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/deeply_nested.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 7,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 36,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 9,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 21,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 32,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 53,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 14,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 15,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 16,
+          "line": 54,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 17,
+        "runner_error": 0,
+        "total": 17
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/nested.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 18,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 9,
+        "runner_error": 0,
+        "total": 9
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/simple.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 17,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 28,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 29,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 12,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 13,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "threads",
+          "index": 14,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 15,
+          "line": 41,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 16,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "threads",
+          "index": 17,
+          "line": 48,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 18,
+        "runner_error": 0,
+        "total": 18
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/thread.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 5,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 12,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 14,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 21,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 7,
+        "runner_error": 0,
+        "total": 7
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/unlinkable.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "threads",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 1,
+          "line": 6,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 2,
+          "line": 18,
+          "mode": "proposal_thread",
+          "status": "pass",
+          "type": "thread"
+        },
+        {
+          "feature_area": "threads",
+          "index": 3,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 4,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 5,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 6,
+          "line": 40,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        },
+        {
+          "feature_area": "threads",
+          "index": 7,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "threads",
+          "index": 8,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "threads",
+          "index": 9,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 10,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "threads",
+          "index": 11,
+          "line": 41,
+          "mode": "proposal_wait",
+          "status": "pass",
+          "type": "wait"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 12,
+        "runner_error": 0,
+        "total": 12
+      },
+      "feature_area": "threads",
+      "path": "test/core/threads/wait_notify.wast"
+    }
+  ],
+  "kind": "webassembly_threads_inventory",
+  "profile": "threads",
+  "schema_version": 2,
+  "spec": {
+    "commit": "979d0fcb994439423d63b2f0a8a7332d6285dd84",
+    "files_available": 13,
+    "files_scored": 13,
+    "license": "Apache-2.0",
+    "repository": "https://github.com/WebAssembly/threads.git",
+    "suite": "test/core/threads/*.wast",
+    "tag": "proposal-revision"
+  },
+  "totals": {
+    "fail": 0,
+    "not_applicable": 0,
+    "pass": 551,
+    "runner_error": 0,
+    "total": 551
+  },
+  "totals_by_feature_area": {
+    "threads": {
+      "fail": 0,
+      "not_applicable": 0,
+      "pass": 551,
+      "runner_error": 0,
+      "total": 551
+    }
+  }
+}

@@ -25,6 +25,10 @@ pub fn main(init: std.process.Init) !void {
     const simd = std.mem.eql(u8, profile, "simd");
     const threads = std.mem.eql(u8, profile, "threads");
     const ctx = try js.Context.createWithTestingOptions(gpa, .{
+        .enable_threads = threads,
+        .enable_gc = threads,
+        .parallel_gc = threads,
+        .parallel_js = threads,
         .wasm_spec_bit_exact = true,
         .wasm_features = if (threads) .{
             .threads = true,
