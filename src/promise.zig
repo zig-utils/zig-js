@@ -39,6 +39,11 @@ pub const Reaction = struct {
     /// Host-only reactions have no result capability. Their callback result is
     /// discarded; an abrupt callback still escapes the microtask checkpoint.
     detached: bool = false,
+    /// Suspended async activation retained until this reaction job runs. The
+    /// Promise's pending-link is cleared at settlement; this edge bridges the
+    /// queued interval without teaching native callback objects to trace their
+    /// opaque `private_data` payload.
+    retained_async_activation: ?*anyopaque = null,
     /// Intrinsic `.then` fast path: settle this result promise directly instead
     /// of allocating native resolve/reject capability closures. Custom species
     /// capabilities keep using `resolve`/`reject` below.
@@ -58,6 +63,12 @@ pub const Promise = struct {
     /// The unique JavaScript wrapper for this internal Promise cell. The host
     /// rejection tracker needs its exact identity for process events.
     wrapper: ?*Object = null,
+    /// While pending, the suspended async activation directly awaiting this
+    /// Promise. Type-erased to keep promise.zig independent of vm.zig.
+    awaiting_async_activation: ?*anyopaque = null,
+    /// A transparent adoption/pass-through destination. Async-stack walking
+    /// follows this only when there is no direct awaiting activation.
+    async_forward_to: ?*Promise = null,
     /// Reaction list buffers are owned by the GC backing allocator when this
     /// promise cell is GC-owned; arena contexts keep the legacy arena path.
     gc_owned: bool = false,
@@ -94,6 +105,39 @@ pub const Promise = struct {
         self.lock.unlock();
     }
 };
+
+pub const AsyncStackLink = struct {
+    state: State,
+    activation: ?*anyopaque,
+    forward_to: ?*Promise,
+};
+
+pub fn asyncStackLink(p: *Promise) AsyncStackLink {
+    p.lockState();
+    defer p.unlockState();
+    return .{
+        .state = p.state,
+        .activation = p.awaiting_async_activation,
+        .forward_to = p.async_forward_to,
+    };
+}
+
+pub fn linkAwaitingAsyncActivation(p: *Promise, activation: *anyopaque) void {
+    p.lockState();
+    defer p.unlockState();
+    if (p.state != .pending) return;
+    gc_mod.barrierCellFrom(p, activation);
+    p.awaiting_async_activation = activation;
+}
+
+fn linkAsyncForward(source: *Promise, destination: *Promise) void {
+    if (source == destination) return;
+    source.lockState();
+    defer source.unlockState();
+    if (source.state != .pending or source.async_forward_to != null) return;
+    gc_mod.barrierCellFrom(source, destination);
+    source.async_forward_to = destination;
+}
 
 /// A queued reaction job: run `reaction.handler(argument)` and settle
 /// `reaction.result` accordingly (a pass-through when `handler` is null).
@@ -585,6 +629,8 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
 
     errdefer {
         p.lockState();
+        p.awaiting_async_activation = null;
+        p.async_forward_to = null;
         p.on_fulfill_inline = null;
         p.on_reject_inline = null;
         p.on_fulfill = .empty;
@@ -597,6 +643,11 @@ fn settle(self: *Interpreter, p: *Promise, state: State, v: Value) EvalError!voi
     if (selected_inline) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
     for (selected) |r| try enqueue(self, .{ .reaction = r, .argument = v, .fulfilled = state == .fulfilled });
     p.lockState();
+    // Keep async-stack edges alive until the selected reaction has been copied
+    // into the traced microtask queue. The promise is already settled, so the
+    // walker will not consume these links during this short handoff window.
+    p.awaiting_async_activation = null;
+    p.async_forward_to = null;
     p.on_fulfill_inline = null;
     p.on_reject_inline = null;
     p.on_fulfill = .empty;
@@ -637,6 +688,7 @@ pub fn resolve(self: *Interpreter, p: *Promise, v: Value) EvalError!void {
                 .then_fn = then_fn,
                 .promise = p,
             });
+            if (promiseOf(v)) |inner| linkAsyncForward(inner, p);
             return;
         }
     }
@@ -686,6 +738,26 @@ pub fn performThenResult(self: *Interpreter, p: *Promise, on_f: Value, on_r: Val
     const react_f = Reaction{ .handler = fh, .result = result };
     const react_r = Reaction{ .handler = rh, .result = result };
     try performThenReactions(self, p, react_f, react_r);
+    if (fh == null and rh == null) linkAsyncForward(p, result);
+}
+
+/// Async-driver variant of `then`: the continuation activation stays precisely
+/// rooted after source settlement moves its reactions into the microtask queue.
+pub fn thenRetainingAsyncActivation(
+    self: *Interpreter,
+    p: *Promise,
+    on_f: Value,
+    on_r: Value,
+    activation: *anyopaque,
+) EvalError!Value {
+    const result = try newPromise(self);
+    const rp: *Promise = @ptrCast(@alignCast(result.promiseData().?));
+    const fh: ?Value = if (on_f.isCallable()) on_f else null;
+    const rh: ?Value = if (on_r.isCallable()) on_r else null;
+    const react_f = Reaction{ .handler = fh, .result = rp, .retained_async_activation = activation };
+    const react_r = Reaction{ .handler = rh, .result = rp, .retained_async_activation = activation };
+    try performThenReactions(self, p, react_f, react_r);
+    return Value.obj(result);
 }
 
 /// Register host callbacks without creating a dependent Promise. Both handlers

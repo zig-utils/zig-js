@@ -483,6 +483,7 @@ extern "c" fn JSC__JSValue__asInternalPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__asPromise(EncodedValue) ?*anyopaque;
 extern "c" fn JSC__JSValue__createInternalPromise(JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue___then(EncodedValue, JSContextRef, EncodedValue, ?*const JSHostFn, ?*const JSHostFn) void;
+extern "c" fn Bun__attachAsyncStackFromPromise(JSContextRef, EncodedValue, ?*anyopaque) void;
 extern "c" fn JSC__JSMap__create(JSContextRef) ?*anyopaque;
 extern "c" fn JSC__JSMap__set(?*anyopaque, JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__JSMap__get(?*anyopaque, JSContextRef, EncodedValue) EncodedValue;
@@ -4174,6 +4175,28 @@ pub fn main() void {
         promise_then_fixture.fulfilled != 0)
         fail("private Promise reaction replaced a pending exception");
 
+    const async_stack_gate = evaluate(context,
+        \\globalThis.__private_async_stack_gate_254 = new Promise(resolve => { globalThis.__private_async_stack_resolve_254 = resolve; });
+        \\async function privateAsyncStackInner254() { await __private_async_stack_gate_254; }
+        \\async function privateAsyncStackOuter254() { await privateAsyncStackInner254(); }
+        \\globalThis.__private_async_stack_outer_254 = privateAsyncStackOuter254();
+        \\globalThis.__private_async_stack_error_254 = new Error('existing-254');
+        \\globalThis.__private_async_stack_before_254 = __private_async_stack_error_254.stack;
+        \\__private_async_stack_gate_254;
+    );
+    const async_stack_error = evaluate(context, "__private_async_stack_error_254");
+    const async_stack_gate_cell = JSC__JSValue__asPromise(async_stack_gate) orelse fail("private async stack Promise downcast failed");
+    Bun__attachAsyncStackFromPromise(context, async_stack_error, async_stack_gate_cell);
+    Bun__attachAsyncStackFromPromise(context, async_stack_error, null);
+    Bun__attachAsyncStackFromPromise(context, .undefined, async_stack_gate_cell);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_async_stack_error_254.stack === __private_async_stack_before_254")))
+        fail("private async stack overwrote existing/materialized Error stack");
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(254));
+    Bun__attachAsyncStackFromPromise(context, async_stack_error, async_stack_gate_cell);
+    const preserved_async_stack_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_async_stack_exception.cellPointer()) != EncodedValue.fromInt32(254))
+        fail("private async stack replaced a pending exception");
+
     const foreign_promise = JSC__JSValue__createInternalPromise(foreign_context);
     if (JSC__JSValue__asPromise(foreign_promise) != foreign_promise.cellPointer())
         fail("private Promise downcast rejected another live VM");
@@ -4626,5 +4649,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 261/261 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 262/262 symbols linked; runtime matrix passed\n", .{});
 }

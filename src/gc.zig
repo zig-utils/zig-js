@@ -433,6 +433,9 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
     defer p.unlockState();
     markValue(v, p.value);
     if (p.wrapper) |wrapper| v.mark(wrapper);
+    if (p.awaiting_async_activation) |activation|
+        v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
+    if (p.async_forward_to) |forward| markManaged(v, forward);
     if (p.on_fulfill_inline) |r| traceReaction(r, v);
     if (p.on_reject_inline) |r| traceReaction(r, v);
     for (p.on_fulfill.items) |r| traceReaction(r, v);
@@ -442,6 +445,8 @@ pub fn tracePromise(p: *promise.Promise, v: anytype) void {
 inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     markValueOpt(v, r.handler);
     markValueOpt(v, r.extra_argument);
+    if (r.retained_async_activation) |activation|
+        v.mark(@as(*vm.Generator, @ptrCast(@alignCast(activation))));
     if (r.detached) return;
     if (r.result) |result| {
         markManaged(v, result);
@@ -484,6 +489,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.home_object);
     v.mark(g.super_ctor);
     v.mark(g.result);
+    if (g.async_parent_promise) |parent| markManaged(v, parent);
     for (g.pendingRequests()) |req| {
         markValue(v, req.value);
         v.mark(req.result);

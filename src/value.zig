@@ -766,6 +766,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
         name: []const u8 = "",
         ctor: ?[]const u8 = null,
         stack: ?*const ErrorStack = null,
+        stack_materialized: bool = false,
     },
     date: struct {},
     module_ns: struct { ptr: ?*anyopaque = null },
@@ -1484,6 +1485,16 @@ pub const Object = struct {
         if (!cold.hasRare(.error_state)) return &.{};
         const stack = cold.rare.error_state.stack orelse return &.{};
         return stack.frames;
+    }
+
+    pub inline fn hasMaterializedErrorInfo(self: *const Object) bool {
+        const cold = self.coldState() orelse return false;
+        return cold.hasRare(.error_state) and cold.rare.error_state.stack_materialized;
+    }
+
+    pub inline fn markErrorInfoMaterialized(self: *Object) void {
+        const cold = self.coldState() orelse return;
+        if (cold.hasRare(.error_state)) cold.rare.error_state.stack_materialized = true;
     }
 
     pub inline fn moduleNs(self: *const Object) ?*anyopaque {

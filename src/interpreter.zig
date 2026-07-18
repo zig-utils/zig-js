@@ -2336,7 +2336,7 @@ pub const Interpreter = struct {
         return Value.obj(obj);
     }
 
-    fn appendErrorStackFrame(self: *Interpreter, frames: *std.ArrayListUnmanaged(value.ErrorStackFrame), frame: *const StackTraceCallFrame) EvalError!void {
+    pub fn errorStackFrameFromCallFrame(frame: *const StackTraceCallFrame, index: usize) value.ErrorStackFrame {
         const location = frame.location;
         const line: i32 = if (location) |loc|
             std.math.cast(i32, loc.location.line -| 1) orelse std.math.maxInt(i32)
@@ -2350,7 +2350,7 @@ pub const Interpreter = struct {
             const start = loc.location.byte_offset -| (loc.location.column -| 1);
             break :blk std.math.cast(i32, start) orelse -1;
         } else -1;
-        try frames.append(self.arena, .{
+        return .{
             .function_name = frame.function_name,
             .source_url = if (location) |loc| loc.source_url else "",
             .script_id = if (location) |loc| loc.script_id else 0,
@@ -2359,8 +2359,27 @@ pub const Interpreter = struct {
             .line_start_byte = line_start,
             .code_type = frame.code_type,
             .is_async = frame.is_async,
-            .jsc_stack_frame_index = @intCast(frames.items.len),
-        });
+            .jsc_stack_frame_index = std.math.cast(i32, index) orelse std.math.maxInt(i32),
+        };
+    }
+
+    fn appendErrorStackFrame(self: *Interpreter, frames: *std.ArrayListUnmanaged(value.ErrorStackFrame), frame: *const StackTraceCallFrame) EvalError!void {
+        try frames.append(self.arena, errorStackFrameFromCallFrame(frame, frames.items.len));
+    }
+
+    /// Realm-local limit used by private async-stack reconstruction. The
+    /// writable `Error.stackTraceLimit` convention defaults to ten frames;
+    /// non-finite/non-positive values disable collection and very large values
+    /// are bounded by the structured-frame ABI's u8-sized practical limit.
+    pub fn selectedStackTraceLimit(self: *Interpreter) usize {
+        const ctor = self.env.get("Error") orelse return 10;
+        if (!ctor.isObject()) return 10;
+        const configured = ctor.asObj().getOwn("stackTraceLimit") orelse return 10;
+        if (!configured.isNumber()) return 0;
+        const number = configured.asNum();
+        if (!std.math.isFinite(number) or number <= 0) return 0;
+        const bounded = @min(number, @as(f64, @floatFromInt(std.math.maxInt(u8))));
+        return @intFromFloat(@floor(bounded));
     }
 
     fn captureErrorStack(self: *Interpreter, obj: *value.Object) EvalError!void {
@@ -16787,6 +16806,7 @@ fn errorStackGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     // (proxy traps, getters) can't re-enter and blow the stack.
     const obj = this.asObj();
     if (!obj.behavior.is_error) return Value.undef();
+    obj.markErrorInfoMaterialized();
     const name = if (obj.errorName().len == 0) "Error" else obj.errorName();
     const message = if (obj.getOwn("message")) |v|
         (if (v.isString()) v.asStr() else "")
@@ -16866,6 +16886,7 @@ fn errorStackSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostEr
     const v = if (args.len > 0) args[0] else Value.undef();
     if (!v.isString())
         return self.throwError("TypeError", "Error.prototype.stack setter requires a string value");
+    if (this.asObj().behavior.is_error) this.asObj().markErrorInfoMaterialized();
     const home: ?*value.Object = if (self.active_native) |nat|
         (if (nat.private_data) |hd| @as(*value.Object, @ptrCast(@alignCast(hd))) else null)
     else
@@ -29371,6 +29392,8 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
         try proto.setOwn(a, root_shape, "constructor", ctor_v);
         try proto.setAttr(a, "constructor", ro);
         if (is_base) {
+            try ctor.setOwn(a, root_shape, "stackTraceLimit", Value.num(10));
+            try ctor.setAttr(a, "stackTraceLimit", ro);
             try setNative(a, root_shape, proto, "toString", 0, errorToStringFn);
             // `Error.prototype.stack` is a V8-style accessor (get brand-checks an
             // Error receiver; set installs an own data property), inherited by all

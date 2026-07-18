@@ -2117,6 +2117,17 @@ fn privatePromiseCellFromEncoded(encoded: EncodedValue) ?*anyopaque {
     return @ptrCast(boxed);
 }
 
+fn privatePromiseFromCell(global: JSContextRef, cell: ?*anyopaque) ?*promise.Promise {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value) return null;
+    if (boxed.owner != context) {
+        const group = context.c_api_group orelse return null;
+        if (boxed.owner.c_api_group != group) return null;
+    }
+    return promise.promiseOf(boxed.value);
+}
+
 const PrivateMapOperation = enum { create, get, has, remove, clear, set, size };
 
 const PrivateMapResult = struct {
@@ -9174,6 +9185,56 @@ export fn JSC__JSValue___then(
         reject_value,
         retained_context,
     ) catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
+/// Reconstruct the pending async-await chain rooted at `promise_cell` and
+/// install it as the structured trace for an otherwise stackless Error. This is
+/// deliberately side-effect-free: malformed inputs, settled chains, existing
+/// traces, materialized stack info, and allocation failure are all no-ops.
+export fn Bun__attachAsyncStackFromPromise(
+    global: JSContextRef,
+    encoded_error: EncodedValue,
+    promise_cell: ?*anyopaque,
+) callconv(.c) void {
+    const context = ctxForHandleInspection(global) orelse return;
+    const error_value = privateValueFrom(global, encoded_error) orelse return;
+    if (!error_value.isObject()) return;
+    const error_object = error_value.asObj();
+    if (!error_object.behavior.is_error or error_object.hasMaterializedErrorInfo() or error_object.getOwn("stack") != null or
+        error_object.errorStackFrames().len != 0) return;
+
+    var machine = context.interpreter();
+    const limit = machine.selectedStackTraceLimit();
+    if (limit == 0) return;
+    var current = privatePromiseFromCell(global, promise_cell) orelse return;
+    var frames: std.ArrayListUnmanaged(value.ErrorStackFrame) = .empty;
+    frame_walk: while (frames.items.len < limit) {
+        var activation: ?*vm.Generator = null;
+        var forward_hops: usize = 0;
+        while (forward_hops < 32) : (forward_hops += 1) {
+            const link = promise.asyncStackLink(current);
+            if (link.state != .pending) break :frame_walk;
+            if (link.activation) |raw_activation| {
+                activation = @ptrCast(@alignCast(raw_activation));
+                break;
+            }
+            current = link.forward_to orelse break :frame_walk;
+        }
+        const suspended = activation orelse break;
+        if (suspended.done) break;
+        var frame = suspended.async_suspension_frame orelse break;
+        frame.function_name = context.arena().dupe(u8, frame.function_name) catch return;
+        frame.source_url = context.arena().dupe(u8, frame.source_url) catch return;
+        frame.is_async = true;
+        frame.jsc_stack_frame_index = @intCast(frames.items.len);
+        frames.append(context.arena(), frame) catch return;
+        const parent = suspended.async_parent_promise orelse break;
+        if (parent == current) break;
+        current = parent;
+    }
+    if (frames.items.len == 0) return;
+    const owned = frames.toOwnedSlice(context.arena()) catch return;
+    error_object.setErrorStackFrames(context.arena(), owned) catch return;
 }
 
 export fn JSC__JSPromise__wrap(
@@ -20830,4 +20891,171 @@ test "C-API: JSValueProtect roots survive mid-script parallel GC" {
     try std.testing.expect(ZJSValueUnprotect(ctx, held));
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
+}
+
+test "private async Error stacks follow pending Promise await chains" {
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group);
+    const context = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+
+    const source = JSStringCreateWithUTF8CString(
+        \\globalThis.__resolve_254 = undefined;
+        \\globalThis.__gate_254 = new Promise(resolve => { __resolve_254 = resolve; });
+        \\async function inner254() {
+        \\  await __gate_254;
+        \\}
+        \\async function outer254() {
+        \\  await inner254();
+        \\}
+        \\globalThis.__outer_254 = outer254();
+        \\__gate_254;
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const source_url = JSStringCreateWithUTF8CString("async-stack-254.js") orelse return error.StringInitFailed;
+    defer JSStringRelease(source_url);
+    var exception: JSValueRef = null;
+    const gate_ref = JSEvaluateScript(context, source, null, source_url, 40, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    const gate = privateEncodedFromRef(gate_ref);
+    const gate_cell = JSC__JSValue__asPromise(gate) orelse return error.PromiseCreateFailed;
+
+    const makeStacklessError = struct {
+        fn make(c: *Context, text: []const u8) !EncodedValue {
+            const error_value = try c.evaluate(text);
+            try error_value.asObj().setErrorStackFrames(c.arena(), &.{});
+            return privateEncodedFromValue(c, error_value);
+        }
+    }.make;
+
+    const encoded_error = try makeStacklessError(internal, "globalThis.__async_error_254 = new Error('native-254')");
+    _ = JSC__VM__runGC(JSC__JSGlobalObject__vm(context), true);
+    Bun__attachAsyncStackFromPromise(context, encoded_error, gate_cell);
+    const error_object = (privateValueFrom(context, encoded_error) orelse return error.ValueInitFailed).asObj();
+    const frames = error_object.errorStackFrames();
+    try std.testing.expectEqual(@as(usize, 2), frames.len);
+    try std.testing.expectEqualStrings("inner254", frames[0].function_name);
+    try std.testing.expectEqualStrings("outer254", frames[1].function_name);
+    for (frames, 0..) |frame, index| {
+        try std.testing.expect(frame.is_async);
+        try std.testing.expectEqualStrings("async-stack-254.js", frame.source_url);
+        try std.testing.expect(frame.line_zero_based >= 39);
+        try std.testing.expect(frame.column_zero_based >= 0);
+        try std.testing.expect(frame.line_start_byte >= 0);
+        try std.testing.expectEqual(@as(i32, @intCast(index)), frame.jsc_stack_frame_index);
+    }
+
+    const sibling_error = try makeStacklessError(sibling_internal, "globalThis.__sibling_async_error_254 = new Error('sibling-254')");
+    Bun__attachAsyncStackFromPromise(sibling, sibling_error, gate_cell);
+    try std.testing.expectEqual(@as(usize, 2), (privateValueFrom(sibling, sibling_error) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    const existing = privateEncodedFromValue(internal, try internal.evaluate("new Error('existing-254')"));
+    const existing_count = (privateValueFrom(context, existing) orelse return error.ValueInitFailed).asObj().errorStackFrames().len;
+    Bun__attachAsyncStackFromPromise(context, existing, gate_cell);
+    try std.testing.expectEqual(existing_count, (privateValueFrom(context, existing) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    const materialized = try makeStacklessError(internal, "globalThis.__materialized_254 = new Error('materialized-254')");
+    _ = try internal.evaluate("void __materialized_254.stack");
+    Bun__attachAsyncStackFromPromise(context, materialized, gate_cell);
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, materialized) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+    const assigned_stack = try makeStacklessError(internal, "globalThis.__assigned_stack_254 = new Error('assigned-254')");
+    _ = try internal.evaluate("__assigned_stack_254.stack = 'custom-254'");
+    Bun__attachAsyncStackFromPromise(context, assigned_stack, gate_cell);
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, assigned_stack) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    _ = try internal.evaluate("Error.stackTraceLimit = 0");
+    const zero_limit = try makeStacklessError(internal, "new Error('zero-limit-254')");
+    Bun__attachAsyncStackFromPromise(context, zero_limit, gate_cell);
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, zero_limit) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+    _ = try internal.evaluate("Error.stackTraceLimit = 1");
+    const one_limit = try makeStacklessError(internal, "new Error('one-limit-254')");
+    Bun__attachAsyncStackFromPromise(context, one_limit, gate_cell);
+    try std.testing.expectEqual(@as(usize, 1), (privateValueFrom(context, one_limit) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+    _ = try internal.evaluate("Error.stackTraceLimit = 10");
+
+    const pending_error = try makeStacklessError(internal, "new Error('pending-254')");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(254));
+    Bun__attachAsyncStackFromPromise(context, pending_error, gate_cell);
+    try std.testing.expectEqual(@as(usize, 2), (privateValueFrom(context, pending_error) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+    const preserved = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(254), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+
+    Bun__attachAsyncStackFromPromise(context, .undefined, gate_cell);
+    Bun__attachAsyncStackFromPromise(context, encoded_error, null);
+    const settled = privateEncodedFromValue(internal, try internal.evaluate("Promise.resolve(254)"));
+    const settled_error = try makeStacklessError(internal, "new Error('settled-254')");
+    Bun__attachAsyncStackFromPromise(context, settled_error, JSC__JSValue__asPromise(settled));
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, settled_error) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    const forwarded_gate = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__forwarded_gate_254 = new Promise(resolve => { globalThis.__forwarded_resolve_254 = resolve; });
+        \\async function returnsPromise254() { return __forwarded_gate_254; }
+        \\async function awaitsForwarded254() { await returnsPromise254(); }
+        \\globalThis.__forwarded_outer_254 = awaitsForwarded254();
+        \\__forwarded_gate_254;
+    ));
+    const forwarded_error = try makeStacklessError(internal, "new Error('forwarded-254')");
+    Bun__attachAsyncStackFromPromise(context, forwarded_error, JSC__JSValue__asPromise(forwarded_gate));
+    const forwarded_frames = (privateValueFrom(context, forwarded_error) orelse return error.ValueInitFailed).asObj().errorStackFrames();
+    try std.testing.expectEqual(@as(usize, 1), forwarded_frames.len);
+    try std.testing.expectEqualStrings("awaitsForwarded254", forwarded_frames[0].function_name);
+
+    const within_hop_gate = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__within_hop_gate_254 = new Promise(resolve => { globalThis.__within_hop_resolve_254 = resolve; });
+        \\let __within_hop_tail_254 = __within_hop_gate_254;
+        \\for (let i = 0; i < 30; i++) __within_hop_tail_254 = __within_hop_tail_254.then();
+        \\async function withinHopGuard254() { await __within_hop_tail_254; }
+        \\globalThis.__within_hop_outer_254 = withinHopGuard254();
+        \\__within_hop_gate_254;
+    ));
+    const within_hop_error = try makeStacklessError(internal, "new Error('within-hop-254')");
+    Bun__attachAsyncStackFromPromise(context, within_hop_error, JSC__JSValue__asPromise(within_hop_gate));
+    const within_hop_frames = (privateValueFrom(context, within_hop_error) orelse return error.ValueInitFailed).asObj().errorStackFrames();
+    try std.testing.expectEqual(@as(usize, 1), within_hop_frames.len);
+    try std.testing.expectEqualStrings("withinHopGuard254", within_hop_frames[0].function_name);
+
+    const beyond_hop_gate = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__beyond_hop_gate_254 = new Promise(resolve => { globalThis.__beyond_hop_resolve_254 = resolve; });
+        \\let __beyond_hop_tail_254 = __beyond_hop_gate_254;
+        \\for (let i = 0; i < 32; i++) __beyond_hop_tail_254 = __beyond_hop_tail_254.then();
+        \\async function beyondHopGuard254() { await __beyond_hop_tail_254; }
+        \\globalThis.__beyond_hop_outer_254 = beyondHopGuard254();
+        \\__beyond_hop_gate_254;
+    ));
+    const beyond_hop_error = try makeStacklessError(internal, "new Error('beyond-hop-254')");
+    Bun__attachAsyncStackFromPromise(context, beyond_hop_error, JSC__JSValue__asPromise(beyond_hop_gate));
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, beyond_hop_error) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    const combinator_gate = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__combinator_gate_254 = new Promise(resolve => { globalThis.__combinator_resolve_254 = resolve; });
+        \\async function awaitsCombinator254() { await Promise.all([__combinator_gate_254]); }
+        \\globalThis.__combinator_outer_254 = awaitsCombinator254();
+        \\__combinator_gate_254;
+    ));
+    const combinator_error = try makeStacklessError(internal, "new Error('combinator-254')");
+    Bun__attachAsyncStackFromPromise(context, combinator_error, JSC__JSValue__asPromise(combinator_gate));
+    try std.testing.expectEqual(@as(usize, 0), (privateValueFrom(context, combinator_error) orelse return error.ValueInitFailed).asObj().errorStackFrames().len);
+
+    const async_generator_gate = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__async_generator_gate_254 = new Promise(resolve => { globalThis.__async_generator_resolve_254 = resolve; });
+        \\async function* asyncGenerator254() { await __async_generator_gate_254; yield 254; }
+        \\globalThis.__async_generator_254 = asyncGenerator254();
+        \\globalThis.__async_generator_request_254 = __async_generator_254.next();
+        \\__async_generator_gate_254;
+    ));
+    const async_generator_error = try makeStacklessError(internal, "new Error('async-generator-254')");
+    Bun__attachAsyncStackFromPromise(context, async_generator_error, JSC__JSValue__asPromise(async_generator_gate));
+    const async_generator_frames = (privateValueFrom(context, async_generator_error) orelse return error.ValueInitFailed).asObj().errorStackFrames();
+    try std.testing.expectEqual(@as(usize, 1), async_generator_frames.len);
+    try std.testing.expectEqualStrings("asyncGenerator254", async_generator_frames[0].function_name);
+
+    _ = try internal.evaluate("__resolve_254(254)");
+    const gate_promise = promise.promiseOf(privateValueFrom(context, gate).?).?;
+    const cleared = promise.asyncStackLink(gate_promise);
+    try std.testing.expect(cleared.state != .pending);
+    try std.testing.expect(cleared.activation == null and cleared.forward_to == null);
 }

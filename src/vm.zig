@@ -266,6 +266,11 @@ pub const Generator = struct {
     /// and `result` is the promise the call returned, settled on completion.
     is_async: bool = false,
     result: ?*value.Object = null,
+    /// Structured metadata copied at the most recent `await` bytecode. The
+    /// pending awaited Promise points back to this activation; this pointer to
+    /// the result/request Promise lets the async-stack walker continue outward.
+    async_suspension_frame: ?value.ErrorStackFrame = null,
+    async_parent_promise: ?*promise.Promise = null,
     /// Whether the last suspension was an `await` (resume on promise settlement)
     /// or a `yield` (resume on the next request) — set by the suspend opcode so
     /// the async-generator driver can tell them apart.
@@ -4720,6 +4725,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     exec.ip = ip;
                     g.suspended = true;
                     g.suspend_kind = if (inst.op == .await_op) .await else .yield;
+                    if (inst.op == .await_op) {
+                        if (vm.stack_trace_call_frame) |trace_frame| {
+                            var snapshot = Interpreter.errorStackFrameFromCallFrame(trace_frame, 0);
+                            snapshot.is_async = true;
+                            g.async_suspension_frame = snapshot;
+                        }
+                    }
                     // A `yield*` delegation point must intercept throw()/return()
                     // and forward them to the inner iterator; any other suspend
                     // point handles them itself (inject / complete).
@@ -5445,6 +5457,8 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
     g.claimAsyncResume();
     defer g.releaseAsyncResume();
     if (g.done) return;
+    g.async_suspension_frame = null;
+    g.async_parent_promise = null;
     if (g.started) {
         switch (kind) {
             .send => try g.exec.stack.append(g.stackAllocator(vm.arena), val), // the awaited value
@@ -5515,11 +5529,16 @@ fn asyncDrive(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) Eva
             try promise.reject(vm, resultPromise(g), reason);
             return;
         };
+        const awaited_promise: *promise.Promise = @ptrCast(@alignCast(awaited.asObj().promiseData().?));
+        const parent = resultPromise(g);
+        gc_mod.barrierCellFrom(g, parent);
+        g.async_parent_promise = parent;
         const onf = try gc_mod.allocObj(vm.arena);
         onf.* = .{ .native = asyncOnFulfill, .private_data = @ptrCast(g) };
         const onr = try gc_mod.allocObj(vm.arena);
         onr.* = .{ .native = asyncOnReject, .private_data = @ptrCast(g) };
-        _ = try promise.then(vm, @ptrCast(@alignCast(awaited.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
+        _ = try promise.thenRetainingAsyncActivation(vm, awaited_promise, Value.obj(onf), Value.obj(onr), @ptrCast(g));
+        promise.linkAwaitingAsyncActivation(awaited_promise, @ptrCast(g));
         return;
     }
     g.done = true;
@@ -5595,11 +5614,14 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     const g = try gc_mod.allocGenerator(vm.arena);
     g.* = .{
         .chunk = chunk,
+        .function_name = func.name,
+        .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
         .home_object = func.home_object,
         .super_ctor = func.super_ctor,
         .import_meta_slot = func.import_meta_slot,
+        .module_referrer = func.module_referrer,
         .is_async_gen = true,
     };
     gc_mod.initGeneratorBacking(g);
@@ -5667,6 +5689,8 @@ const AgStep = union(enum) { awaited: Value, yielded: Value, returned: Value, re
 
 /// Resume the async-generator body once and report why it stopped.
 fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalError!AgStep {
+    g.async_suspension_frame = null;
+    g.async_parent_promise = null;
     if (g.started and g.delegating) {
         // `yield*` delegation point: forward the resume to the inner iterator.
         g.delegating = false;
@@ -5810,11 +5834,16 @@ fn agStep(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalErr
                 vm.exception = Value.undef();
                 return agStep(vm, g, .throw_, reason);
             };
+            const awaited_promise: *promise.Promise = @ptrCast(@alignCast(wrapped.asObj().promiseData().?));
+            const parent: *promise.Promise = @ptrCast(@alignCast(front.promiseData().?));
+            gc_mod.barrierCellFrom(g, parent);
+            g.async_parent_promise = parent;
             const onf = try gc_mod.allocObj(vm.arena);
             onf.* = .{ .native = agOnFulfill, .private_data = @ptrCast(g) };
             const onr = try gc_mod.allocObj(vm.arena);
             onr.* = .{ .native = agOnReject, .private_data = @ptrCast(g) };
-            _ = try promise.then(vm, @ptrCast(@alignCast(wrapped.asObj().promiseData().?)), Value.obj(onf), Value.obj(onr));
+            _ = try promise.thenRetainingAsyncActivation(vm, awaited_promise, Value.obj(onf), Value.obj(onr), @ptrCast(g));
+            promise.linkAwaitingAsyncActivation(awaited_promise, @ptrCast(g));
         },
         .yielded => |v| {
             try promise.resolve(vm, @ptrCast(@alignCast(front.promiseData().?)), try makeIterResult(vm, v, false));
