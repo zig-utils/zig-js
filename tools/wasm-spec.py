@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run and inventory the pinned upstream WebAssembly wg-1.0 core corpus."""
+"""Run and inventory pinned upstream WebAssembly specification corpora."""
 
 from __future__ import annotations
 
@@ -21,15 +21,18 @@ WABT_COMMIT = "cf261f2bd561297e0da7008ddde8c09ba5ea35a2"
 PROFILES = {
     "mvp": {
         "kind": "webassembly_wg_1_0_core_inventory",
+        "repository": "https://github.com/WebAssembly/spec.git",
         "tag": "wg-1.0",
         "commit": SPEC_COMMIT,
         "wabt_version": WABT_VERSION,
         "wabt_commit": WABT_COMMIT,
         "evaluator_profile": None,
         "features": [],
+        "corpus_glob": "test/core/*.wast",
     },
     "core-2-structural": {
         "kind": "webassembly_core_2_0_structural_inventory",
+        "repository": "https://github.com/WebAssembly/spec.git",
         "tag": "wg-2.0",
         "commit": "fffc6e12fa454e475455a7b58d3b5dc343980c10",
         "wabt_version": "1.0.39",
@@ -41,6 +44,47 @@ PROFILES = {
             "multi_value",
             "reference_types",
             "bulk_memory",
+        ],
+        "corpus_glob": "test/core/*.wast",
+    },
+    "simd-movement": {
+        "kind": "webassembly_fixed_width_simd_movement_inventory",
+        "repository": "https://github.com/WebAssembly/simd.git",
+        "tag": "proposal-revision",
+        "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "simd",
+        "features": [
+            "sign_extension_ops",
+            "nontrapping_float_to_int",
+            "multi_value",
+            "reference_types",
+            "bulk_memory",
+            "fixed_width_simd",
+        ],
+        "corpus_glob": "test/core/simd/*.wast",
+        "default_files": [
+            "simd_address.wast",
+            "simd_align.wast",
+            "simd_bitwise.wast",
+            "simd_boolean.wast",
+            "simd_const.wast",
+            "simd_lane.wast",
+            "simd_load.wast",
+            "simd_load8_lane.wast",
+            "simd_load16_lane.wast",
+            "simd_load32_lane.wast",
+            "simd_load64_lane.wast",
+            "simd_load_extend.wast",
+            "simd_load_splat.wast",
+            "simd_load_zero.wast",
+            "simd_splat.wast",
+            "simd_store.wast",
+            "simd_store8_lane.wast",
+            "simd_store16_lane.wast",
+            "simd_store32_lane.wast",
+            "simd_store64_lane.wast",
         ],
     },
 }
@@ -59,7 +103,8 @@ def checked_output(command: list[str], cwd: Path | None = None) -> str:
 
 
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
-    if not (spec_root / "test/core").is_dir():
+    corpus_root = spec_root / Path(profile["corpus_glob"]).parent
+    if not corpus_root.is_dir():
         fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
     if actual_spec != profile["commit"]:
@@ -141,6 +186,23 @@ def value_expression(value: dict) -> str:
     raise ValueError(f"unknown value type {kind}")
 
 
+def raw_value_bits(value: dict) -> str:
+    kind = value["type"]
+    if kind != "v128":
+        return str(value["value"])
+    widths = {"i8": 8, "i16": 16, "i32": 32, "i64": 64, "f32": 32, "f64": 64}
+    lane_type = value.get("lane_type")
+    if lane_type not in widths:
+        raise ValueError(f"unknown v128 lane type {lane_type}")
+    width = widths[lane_type]
+    mask = (1 << width) - 1
+    lanes = value.get("value")
+    if not isinstance(lanes, list) or len(lanes) * width != 128:
+        raise ValueError(f"invalid v128 {lane_type} lane count")
+    bits = sum((int(lane, 0) & mask) << (index * width) for index, lane in enumerate(lanes))
+    return str(bits)
+
+
 def action_expression(action: dict) -> str:
     instance = instance_expression(action)
     field = js_string(action["field"])
@@ -159,7 +221,7 @@ def raw_action_expression(action: dict) -> str:
         return f"__wasmSpecInvokeBits({target})"
     if action["type"] == "invoke":
         args = "".join(
-            f",{js_string(value['value'])}" for value in action.get("args", [])
+            f",{js_string(raw_value_bits(value))}" for value in action.get("args", [])
         )
         return f"__wasmSpecInvokeBits({target}{args})"
     raise ValueError(f"unknown raw action type {action['type']}")
@@ -189,6 +251,11 @@ def requires_bit_exact_nan(command: dict) -> bool:
         return False
     values = expected + command.get("action", {}).get("args", [])
     return any(is_nan_bits(value) for value in values)
+
+
+def requires_vector_bits(command: dict) -> bool:
+    values = command.get("expected", []) + command.get("action", {}).get("args", [])
+    return any(value.get("type") == "v128" for value in values)
 
 
 PRELUDE = r"""
@@ -318,6 +385,23 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{js_string(kind)},'fail',__message(__error));}}}}"
             )
         if kind == "assert_return":
+            if requires_vector_bits(command):
+                expected = command.get("expected", [])
+                expected_bits = [raw_value_bits(value) for value in expected]
+                expression = raw_action_expression(command["action"])
+                if len(expected_bits) == 0:
+                    comparison = "__actual===undefined"
+                elif len(expected_bits) == 1:
+                    comparison = f"__actual==={js_string(expected_bits[0])}"
+                else:
+                    comparison = f"JSON.stringify(__actual)==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
+                return (
+                    f"{{try{{const __actual={expression};if({comparison}){{"
+                    f"{record_line(index, command, 'pass', mode='vector_bits')}"
+                    f"}}else{{{record_line(index, command, 'fail', 'raw vector result mismatch', 'vector_bits')}}}"
+                    f"}}catch(__error){{__record({index},{int(command.get('line', 0))},"
+                    f"{js_string(kind)},'fail',__message(__error),'vector_bits');}}}}"
+                )
             if requires_bit_exact_nan(command):
                 expected = command.get("expected", [])
                 if len(expected) != 1:
@@ -356,10 +440,11 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{js_string(kind)},'fail',__message(__error));}}}}"
             )
         if kind in ("assert_trap", "assert_exhaustion"):
+            action = raw_action_expression(command["action"]) if requires_vector_bits(command) else action_expression(command["action"])
             return expected_exception(
                 index,
                 command,
-                action_expression(command["action"]),
+                action,
                 "WebAssembly.RuntimeError",
             )
         if kind in ("assert_malformed", "assert_invalid"):
@@ -495,6 +580,8 @@ def counts(commands: list[dict]) -> dict[str, int]:
 def feature_area(profile_name: str, filename: str) -> str:
     if profile_name == "mvp":
         return "mvp"
+    if profile_name == "simd-movement":
+        return "fixed_width_simd_movement"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -530,7 +617,7 @@ def main() -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        help="per-file evaluator timeout (default: 120s for MVP, 600s for Core 2)",
+        help="per-file evaluator timeout (default: 600s for Core 2 structural, 120s otherwise)",
     )
     parser.add_argument("--keep-work", type=Path)
     parser.add_argument("--allow-failures", action="store_true")
@@ -543,14 +630,24 @@ def main() -> int:
     spec_root = (args.spec_root or ROOT / "wasm-spec").resolve()
     converter = args.wast2json.resolve()
     engine = args.engine.resolve()
-    inventory_path = args.inventory or (
-        ROOT / "docs/.data/wasm-spec-inventory.json"
-        if args.profile == "mvp"
-        else ROOT / "docs/.data/wasm-core-2-structural-inventory.json"
-    )
+    default_inventories = {
+        "mvp": ROOT / "docs/.data/wasm-spec-inventory.json",
+        "core-2-structural": ROOT / "docs/.data/wasm-core-2-structural-inventory.json",
+        "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
+    }
+    inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
-    all_wast = sorted((spec_root / "test/core").glob("*.wast"))
-    selected = [path for path in all_wast if not args.filter or args.filter in path.as_posix()]
+    all_wast = sorted(spec_root.glob(profile["corpus_glob"]))
+    if args.filter:
+        selected = [path for path in all_wast if args.filter in path.as_posix()]
+    elif profile.get("default_files"):
+        selected_names = set(profile["default_files"])
+        selected = [path for path in all_wast if path.name in selected_names]
+        missing = selected_names - {path.name for path in selected}
+        if missing:
+            fail(f"pinned profile files missing: {sorted(missing)}")
+    else:
+        selected = all_wast
     if not selected:
         fail("no corpus files selected")
 
@@ -600,11 +697,11 @@ def main() -> int:
         "profile": args.profile,
         "features": profile["features"],
         "spec": {
-            "repository": "https://github.com/WebAssembly/spec.git",
+            "repository": profile["repository"],
             "tag": profile["tag"],
             "commit": profile["commit"],
             "license": "Apache-2.0",
-            "suite": "test/core/*.wast",
+            "suite": profile["corpus_glob"],
             "files_available": len(all_wast),
             "files_scored": len(selected),
         },
