@@ -3740,6 +3740,7 @@ pub const Context = struct {
         }
         self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
         h.collect();
+        wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
     }
@@ -3759,6 +3760,7 @@ pub const Context = struct {
         } else {
             return;
         }
+        wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
     }
 

@@ -208,6 +208,15 @@ pub fn traceObject(o: *Object, v: anytype) void {
     v.mark(cold.wasm.exports_obj);
     v.mark(cold.wasm.buffer_obj);
     v.mark(cold.wasm.owner_obj);
+    if (cold.wasm.gc_ref) |reference| {
+        const Marker = struct {
+            fn mark(raw: *anyopaque, child: Value) void {
+                const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+                markValue(visitor, child);
+            }
+        };
+        reference.trace(reference, @ptrCast(v), Marker.mark);
+    }
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
@@ -1039,6 +1048,11 @@ pub const Binding = struct {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
                 if (o.cApiObjectOwner()) |owner| owner.finishOnce();
+                if (o.wasmGcReference()) |state| {
+                    if (state.root) |root| if (state.release) |release| release(root, o);
+                    state.root = null;
+                    state.reference = null;
+                }
                 // Buffer metadata now lives in the cold sidecar. Release it
                 // before finalizeObjectBacking destroys that sidecar.
                 if (o.arrayBuffer()) |ab| {

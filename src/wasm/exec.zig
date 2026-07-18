@@ -231,6 +231,7 @@ pub const GcObject = struct {
     mark_epoch: u32 = 0,
     host_trace_epoch: u64 = 0,
     host_trace_next: ?*GcObject = null,
+    wrapper: std.atomic.Value(?*js_value.Object) = .init(null),
 };
 
 var gc_host_trace_lock: std.atomic.Mutex = .unlocked;
@@ -296,6 +297,11 @@ pub const GcRootHandle = struct {
     owner: *Instance,
     object: *GcObject,
     next: ?*GcRootHandle = null,
+};
+
+pub const GcWrapperRetain = union(enum) {
+    existing: *js_value.Object,
+    retained: *GcRootHandle,
 };
 
 pub const Imports = struct {
@@ -367,6 +373,49 @@ pub fn releaseGcReference(handle: *GcRootHandle) void {
     owner.gpa.destroy(handle);
 }
 
+/// Publishes exactly one weak JavaScript identity for an aggregate and roots
+/// the aggregate until that wrapper is finalized. The wrapper pointer itself
+/// is weak: its finalizer clears it before releasing the native root.
+pub fn retainGcWrapper(slot: ValueSlot, wrapper: *js_value.Object) error{OutOfMemory}!GcWrapperRetain {
+    const reference = switch (slot) {
+        .gcref => |value| value orelse unreachable,
+        else => unreachable,
+    };
+    const object = gcObjectFromRef(reference);
+    const owner = object.owner;
+    const handle = try owner.gpa.create(GcRootHandle);
+    handle.* = .{ .owner = owner, .object = object };
+    while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    if (object.wrapper.load(.acquire)) |existing| {
+        owner.gc_object_lock.unlock();
+        owner.gpa.destroy(handle);
+        return .{ .existing = existing };
+    }
+    object.wrapper.store(wrapper, .release);
+    handle.next = owner.gc_external_roots;
+    owner.gc_external_roots = handle;
+    owner.gc_object_lock.unlock();
+    return .{ .retained = handle };
+}
+
+pub fn releaseGcWrapper(raw: *anyopaque, wrapper: *js_value.Object) void {
+    const handle: *GcRootHandle = @ptrCast(@alignCast(raw));
+    const owner = handle.owner;
+    while (!owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    if (handle.object.wrapper.load(.acquire) == wrapper)
+        handle.object.wrapper.store(null, .release);
+    var link = &owner.gc_external_roots;
+    while (link.*) |candidate| {
+        if (candidate == handle) {
+            link.* = candidate.next;
+            break;
+        }
+        link = &candidate.next;
+    }
+    owner.gc_object_lock.unlock();
+    owner.gpa.destroy(handle);
+}
+
 fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fields: []const ValueSlot) error{OutOfMemory}!*GcObject {
     const owned_fields = try inst.gpa.dupe(ValueSlot, fields);
     errdefer inst.gpa.free(owned_fields);
@@ -425,7 +474,7 @@ fn markGcSlot(
 /// caller supplies active/escaping slots; globals, tables, and published
 /// exception payloads are included automatically. Cross-instance objects are
 /// left to their owner. Mark allocation failure performs no sweep.
-fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
+pub fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error{OutOfMemory}!usize {
     while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
     defer inst.gc_object_lock.unlock();
 
@@ -1290,16 +1339,17 @@ fn gcObjectFromSlot(s: *State, slot: WasmSlot) ExecError!*GcObject {
     return gcObjectFromRef(reference);
 }
 
-fn gcReferenceMatches(inst: *const Instance, slot: WasmSlot, target: types.RefType) bool {
+fn gcReferenceMatches(inst: ?*const Instance, slot: WasmSlot, target: types.RefType) bool {
     if (slotIsNull(slot)) return target.nullable;
     return switch (slot) {
         .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
         .gcref => |raw| blk: {
             const object = gcObjectFromRef(raw.?);
             if (target.heap.concreteIndex() != null) {
-                if (object.owner != inst) break :blk false;
+                const target_inst = inst orelse break :blk false;
+                if (object.owner != target_inst) break :blk false;
                 break :blk validate.heapTypeMatches(
-                    inst.module,
+                    target_inst.module,
                     types.HeapType.concrete(object.type_index),
                     target.heap,
                 );
@@ -1311,6 +1361,11 @@ fn gcReferenceMatches(inst: *const Instance, slot: WasmSlot, target: types.RefTy
         },
         else => false,
     };
+}
+
+pub fn gcReferenceSlotMatches(inst: ?*const Instance, slot: WasmSlot, val_type: types.ValType) bool {
+    const target = val_type.refType() orelse return false;
+    return gcReferenceMatches(inst, slot, target);
 }
 
 fn normalizePackedField(storage: types.StorageType, slot: WasmSlot) WasmSlot {

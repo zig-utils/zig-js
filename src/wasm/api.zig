@@ -925,6 +925,28 @@ fn functionInstance(func: *exec.FuncInst, fallback: ?*exec.Instance) ?*exec.Inst
     };
 }
 
+fn wasmGcReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostError!Value {
+    return switch (slot) {
+        .i31ref => |bits| Value.num(@floatFromInt(@as(i32, @bitCast(bits << 1)) >> 1)),
+        .gcref => |reference| if (reference) |root| blk: {
+            const wrapper = try gc.allocObj(self.arena);
+            wrapper.* = .{};
+            wrapper.setExtensible(false);
+            const state = try wrapper.wasmGcReferenceState(self.arena);
+            switch (try exec.retainGcWrapper(slot, wrapper)) {
+                .existing => |existing| break :blk Value.obj(existing),
+                .retained => |handle| {
+                    state.reference = root;
+                    state.root = @ptrCast(handle);
+                    state.release = exec.releaseGcWrapper;
+                    break :blk Value.obj(wrapper);
+                },
+            }
+        } else Value.nul(),
+        else => self.throwError("TypeError", "value is not a WebAssembly GC reference"),
+    };
+}
+
 fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
     return switch (kind) {
         .i32, .i64, .f32, .f64 => wasmBitsToJs(self, kind, slot.numericBits()),
@@ -939,18 +961,42 @@ fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, f
                 return self.throwError("TypeError", "WebAssembly function reference is unavailable");
             break :blk try host.resolve(host.ctx, func);
         } else Value.nul(),
-        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
+        else => if (kind.refType() != null)
+            wasmGcReferenceToJs(self, slot)
+        else
+            self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
     };
 }
 
-fn jsToWasmSlot(self: *Interpreter, store: *context.Context, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+fn jsToWasmGcReference(self: *Interpreter, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    const target = kind.refType() orelse return self.throwError("TypeError", "value type is not a WebAssembly reference");
+    if (input.isNull()) {
+        if (!target.nullable) return self.throwError("TypeError", "null does not match a non-nullable WebAssembly reference");
+        return .{ .gcref = null };
+    }
+    if (input.isNumber()) {
+        const number = input.asNum();
+        if (std.math.isFinite(number) and @trunc(number) == number and number >= -1073741824 and number <= 1073741823) {
+            const signed: i32 = @intFromFloat(number);
+            const slot: exec.ValueSlot = .{ .i31ref = @as(u32, @bitCast(signed)) & 0x7fff_ffff };
+            if (exec.gcReferenceSlotMatches(inst, slot, kind)) return slot;
+        }
+    }
+    if (languageObject(input)) |object| if (object.wasmGcReference()) |state| if (state.reference) |reference| {
+        const slot: exec.ValueSlot = .{ .gcref = reference };
+        if (exec.gcReferenceSlotMatches(inst, slot, kind)) return slot;
+    };
+    return self.throwError("TypeError", "JavaScript value does not match the WebAssembly GC reference type");
+}
+
+fn jsToWasmSlot(self: *Interpreter, store: *context.Context, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
     return switch (kind) {
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
         .v128 => return self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
         .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
         .externref => .{ .externref = input },
         .funcref => (try tableRefFromValue(self, store, .funcref, input)).slot,
-        else => return self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
+        else => jsToWasmGcReference(self, inst, kind, input),
     };
 }
 
@@ -1010,7 +1056,7 @@ fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []e
     const result = self.callValueWithThis(bridge.callable, js_args, Value.undef()) catch |err| return importCallError(err);
     if (bridge.function_type.results.len == 0) return;
     if (bridge.function_type.results.len == 1) {
-        results[0] = jsToWasmSlot(self, bridge.store, bridge.function_type.results[0], result) catch |err| return importCallError(err);
+        results[0] = jsToWasmSlot(self, bridge.store, bridge.inst, bridge.function_type.results[0], result) catch |err| return importCallError(err);
         return;
     }
 
@@ -1021,7 +1067,7 @@ fn jsImportCallSlots(raw: *anyopaque, args: []const exec.ValueSlot, results: []e
         return error.Host;
     }
     for (bridge.function_type.results, values.items, 0..) |kind, item, i|
-        results[i] = jsToWasmSlot(self, bridge.store, kind, item) catch |err| return importCallError(err);
+        results[i] = jsToWasmSlot(self, bridge.store, bridge.inst, kind, item) catch |err| return importCallError(err);
 }
 
 fn takeJsImportException(raw: *anyopaque) ?exec.HostException {
@@ -1051,7 +1097,7 @@ fn wasmExportCall(ctx: *anyopaque, _: Value, args: []const Value) value.HostErro
     const slot_results = try owner.store.gpa.alloc(exec.ValueSlot, owner.function_type.results.len);
     defer owner.store.gpa.free(slot_results);
     for (owner.function_type.params, 0..) |kind, i|
-        slot_args[i] = try jsToWasmSlot(self, owner.store, kind, if (i < args.len) args[i] else Value.undef());
+        slot_args[i] = try jsToWasmSlot(self, owner.store, owner.inst, kind, if (i < args.len) args[i] else Value.undef());
 
     var diag: types.Diagnostic = .{};
     const previous = active_wasm_interp;
@@ -1337,7 +1383,7 @@ fn exceptionConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.Ho
     const temporary = try self.arena.alloc(exec.ValueSlot, tag.type.params.len);
     var externref_count: usize = 0;
     for (tag.type.params, payload_values, 0..) |kind, entry, index| {
-        temporary[index] = try jsToWasmSlot(self, store, kind, entry);
+        temporary[index] = try jsToWasmSlot(self, store, null, kind, entry);
         if (kind == .externref) externref_count += 1;
     }
     const payload = try store.gpa.dupe(exec.ValueSlot, temporary);
@@ -2246,6 +2292,20 @@ pub fn teardownWasmStore(store: *context.Context) void {
     store.wasm_registry.clearRetainingCapacity();
 }
 
+/// Reclaim native Wasm GC graphs after the host collector has finalized dead
+/// exported wrappers and released their external root handles.
+pub fn collectWasmGarbage(store: *context.Context) void {
+    while (!store.wasm_registry_lock.tryLock()) std.atomic.spinLoopHint();
+    defer store.wasm_registry_lock.unlock();
+    for (store.wasm_registry.items) |owned| switch (owned) {
+        .instance => |owner_ptr| {
+            const owner: *InstanceOwner = @ptrCast(@alignCast(owner_ptr));
+            _ = exec.collectGcAggregatesQuiescent(owner.inst, &.{}) catch {};
+        },
+        else => {},
+    };
+}
+
 test "wasm api installs errors validates and reflects Module" {
     const store = try context.Context.create(std.testing.allocator);
     defer store.destroy();
@@ -2321,6 +2381,40 @@ test "wasm api corpus harness preserves raw v128 functions and globals" {
         \\__wasmSpecInvokeBits(exports.g) === bits && opaqueFunction && opaqueGlobal;
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api GC references preserve identity and precise wrapper lifetime" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{
+            .reference_types = true,
+            .typed_function_references = true,
+            .gc = true,
+        },
+    });
+    defer store.destroy();
+    const before = try store.evaluate(
+        \\const gcBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  1,19,4,95,0,96,0,1,100,0,96,1,100,0,1,100,0,96,0,1,108,
+        \\  3,4,3,1,2,3,
+        \\  7,21,3,4,109,97,107,101,0,0,4,101,99,104,111,0,1,3,105,51,49,0,2,
+        \\  10,19,3,5,0,251,1,0,11,4,0,32,0,11,6,0,65,127,251,28,11
+        \\]);
+        \\globalThis.gcExports = new WebAssembly.Instance(new WebAssembly.Module(gcBytes)).exports;
+        \\globalThis.gcKeep = gcExports.make();
+        \\globalThis.gcWeak = new WeakRef(gcKeep);
+        \\Object.getPrototypeOf(gcKeep) === null && !Object.isExtensible(gcKeep) &&
+        \\  gcExports.echo(gcKeep) === gcKeep && gcExports.make() !== gcKeep && gcExports.i31() === -1;
+    );
+    try std.testing.expect(before.isBoolean() and before.asBool());
+    store.collectGarbage();
+    const retained = try store.evaluate("gcWeak.deref() === gcKeep && gcExports.echo(gcKeep) === gcKeep");
+    try std.testing.expect(retained.isBoolean() and retained.asBool());
+    _ = try store.evaluate("globalThis.gcKeep = undefined");
+    store.collectGarbage();
+    const reclaimed = try store.evaluate("gcWeak.deref() === undefined");
+    try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
 }
 
 test "wasm api Context options gate post-MVP features explicitly" {

@@ -62,6 +62,7 @@ pub const WasmException = struct {
 };
 
 pub const WasmGcMarkValueFn = *const fn (*anyopaque, Value) void;
+pub const WasmGcReleaseFn = *const fn (*anyopaque, *Object) void;
 
 /// Type-erased tracing header embedded in every runtime-owned Wasm GC
 /// aggregate. Core GC can precisely visit nested JavaScript references
@@ -1141,6 +1142,7 @@ pub const ObjectRareTag = enum(u8) {
     wasm_function,
     wasm_tag,
     wasm_exception,
+    wasm_gc_ref,
 };
 
 /// Structured JavaScript stack metadata retained when an Error is created.
@@ -1225,6 +1227,11 @@ pub const ObjectRareState = union(ObjectRareTag) {
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
     wasm_tag: struct { tag: ?*anyopaque = null, store: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.TagInst
     wasm_exception: struct { exception: ?*WasmException = null, payload_values: []const Value = &.{}, owner_obj: ?*Object = null },
+    wasm_gc_ref: struct {
+        reference: ?*WasmGcRef = null,
+        root: ?*anyopaque = null,
+        release: ?WasmGcReleaseFn = null,
+    },
 };
 
 /// Exact payload for JSC's internal GetterSetter / CustomGetterSetter cells.
@@ -1886,6 +1893,7 @@ pub const Object = struct {
         exports_obj: ?*Object = null,
         buffer_obj: ?*Object = null,
         owner_obj: ?*Object = null,
+        gc_ref: ?*WasmGcRef = null,
     };
 
     /// Stable snapshot of every GC-visible cold/rare edge. The concurrent
@@ -1961,6 +1969,7 @@ pub const Object = struct {
             .wasm_function => .{ .owner_obj = cold.rare.wasm_function.owner_obj },
             .wasm_tag => .{ .owner_obj = cold.rare.wasm_tag.owner_obj },
             .wasm_exception => .{ .import_vals = cold.rare.wasm_exception.payload_values, .owner_obj = cold.rare.wasm_exception.owner_obj },
+            .wasm_gc_ref => .{ .gc_ref = cold.rare.wasm_gc_ref.reference },
             else => .{},
         };
     }
@@ -2321,6 +2330,16 @@ pub const Object = struct {
 
     pub fn wasmExceptionState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_exception") {
         return self.ensureRare(fallback, .wasm_exception, .{});
+    }
+
+    pub inline fn wasmGcReference(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_gc_ref") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.wasm_gc_ref)) return null;
+        return &cold.rare.wasm_gc_ref;
+    }
+
+    pub fn wasmGcReferenceState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_gc_ref") {
+        return self.ensureRare(fallback, .wasm_gc_ref, .{});
     }
 
     pub inline fn temporalData(self: *const Object) ?*TemporalData {
