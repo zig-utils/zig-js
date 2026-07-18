@@ -388,12 +388,47 @@ fn toIndexU32(self: *Interpreter, input: Value, maximum: u32, what: []const u8) 
     return @intFromFloat(integer);
 }
 
-fn optionalMaximum(self: *Interpreter, descriptor: *Object, initial: u32, maximum: u32, what: []const u8) value.HostError!?u32 {
+fn addressTypeFromDescriptor(self: *Interpreter, store: *context.Context, descriptor: *Object, what: []const u8) value.HostError!types.AddressType {
+    const raw = try self.getProperty(Value.obj(descriptor), "address");
+    if (raw.isUndefined()) return .i32;
+    const name = try self.toStringV(raw);
+    if (std.mem.eql(u8, name, "i32")) return .i32;
+    if (std.mem.eql(u8, name, "i64")) {
+        if (!store.wasm_features.memory64)
+            return self.throwError("TypeError", "WebAssembly memory64 is disabled");
+        return .i64;
+    }
+    return self.throwError("TypeError", what);
+}
+
+fn addressValueToU64(self: *Interpreter, input: Value, address: types.AddressType, maximum: u64, what: []const u8) value.HostError!u64 {
+    if (address == .i32) return @as(u64, try toIndexU32(self, input, @intCast(@min(maximum, std.math.maxInt(u32))), what));
+    const bigint = try self.toBigIntValue(input);
+    const object = bigint.asObj();
+    const result = if (object.bigIntText()) |text|
+        std.fmt.parseInt(u64, text, 10) catch return self.throwError("TypeError", what)
+    else blk: {
+        const value_ = object.bigIntValue();
+        if (value_ < 0 or value_ > std.math.maxInt(u64)) return self.throwError("TypeError", what);
+        break :blk @as(u64, @intCast(value_));
+    };
+    if (result > maximum) return self.throwError("TypeError", what);
+    return result;
+}
+
+fn optionalAddressMaximum(self: *Interpreter, descriptor: *Object, address: types.AddressType, initial: u64, maximum: u64, what: []const u8) value.HostError!?u64 {
     const raw = try self.getProperty(Value.obj(descriptor), "maximum");
     if (raw.isUndefined()) return null;
-    const result = try toIndexU32(self, raw, maximum, what);
+    const result = try addressValueToU64(self, raw, address, maximum, what);
     if (result < initial) return self.throwError("RangeError", what);
     return result;
+}
+
+fn addressValueFromU64(self: *Interpreter, address: types.AddressType, result: u64) value.HostError!Value {
+    return switch (address) {
+        .i32 => Value.num(@floatFromInt(result)),
+        .i64 => try self.makeBigInt(@as(i128, result)),
+    };
 }
 
 fn errorConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
@@ -612,18 +647,19 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     const native: *MemoryDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "WebAssembly.Memory must be called with new");
     const descriptor = try requireDescriptor(self, args, "WebAssembly.Memory requires a descriptor object");
+    const store = try storeFor(self);
+    const address = try addressTypeFromDescriptor(self, store, descriptor, "WebAssembly.Memory address must be i32 or i64");
     const raw_initial = try self.getProperty(Value.obj(descriptor), "initial");
     if (raw_initial.isUndefined()) return self.throwError("TypeError", "WebAssembly.Memory descriptor requires initial");
-    const initial = try toIndexU32(self, raw_initial, types.MAX_PAGES, "WebAssembly.Memory initial is out of range");
-    const maximum = try optionalMaximum(self, descriptor, initial, types.MAX_PAGES, "WebAssembly.Memory maximum is out of range");
+    const initial = try addressValueToU64(self, raw_initial, address, address.maxMemoryPages(), "WebAssembly.Memory initial is out of range");
+    const maximum = try optionalAddressMaximum(self, descriptor, address, initial, address.maxMemoryPages(), "WebAssembly.Memory maximum is out of range");
     const shared = (try self.getProperty(Value.obj(descriptor), "shared")).toBoolean();
     if (shared and maximum == null)
         return self.throwError("TypeError", "shared WebAssembly.Memory requires a maximum");
     const proto = try constructedPrototype(self, native.proto);
-    const store = try storeFor(self);
 
-    const maximum64: ?u64 = if (maximum) |limit| limit else null;
-    const mem = try exec.createMemoryTyped(store.gpa, initial, maximum64, shared);
+    const mem = exec.createMemoryAddressed(store.gpa, address, initial, maximum, shared) catch
+        return self.throwError("RangeError", "WebAssembly.Memory could not be allocated");
     errdefer exec.destroyMemory(store.gpa, mem);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
@@ -651,13 +687,13 @@ fn memoryBufferGetter(ctx: *anyopaque, this: Value, _: []const Value) value.Host
 fn memoryGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const owner = try memoryFromThis(self, this, "WebAssembly.Memory.prototype.grow requires a Memory");
-    const delta = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Memory grow delta is out of range");
+    const delta = try addressValueToU64(self, if (args.len > 0) args[0] else Value.undef(), owner.mem.address, owner.mem.address.maxMemoryPages(), "WebAssembly.Memory grow delta is out of range");
     const previous = active_wasm_interp;
     active_wasm_interp = @ptrCast(self);
     defer active_wasm_interp = previous;
-    const result = exec.memoryGrow(owner.mem, delta);
-    if (result < 0) return self.throwError("RangeError", "WebAssembly.Memory could not grow");
-    return Value.num(@floatFromInt(result));
+    const result = exec.memoryGrowAddressed(owner.mem, delta) orelse
+        return self.throwError("RangeError", "WebAssembly.Memory could not grow");
+    return addressValueFromU64(self, owner.mem.address, result);
 }
 
 const TableRef = struct {
@@ -694,6 +730,7 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     const descriptor = try requireDescriptor(self, args, "WebAssembly.Table requires a descriptor object");
     const element = try self.toStringV(try self.getProperty(Value.obj(descriptor), "element"));
     const store = try storeFor(self);
+    const address = try addressTypeFromDescriptor(self, store, descriptor, "WebAssembly.Table address must be i32 or i64");
     const elem_type: types.ValType = if (std.mem.eql(u8, element, "anyfunc") or std.mem.eql(u8, element, "funcref"))
         .funcref
     else if (std.mem.eql(u8, element, "externref") and store.wasm_features.reference_types)
@@ -702,16 +739,16 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
         return self.throwError("TypeError", "WebAssembly.Table descriptor has an unsupported element type");
     const raw_initial = try self.getProperty(Value.obj(descriptor), "initial");
     if (raw_initial.isUndefined()) return self.throwError("TypeError", "WebAssembly.Table descriptor requires initial");
-    const initial = try toIndexU32(self, raw_initial, std.math.maxInt(u32), "WebAssembly.Table initial is out of range");
-    const maximum = try optionalMaximum(self, descriptor, initial, std.math.maxInt(u32), "WebAssembly.Table maximum is out of range");
+    const initial = try addressValueToU64(self, raw_initial, address, address.maxTableElements(), "WebAssembly.Table initial is out of range");
+    const maximum = try optionalAddressMaximum(self, descriptor, address, initial, address.maxTableElements(), "WebAssembly.Table maximum is out of range");
     const proto = try constructedPrototype(self, native.proto);
     const fill = try tableRefFromValue(self, store, elem_type, if (args.len > 1) args[1] else Value.nul());
 
-    const maximum64: ?u64 = if (maximum) |limit| limit else null;
-    const table = try exec.createTableTyped(store.gpa, elem_type, initial, maximum64);
+    const table = exec.createTableAddressed(store.gpa, address, elem_type, initial, maximum) catch
+        return self.throwError("RangeError", "WebAssembly.Table could not be allocated");
     errdefer exec.destroyTable(store.gpa, table);
     @memset(table.elems, fill.slot);
-    const refs = try allocateTableRefs(store, initial, fill.value);
+    const refs = try allocateTableRefs(store, @intCast(initial), fill.value);
     errdefer store.gpa.free(refs);
     const object = try gc.allocObj(self.arena);
     object.* = .{ .proto = proto };
@@ -732,13 +769,13 @@ fn tableLengthGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostE
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.length getter requires a Table");
     owner.lockOwner();
     defer owner.unlockOwner();
-    return Value.num(@floatFromInt(owner.refs.len));
+    return addressValueFromU64(self, owner.table.address, owner.refs.len);
 }
 
 fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.get requires a Table");
-    const index = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table index is out of range");
+    const index = try addressValueToU64(self, if (args.len > 0) args[0] else Value.undef(), owner.table.address, owner.table.address.maxTableElements(), "WebAssembly.Table index is out of range");
     while (true) {
         owner.lockOwner();
         owner.table.lockTable();
@@ -747,8 +784,8 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
             owner.unlockOwner();
             return self.throwError("RangeError", "WebAssembly.Table index is out of bounds");
         }
-        const slot = owner.table.elems[index];
-        const mirrored: Value = .{ .bits = owner.refs[index].load(.acquire) };
+        const slot = owner.table.elems[@intCast(index)];
+        const mirrored: Value = .{ .bits = owner.refs[@intCast(index)].load(.acquire) };
         owner.table.unlockTable();
         owner.unlockOwner();
         switch (slot) {
@@ -766,9 +803,9 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                 owner.lockOwner();
                 owner.table.lockTable();
                 const unchanged = index < owner.table.elems.len and
-                    owner.table.elems[index] == .funcref and
-                    owner.table.elems[index].funcref == func;
-                if (unchanged) owner.refs[index].store(resolved.bits, .release);
+                    owner.table.elems[@intCast(index)] == .funcref and
+                    owner.table.elems[@intCast(index)].funcref == func;
+                if (unchanged) owner.refs[@intCast(index)].store(resolved.bits, .release);
                 owner.table.unlockTable();
                 owner.unlockOwner();
                 if (unchanged) {
@@ -784,7 +821,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.set requires a Table");
-    const index = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table index is out of range");
+    const index = try addressValueToU64(self, if (args.len > 0) args[0] else Value.undef(), owner.table.address, owner.table.address.maxTableElements(), "WebAssembly.Table index is out of range");
     owner.lockOwner();
     const in_bounds = index < owner.refs.len;
     owner.unlockOwner();
@@ -793,9 +830,9 @@ fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     owner.lockOwner();
     defer owner.unlockOwner();
     owner.table.lockTable();
-    owner.table.elems[index] = replacement.slot;
+    owner.table.elems[@intCast(index)] = replacement.slot;
     owner.table.unlockTable();
-    owner.refs[index].store(replacement.value.bits, .release);
+    owner.refs[@intCast(index)].store(replacement.value.bits, .release);
     gc.barrierValueFrom(owner.wrapper, replacement.value);
     return Value.undef();
 }
@@ -803,27 +840,29 @@ fn tableSet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 fn tableGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const owner = try tableFromThis(self, this, "WebAssembly.Table.prototype.grow requires a Table");
-    const delta = try toIndexU32(self, if (args.len > 0) args[0] else Value.undef(), std.math.maxInt(u32), "WebAssembly.Table grow delta is out of range");
+    const delta = try addressValueToU64(self, if (args.len > 0) args[0] else Value.undef(), owner.table.address, owner.table.address.maxTableElements(), "WebAssembly.Table grow delta is out of range");
     const fill = try tableRefFromValue(self, owner.store, owner.table.type, if (args.len > 1) args[1] else Value.nul());
     owner.lockOwner();
     defer owner.unlockOwner();
-    const old_len: u32 = @intCast(owner.refs.len);
-    const limit = owner.table.limits.max orelse std.math.maxInt(u32);
-    if (delta > limit - old_len)
+    const old_len: u64 = @intCast(owner.refs.len);
+    if (delta == 0) return addressValueFromU64(self, owner.table.address, old_len);
+    const limit = @min(owner.table.limits.max orelse owner.table.address.maxTableElements(), exec.MAX_HOST_TABLE_ELEMENTS);
+    if (old_len >= limit or delta > limit - old_len)
         return self.throwError("RangeError", "WebAssembly.Table could not grow");
-    if (delta == 0) return Value.num(@floatFromInt(old_len));
 
-    const fresh = try allocateTableRefs(owner.store, @as(usize, old_len) + delta, fill.value);
+    const new_len = old_len + delta;
+    if (new_len > std.math.maxInt(usize)) return self.throwError("RangeError", "WebAssembly.Table could not grow");
+    const fresh = try allocateTableRefs(owner.store, @intCast(new_len), fill.value);
     errdefer owner.store.gpa.free(fresh);
     for (owner.refs, 0..) |*old, i| fresh[i].store(old.load(.acquire), .monotonic);
     try owner.retired_refs.ensureUnusedCapacity(owner.store.gpa, 1);
-    if (exec.tableGrowWith(owner.table, delta, fill.slot) < 0)
+    if (exec.tableGrowAddressed(owner.table, delta, fill.slot) == null)
         return self.throwError("RangeError", "WebAssembly.Table could not grow");
     owner.retired_refs.appendAssumeCapacity(owner.refs);
     owner.refs = fresh;
     owner.wrapper.setWasmTableRefs(self.arena, fresh) catch unreachable;
     gc.barrierValueFrom(owner.wrapper, fill.value);
-    return Value.num(@floatFromInt(old_len));
+    return addressValueFromU64(self, owner.table.address, old_len);
 }
 
 fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostError!types.ValType {
@@ -2902,6 +2941,132 @@ test "wasm api Memory grows failure-atomically and detaches the old buffer" {
         \\missing && ordering.join('') === 'imr' && derived instanceof DerivedMemory;
     );
     try std.testing.expect(boundaries.isBoolean() and boundaries.asBool());
+}
+
+test "wasm api memory64 constructors use BigInt addresses and host limits" {
+    const disabled = try context.Context.create(std.testing.allocator);
+    defer disabled.destroy();
+    const rejected = try disabled.evaluate(
+        \\let rejected = false;
+        \\try { new WebAssembly.Memory({address: 'i64', initial: 1n}); }
+        \\catch (error) { rejected = error instanceof TypeError && error.message.includes('memory64 is disabled'); }
+        \\rejected;
+    );
+    try std.testing.expect(rejected.isBoolean() and rejected.asBool());
+
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .memory64 = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const memory = new WebAssembly.Memory({address: 'i64', initial: 1n, maximum: 2n});
+        \\const firstBuffer = memory.buffer;
+        \\const zero = memory.grow(0n);
+        \\const previous = memory.grow(1n);
+        \\let memoryLimit = false, numberRejected = false, negativeRejected = false, hostMemoryLimit = false;
+        \\try { memory.grow(1n); } catch (error) { memoryLimit = error instanceof RangeError; }
+        \\try { new WebAssembly.Memory({address: 'i64', initial: 1}); } catch (error) { numberRejected = error instanceof TypeError; }
+        \\try { new WebAssembly.Memory({address: 'i64', initial: -1n}); } catch (error) { negativeRejected = error instanceof TypeError; }
+        \\try { new WebAssembly.Memory({address: 'i64', initial: 262145n}); } catch (error) { hostMemoryLimit = error instanceof RangeError; }
+        \\const table = new WebAssembly.Table({element: 'externref', address: 'i64', initial: 1n, maximum: 2n});
+        \\const marker = {memory64: 1};
+        \\table.set(0n, marker);
+        \\const tablePrevious = table.grow(1n);
+        \\let tableNumberRejected = false, tableLimit = false, hostTableLimit = false;
+        \\try { table.get(0); } catch (error) { tableNumberRejected = error instanceof TypeError; }
+        \\try { table.grow(1n); } catch (error) { tableLimit = error instanceof RangeError; }
+        \\try { new WebAssembly.Table({element: 'funcref', address: 'i64', initial: 10000001n}); } catch (error) { hostTableLimit = error instanceof RangeError; }
+        \\zero === 1n && previous === 1n && firstBuffer.detached &&
+        \\  memory.grow(0n) === 2n && memory.buffer.byteLength === 2 * 65536 &&
+        \\  memoryLimit && numberRejected && negativeRejected && hostMemoryLimit &&
+        \\  table.length === 2n && tablePrevious === 1n && table.get(0n) === marker && table.get(1n) === null &&
+        \\  table.grow(0n) === 2n && tableNumberRejected && tableLimit && hostTableLimit;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api wraps defined memory64 and table64 with BigInt reflection" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .memory64 = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const memoryBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  5,4,1,5,1,2,
+        \\  7,10,1,6,109,101,109,111,114,121,2,0
+        \\]);
+        \\const tableBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  4,5,1,112,5,1,2,
+        \\  7,5,1,1,116,1,0
+        \\]);
+        \\const memory = new WebAssembly.Instance(new WebAssembly.Module(memoryBytes)).exports.memory;
+        \\const table = new WebAssembly.Instance(new WebAssembly.Module(tableBytes)).exports.t;
+        \\memory instanceof WebAssembly.Memory && memory.grow(0n) === 1n &&
+        \\  table instanceof WebAssembly.Table && table.length === 1n && table.get(0n) === null;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api memory64 imports require matching address types and preserve identity" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .wasm_features = .{ .memory64 = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\const memoryImportBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  2,9,1,1,101,1,109,2,5,1,2,
+        \\  7,5,1,1,120,2,0
+        \\]);
+        \\const tableImportBytes = new Uint8Array([
+        \\  0,97,115,109,1,0,0,0,
+        \\  2,10,1,1,101,1,116,1,112,5,1,2,
+        \\  7,5,1,1,120,1,0
+        \\]);
+        \\const memoryModule = new WebAssembly.Module(memoryImportBytes);
+        \\const tableModule = new WebAssembly.Module(tableImportBytes);
+        \\const memory64 = new WebAssembly.Memory({address: 'i64', initial: 1n, maximum: 2n});
+        \\const table64 = new WebAssembly.Table({element: 'funcref', address: 'i64', initial: 1n, maximum: 2n});
+        \\const memory32 = new WebAssembly.Memory({initial: 1, maximum: 2});
+        \\const table32 = new WebAssembly.Table({element: 'funcref', initial: 1, maximum: 2});
+        \\const memoryIdentity = new WebAssembly.Instance(memoryModule, {e: {m: memory64}}).exports.x === memory64;
+        \\const tableIdentity = new WebAssembly.Instance(tableModule, {e: {t: table64}}).exports.x === table64;
+        \\let memoryMismatch = false, tableMismatch = false;
+        \\try { new WebAssembly.Instance(memoryModule, {e: {m: memory32}}); }
+        \\catch (error) { memoryMismatch = error instanceof WebAssembly.LinkError; }
+        \\try { new WebAssembly.Instance(tableModule, {e: {t: table32}}); }
+        \\catch (error) { tableMismatch = error instanceof WebAssembly.LinkError; }
+        \\memoryIdentity && tableIdentity && memoryMismatch && tableMismatch;
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api memory64 table roots retain and release externrefs" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .wasm_features = .{ .memory64 = true, .reference_types = true },
+    });
+    defer store.destroy();
+    const setup = try store.evaluate(
+        \\globalThis.memory64Table = new WebAssembly.Table({
+        \\  element: 'externref', address: 'i64', initial: 1n, maximum: 2n
+        \\});
+        \\let marker = {memory64Root: 77};
+        \\globalThis.memory64Weak = new WeakRef(marker);
+        \\memory64Table.set(0n, marker);
+        \\marker = null;
+        \\memory64Table.grow(1n) === 1n;
+    );
+    try std.testing.expect(setup.isBoolean() and setup.asBool());
+    store.collectGarbage();
+    const retained = try store.evaluate("memory64Weak.deref() !== undefined && memory64Table.get(0n) === memory64Weak.deref()");
+    try std.testing.expect(retained.isBoolean() and retained.asBool());
+    _ = try store.evaluate("memory64Table.set(0n, null)");
+    store.collectGarbage();
+    const reclaimed = try store.evaluate("memory64Weak.deref() === undefined && memory64Table.get(0n) === null");
+    try std.testing.expect(reclaimed.isBoolean() and reclaimed.asBool());
 }
 
 test "wasm api shared Memory preserves fixed historical buffers and aliases backing" {

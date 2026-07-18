@@ -4092,6 +4092,25 @@ test "wasm.exec memory64 addressed instances and host allocation limits" {
     try std.testing.expectEqual(types.AddressType.i64, inst.tables[0].address);
 }
 
+fn instantiateMemory64WithFailingAllocator(gpa: Allocator) !void {
+    const bytes = comptime (hdr ++ table64Sec(2, 3) ++ mem64Sec(0, 1));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, .{ .memory64 = true }, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(gpa, mod, .{}, &diag);
+    defer destroyInstance(gpa, inst);
+    try std.testing.expectEqual(types.AddressType.i64, inst.mems[0].address);
+    try std.testing.expectEqual(types.AddressType.i64, inst.tables[0].address);
+}
+
+test "wasm.exec memory64 instantiation is rollback safe across allocation failures" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        instantiateMemory64WithFailingAllocator,
+        .{},
+    );
+}
+
 test "wasm.exec memory64 active offsets retain all address bits" {
     const bytes = comptime (hdr ++
         sec(5, "\x01\x04\x01") ++
