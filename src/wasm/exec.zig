@@ -467,9 +467,15 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
             .active => true,
         } };
 
-    // 3. Preflight every active segment before mutating any store. A link
-    // failure must leave imported memories and tables untouched; start-function
-    // traps happen later and deliberately retain already-applied mutations.
+    return inst;
+}
+
+/// Apply active segments in declaration order. Core 2 requires writes from a
+/// completed segment to remain visible when a later segment traps, while the
+/// failing segment itself performs no partial write.
+pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}!void {
+    const mod = inst.module;
+
     for (mod.elems, inst.elem_segments) |e, segment| {
         const active = switch (e.mode) {
             .active => |active| active,
@@ -480,13 +486,15 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         tab.lockTable();
         const table_len: u64 = @intCast(tab.elems.len);
         const available = if (start <= table_len) tab.elems.len - @as(usize, @intCast(start)) else 0;
-        const in_bounds = start <= table_len and segment.elems.len <= available;
-        tab.unlockTable();
-        if (!in_bounds) {
+        if (start > table_len or segment.elems.len > available) {
+            tab.unlockTable();
             diag.set(types.Diagnostic.no_offset, "out of bounds table index", .{});
-            return error.Link;
+            return error.Trap;
         }
+        @memcpy(tab.elems[@intCast(start)..][0..segment.elems.len], segment.elems);
+        tab.unlockTable();
     }
+
     for (mod.datas) |d| {
         const active = switch (d.mode) {
             .active => |active| active,
@@ -498,36 +506,11 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         const available = if (start <= memory_len) mem.bytes.len - @as(usize, @intCast(start)) else 0;
         if (start > memory_len or d.bytes.len > available) {
             diag.set(types.Diagnostic.no_offset, "out of bounds memory index", .{});
-            return error.Link;
+            return error.Trap;
         }
-    }
-
-    // 4. Apply element segments.
-    for (mod.elems, inst.elem_segments) |e, segment| {
-        const active = switch (e.mode) {
-            .active => |active| active,
-            .passive, .declarative => continue,
-        };
-        const tab = inst.tables[active.table];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
-        tab.lockTable();
-        @memcpy(tab.elems[@intCast(start)..][0..segment.elems.len], segment.elems);
-        tab.unlockTable();
-    }
-
-    // 5. Apply data segments.
-    for (mod.datas) |d| {
-        const active = switch (d.mode) {
-            .active => |active| active,
-            .passive => continue,
-        };
-        const mem = inst.mems[active.mem];
-        const start: u64 = @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()));
         const lo: usize = @intCast(start);
         @memcpy(mem.bytes[lo..][0..d.bytes.len], d.bytes);
     }
-
-    return inst;
 }
 
 pub fn runStart(inst: *Instance, diag: *types.Diagnostic) ExecError!void {
@@ -537,6 +520,7 @@ pub fn runStart(inst: *Instance, diag: *types.Diagnostic) ExecError!void {
 pub fn instantiate(gpa: Allocator, mod: *const types.Module, imports: Imports, diag: *types.Diagnostic) LinkError!*Instance {
     const inst = try instantiateStore(gpa, mod, imports, diag);
     errdefer destroyInstance(gpa, inst);
+    try applyActiveSegments(inst, diag);
     try runStart(inst, diag);
     return inst;
 }
@@ -2005,6 +1989,14 @@ fn expectLink(comptime bytes: []const u8, imports: Imports, msg: []const u8) !vo
     }
 }
 
+fn expectInstantiationTrap(comptime bytes: []const u8, imports: Imports, msg: []const u8) !void {
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModule(bytes, &diag);
+    defer decode.destroyModule(talloc, mod);
+    try std.testing.expectError(error.Trap, instantiate(talloc, mod, imports, &diag));
+    try std.testing.expectEqualStrings(msg, diag.message());
+}
+
 fn binop(comptime op: types.Op, comptime pt: []const u8, comptime rt: []const u8, a: u64, b: u64, expected: u64) !void {
     const bytes = comptime arithModule(pt ++ pt, rt, "\x20\x00\x20\x01" ++ ob(op));
     try expectResults(bytes, 0, &.{ a, b }, &.{expected});
@@ -2284,16 +2276,16 @@ test "wasm.exec instantiate global init referencing imported global" {
     try std.testing.expectEqual(@as(u64, 99), try run1(inst, 0, &.{}));
 }
 
-test "wasm.exec instantiate elem out of bounds is a link error" {
+test "wasm.exec instantiate elem out of bounds is a trap" {
     const base = comptime (hdr ++ typesSec(&.{ft("", "")}) ++ funcSec(&.{0}) ++ tableSec(2, null));
-    try expectLink(comptime (base ++ elemSec0(2, &.{0}) ++ codeSec(&.{""})), .{}, "out of bounds table index");
-    try expectLink(comptime (base ++ elemSec0(1, &.{ 0, 0 }) ++ codeSec(&.{""})), .{}, "out of bounds table index");
+    try expectInstantiationTrap(comptime (base ++ elemSec0(2, &.{0}) ++ codeSec(&.{""})), .{}, "out of bounds table index");
+    try expectInstantiationTrap(comptime (base ++ elemSec0(1, &.{ 0, 0 }) ++ codeSec(&.{""})), .{}, "out of bounds table index");
 }
 
-test "wasm.exec instantiate data out of bounds is a link error" {
+test "wasm.exec instantiate data out of bounds is a trap" {
     const base = comptime (hdr ++ memSec(1, null));
-    try expectLink(comptime (base ++ dataSec0(65535, "AB")), .{}, "out of bounds memory index");
-    try expectLink(comptime (base ++ dataSec0(65536, "A")), .{}, "out of bounds memory index");
+    try expectInstantiationTrap(comptime (base ++ dataSec0(65535, "AB")), .{}, "out of bounds memory index");
+    try expectInstantiationTrap(comptime (base ++ dataSec0(65536, "A")), .{}, "out of bounds memory index");
 }
 
 test "wasm.exec instantiate data at exact end succeeds" {
@@ -2305,7 +2297,7 @@ test "wasm.exec instantiate data at exact end succeeds" {
     defer destroyBuilt(b2);
 }
 
-test "wasm.exec link failure applies no earlier active segments" {
+test "wasm.exec instantiation trap retains earlier active segments" {
     var diag: types.Diagnostic = .{};
     const memory_module = try buildModule(comptime (hdr ++
         importSec(&.{impMem("a", "m", 1, null)}) ++
@@ -2313,8 +2305,8 @@ test "wasm.exec link failure applies no earlier active segments" {
     defer decode.destroyModule(talloc, memory_module);
     const memory = try createMemory(talloc, 1, null);
     defer destroyMemory(talloc, memory);
-    try std.testing.expectError(error.Link, instantiate(talloc, memory_module, .{ .mems = &.{memory} }, &diag));
-    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0 }, memory.bytes[0..3]);
+    try std.testing.expectError(error.Trap, instantiate(talloc, memory_module, .{ .mems = &.{memory} }, &diag));
+    try std.testing.expectEqualStrings("abc", memory.bytes[0..3]);
 
     diag = .{};
     const table_module = try buildModule(comptime (hdr ++
@@ -2326,8 +2318,8 @@ test "wasm.exec link failure applies no earlier active segments" {
     defer decode.destroyModule(talloc, table_module);
     const table = try createTable(talloc, 1, null);
     defer destroyTable(talloc, table);
-    try std.testing.expectError(error.Link, instantiate(talloc, table_module, .{ .tables = &.{table} }, &diag));
-    try std.testing.expect(table.elems[0] == .funcref and table.elems[0].funcref == null);
+    try std.testing.expectError(error.Trap, instantiate(talloc, table_module, .{ .tables = &.{table} }, &diag));
+    try std.testing.expect(table.elems[0] == .funcref and table.elems[0].funcref != null);
 }
 
 fn hostInc(ctx: *anyopaque, args: []const u64, results: []u64, diag: *types.Diagnostic) error{ Trap, Host }!void {
