@@ -375,6 +375,12 @@ const Boxed = struct {
     exception_encoded: EncodedValue = .empty,
 };
 
+const PrivateContiguousVector = struct {
+    array: *Object,
+    source_address: usize,
+    encoded: []EncodedValue,
+};
+
 const ReachabilityCell = struct {
     pointer: *anyopaque,
     kind: gc_mod.CellKind,
@@ -486,6 +492,10 @@ const CContextGroup = struct {
     /// publishing the same object twice must return the same encoded handle.
     /// Keep one canonical Boxed cell per VM-owned object across sibling realms.
     private_object_boxes: std.AutoHashMapUnmanaged(*Object, *Boxed) = .empty,
+    /// Stable encoded snapshots returned by the private JSArray iterator fast
+    /// path. There is no consumer release hook, so vectors live with the VM;
+    /// each pointer remains independently revalidatable until group teardown.
+    private_contiguous_vectors: std.AutoHashMapUnmanaged(usize, *PrivateContiguousVector) = .empty,
     /// JSC returns VM small strings for these pure diagnostic projections.
     /// Preserve that raw EncodedJSValue stability across repeated calls.
     no_side_effect_strings: [6]?*Boxed = @splat(null),
@@ -542,6 +552,12 @@ const CContextGroup = struct {
         }
         self.contexts.deinit(gpa);
         self.private_object_boxes.deinit(gpa);
+        var vectors = self.private_contiguous_vectors.valueIterator();
+        while (vectors.next()) |record| {
+            gpa.free(record.*.encoded);
+            gpa.destroy(record.*);
+        }
+        self.private_contiguous_vectors.deinit(gpa);
         self.primary.c_api_group = null;
         self.primary.destroy();
         self.atom_strings.deinit();
@@ -7423,6 +7439,105 @@ export fn JSArray__constructArray(
         return .empty;
     };
     return privateEncodeResult(context, &machine, array);
+}
+
+fn privateContiguousStorageSupported(values: []const Value) bool {
+    if (values.len == 0) return false; // JSC's Undecided shape is excluded.
+    var all_numbers = true;
+    var has_non_int32_number = false;
+    for (values) |item| {
+        if (!item.isNumber()) {
+            all_numbers = false;
+            continue;
+        }
+        const number = item.asNum();
+        if (!std.math.isFinite(number) or @trunc(number) != number or
+            number < @as(f64, @floatFromInt(std.math.minInt(i32))) or
+            number > @as(f64, @floatFromInt(std.math.maxInt(i32))) or
+            (number == 0 and std.math.signbit(number)))
+            has_non_int32_number = true;
+    }
+    // A purely numeric array containing a non-int32 value corresponds to JSC's
+    // unboxed Double shape. Mixed arrays use boxed Contiguous storage.
+    return !(all_numbers and has_non_int32_number);
+}
+
+fn privateContiguousSnapshot(
+    boxed: *Boxed,
+    object: *Object,
+) ?value.PackedDenseStorageSnapshot {
+    var machine = boxed.owner.interpreter();
+    if (!machine.canExposeContiguousArray(object)) return null;
+    return object.packedDenseStorageSnapshot(gpa) catch null;
+}
+
+export fn Bun__JSArray__getContiguousVector(
+    encoded_array: EncodedValue,
+    out_length: ?*u32,
+) callconv(.c) ?[*]const EncodedValue {
+    const output = out_length orelse return null;
+    const boxed = privateBoxedFrom(encoded_array) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    const object = boxed.value.asObj();
+    const snapshot = privateContiguousSnapshot(boxed, object) orelse return null;
+    defer gpa.free(snapshot.values);
+    if (!privateContiguousStorageSupported(snapshot.values) or snapshot.values.len > std.math.maxInt(u32)) return null;
+
+    const vector = gpa.alloc(EncodedValue, snapshot.values.len) catch return null;
+    for (snapshot.values, vector) |item, *slot| {
+        slot.* = privateEncodedFromValue(boxed.owner, item);
+        if (slot.* == .empty) {
+            gpa.free(vector);
+            return null;
+        }
+    }
+    const record = gpa.create(PrivateContiguousVector) catch {
+        gpa.free(vector);
+        return null;
+    };
+    record.* = .{
+        .array = object,
+        .source_address = snapshot.source_address,
+        .encoded = vector,
+    };
+    const opaque_group = boxed.owner.c_api_group orelse {
+        gpa.destroy(record);
+        gpa.free(vector);
+        return null;
+    };
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    group.private_contiguous_vectors.put(gpa, @intFromPtr(vector.ptr), record) catch {
+        gpa.destroy(record);
+        gpa.free(vector);
+        return null;
+    };
+    output.* = @intCast(vector.len);
+    return vector.ptr;
+}
+
+export fn Bun__JSArray__contiguousVectorIsStillValid(
+    encoded_array: EncodedValue,
+    expected: ?[*]const EncodedValue,
+    expected_length: u32,
+) callconv(.c) bool {
+    const expected_vector = expected orelse return false;
+    const boxed = privateBoxedFrom(encoded_array) orelse return false;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return false;
+    const opaque_group = boxed.owner.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const record = group.private_contiguous_vectors.get(@intFromPtr(expected_vector)) orelse return false;
+    const object = boxed.value.asObj();
+    if (record.array != object or record.encoded.len != expected_length) return false;
+
+    const snapshot = privateContiguousSnapshot(boxed, object) orelse return false;
+    defer gpa.free(snapshot.values);
+    if (snapshot.source_address != record.source_address or
+        snapshot.values.len != record.encoded.len or
+        !privateContiguousStorageSupported(snapshot.values)) return false;
+    for (snapshot.values, record.encoded) |item, previous| {
+        if (privateEncodedFromValue(boxed.owner, item) != previous) return false;
+    }
+    return true;
 }
 
 export fn JSC__JSValue__putIndex(

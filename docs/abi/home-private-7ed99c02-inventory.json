@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 275,
-      "pending": 171
+      "implemented": 277,
+      "pending": 169
     }
   },
   "declarations": [
@@ -363,10 +363,10 @@
       "line": 86,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__JSArray__contiguousVectorIsStillValid(JSValue, [*]const JSValue, u32) bool;",
       "declaration_sha256": "e972a37d5a7b23d149dc97e094c160747101d4d1bdaac1c02e225e0e7437f28b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSArray__getContiguousVector",
@@ -374,10 +374,10 @@
       "line": 85,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__JSArray__getContiguousVector(JSValue, *u32) ?[*]const JSValue;",
       "declaration_sha256": "2058cdc3c11ae6b533d2c590a160d13bcec4b3b0721f1a9617029b2e3eeab35a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSValue__toNumber",

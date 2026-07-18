@@ -6620,6 +6620,16 @@ pub const Interpreter = struct {
         return true;
     }
 
+    /// Pure eligibility gate for the private JSArray contiguous-vector bridge.
+    /// The vector snapshot performs the final hole/length/backing checks.
+    pub fn canExposeContiguousArray(self: *Interpreter, o: *value.Object) bool {
+        if (!o.is_array or o.is_arguments or o.forced_array_storage or
+            o.proxyHandler() != null or o.proxy_revoked or o.typedArray() != null or
+            o.accessorsMap() != null or o.attrsMap() != null or
+            o.has_indexed_property.load(.monotonic)) return false;
+        return self.arrayProtoChainCleanForIndexedSet(o);
+    }
+
     /// VM call-site fast path for the intrinsic `Array.prototype.push`. The
     /// callee identity check means an own/prototype override has already won
     /// during ordinary property lookup. Only packed, extensible real arrays

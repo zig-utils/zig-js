@@ -464,6 +464,8 @@ extern "c" fn JSC__JSValue__keys(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__values(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSArray__constructArray(JSContextRef, [*]const EncodedValue, usize) EncodedValue;
 extern "c" fn JSArray__constructEmptyArray(JSContextRef, usize) EncodedValue;
+extern "c" fn Bun__JSArray__getContiguousVector(EncodedValue, ?*u32) ?[*]const EncodedValue;
+extern "c" fn Bun__JSArray__contiguousVectorIsStillValid(EncodedValue, ?[*]const EncodedValue, u32) bool;
 extern "c" fn Bun__JSValue__toNumber(EncodedValue, JSContextRef) f64;
 extern "c" fn JSC__JSValue__isInstanceOf(EncodedValue, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__isIterable(EncodedValue, JSContextRef) bool;
@@ -3671,6 +3673,91 @@ pub fn main() void {
         getNumberProperty(context, constructed_max, "length") != @as(f64, @floatFromInt(std.math.maxInt(u32))))
         fail("private empty JSArray construction mismatch");
 
+    const contiguous_array = evaluate(context, "globalThis.__private_contiguous_255 = [1, 2, 3]; __private_contiguous_255");
+    var contiguous_length: u32 = 0xfeed_beef;
+    const contiguous = Bun__JSArray__getContiguousVector(contiguous_array, &contiguous_length) orelse
+        fail("private contiguous JSArray vector missing");
+    if (contiguous_length != 3 or
+        contiguous[0] != EncodedValue.fromInt32(1) or
+        contiguous[1] != EncodedValue.fromInt32(2) or
+        contiguous[2] != EncodedValue.fromInt32(3) or
+        !Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, contiguous, contiguous_length))
+        fail("private contiguous JSArray vector mismatch");
+    var second_contiguous_length: u32 = 0;
+    const second_contiguous = Bun__JSArray__getContiguousVector(contiguous_array, &second_contiguous_length) orelse
+        fail("second private contiguous JSArray vector missing");
+    if (second_contiguous == contiguous or second_contiguous_length != contiguous_length or
+        !Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, contiguous, contiguous_length) or
+        !Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, second_contiguous, second_contiguous_length) or
+        Bun__JSArray__contiguousVectorIsStillValid(constructed, contiguous, contiguous_length) or
+        Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, contiguous, contiguous_length - 1) or
+        Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, @ptrFromInt(16), contiguous_length) or
+        Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, null, contiguous_length))
+        fail("private contiguous JSArray vector identity mismatch");
+
+    _ = JSC__VM__runGC(vm, true);
+    if (!Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, contiguous, contiguous_length))
+        fail("private contiguous JSArray vector did not survive GC");
+    _ = evaluate(context, "__private_contiguous_255[1] = 22");
+    if (Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, contiguous, contiguous_length) or
+        JSC__JSValue__getDirectIndex(contiguous_array, context, 1) != EncodedValue.fromInt32(22))
+        fail("private contiguous JSArray replacement invalidation mismatch");
+    var replaced_length: u32 = 0;
+    const replaced_vector = Bun__JSArray__getContiguousVector(contiguous_array, &replaced_length) orelse
+        fail("private replaced contiguous JSArray vector missing");
+    _ = evaluate(context, "__private_contiguous_255.push(4)");
+    if (Bun__JSArray__contiguousVectorIsStillValid(contiguous_array, replaced_vector, replaced_length))
+        fail("private contiguous JSArray growth did not invalidate vector");
+
+    var mixed_length: u32 = 0;
+    const mixed_vector = Bun__JSArray__getContiguousVector(constructed, &mixed_length) orelse
+        fail("private mixed contiguous JSArray vector missing");
+    if (mixed_length != constructed_items.len or
+        mixed_vector[0] != .true or mixed_vector[1] != EncodedValue.fromInt32(-7) or
+        !JSC__JSValue__isStrictEqual(mixed_vector[2], encoded_object, context) or
+        !JSC__JSValue__isStrictEqual(mixed_vector[3], sibling_item, context) or
+        !Bun__JSArray__contiguousVectorIsStillValid(constructed, mixed_vector, mixed_length))
+        fail("private mixed/sibling contiguous JSArray vector mismatch");
+    const undefined_array = evaluate(context, "[undefined]");
+    var undefined_length: u32 = 0;
+    const undefined_vector = Bun__JSArray__getContiguousVector(undefined_array, &undefined_length) orelse
+        fail("private undefined contiguous JSArray vector missing");
+    if (undefined_length != 1 or undefined_vector[0] != .undefined)
+        fail("private contiguous JSArray present-undefined mismatch");
+
+    for ([_]EncodedValue{
+        .undefined,
+        encoded_object,
+        evaluate(context, "new Uint8Array([1, 2])"),
+        evaluate(context, "[]"),
+        evaluate(context, "[1.5, 2.5]"),
+        evaluate(context, "[1, , 3]"),
+        evaluate(context, "(() => { const a = [1]; Object.defineProperty(a, '0', { get() { return 9; } }); return a; })()"),
+    }) |invalid_contiguous| {
+        var untouched_length: u32 = 0xa5a5_a5a5;
+        if (Bun__JSArray__getContiguousVector(invalid_contiguous, &untouched_length) != null or
+            untouched_length != 0xa5a5_a5a5)
+            fail("private invalid contiguous JSArray changed output length");
+    }
+
+    var pending_contiguous_length: u32 = 0;
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(2551));
+    const pending_contiguous = Bun__JSArray__getContiguousVector(constructed, &pending_contiguous_length) orelse
+        fail("private contiguous JSArray observed pending exception");
+    if (!Bun__JSArray__contiguousVectorIsStillValid(constructed, pending_contiguous, pending_contiguous_length))
+        fail("private contiguous JSArray validation observed pending exception");
+    const contiguous_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(contiguous_exception.cellPointer()) != EncodedValue.fromInt32(2551) or
+        Bun__JSArray__getContiguousVector(constructed, null) != null)
+        fail("private contiguous JSArray replaced pending exception");
+
+    var polluted_length: u32 = 0x1234_5678;
+    _ = evaluate(context, "Object.defineProperty(Array.prototype, '9', { get() { return 9; }, configurable: true })");
+    if (Bun__JSArray__getContiguousVector(evaluate(context, "[1, 2]"), &polluted_length) != null or
+        polluted_length != 0x1234_5678)
+        fail("private contiguous JSArray ignored indexed prototype pollution");
+    _ = evaluate(context, "delete Array.prototype[9]");
+
     const invalid_items = [_]EncodedValue{ EncodedValue.fromInt32(1), EncodedValue.fromRef(foreign_object) };
     if (JSArray__constructArray(context, invalid_items[0..].ptr, invalid_items.len) != .empty or
         !JSGlobalObject__hasException(context))
@@ -4539,5 +4626,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 259/259 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 261/261 symbols linked; runtime matrix passed\n", .{});
 }

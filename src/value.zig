@@ -750,6 +750,11 @@ pub const ErrorStackFrame = struct {
     jsc_stack_frame_index: i32 = -1,
 };
 
+pub const PackedDenseStorageSnapshot = struct {
+    values: []Value,
+    source_address: usize,
+};
+
 const ErrorStack = struct {
     frames: []const ErrorStackFrame,
 };
@@ -2437,12 +2442,20 @@ pub const Object = struct {
     /// `elements_lock`. Returns null when Array iteration must fall back to
     /// observable `[[Get]]` (holes, sparse logical tail, or index accessors).
     pub fn packedDenseElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?[]Value {
+        const snapshot = try self.packedDenseStorageSnapshot(arena) orelse return null;
+        return snapshot.values;
+    }
+
+    /// Copy a packed dense Array while also retaining the identity of its
+    /// current element backing. Private contiguous-vector consumers compare
+    /// both the encoded snapshot and this address before every direct read.
+    pub fn packedDenseStorageSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?PackedDenseStorageSnapshot {
         self.lockElements();
         defer self.unlockElements();
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len or self.accessorsMap() != null) return null;
         const out = try arena.alloc(Value, self.elementsItems().len);
         @memcpy(out, self.elementsItems());
-        return out;
+        return .{ .values = out, .source_address = @intFromPtr(self.elementsItems().ptr) };
     }
 
     /// Snapshot internal element-backed tuples/lists under `elements_lock`.
