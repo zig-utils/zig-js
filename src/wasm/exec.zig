@@ -1310,6 +1310,175 @@ fn executeSimdFloatConversion(s: *State, op: simd.Op) ExecError!bool {
     return true;
 }
 
+const SimdIntegerTransform = struct {
+    source_width: u8,
+    target_width: u8,
+    signed: bool,
+    high: bool = false,
+};
+
+fn simdExtend(op: simd.Op) ?SimdIntegerTransform {
+    return switch (op) {
+        .i16x8_extend_low_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true },
+        .i16x8_extend_high_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true, .high = true },
+        .i16x8_extend_low_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false },
+        .i16x8_extend_high_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false, .high = true },
+        .i32x4_extend_low_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true },
+        .i32x4_extend_high_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true, .high = true },
+        .i32x4_extend_low_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false },
+        .i32x4_extend_high_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false, .high = true },
+        .i64x2_extend_low_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true },
+        .i64x2_extend_high_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true, .high = true },
+        .i64x2_extend_low_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false },
+        .i64x2_extend_high_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false, .high = true },
+        else => null,
+    };
+}
+
+fn extendSimdHalf(vector: u128, descriptor: SimdIntegerTransform) u128 {
+    const lanes = 128 / descriptor.target_width;
+    const first = if (descriptor.high) lanes else 0;
+    var result: u128 = 0;
+    for (0..lanes) |lane| {
+        var value = laneBits(vector, @intCast(first + lane), descriptor.source_width);
+        if (descriptor.signed) value = signExtendLane(value, descriptor.source_width);
+        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, value);
+    }
+    return result;
+}
+
+fn simdExtMul(op: simd.Op) ?SimdIntegerTransform {
+    return switch (op) {
+        .i16x8_extmul_low_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true },
+        .i16x8_extmul_high_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true, .high = true },
+        .i16x8_extmul_low_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false },
+        .i16x8_extmul_high_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false, .high = true },
+        .i32x4_extmul_low_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true },
+        .i32x4_extmul_high_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true, .high = true },
+        .i32x4_extmul_low_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false },
+        .i32x4_extmul_high_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false, .high = true },
+        .i64x2_extmul_low_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true },
+        .i64x2_extmul_high_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true, .high = true },
+        .i64x2_extmul_low_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false },
+        .i64x2_extmul_high_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false, .high = true },
+        else => null,
+    };
+}
+
+fn extMulSimdHalf(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
+    const lanes = 128 / descriptor.target_width;
+    const first = if (descriptor.high) lanes else 0;
+    var result: u128 = 0;
+    for (0..lanes) |lane| {
+        const a = laneBits(left, @intCast(first + lane), descriptor.source_width);
+        const b = laneBits(right, @intCast(first + lane), descriptor.source_width);
+        const product: u64 = if (descriptor.signed)
+            @bitCast(signedSimdLane(a, descriptor.source_width) * signedSimdLane(b, descriptor.source_width))
+        else
+            a * b;
+        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, product);
+    }
+    return result;
+}
+
+fn simdNarrow(op: simd.Op) ?SimdIntegerTransform {
+    return switch (op) {
+        .i8x16_narrow_i16x8_s => .{ .source_width = 16, .target_width = 8, .signed = true },
+        .i8x16_narrow_i16x8_u => .{ .source_width = 16, .target_width = 8, .signed = false },
+        .i16x8_narrow_i32x4_s => .{ .source_width = 32, .target_width = 16, .signed = true },
+        .i16x8_narrow_i32x4_u => .{ .source_width = 32, .target_width = 16, .signed = false },
+        else => null,
+    };
+}
+
+fn narrowSimdLanes(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
+    const source_lanes = 128 / descriptor.source_width;
+    const signed_min = -(@as(i64, 1) << @intCast(descriptor.target_width - 1));
+    const signed_max = (@as(i64, 1) << @intCast(descriptor.target_width - 1)) - 1;
+    const unsigned_max = (@as(i64, 1) << @intCast(descriptor.target_width)) - 1;
+    var result: u128 = 0;
+    for (0..source_lanes * 2) |lane| {
+        const source = if (lane < source_lanes) left else right;
+        const source_lane = lane % source_lanes;
+        const value = signedSimdLane(laneBits(source, @intCast(source_lane), descriptor.source_width), descriptor.source_width);
+        const narrowed = if (descriptor.signed)
+            std.math.clamp(value, signed_min, signed_max)
+        else
+            std.math.clamp(value, 0, unsigned_max);
+        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, signedLaneBits(narrowed));
+    }
+    return result;
+}
+
+fn extAddPairwise(vector: u128, source_width: u8, signed: bool) u128 {
+    const target_width = source_width * 2;
+    var result: u128 = 0;
+    for (0..128 / target_width) |lane| {
+        var a = laneBits(vector, @intCast(lane * 2), source_width);
+        var b = laneBits(vector, @intCast(lane * 2 + 1), source_width);
+        if (signed) {
+            a = signExtendLane(a, source_width);
+            b = signExtendLane(b, source_width);
+        }
+        result = replaceLaneBits(result, @intCast(lane), target_width, a +% b);
+    }
+    return result;
+}
+
+fn dotI16x8(left: u128, right: u128) u128 {
+    var result: u128 = 0;
+    for (0..4) |lane| {
+        const a0 = signedSimdLane(laneBits(left, @intCast(lane * 2), 16), 16);
+        const a1 = signedSimdLane(laneBits(left, @intCast(lane * 2 + 1), 16), 16);
+        const b0 = signedSimdLane(laneBits(right, @intCast(lane * 2), 16), 16);
+        const b1 = signedSimdLane(laneBits(right, @intCast(lane * 2 + 1), 16), 16);
+        result = replaceLaneBits(result, @intCast(lane), 32, signedLaneBits(a0 * b0 + a1 * b1));
+    }
+    return result;
+}
+
+fn q15MulRoundSaturate(left: u128, right: u128) u128 {
+    var result: u128 = 0;
+    for (0..8) |lane| {
+        const a = signedSimdLane(laneBits(left, @intCast(lane), 16), 16);
+        const b = signedSimdLane(laneBits(right, @intCast(lane), 16), 16);
+        const value = std.math.clamp((a * b + 0x4000) >> 15, -32768, 32767);
+        result = replaceLaneBits(result, @intCast(lane), 16, signedLaneBits(value));
+    }
+    return result;
+}
+
+fn executeSimdIntegerTransform(s: *State, op: simd.Op) ExecError!bool {
+    if (simdExtend(op)) |descriptor| {
+        try pushVector(s, extendSimdHalf(popVector(s), descriptor));
+        return true;
+    }
+    if (simdExtMul(op)) |descriptor| {
+        const right = popVector(s);
+        try pushVector(s, extMulSimdHalf(popVector(s), right, descriptor));
+        return true;
+    }
+    if (simdNarrow(op)) |descriptor| {
+        const right = popVector(s);
+        try pushVector(s, narrowSimdLanes(popVector(s), right, descriptor));
+        return true;
+    }
+    switch (op) {
+        .i16x8_extadd_pairwise_i8x16_s, .i16x8_extadd_pairwise_i8x16_u => try pushVector(s, extAddPairwise(popVector(s), 8, op == .i16x8_extadd_pairwise_i8x16_s)),
+        .i32x4_extadd_pairwise_i16x8_s, .i32x4_extadd_pairwise_i16x8_u => try pushVector(s, extAddPairwise(popVector(s), 16, op == .i32x4_extadd_pairwise_i16x8_s)),
+        .i32x4_dot_i16x8_s => {
+            const right = popVector(s);
+            try pushVector(s, dotI16x8(popVector(s), right));
+        },
+        .i16x8_q15mulr_sat_s => {
+            const right = popVector(s);
+            try pushVector(s, q15MulRoundSaturate(popVector(s), right));
+        },
+        else => return false,
+    }
+    return true;
+}
+
 fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
     const op = simdOp(instr);
     switch (op) {
@@ -1396,6 +1565,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     if (try executeSimdIntegerComparison(s, op)) return;
     if (try executeSimdIntegerBasic(s, op)) return;
     if (try executeSimdIntegerBounded(s, op)) return;
+    if (try executeSimdIntegerTransform(s, op)) return;
     if (try executeSimdFloatComparison(s, op)) return;
     if (try executeSimdFloatUnary(s, op)) return;
     if (try executeSimdFloatBinary(s, op)) return;
