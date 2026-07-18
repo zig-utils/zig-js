@@ -111,7 +111,7 @@ class ReadmeTests(unittest.TestCase):
                 generated_rows.append(publication.benchmark.Row("zig-js", "shared", workload, lanes, 1, 0, elapsed, 1))
 
         scorecard = publication.readme_scorecard(generated_rows, metadata(), "report.md", "raw.tsv")
-        self.assertIn("zig-js wins 10/10 direct rows, 9/10 maximum-lane warmed-independent rows, and 10/10", scorecard)
+        self.assertIn("| independent steady contexts | 8 | 9 / 10 |", scorecard)
         self.assertNotIn("wins all 10", scorecard)
 
 

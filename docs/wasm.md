@@ -446,17 +446,17 @@ deterministic invalid diagnostics, validator allocation failure, and a
 512-level subtype chain: **8/8 GC validation tests pass**. The complete
 validator regression root passes **93/93 tests**.
 
-This boundary completes [#298](https://github.com/zig-utils/zig-js/issues/298).
-The runtime now executes i31, struct/array construction and mutation, packed
-accesses, segment and overlap-safe bulk operations, casts/tests, and cast
-branches. Instance-owned mark/sweep reclaims cycles; active frames, escaped
-handles, globals, tables, exceptions, and opaque JavaScript wrappers form the
-precise root set. Wrapper identity survives calls and independently decoded
-cross-instance function/table/global links, while weak wrappers and nested
-JavaScript references reclaim after their final native root is cleared. The
-remaining extern conversions and stress/sanitizer evidence are tracked by
-[#299](https://github.com/zig-utils/zig-js/issues/299), and terminal corpus
-results by [#300](https://github.com/zig-utils/zig-js/issues/300).
+The binary/validation boundary completes [#298](https://github.com/zig-utils/zig-js/issues/298),
+and the runtime/lifetime boundary completes
+[#299](https://github.com/zig-utils/zig-js/issues/299). All 33 instructions
+execute, including extern conversions. Canonical wrappers preserve identity
+across calls, tables, globals, exceptions, exports, imports, and independently
+decoded modules. Active frames and stable external handles root instance-owned
+mark/sweep; weak wrappers, cycles, nested host references, and dead exception
+payloads reclaim exactly. The focused evidence is **10/10 GC runtime tests**
+and **40/40 WebAssembly API tests**, both with zero leaks, plus a clean
+eight-way wrapper-publication ThreadSanitizer witness. Terminal upstream corpus
+results remain tracked by [#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
@@ -744,9 +744,8 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
-execution are separate scored profiles. Memory64 binary/validation is complete
-as the independently pinned boundary below, while its corpus score, remaining
-Wasm GC integration/stress work, and shell-only hooks remain separate work.
+execution are separate scored profiles. Memory64 and Wasm GC terminal corpus
+scores, plus shell-only hooks, remain separate work.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

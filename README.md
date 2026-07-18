@@ -1,10 +1,6 @@
 # zig-js
 
-A JavaScript engine written in pure Zig, with an implemented JavaScriptCore-shaped C API subset. No JSC, no V8, no external C libraries.
-
-`zig-js` is an embeddable engine for Zig applications, tools, experiments, and runtimes that want to own their JavaScript stack. Use it directly as a Zig module or link `libzig-js.a`. The project is pre-stabilization: clean semantics and a better API take priority over backward compatibility.
-
-The configured conformance runner is green against the pinned tc39/test262 corpus it scores: **48,506 / 48,506 valid** and **4,669 / 4,669 negative**, with **0 parse**, **0 runtime**, **0 host**, **0 skipped**, and **0 excluded** failures. This is a scoped result, not a claim of complete ECMAScript coverage.
+A pure-Zig, embeddable JavaScript engine with a JavaScriptCore-shaped C API. It links no JSC, V8, or external C libraries. The project is pre-stabilization: better semantics and APIs take priority over backward compatibility.
 
 ```zig
 const js = @import("js");
@@ -13,21 +9,13 @@ const ctx = try js.Context.create(allocator);
 defer ctx.destroy();
 
 const value = try ctx.evaluate("let x = 40; x + 2");
-// value == .{ .number = 42 }
 ```
 
-## How It Works
+The engine combines a semantic tree-walker with a suspendable stack bytecode VM over one object model. It includes modules, async execution, generators, precise opt-in GC, isolated workers, shared-realm threads, and WebAssembly proposal profiles.
 
-The engine has two execution paths over one object model:
+## Status
 
-- a tree-walking interpreter used as the semantic baseline and fallback;
-- a suspendable stack bytecode VM for supported top-level code, functions, generators, async functions, and async generators.
-
-Object shapes and inline caches accelerate property access. Compiled functions use frame slots and upvalues. Default contexts use arena lifetime; opt-in GC contexts use the precise collector described in [Architecture](docs/architecture.md). Shared-realm threads and isolated workers are available when explicitly enabled.
-
-## Conformance
-
-All figures below are checked-in, reproducible results. Full pins, runner boundaries, command inventories, and reproduction steps live in [WebAssembly status](docs/wasm.md) and the linked data files.
+The configured test262 runner is green for everything it scores: **48,506 / 48,506 valid** and **4,669 / 4,669 negative**, with no parse, runtime, host, skipped, or excluded failures. This is scoped evidence, not a claim that every JavaScript or JSC surface exists.
 
 | profile | result | evidence |
 | --- | ---: | --- |
@@ -40,35 +28,16 @@ All figures below are checked-in, reproducible results. Full pins, runner bounda
 | WebAssembly tail calls | **108 / 108 applicable commands** | [inventory](docs/.data/wasm-tail-call-inventory.json) |
 | WebAssembly exceptions | **84 / 84 applicable commands** | [inventory](docs/.data/wasm-exception-handling-inventory.json) |
 
-Memory64 binary handling, validation, runtime, and JavaScript API behavior pass the focused **22 / 22** normal and ThreadSanitizer tests; terminal upstream scoring remains tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). The Wasm GC proposal is pinned at `756060f5`; all 33 instructions validate, and the runtime now covers aggregates, casts, i31, canonical cross-instance wrappers, cyclic collection, and precise host tracing. Extern conversions and terminal stress/corpus evidence remain in [#299](https://github.com/zig-utils/zig-js/issues/299) and [#300](https://github.com/zig-utils/zig-js/issues/300). Inventory facts are not reported as pass scores.
+Memory64 passes **22 / 22** focused normal and ThreadSanitizer tests. The pinned Wasm GC runtime executes all 33 instructions with canonical cross-instance identity, weak wrappers, precise cyclic collection, deep-graph coverage, failure injection, and a clean concurrent-publication TSan witness. Terminal upstream GC and Memory64 scoring is tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). See [WebAssembly status](docs/wasm.md) for exact scope and reproduction.
 
 ## Performance
-
-`zig build bench` times the bytecode VM against the tree-walker on a small set of microbenchmarks. The latest saved local run is [docs/.data/bench-2026-07-04.txt](docs/.data/bench-2026-07-04.txt):
-
-| case | VM ns/op | tree ns/op | VM/tree |
-| ---- | -------: | ---------: | ------: |
-| `fib(27)` recursion | 172,360,029 | 166,933,604 | 0.97x |
-| tight loop sum to 100k | 8,614,833 | 8,547,850 | 0.99x |
-| object property churn | 7,563,963 | 7,356,334 | 0.97x |
-| array push/sum | 8,484,360 | 8,475,588 | 1.00x |
-| deep recursion, depth 500 | 112,897 | 115,296 | 1.02x |
-
-Those numbers show current VM/tree-walk parity on these microbenchmarks, not a broad speedup claim. The same run records independent-context throughput scaling:
-
-| threads | wall ns | scaling |
-| ------: | ------: | ------: |
-| 1 | 258,529,500 | 1.00x |
-| 2 | 297,057,916 | 1.74x |
-| 4 | 315,458,875 | 3.28x |
-| 8 | 362,099,959 | 5.71x |
 
 ### zig-js vs JavaScriptCore
 
 <!-- benchmark-comparison:start -->
 <!-- Generated by tools/benchmark-publication.py; do not edit headline numbers manually. -->
 
-The latest [full report](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.md) preserves all [1,540 raw timing samples](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv) from clean zig-js commit `01fcf42c`, zig-gc `c67e344d`, and zig-regex `86159c5b` on Apple M3 Pro, 11 physical / 11 logical CPUs, 18.0 GiB. The run used Zig `0.17.0-dev.956+2dca73595`, system framework 22625.1.20.11.3, and AC Power (charged). Every full-run median exceeds the 50 ms timing floor; equal work/checksums, alternating runner order, and per-row dispersion are validated by the harness.
+Latest [report](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.md) and [1,540 raw samples](docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv): zig-js `01fcf42c`, zig-gc `c67e344d`, zig-regex `86159c5b`; Apple M3 Pro, 11 physical / 11 logical CPUs, 18.0 GiB; Zig `0.17.0-dev.956+2dca73595`; system framework 22625.1.20.11.3; AC Power (charged). The harness validates equal work, alternating order, dispersion, and a 50 ms timing floor.
 
 | mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -77,83 +46,42 @@ The latest [full report](docs/.data/benchmark-comparison-2026-07-17-structured-s
 | independent cold lifecycles | 8 | 9 / 10 | **2.53x** | **4.40x** | 4.07x |
 | shared realm, no GIL | 8 | no public-JSC equivalent | — | **3.84x** | — |
 
-Lower time is better. A throughput ratio above 1.00x favors zig-js. Shared-realm threads share one object graph and therefore have no direct public-JSC embedding equivalent.
-
-| workload | zig-js direct (ms) | JSC direct (ms) | zig-js / JSC throughput | zig-js shared scaling |
-| --- | ---: | ---: | ---: | ---: |
-| `arithmetic` | 85.429 | 358.819 | 4.20x | 5.34x |
-| `properties` | 100.759 | 294.505 | 2.92x | 5.30x |
-| `polymorphic_properties` | 97.913 | 209.625 | 2.14x | 4.51x |
-| `object_churn` | 96.410 | 129.002 | 1.34x | 0.92x |
-| `arrays` | 100.417 | 166.654 | 1.66x | 2.47x |
-| `direct_calls` | 81.097 | 122.462 | 1.51x | 5.26x |
-| `method_calls` | 86.833 | 148.788 | 1.71x | 4.70x |
-| `closure_calls` | 90.154 | 229.340 | 2.54x | 4.88x |
-| `arguments_calls` | 96.357 | 326.770 | 3.39x | 4.35x |
-| `fibonacci` | 90.338 | 489.696 | 5.42x | 4.54x |
-
-zig-js wins 10/10 direct rows, 10/10 maximum-lane warmed-independent rows, and 9/10 maximum-lane cold-lifecycle rows. The geometric-mean throughput lead is 2.43x direct, 2.71x warmed-independent, and 2.53x cold-lifecycle; shared-realm scaling is 3.84x at 8 lanes.
+A throughput ratio above 1.00x favors zig-js. Shared-realm threads share one object graph and have no public-JSC embedding equivalent.
 <!-- benchmark-comparison:end -->
 
-### WebAssembly SIMD vs scalar and JavaScriptCore
+### WebAssembly
 
-The [July 18 SIMD report](docs/.data/wasm-simd-benchmark-2026-07-18.md) preserves all [224 raw samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv). It compares identical embedded Wasm bytes in zig-js and macOS system JavaScriptCore, with a scalar export for each kernel.
+The latest SIMD comparison uses identical Wasm bytes in zig-js and macOS JSC. These are warmed independent contexts; zig-js currently uses portable SIMD rather than architecture-specific vector lowering. [Report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [224 samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)
 
-| kernel | zig-js 1 thread | zig-js 8 threads | zig-js scaling | JSC 1 thread | JSC 8 threads | zig-js / JSC at 8 threads | zig-js SIMD / scalar, 1 thread |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| integer | 7.73 M/s | 28.35 M/s | 3.67x | 62.02 M/s | 280.32 M/s | 0.10x | 1.38x |
-| float | 7.06 M/s | 27.66 M/s | 3.92x | 63.66 M/s | 283.33 M/s | 0.10x | 1.27x |
-| shuffle | 6.74 M/s | 29.00 M/s | 4.30x | 63.23 M/s | 286.75 M/s | 0.10x | 17.27x |
-| memory | 8.98 M/s | 41.13 M/s | 4.58x | 53.32 M/s | 291.96 M/s | 0.14x | 1.69x |
+| SIMD kernel | zig-js 1 lane | zig-js 8 lanes | scaling | JSC 8 lanes | zig-js / JSC |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| integer | 7.73 M/s | 28.35 M/s | 3.67x | 280.32 M/s | 0.10x |
+| float | 7.06 M/s | 27.66 M/s | 3.92x | 283.33 M/s | 0.10x |
+| shuffle | 6.74 M/s | 29.00 M/s | 4.30x | 286.75 M/s | 0.10x |
+| memory | 8.98 M/s | 41.13 M/s | 4.58x | 291.96 M/s | 0.14x |
 
-These are warmed independent-context workers, the concurrency model both public embedding APIs expose. The current portable SIMD path is not architecture-specific vector lowering.
+The latest shared-memory Threads run uses one module and memory. Public macOS JSC has no equivalent shared-realm worker embedding, so its score is N/A. [Report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [105 samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)
 
-### WebAssembly Threads scaling
-
-The [July 18 Threads report](docs/.data/wasm-threads-benchmark-2026-07-18.md) preserves all [105 raw samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv) over the same shared module and memory:
-
-| workers | contended add | CAS increment | disjoint add | wait/notify pair handoffs |
+| workers | contended add | CAS increment | disjoint add | wait/notify handoffs |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 14.56 M/s (1.00x) | 8.81 M/s (1.00x) | 13.87 M/s (1.00x) | — |
-| 2 | 19.19 M/s (1.32x) | 7.22 M/s (0.82x) | 19.31 M/s (1.39x) | 259,476/s |
-| 4 | 18.88 M/s (1.30x) | 6.18 M/s (0.70x) | 19.87 M/s (1.43x) | 1,067,241/s |
-| 8 | 17.23 M/s (1.18x) | 4.74 M/s (0.54x) | 17.28 M/s (1.25x) | 287,444/s |
+| 1 | 14.56 M/s | 8.81 M/s | 13.87 M/s | — |
+| 2 | 19.19 M/s | 7.22 M/s | 19.31 M/s | 259,476/s |
+| 4 | 18.88 M/s | 6.18 M/s | 19.87 M/s | 1,067,241/s |
+| 8 | 17.23 M/s | 4.74 M/s | 17.28 M/s | 287,444/s |
 
-The macOS public JSC embedding exposes neither `SharedArrayBuffer` for this module nor a shared-realm worker API, so JSC is correctly reported as N/A. See [Performance Benchmarks](docs/benchmarks.md) for methodology, boundaries, dispersion, reproduction, and historical A/B evidence.
+Full methodology, per-workload results, dispersion, and historical A/B evidence live in [Performance benchmarks](docs/benchmarks.md).
 
-## Coverage
+## Use
 
-The green configured test262 surface includes modern syntax and control flow, modules and top-level await, classes and private members, generators and async generators, promises and disposal, typed arrays and atomics, weak collections and references, `Temporal`, `Intl`, and the standard built-ins. The WebAssembly API and opt-in proposal profiles are documented separately in [WebAssembly status](docs/wasm.md).
-
-## Using It
-
-### Zig module
-
-```zig
-const js = @import("js");
-
-const ctx = try js.Context.create(allocator);
-defer ctx.destroy();
-
-const value = try ctx.evaluate("let x = 40; x + 2");
-```
-
-### C API subset
-
-`zig build` installs `libzig-js.a` and the checked-in `<JavaScriptCore/JavaScript.h>`-compatible headers under `zig-out/`:
+`zig build` installs `libzig-js.a` and JavaScriptCore-compatible headers under `zig-out/`. The public audit covers **117 / 117 public C functions** plus 19 zig-js extensions; private consumer ABI coverage is reported separately.
 
 ```c
 JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
 JSStringRef script = JSStringCreateWithUTF8CString("1 + 1");
 JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
-double n = JSValueToNumber(ctx, result, NULL); // 2.0
 ```
 
-The pinned public audit covers **117 / 117 public C functions**, alongside 19 documented zig-js extensions. Compile/link/runtime fixtures, system-JSC differentials, Objective-C coverage, and Home/Bun consumer inventories live in [C API support](docs/api.md), [Home integration](docs/HOME_INTEGRATION.md), and [ABI inventories](docs/abi/README.md). Private consumer ABI coverage is intentionally reported separately from the public JSC-compatible count.
-
-## Architecture
-
-The parser, tree-walker, compiler, VM, object model, promise queue, GC, threads, workers, and embedding layers are separate modules under [`src/`](src). Start with [Architecture](docs/architecture.md) for ownership and execution design, [`src/root.zig`](src/root.zig) for the Zig API, or [`src/c_api.zig`](src/c_api.zig) for exported C entry points.
+Start with [Architecture](docs/architecture.md), [Zig API](src/root.zig), [C API support](docs/api.md), [WebAssembly](docs/wasm.md), or [Threads and GC](docs/threads/index.md).
 
 ## Build And Test
 
@@ -162,47 +90,25 @@ Requires Zig 0.17.0-dev.
 ```sh
 zig build                       # library and headers
 zig build test                  # main test root
-zig build conformance           # fast language smoke suite
 zig build test262               # configured tc39/test262 corpus
-zig build test-c-api            # real C and C++ embedding fixtures
+zig build test-c-api            # C and C++ embedding fixtures
+zig build benchmark-comparison  # zig-js single/multithread vs JSC
 zig build wasm-feature-profiles-check
-
-zig build bench                 # VM/tree-walker microbenchmarks
-zig build benchmark-comparison  # zig-js single/multithread vs JSC on macOS
-
-bun run docs:data
-bun run docs:build
 ```
 
-Specialized ABI, sanitizer, proposal-corpus, fuzzing, and profiling commands are discoverable with `zig build --help` and documented in [C API support](docs/api.md), [WebAssembly status](docs/wasm.md), and [thread testing](docs/threads/testing.md). The test262 corpus is the `test262/` submodule and is skipped cleanly when absent.
-
-Local build artifacts can be inspected or removed without touching source files:
-
-```sh
-tools/zig-cache-tool.sh report
-tools/zig-cache-tool.sh prune
-```
+Specialized proposal, sanitizer, fuzzing, ABI, and profiling commands are listed by `zig build --help` and in the linked docs. Use `tools/zig-cache-tool.sh report` and `tools/zig-cache-tool.sh prune` to inspect or remove local build artifacts.
 
 ## Threads And GC
 
-`Context.createWith(.{ .enable_threads = true })` enables shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and atomics. Threads run in parallel by default; `.gil = true` requests serialized execution. Isolated `Worker`s own separate precise-GC heaps.
-
-```zig
-const parallel = try js.Context.createWith(gpa, .{ .enable_threads = true });
-const serialized = try js.Context.createWith(gpa, .{ .enable_threads = true, .gil = true });
-```
-
-The memory model, lifecycle rules, sanitizer strategy, and current work are maintained in [threading and GC docs](docs/threads/index.md) and [issue #1](https://github.com/zig-utils/zig-js/issues/1).
+`Context.createWith(.{ .enable_threads = true })` enables shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and atomics; threads run in parallel unless `.gil = true`. Isolated `Worker`s own separate precise-GC heaps. The memory model and sanitizer gates are documented in [Threads and GC](docs/threads/index.md) and tracked in [#1](https://github.com/zig-utils/zig-js/issues/1).
 
 ## What Is Not Implemented
 
-The green configured runners do not mean the entire JavaScript/JSC universe is complete. Remaining boundaries include:
-
-- the rest of JavaScriptCore framework/private internals and the remaining Bun/Home private ABI;
-- remaining Wasm GC extern-conversion/stress evidence, terminal proposal corpus scoring, shell-only Wasm/JIT hooks, and final Threads host-wide stress evidence;
+- remaining JavaScriptCore framework/private internals and Bun/Home private ABI;
+- terminal Wasm GC/Memory64 corpus scoring, shell-only Wasm/JIT hooks, and final host-wide Threads stress evidence;
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
-The implementation roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134). The evidence-backed removal of this section is tracked explicitly in [#246](https://github.com/zig-utils/zig-js/issues/246).
+The roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134); evidence-backed removal of this section is tracked in [#246](https://github.com/zig-utils/zig-js/issues/246).
 
 ## Used By
 
