@@ -885,6 +885,7 @@ fn coerceGlobalSlot(self: *Interpreter, kind: types.ValType, input: Value) value
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
+        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript Global boundary"),
     };
 }
 
@@ -902,6 +903,7 @@ fn coerceGlobalBits(self: *Interpreter, kind: types.ValType, input: Value) value
         .f32 => @as(u64, @as(u32, @bitCast(@as(f32, @floatCast(try self.toNumberV(input)))))),
         .f64 => @bitCast(try self.toNumberV(input)),
         .funcref, .exnref, .externref, .v128 => unreachable,
+        else => unreachable,
     };
 }
 
@@ -912,6 +914,7 @@ fn wasmBitsToJs(self: *Interpreter, kind: types.ValType, bits: u64) value.HostEr
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(bits))))),
         .f64 => Value.num(@bitCast(bits)),
         .funcref, .exnref, .externref, .v128 => self.throwError("TypeError", "value type cannot cross this numeric function boundary"),
+        else => self.throwError("TypeError", "GC reference value cannot cross this numeric function boundary"),
     };
 }
 
@@ -936,6 +939,7 @@ fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, f
                 return self.throwError("TypeError", "WebAssembly function reference is unavailable");
             break :blk try host.resolve(host.ctx, func);
         } else Value.nul(),
+        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
     };
 }
 
@@ -946,6 +950,7 @@ fn jsToWasmSlot(self: *Interpreter, store: *context.Context, kind: types.ValType
         .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
         .externref => .{ .externref = input },
         .funcref => (try tableRefFromValue(self, store, .funcref, input)).slot,
+        else => return self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
     };
 }
 
@@ -1073,6 +1078,7 @@ fn rawSlotString(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot) 
         .i64, .f64 => slot.numericBits(),
         .v128 => slot.vectorBits(),
         .funcref, .exnref, .externref => return self.throwError("TypeError", "reference value has no raw bit encoding"),
+        else => return self.throwError("TypeError", "reference value has no raw bit encoding"),
     };
     return Value.strOwned(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{normalized}));
 }
@@ -1084,6 +1090,7 @@ fn rawSlotFromString(self: *Interpreter, kind: types.ValType, text: []const u8) 
         .v128 => .{ .vector = std.fmt.parseInt(u128, text, 10) catch
             return self.throwError("TypeError", "raw WebAssembly arguments must be unsigned decimal bits") },
         .funcref, .exnref, .externref => self.throwError("TypeError", "reference value has no raw bit encoding"),
+        else => self.throwError("TypeError", "reference value has no raw bit encoding"),
     };
 }
 
@@ -1146,6 +1153,7 @@ fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value
         .funcref => unreachable,
         .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
+        else => self.throwError("TypeError", "GC reference value cannot cross the JavaScript Global boundary"),
     };
 }
 
@@ -1482,16 +1490,18 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
         values[import_index] = imported;
         switch (entry.desc) {
             .func => |type_index| {
+                const function_type = module.funcTypeAt(type_index) orelse
+                    return throwWasmWithProto(self, "LinkError", "WebAssembly function import references a non-function type", descriptor.link_error_proto);
                 if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", descriptor.link_error_proto);
                 if (imported.isObject()) if (imported.asObj().wasmFunction()) |state| {
                     const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", descriptor.link_error_proto)));
-                    if (owner.store != store or !types.funcTypeEql(owner.function_type, module.types[type_index]))
+                    if (owner.store != store or !types.funcTypeEql(owner.function_type, function_type))
                         return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", descriptor.link_error_proto);
                 };
-                bridges[fi] = .{ .store = store, .callable = imported, .function_type = module.types[type_index], .js_tag = descriptor.js_tag };
+                bridges[fi] = .{ .store = store, .callable = imported, .function_type = function_type, .js_tag = descriptor.js_tag };
                 funcs[fi] = .{
                     .ctx = @ptrCast(&bridges[fi]),
-                    .type = module.types[type_index],
+                    .type = function_type,
                     .call = jsImportCall,
                     .call_slots = jsImportCallSlots,
                     .take_exception = takeJsImportException,
@@ -1535,6 +1545,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                     .i64 => imported.isObject() and imported.asObj().is_bigint,
                     .externref => true,
                     .funcref, .exnref, .v128 => false,
+                    else => false,
                 };
                 if (!primitive_matches)
                     return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly global import type", descriptor.link_error_proto);

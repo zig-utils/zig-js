@@ -64,7 +64,11 @@ pub fn decodeWithFeatures(gpa: Allocator, bytes: []const u8, features: types.Fea
             if (order <= last_order) return r.failAt(sec_off, "unexpected content after last section", .{});
             last_order = order;
             switch (id) {
-                1 => mod.types = try parseTypeSection(&r, a),
+                1 => {
+                    const decoded = try parseTypeSection(&r, a);
+                    mod.types = decoded.types;
+                    mod.rec_groups = decoded.rec_groups;
+                },
                 2 => mod.imports = try parseImportSection(&r, a, mod),
                 3 => {
                     mod.funcs = try parseFuncSection(&r, a);
@@ -282,13 +286,43 @@ const Reader = struct {
     fn readValType(self: *Reader) DecodeError!types.ValType {
         const off = self.offset();
         const b = try self.readU8();
+        if (b == 0x63 or b == 0x64) {
+            if (!self.features.typed_function_references)
+                return self.unsupportedFeature(off, .typed_function_references);
+            const ref_type: types.RefType = .{
+                .nullable = b == 0x63,
+                .heap = try self.readHeapType(),
+            };
+            const value_type = types.ValType.fromRef(ref_type);
+            if (value_type.isGcReference() and !self.features.gc)
+                return self.unsupportedFeature(off, .gc);
+            return value_type;
+        }
         const value_type = types.ValType.fromByte(b) orelse
             return self.failAt(off, "invalid value type", .{});
         if (value_type == .exnref and !self.features.exception_handling)
             return self.unsupportedFeature(off, .exception_handling);
         if (value_type == .v128 and !self.features.fixed_width_simd)
             return self.unsupportedFeature(off, .fixed_width_simd);
+        if ((value_type == .nofuncref or value_type == .noexternref) and !self.features.typed_function_references)
+            return self.unsupportedFeature(off, .typed_function_references);
+        if (value_type.isGcReference() and !self.features.gc)
+            return self.unsupportedFeature(off, .gc);
         return value_type;
+    }
+
+    fn readHeapType(self: *Reader) DecodeError!types.HeapType {
+        const off = self.offset();
+        const encoded = try self.readS33();
+        if (encoded >= 0) {
+            if (encoded > std.math.maxInt(u32)) return self.failAt(off, "invalid heap type", .{});
+            return types.HeapType.concrete(@intCast(encoded));
+        }
+        const byte_signed = encoded + 0x80;
+        if (byte_signed < 0 or byte_signed > std.math.maxInt(u8))
+            return self.failAt(off, "invalid heap type", .{});
+        return types.HeapType.fromAbstractByte(@intCast(byte_signed)) orelse
+            self.failAt(off, "invalid heap type", .{});
     }
 
     fn readTag(self: *Reader) DecodeError!types.Tag {
@@ -328,7 +362,16 @@ const Reader = struct {
                 .{ .value = .externref }
             else
                 self.unsupportedFeature(off, .reference_types),
-            else => self.failAt(off, "invalid block type", .{}),
+            else => blk: {
+                const byte_signed = v + 0x80;
+                if (byte_signed < 0 or byte_signed > std.math.maxInt(u8))
+                    return self.failAt(off, "invalid block type", .{});
+                const decoded = types.ValType.fromByte(@intCast(byte_signed)) orelse
+                    return self.failAt(off, "invalid block type", .{});
+                if (decoded.isGcReference() and !self.features.gc)
+                    return self.unsupportedFeature(off, .gc);
+                break :blk .{ .value = decoded };
+            },
         };
     }
 
@@ -441,25 +484,115 @@ const Reader = struct {
     }
 };
 
-fn parseTypeSection(r: *Reader, a: Allocator) DecodeError![]const types.FuncType {
-    const n = try r.readCount();
-    const ts = try a.alloc(types.FuncType, n);
-    for (ts) |*t| {
-        const off = r.offset();
-        if (try r.readU8() != 0x60)
-            return r.failAt(off, "invalid function type", .{});
-        const pn = try r.readCount();
-        const params = try a.alloc(types.ValType, pn);
-        for (params) |*p| p.* = try r.readValType();
-        const res_off = r.offset();
-        const rn = try r.readCount();
-        const results = try a.alloc(types.ValType, rn);
-        for (results) |*p| p.* = try r.readValType();
-        if (rn > 1 and !r.features.multi_value)
-            return r.failAt(res_off, "invalid result arity", .{});
-        t.* = .{ .params = params, .results = results };
+const DecodedTypeSection = struct {
+    types: []const types.DefType,
+    rec_groups: []const types.RecGroup,
+};
+
+fn readFunctionType(r: *Reader, a: Allocator) DecodeError!types.FuncType {
+    const pn = try r.readCount();
+    const params = try a.alloc(types.ValType, pn);
+    for (params) |*param| param.* = try r.readValType();
+    const res_off = r.offset();
+    const rn = try r.readCount();
+    const results = try a.alloc(types.ValType, rn);
+    for (results) |*result| result.* = try r.readValType();
+    if (rn > 1 and !r.features.multi_value)
+        return r.failAt(res_off, "invalid result arity", .{});
+    return .{ .params = params, .results = results };
+}
+
+fn readStorageType(r: *Reader) DecodeError!types.StorageType {
+    const off = r.offset();
+    if (r.pos >= r.limit) return r.fail("unexpected end", .{});
+    const byte = r.bytes[r.pos];
+    if (byte == 0x78 or byte == 0x77) {
+        if (!r.features.gc) return r.unsupportedFeature(off, .gc);
+        r.pos += 1;
+        return if (byte == 0x78) .i8 else .i16;
     }
-    return ts;
+    return .{ .value = try r.readValType() };
+}
+
+fn readFieldType(r: *Reader) DecodeError!types.FieldType {
+    const storage = try readStorageType(r);
+    const mut_off = r.offset();
+    const mutability = try r.readU8();
+    if (mutability > 1) return r.failAt(mut_off, "malformed mutability", .{});
+    return .{ .storage = storage, .mutable = mutability == 1 };
+}
+
+fn readCompositeType(r: *Reader, a: Allocator, first: u8, off: u32) DecodeError!types.CompositeType {
+    return switch (first) {
+        0x60 => .{ .func = try readFunctionType(r, a) },
+        0x5F => blk: {
+            if (!r.features.gc) return r.unsupportedFeature(off, .gc);
+            const count = try r.readCount();
+            const fields = try a.alloc(types.FieldType, count);
+            for (fields) |*field| field.* = try readFieldType(r);
+            break :blk .{ .struct_ = .{ .fields = fields } };
+        },
+        0x5E => blk: {
+            if (!r.features.gc) return r.unsupportedFeature(off, .gc);
+            break :blk .{ .array = .{ .field = try readFieldType(r) } };
+        },
+        else => r.failAt(off, "invalid composite type", .{}),
+    };
+}
+
+fn readSubType(r: *Reader, a: Allocator, first: u8, off: u32) DecodeError!types.SubType {
+    if (first != 0x50 and first != 0x4F) return .{
+        .final = true,
+        .supertypes = &.{},
+        .composite = try readCompositeType(r, a, first, off),
+    };
+    if (!r.features.gc) return r.unsupportedFeature(off, .gc);
+    const super_count = try r.readCount();
+    const supertypes = try a.alloc(u32, super_count);
+    for (supertypes) |*supertype| supertype.* = try r.readU32Leb();
+    const composite_off = r.offset();
+    const composite_byte = try r.readU8();
+    return .{
+        .final = first == 0x4F,
+        .supertypes = supertypes,
+        .composite = try readCompositeType(r, a, composite_byte, composite_off),
+    };
+}
+
+fn parseTypeSection(r: *Reader, a: Allocator) DecodeError!DecodedTypeSection {
+    const entry_count = try r.readCount();
+    var definitions: std.ArrayListUnmanaged(types.DefType) = .empty;
+    var groups: std.ArrayListUnmanaged(types.RecGroup) = .empty;
+    for (0..entry_count) |_| {
+        const off = r.offset();
+        const first = try r.readU8();
+        const group_index: u32 = @intCast(groups.items.len);
+        const start: u32 = @intCast(definitions.items.len);
+        if (first == 0x4E) {
+            if (!r.features.gc) return r.unsupportedFeature(off, .gc);
+            const count = try r.readCount();
+            for (0..count) |index| {
+                const subtype_off = r.offset();
+                const subtype_first = try r.readU8();
+                try definitions.append(a, .{
+                    .rec_group = group_index,
+                    .rec_index = @intCast(index),
+                    .subtype = try readSubType(r, a, subtype_first, subtype_off),
+                });
+            }
+        } else {
+            try definitions.append(a, .{
+                .rec_group = group_index,
+                .rec_index = 0,
+                .subtype = try readSubType(r, a, first, off),
+            });
+        }
+        try groups.append(a, .{ .start = start, .len = @intCast(definitions.items.len - start) });
+    }
+    return .{
+        .types = try definitions.toOwnedSlice(a),
+        .rec_groups = try groups.toOwnedSlice(a),
+    };
 }
 
 fn parseImportSection(r: *Reader, a: Allocator, mod: *types.Module) DecodeError![]const types.Import {
@@ -914,9 +1047,20 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             },
             .ref_null => {
                 const type_off = r.offset();
-                const ref_type = try r.readValType();
-                if (!ref_type.isReference()) return r.failAt(type_off, "reference type expected", .{});
-                instr.imm = .{ .type = ref_type };
+                // The selected exception proposal retains its exnref immediate
+                // alongside GC's heap-type form.
+                if (r.pos < r.limit and r.bytes[r.pos] == @intFromEnum(types.ValType.exnref)) {
+                    if (!r.features.exception_handling)
+                        return r.unsupportedFeature(type_off, .exception_handling);
+                    r.pos += 1;
+                    instr.imm = .{ .type = .exnref };
+                } else {
+                    const heap = try r.readHeapType();
+                    const ref_type = types.ValType.fromRef(.{ .nullable = true, .heap = heap });
+                    if (ref_type.isGcReference() and !r.features.gc)
+                        return r.unsupportedFeature(type_off, .gc);
+                    instr.imm = .{ .type = ref_type };
+                }
             },
             .br_table => {
                 const cnt = try r.readCount();
@@ -1131,10 +1275,10 @@ test "wasm.decode kitchen sink module" {
 
     // Types.
     try std.testing.expectEqual(@as(usize, 2), mod.types.len);
-    try std.testing.expectEqualDeep(&[_]types.ValType{}, mod.types[0].params);
-    try std.testing.expectEqualDeep(&[_]types.ValType{}, mod.types[0].results);
-    try std.testing.expectEqualDeep(&[_]types.ValType{ .i32, .i64 }, mod.types[1].params);
-    try std.testing.expectEqualDeep(&[_]types.ValType{.i32}, mod.types[1].results);
+    try std.testing.expectEqualDeep(&[_]types.ValType{}, mod.types[0].funcType().?.params);
+    try std.testing.expectEqualDeep(&[_]types.ValType{}, mod.types[0].funcType().?.results);
+    try std.testing.expectEqualDeep(&[_]types.ValType{ .i32, .i64 }, mod.types[1].funcType().?.params);
+    try std.testing.expectEqualDeep(&[_]types.ValType{.i32}, mod.types[1].funcType().?.results);
 
     // Imports + per-kind counts.
     try std.testing.expectEqual(@as(usize, 4), mod.imports.len);
@@ -1412,6 +1556,87 @@ test "wasm.decode memory64 allocation failures are rollback safe" {
     );
 }
 
+const gc_features: types.Features = .{
+    .reference_types = true,
+    .typed_function_references = true,
+    .gc = true,
+};
+
+const gc_type_bytes = hdr ++ testSection(1,
+    // Two type-section entries expanding to three indexed definitions.
+    "\x02" ++
+        // rec { sub (struct (field i8 const) (field (ref null 0) var));
+        //       sub final 0 (array (field (ref any) const)) }
+        "\x4E\x02" ++
+        "\x50\x00\x5F\x02\x78\x00\x63\x00\x01" ++
+        "\x4F\x01\x00\x5E\x64\x6E\x00" ++
+        // Shorthand final function: (anyref, (ref 1)) -> funcref.
+        "\x60\x02\x6E\x64\x01\x01\x63\x70");
+
+test "wasm.decode GC recursive subtypes fields and heap references" {
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, gc_type_bytes, gc_features, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    try std.testing.expectEqual(@as(usize, 3), mod.types.len);
+    try std.testing.expectEqual(@as(usize, 2), mod.rec_groups.len);
+    try std.testing.expectEqualDeep(types.RecGroup{ .start = 0, .len = 2 }, mod.rec_groups[0]);
+    try std.testing.expectEqualDeep(types.RecGroup{ .start = 2, .len = 1 }, mod.rec_groups[1]);
+
+    const struct_type = mod.types[0];
+    try std.testing.expect(!struct_type.subtype.final);
+    try std.testing.expectEqual(@as(usize, 0), struct_type.subtype.supertypes.len);
+    const fields = struct_type.subtype.composite.struct_.fields;
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expect(fields[0].storage == .i8 and !fields[0].mutable);
+    const field_ref = fields[1].storage.value.refType().?;
+    try std.testing.expect(field_ref.nullable);
+    try std.testing.expectEqual(@as(?u32, 0), field_ref.heap.concreteIndex());
+    try std.testing.expect(fields[1].mutable);
+
+    const array_type = mod.types[1];
+    try std.testing.expect(array_type.subtype.final);
+    try std.testing.expectEqualSlices(u32, &.{0}, array_type.subtype.supertypes);
+    const array_ref = array_type.subtype.composite.array.field.storage.value.refType().?;
+    try std.testing.expect(!array_ref.nullable);
+    try std.testing.expectEqual(types.HeapType.any, array_ref.heap);
+
+    const function_type = mod.types[2].funcType().?;
+    try std.testing.expectEqualSlices(types.ValType, &.{
+        .anyref,
+        types.ValType.fromRef(.{ .nullable = false, .heap = types.HeapType.concrete(1) }),
+    }, function_type.params);
+    try std.testing.expectEqualSlices(types.ValType, &.{.funcref}, function_type.results);
+}
+
+fn decodeGcTypesWithFailingAllocator(gpa: Allocator) !void {
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(gpa, gc_type_bytes, gc_features, &diag);
+    defer destroyModule(gpa, mod);
+    try std.testing.expectEqual(@as(usize, 3), mod.types.len);
+}
+
+test "wasm.decode GC type allocation failures are rollback safe" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        decodeGcTypesWithFailingAllocator,
+        .{},
+    );
+}
+
+test "wasm.decode GC type gates and malformed fields are deterministic" {
+    try expectMalformedWithFeatures(
+        gc_type_bytes,
+        .{ .reference_types = true, .typed_function_references = true },
+        11,
+        "WebAssembly feature gc is disabled",
+    );
+    const bad_mutability = comptime (hdr ++ testSection(1, "\x01\x5F\x01\x7F\x02"));
+    try expectMalformedWithFeatures(bad_mutability, gc_features, 14, "malformed mutability");
+    const bad_composite = comptime (hdr ++ testSection(1, "\x01\x50\x00\x5D"));
+    try expectMalformedWithFeatures(bad_composite, gc_features, 13, "invalid composite type");
+}
+
 test "wasm.decode malformed code bodies" {
     // The pinned proposal uses 0x08/0x0a/0x1f; legacy 0x06 is invalid.
     try expectMalformed(hdr ++ func_sec_1 ++ "\x0A\x04\x01\x02\x00\x06", 17, "invalid opcode 0x06");
@@ -1564,7 +1789,7 @@ test "wasm.decode feature gates distinguish disabled features and dependencies" 
         &diag,
     );
     defer destroyModule(std.testing.allocator, exnref);
-    try std.testing.expectEqual(types.ValType.exnref, exnref.types[0].params[0]);
+    try std.testing.expectEqual(types.ValType.exnref, exnref.types[0].funcType().?.params[0]);
 }
 
 test "wasm.decode exception tags sections imports and exports" {
@@ -1667,7 +1892,7 @@ test "wasm.decode multi-value signatures and type-index blocks" {
     var diag: types.Diagnostic = .{};
     const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .multi_value = true }, &diag);
     defer destroyModule(std.testing.allocator, mod);
-    try std.testing.expectEqual(@as(usize, 2), mod.types[0].results.len);
+    try std.testing.expectEqual(@as(usize, 2), mod.types[0].funcType().?.results.len);
     try std.testing.expectEqual(types.BlockType{ .type_index = 0 }, mod.code[0].instrs[0].imm.block.type);
 }
 

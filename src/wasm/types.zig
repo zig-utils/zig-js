@@ -102,15 +102,85 @@ pub const Diagnostic = struct {
     }
 };
 
-pub const ValType = enum(u8) {
+/// Heap types use the low u32 range for concrete module type indices and a
+/// disjoint high range for the ten abstract GC hierarchy nodes. This keeps
+/// them compact, directly comparable, and allocation-free in every IR use.
+pub const HeapType = enum(u64) {
+    nofunc = (@as(u64, 1) << 32) | 0x73,
+    noextern = (@as(u64, 1) << 32) | 0x72,
+    none = (@as(u64, 1) << 32) | 0x71,
+    func = (@as(u64, 1) << 32) | 0x70,
+    extern_ = (@as(u64, 1) << 32) | 0x6F,
+    any = (@as(u64, 1) << 32) | 0x6E,
+    eq = (@as(u64, 1) << 32) | 0x6D,
+    i31 = (@as(u64, 1) << 32) | 0x6C,
+    struct_ = (@as(u64, 1) << 32) | 0x6B,
+    array = (@as(u64, 1) << 32) | 0x6A,
+    _,
+
+    pub fn concrete(index: u32) HeapType {
+        return @enumFromInt(index);
+    }
+
+    pub fn concreteIndex(self: HeapType) ?u32 {
+        const raw = @intFromEnum(self);
+        return if (raw <= std.math.maxInt(u32)) @intCast(raw) else null;
+    }
+
+    pub fn fromAbstractByte(byte: u8) ?HeapType {
+        return switch (byte) {
+            0x73 => .nofunc,
+            0x72 => .noextern,
+            0x71 => .none,
+            0x70 => .func,
+            0x6F => .extern_,
+            0x6E => .any,
+            0x6D => .eq,
+            0x6C => .i31,
+            0x6B => .struct_,
+            0x6A => .array,
+            else => null,
+        };
+    }
+
+    pub fn abstractByte(self: HeapType) ?u8 {
+        if (self.concreteIndex() != null) return null;
+        const raw = @intFromEnum(self);
+        if (raw >> 32 != 1) return null;
+        return @truncate(raw);
+    }
+};
+
+pub const RefType = struct {
+    nullable: bool,
+    heap: HeapType,
+};
+
+/// Value types retain their normative one-byte values for all short forms.
+/// Explicit `(ref null? ht)` forms occupy a private disjoint encoding carrying
+/// the complete heap type; this is IR-only and never leaks into the binary.
+pub const ValType = enum(u64) {
     i32 = 0x7F,
     i64 = 0x7E,
     f32 = 0x7D,
     f64 = 0x7C,
     v128 = 0x7B,
+    nofuncref = 0x73,
+    noexternref = 0x72,
+    nullref = 0x71,
     exnref = 0x69,
+    anyref = 0x6E,
+    eqref = 0x6D,
+    i31ref = 0x6C,
+    structref = 0x6B,
+    arrayref = 0x6A,
     externref = 0x6F,
     funcref = 0x70,
+    _,
+
+    const explicit_ref_base: u64 = @as(u64, 1) << 63;
+    const nullable_bit: u64 = @as(u64, 1) << 62;
+    const heap_mask: u64 = nullable_bit - 1;
 
     pub fn fromByte(b: u8) ?ValType {
         return switch (b) {
@@ -119,19 +189,73 @@ pub const ValType = enum(u8) {
             0x7D => .f32,
             0x7C => .f64,
             0x7B => .v128,
+            0x73 => .nofuncref,
+            0x72 => .noexternref,
+            0x71 => .nullref,
             0x69 => .exnref,
+            0x6E => .anyref,
+            0x6D => .eqref,
+            0x6C => .i31ref,
+            0x6B => .structref,
+            0x6A => .arrayref,
             0x6F => .externref,
             0x70 => .funcref,
             else => null,
         };
     }
 
+    pub fn fromRef(ref_type: RefType) ValType {
+        if (ref_type.nullable) {
+            if (ref_type.heap.abstractByte()) |byte|
+                return ValType.fromByte(byte).?;
+        }
+        const nullable = if (ref_type.nullable) nullable_bit else 0;
+        return @enumFromInt(explicit_ref_base | nullable | @intFromEnum(ref_type.heap));
+    }
+
+    pub fn refType(self: ValType) ?RefType {
+        const raw = @intFromEnum(self);
+        if (raw & explicit_ref_base != 0) return .{
+            .nullable = raw & nullable_bit != 0,
+            .heap = @enumFromInt(raw & heap_mask),
+        };
+        const byte: u8 = std.math.cast(u8, raw) orelse return null;
+        const heap = HeapType.fromAbstractByte(byte) orelse return null;
+        return .{ .nullable = true, .heap = heap };
+    }
+
     pub fn name(self: ValType) []const u8 {
-        return @tagName(self);
+        return switch (self) {
+            .i32 => "i32",
+            .i64 => "i64",
+            .f32 => "f32",
+            .f64 => "f64",
+            .v128 => "v128",
+            .exnref => "exnref",
+            .funcref => "funcref",
+            .externref => "externref",
+            .nofuncref => "nofuncref",
+            .noexternref => "noexternref",
+            .nullref => "nullref",
+            .anyref => "anyref",
+            .eqref => "eqref",
+            .i31ref => "i31ref",
+            .structref => "structref",
+            .arrayref => "arrayref",
+            _ => "ref",
+        };
     }
 
     pub fn isReference(self: ValType) bool {
-        return self == .funcref or self == .exnref or self == .externref;
+        return self == .exnref or self.refType() != null;
+    }
+
+    pub fn isGcReference(self: ValType) bool {
+        const ref_type = self.refType() orelse return false;
+        return switch (ref_type.heap) {
+            .func, .nofunc, .extern_, .noextern => false,
+            else => true,
+        };
     }
 };
 
@@ -154,8 +278,9 @@ pub const BlockType = union(enum) {
                 .exnref => &.{.exnref},
                 .externref => &.{.externref},
                 .funcref => &.{.funcref},
+                else => &.{value},
             } },
-            .type_index => |index| if (index < mod.types.len) mod.types[index] else null,
+            .type_index => |index| mod.funcTypeAt(index),
         };
     }
 };
@@ -200,6 +325,62 @@ pub const Limits = struct {
 pub const FuncType = struct {
     params: []const ValType,
     results: []const ValType,
+};
+
+pub const StorageType = union(enum) {
+    value: ValType,
+    i8,
+    i16,
+
+    pub fn unpacked(self: StorageType) ValType {
+        return switch (self) {
+            .value => |value| value,
+            .i8, .i16 => .i32,
+        };
+    }
+};
+
+pub const FieldType = struct {
+    storage: StorageType,
+    mutable: bool,
+};
+
+pub const StructType = struct {
+    fields: []const FieldType,
+};
+
+pub const ArrayType = struct {
+    field: FieldType,
+};
+
+pub const CompositeType = union(enum) {
+    func: FuncType,
+    struct_: StructType,
+    array: ArrayType,
+};
+
+pub const SubType = struct {
+    final: bool,
+    supertypes: []const u32,
+    composite: CompositeType,
+};
+
+pub const DefType = struct {
+    rec_group: u32,
+    rec_index: u32,
+    subtype: SubType,
+
+    pub fn funcType(self: DefType) ?FuncType {
+        return switch (self.subtype.composite) {
+            .func => |function| function,
+            else => null,
+        };
+    }
+};
+
+pub const RecGroup = struct {
+    start: u32,
+    len: u32,
 };
 
 pub fn funcTypeEql(a: FuncType, b: FuncType) bool {
@@ -693,7 +874,8 @@ pub const Module = struct {
     arena: std.heap.ArenaAllocator,
     features: Features = .{},
 
-    types: []const FuncType = &.{},
+    types: []const DefType = &.{},
+    rec_groups: []const RecGroup = &.{},
     imports: []const Import = &.{},
     /// Type indices of module-defined functions (imports excluded).
     funcs: []const u32 = &.{},
@@ -740,17 +922,22 @@ pub const Module = struct {
         return self.imported_tags + @as(u32, @intCast(self.tags.len));
     }
 
+    pub fn funcTypeAt(self: *const Module, typeidx: u32) ?FuncType {
+        if (typeidx >= self.types.len) return null;
+        return self.types[typeidx].funcType();
+    }
+
     /// Type of any tag in the index space (imports precede definitions).
     pub fn tagType(self: *const Module, tagidx: u32) FuncType {
         var i: u32 = tagidx;
         for (self.imports) |imp| switch (imp.desc) {
             .tag => |tag| {
-                if (i == 0) return self.types[tag.type_index];
+                if (i == 0) return self.funcTypeAt(tag.type_index).?;
                 i -= 1;
             },
             else => {},
         };
-        return self.types[self.tags[i].type_index];
+        return self.funcTypeAt(self.tags[i].type_index).?;
     }
 
     /// Type of any function in the index space (imported or defined).
@@ -759,13 +946,13 @@ pub const Module = struct {
         for (self.imports) |imp| {
             switch (imp.desc) {
                 .func => |t| {
-                    if (i == 0) return self.types[t];
+                    if (i == 0) return self.funcTypeAt(t).?;
                     i -= 1;
                 },
                 else => {},
             }
         }
-        return self.types[self.funcs[i]];
+        return self.funcTypeAt(self.funcs[i]).?;
     }
 
     /// Global type of any global in the index space (imported or defined).

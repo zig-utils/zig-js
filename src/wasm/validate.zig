@@ -33,20 +33,25 @@ fn validateValType(mod: *const types.Module, value_type: types.ValType, diag: *t
 
 pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
     // 1. Type indices must resolve; reference value positions are opt-in.
-    for (mod.types) |ft| {
+    for (mod.types) |definition| if (definition.funcType()) |ft| {
         // MVP function types have at most one result; multi-value is opt-in.
         if (ft.results.len > 1 and !mod.features.multi_value) return failMod(diag, "invalid result arity");
         for (ft.params) |p| try validateValType(mod, p, diag);
         for (ft.results) |r| try validateValType(mod, r, diag);
-    }
+    };
     for (mod.imports) |imp| switch (imp.desc) {
-        .func => |t| if (t >= mod.types.len) return failMod(diag, "unknown type"),
+        .func => |t| {
+            if (t >= mod.types.len) return failMod(diag, "unknown type");
+            if (mod.funcTypeAt(t) == null) return failMod(diag, "type mismatch");
+        },
         .global => |g| try validateValType(mod, g.val, diag),
         .tag => |tag| try validateTagType(mod, tag, diag),
         else => {},
     };
-    for (mod.funcs) |t|
+    for (mod.funcs) |t| {
         if (t >= mod.types.len) return failMod(diag, "unknown type");
+        if (mod.funcTypeAt(t) == null) return failMod(diag, "type mismatch");
+    }
     for (mod.tags) |tag| try validateTagType(mod, tag, diag);
 
     // 2. MVP allows at most one table and one memory (imports + defined).
@@ -131,13 +136,14 @@ pub fn validate(mod: *const types.Module, diag: *types.Diagnostic) Error!void {
 
     // 8. Function bodies.
     for (mod.funcs, mod.code) |typeidx, body|
-        try validateFunc(mod, diag, mod.types[typeidx], body);
+        try validateFunc(mod, diag, mod.funcTypeAt(typeidx).?, body);
 }
 
 fn validateTagType(mod: *const types.Module, tag: types.Tag, diag: *types.Diagnostic) Error!void {
     if (!mod.features.exception_handling) return unsupportedFeature(mod, diag, .exception_handling);
     if (tag.type_index >= mod.types.len) return failMod(diag, "unknown type");
-    if (mod.types[tag.type_index].results.len != 0)
+    const function_type = mod.funcTypeAt(tag.type_index) orelse return failMod(diag, "type mismatch");
+    if (function_type.results.len != 0)
         return failMod(diag, "non-empty tag result type");
 }
 
@@ -192,19 +198,21 @@ fn isDeclaredFunction(mod: *const types.Module, funcidx: u32) bool {
 
 /// Abstract operand: a concrete numeric type or `unknown`, the bottom type
 /// produced by the polymorphic stack after `unreachable`/branches.
-const StackVal = enum { unknown, i32, i64, f32, f64, v128, funcref, exnref, externref };
+const StackVal = enum(u64) {
+    unknown = 0,
+    i32 = @intFromEnum(types.ValType.i32),
+    i64 = @intFromEnum(types.ValType.i64),
+    f32 = @intFromEnum(types.ValType.f32),
+    f64 = @intFromEnum(types.ValType.f64),
+    v128 = @intFromEnum(types.ValType.v128),
+    funcref = @intFromEnum(types.ValType.funcref),
+    exnref = @intFromEnum(types.ValType.exnref),
+    externref = @intFromEnum(types.ValType.externref),
+    _,
+};
 
 fn stackVal(vt: types.ValType) StackVal {
-    return switch (vt) {
-        .i32 => .i32,
-        .i64 => .i64,
-        .f32 => .f32,
-        .f64 => .f64,
-        .v128 => .v128,
-        .funcref => .funcref,
-        .exnref => .exnref,
-        .externref => .externref,
-    };
+    return @enumFromInt(@intFromEnum(vt));
 }
 
 const FrameKind = enum { block, loop, if_, try_table };
@@ -760,7 +768,7 @@ const FuncValidator = struct {
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
                     if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
                     try self.popExpect(self.mod.tableType(tableidx).address.valType());
-                    try self.callFunc(self.mod.types[tidx]);
+                    try self.callFunc(self.mod.funcTypeAt(tidx) orelse return self.fail("type mismatch"));
                 },
                 .return_call_indirect => {
                     const tidx = instr.imm.call_indirect.type_index;
@@ -770,7 +778,7 @@ const FuncValidator = struct {
                     if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
                     if (tidx >= self.mod.types.len) return self.fail("unknown type");
                     try self.popExpect(self.mod.tableType(tableidx).address.valType());
-                    try self.tailCallFunc(self.mod.types[tidx]);
+                    try self.tailCallFunc(self.mod.funcTypeAt(tidx) orelse return self.fail("type mismatch"));
                 },
                 .drop => _ = try self.pop(),
                 .select => {
@@ -1006,8 +1014,10 @@ fn validateFunc(
     // OOM surfaces as Invalid only on truly pathological modules.
     const n = body.instrs.len + 1;
     var max_arity: usize = 1;
-    for (mod.types) |signature|
-        max_arity = @max(max_arity, signature.params.len, signature.results.len);
+    for (mod.types) |definition| {
+        if (definition.funcType()) |signature|
+            max_arity = @max(max_arity, signature.params.len, signature.results.len);
+    }
     const operand_slots = std.math.mul(usize, n, max_arity) catch
         return failMod(diag, "out of memory");
     const alloc = std.heap.page_allocator;

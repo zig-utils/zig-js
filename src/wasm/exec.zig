@@ -472,6 +472,7 @@ fn nullTableSlot(elem_type: types.ValType) ValueSlot {
         .exnref => .{ .exnref = null },
         .externref => .{ .externref = js_value.Value.nul() },
         .i32, .i64, .f32, .f64, .v128 => unreachable,
+        else => unreachable,
     };
 }
 
@@ -618,7 +619,11 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                     gi += 1;
                 },
                 .tag => |tag_decl| {
-                    if (!types.funcTypeEql(imports.tags[tag_i].type, mod.types[tag_decl.type_index])) {
+                    const function_type = mod.funcTypeAt(tag_decl.type_index) orelse {
+                        diag.set(types.Diagnostic.no_offset, "tag references a non-function type", .{});
+                        return error.Link;
+                    };
+                    if (!types.funcTypeEql(imports.tags[tag_i].type, function_type)) {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
                         return error.Link;
                     }
@@ -704,7 +709,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.tags = try a.alloc(*TagInst, mod.totalTags());
     for (imports.tags, 0..) |tag, k| inst.tags[k] = tag;
     for (mod.tags, 0..) |tag_decl, j| {
-        const tag = try createTag(gpa, mod.types[tag_decl.type_index]);
+        const tag = try createTag(gpa, mod.funcTypeAt(tag_decl.type_index).?);
         created_tags += 1;
         inst.tags[mod.imported_tags + j] = tag;
     }
@@ -840,6 +845,7 @@ fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
         .funcref => slot == .funcref,
         .exnref => slot == .exnref,
         .externref => slot == .externref,
+        else => false,
     };
 }
 
@@ -885,7 +891,7 @@ pub fn callFuncInstSlots(f: *const FuncInst, args: []const ValueSlot, results: [
 
 fn runDefinedSlots(f: *const FuncInst, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
     const def = f.defined;
-    const fty = def.inst.module.types[def.inst.module.funcs[def.idx]];
+    const fty = def.inst.module.funcTypeAt(def.inst.module.funcs[def.idx]).?;
     if (!argumentsMatchSignature(fty, args, results.len)) {
         diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
         return error.Trap;
@@ -2086,6 +2092,7 @@ fn zeroSlot(val_type: types.ValType) WasmSlot {
         .funcref => .{ .funcref = null },
         .exnref => .{ .exnref = null },
         .externref => .{ .externref = js_value.Value.nul() },
+        else => unreachable,
     };
 }
 
@@ -2102,7 +2109,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     if (!seen_instance) try s.touched_instances.append(s.alloc, def.inst);
     const mod = def.inst.module;
     const body = &mod.code[def.idx];
-    const fty = mod.types[mod.funcs[def.idx]];
+    const fty = mod.funcTypeAt(mod.funcs[def.idx]).?;
     // Params move from the operand stack into fresh locals; declared locals
     // follow, zero-initialized.
     const arg_start = s.stack.items.len - fty.params.len;
@@ -2424,7 +2431,7 @@ fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
     const def = f.defined;
     const mod = def.inst.module;
     const body = &mod.code[def.idx];
-    const fty = mod.types[mod.funcs[def.idx]];
+    const fty = mod.funcTypeAt(mod.funcs[def.idx]).?;
     const arg_start = s.stack.items.len - fty.params.len;
     const args = s.stack.items[arg_start..];
 
@@ -2913,12 +2920,12 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .return_call => try tailCallFunc(s, inst.funcs[instr.imm.idx]),
             .call_indirect => {
                 const immediate = instr.imm.call_indirect;
-                const callable = try indirectCallable(s, inst, mod.types[immediate.type_index], immediate);
+                const callable = try indirectCallable(s, inst, mod.funcTypeAt(immediate.type_index).?, immediate);
                 try callFunc(s, callable);
             },
             .return_call_indirect => {
                 const immediate = instr.imm.call_indirect;
-                const callable = try indirectCallable(s, inst, mod.types[immediate.type_index], immediate);
+                const callable = try indirectCallable(s, inst, mod.funcTypeAt(immediate.type_index).?, immediate);
                 try tailCallFunc(s, callable);
             },
             .drop => _ = popSlot(s),
@@ -2960,6 +2967,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 .exnref => .{ .exnref = null },
                 .externref => .{ .externref = js_value.Value.nul() },
                 .i32, .i64, .f32, .f64, .v128 => unreachable,
+                else => unreachable,
             }),
             .ref_is_null => {
                 const slot = popSlot(s);
