@@ -49,7 +49,7 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 252 implemented / 179 pending under #163. The generated
+private imports are now 255 implemented / 176 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -256,13 +256,16 @@ JSString backing iterator additionally delivers exact Latin-1 or UTF-16 units
 through the pinned caller-owned callback layout. `JSFunction__createFromZig`
 now creates selected-realm native functions with owned metadata and invokes
 call/construct callbacks through the exact JSC64 `CallFrame` register layout.
+The three CallFrame metadata exports bind that active pointer to its owning VM
+and visible caller, returning an owned URL with one-based coordinates, exact Bun
+main-origin detection, and a stable debug description across nested callbacks.
 `JSC__Exception__getStackTrace` projects retained structured Error frames with
 owned BunStrings and exact zero-based positions through Home's pinned
 `ZigStackTrace`/`ZigStackFrame` layouts; it never parses the mutable `.stack`
 string. Full `ZigException` conversion adds the exact 216-byte layout, owned
 error/system fields, cause type, stable exception-cell identity, and a capped
 second pass over current/preceding source lines by retained script ID. The
-251-symbol combined
+254-symbol combined
 fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only

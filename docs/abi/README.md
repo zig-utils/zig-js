@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (252 implemented, 179 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (255 implemented, 176 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -644,11 +644,16 @@ top-level-await settlement, and complete module-graph tracing. The JSString
 backing iterator adds pinned callback-layout validation and exact Latin-1 or
 UTF-16 unit delivery. `JSFunction__createFromZig` creates native functions with
 owned names and exact call/construct `CallFrame` delivery.
+The three native CallFrame metadata exports layer a nested thread-local active
+descriptor over that unchanged register layout. Exact frame and VM identity
+gate an owned caller URL, one-based line/column, Bun-main origin detection, and
+a bounded NUL-terminated description; the fixture covers sibling globals,
+foreign VMs, stale/null pointers, constructors, and reentrant restoration.
 `JSC__Exception__getStackTrace` fills the caller-owned exact-layout frame buffer
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 251-symbol
+the same frame/script identity and own every returned string. The 254-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -692,7 +697,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (246 implemented, 175 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (249 implemented, 172 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
