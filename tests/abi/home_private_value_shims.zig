@@ -143,6 +143,17 @@ const BunString = extern struct {
     value: BunStringImpl,
 };
 
+const SystemError = extern struct {
+    errno: c_int = 0,
+    code: BunString = emptyBunString(),
+    message: BunString,
+    path: BunString = emptyBunString(),
+    syscall: BunString = emptyBunString(),
+    hostname: BunString = emptyBunString(),
+    fd: c_int = std.math.minInt(c_int),
+    dest: BunString = emptyBunString(),
+};
+
 const ZigStackFrameCode = enum(u8) {
     None = 0,
     Eval = 1,
@@ -392,6 +403,8 @@ extern "c" fn JSC__JSValue__createRangeError(*const ZigString, *const ZigString,
 extern "c" fn JSC__createError(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__createTypeError(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn JSC__createRangeError(JSContextRef, *const BunString) EncodedValue;
+extern "c" fn SystemError__toErrorInstance(?*const SystemError, JSContextRef) EncodedValue;
+extern "c" fn SystemError__toErrorInstanceWithInfoObject(?*const SystemError, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSGlobalObject__createAggregateError(JSContextRef, [*c]const EncodedValue, usize, *const ZigString) EncodedValue;
 extern "c" fn JSC__JSGlobalObject__createAggregateErrorWithArray(JSContextRef, EncodedValue, BunString, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__getErrorsProperty(EncodedValue, JSContextRef) EncodedValue;
@@ -2442,6 +2455,104 @@ pub fn main() void {
     if (JSC__Exception__asJSValue(preserved_dom_exception.cellPointer()) != EncodedValue.fromInt32(198))
         fail("DOMException matrix replaced pending exception");
 
+    const enoent_bytes = "ENOENT";
+    const enoent_message_bytes = "no such file or directory";
+    const open_bytes = "open";
+    const nope_path_bytes = "/tmp/nope";
+    const dest_path_bytes = "/tmp/else";
+    const full_system_error = SystemError{
+        .errno = -2,
+        .code = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(enoent_bytes.ptr), .len = enoent_bytes.len } } },
+        .message = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(enoent_message_bytes.ptr), .len = enoent_message_bytes.len } } },
+        .path = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(nope_path_bytes.ptr), .len = nope_path_bytes.len } } },
+        .syscall = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(open_bytes.ptr), .len = open_bytes.len } } },
+        .fd = 9,
+        .dest = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(dest_path_bytes.ptr), .len = dest_path_bytes.len } } },
+    };
+    const full_system_error_instance = SystemError__toErrorInstance(&full_system_error, context);
+    if (full_system_error_instance == .empty or !JSC__JSValue__isAnyError(full_system_error_instance))
+        fail("SystemError error-instance construction failed");
+    exposeCell(context, "__private_system_error", full_system_error_instance);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_system_error instanceof Error && Object.getPrototypeOf(__private_system_error) === Error.prototype && __private_system_error.name === 'Error' && __private_system_error.message === 'no such file or directory' && __private_system_error.code === 'ENOENT' && __private_system_error.path === '/tmp/nope' && __private_system_error.dest === '/tmp/else' && __private_system_error.syscall === 'open' && __private_system_error.fd === 9 && __private_system_error.errno === -2 && !Object.hasOwn(__private_system_error, 'hostname')")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Object.keys(__private_system_error).join(',') === 'code,path,dest,fd,syscall,errno'")))
+        fail("SystemError error-instance field/order mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        \\(() => {
+        \\  const code = Object.getOwnPropertyDescriptor(__private_system_error, 'code');
+        \\  const fd = Object.getOwnPropertyDescriptor(__private_system_error, 'fd');
+        \\  const errno = Object.getOwnPropertyDescriptor(__private_system_error, 'errno');
+        \\  const message = Object.getOwnPropertyDescriptor(__private_system_error, 'message');
+        \\  return code.writable && code.enumerable && !code.configurable &&
+        \\    fd.writable && fd.enumerable && !fd.configurable &&
+        \\    errno.writable && errno.enumerable && !errno.configurable &&
+        \\    message.writable && !message.enumerable && message.configurable;
+        \\})()
+    ))) fail("SystemError error-instance descriptor mismatch");
+
+    const minimal_system_error = SystemError{ .message = latin1_string };
+    const minimal_system_error_instance = SystemError__toErrorInstance(&minimal_system_error, context);
+    exposeCell(context, "__private_minimal_system_error", minimal_system_error_instance);
+    if (minimal_system_error_instance == .empty or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_minimal_system_error.message === 'café' && __private_minimal_system_error.errno === 0 && Object.keys(__private_minimal_system_error).join(',') === 'errno'")))
+        fail("SystemError minimal error-instance mismatch");
+
+    const empty_message_system_error = SystemError{ .errno = 34, .message = emptyBunString(), .fd = 0 };
+    const empty_message_system_error_instance = SystemError__toErrorInstance(&empty_message_system_error, context);
+    exposeCell(context, "__private_empty_message_system_error", empty_message_system_error_instance);
+    if (empty_message_system_error_instance == .empty or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_empty_message_system_error.message === '' && Object.hasOwn(__private_empty_message_system_error, 'message') && __private_empty_message_system_error.fd === 0 && __private_empty_message_system_error.errno === 34 && Object.keys(__private_empty_message_system_error).join(',') === 'fd,errno'")))
+        fail("SystemError empty-message error-instance mismatch");
+
+    const eio_bytes = "EIO";
+    const read_bytes = "read";
+    const info_system_error = SystemError{
+        .errno = -5,
+        .code = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(eio_bytes.ptr), .len = eio_bytes.len } } },
+        .message = utf16_string,
+        .syscall = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(read_bytes.ptr), .len = read_bytes.len } } },
+    };
+    const info_system_error_instance = SystemError__toErrorInstanceWithInfoObject(&info_system_error, context);
+    if (info_system_error_instance == .empty or !JSC__JSValue__isAnyError(info_system_error_instance))
+        fail("SystemError info-object error construction failed");
+    exposeCell(context, "__private_info_system_error", info_system_error_instance);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_info_system_error instanceof Error && __private_info_system_error.name === 'SystemError' && __private_info_system_error.code === 'ERR_SYSTEM_ERROR' && __private_info_system_error.message === 'A system error occurred: read returned EIO (A😀\\uD800Z)' && __private_info_system_error.syscall === 'read' && __private_info_system_error.errno === -5")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Object.getPrototypeOf(__private_info_system_error.info) === Object.prototype && __private_info_system_error.info.code === 'EIO' && __private_info_system_error.info.syscall === 'read' && __private_info_system_error.info.message === 'A😀\\uD800Z' && __private_info_system_error.info.errno === -5")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "Object.keys(__private_info_system_error).join(',') === 'info,syscall,errno' && Object.keys(__private_info_system_error.info).join(',') === 'code,syscall,message,errno'")))
+        fail("SystemError info-object field/order mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        \\(() => {
+        \\  const name = Object.getOwnPropertyDescriptor(__private_info_system_error, 'name');
+        \\  const code = Object.getOwnPropertyDescriptor(__private_info_system_error, 'code');
+        \\  const info = Object.getOwnPropertyDescriptor(__private_info_system_error, 'info');
+        \\  const errno = Object.getOwnPropertyDescriptor(__private_info_system_error, 'errno');
+        \\  const infoCode = Object.getOwnPropertyDescriptor(__private_info_system_error.info, 'code');
+        \\  return name.writable && !name.enumerable && name.configurable &&
+        \\    code.writable && !code.enumerable && code.configurable &&
+        \\    info.writable && info.enumerable && !info.configurable &&
+        \\    errno.writable && errno.enumerable && !errno.configurable &&
+        \\    infoCode.writable && infoCode.enumerable && !infoCode.configurable;
+        \\})()
+    ))) fail("SystemError info-object descriptor mismatch");
+
+    const sparse_info_system_error = SystemError{ .errno = 2, .message = latin1_string };
+    const sparse_info_system_error_instance = SystemError__toErrorInstanceWithInfoObject(&sparse_info_system_error, context);
+    exposeCell(context, "__private_sparse_info_system_error", sparse_info_system_error_instance);
+    if (sparse_info_system_error_instance == .empty or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_sparse_info_system_error.message === 'A system error occurred:  returned  (café)' && __private_sparse_info_system_error.syscall === '' && __private_sparse_info_system_error.info.code === '' && __private_sparse_info_system_error.info.syscall === '' && __private_sparse_info_system_error.info.message === 'café' && __private_sparse_info_system_error.info.errno === 2")))
+        fail("SystemError sparse info-object mismatch");
+
+    if (SystemError__toErrorInstance(null, context) != .empty or
+        SystemError__toErrorInstanceWithInfoObject(null, context) != .empty or
+        JSGlobalObject__hasException(context))
+        fail("SystemError bridges accepted a null struct");
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(199));
+    if (SystemError__toErrorInstance(&full_system_error, context) != .empty or
+        SystemError__toErrorInstanceWithInfoObject(&full_system_error, context) != .empty)
+        fail("SystemError bridges ignored pending exception");
+    const preserved_system_error_exception = JSGlobalObject__tryTakeException(context);
+    if (JSC__Exception__asJSValue(preserved_system_error_exception.cellPointer()) != EncodedValue.fromInt32(199))
+        fail("SystemError bridges replaced pending exception");
+
     var mutable_latin1 = [_]u8{ 'c', 'a', 'f', 0xe9 };
     const mutable_latin1_string = ZigString{ .tagged_ptr = @intFromPtr(&mutable_latin1), .len = mutable_latin1.len };
     const copied_latin1 = ZigString__toValueGC(&mutable_latin1_string, context);
@@ -3652,6 +3763,12 @@ pub fn main() void {
     exposeCell(sibling_context, "__private_sibling_dom_exception", sibling_dom_exception);
     if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_dom_exception) === DOMException.prototype && __private_sibling_dom_exception.name === 'AbortError'")))
         fail("DOMException matrix selected-realm prototype mismatch");
+
+    const sibling_system_error_instance = SystemError__toErrorInstance(&full_system_error, sibling_context);
+    exposeCell(sibling_context, "__private_sibling_system_error", sibling_system_error_instance);
+    if (sibling_system_error_instance == .empty or
+        !JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sibling_system_error) === Error.prototype && __private_sibling_system_error.code === 'ENOENT' && __private_sibling_system_error.errno === -2")))
+        fail("SystemError bridge selected-realm prototype/field mismatch");
 
     const atom_bytes = "shared-atom";
     const atom_string = ZigString{ .tagged_ptr = @intFromPtr(atom_bytes.ptr), .len = atom_bytes.len };
@@ -5064,5 +5181,5 @@ pub fn main() void {
         TopExceptionScope__exceptionIncludingTraps(&verification_scope) != null)
         fail("private TopExceptionScope destruction mismatch");
 
-    std.debug.print("Home private value shims: 278/278 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 280/280 symbols linked; runtime matrix passed\n", .{});
 }

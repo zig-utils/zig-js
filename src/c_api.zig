@@ -119,6 +119,22 @@ const PrivateStringBuilder = extern struct {
     metadata: usize = 0,
 };
 
+/// The pinned Home/Bun `SystemError` by-value layout. `errno` leads, the six
+/// 24-byte BunString fields follow in declaration order, and `fd` sits between
+/// `hostname` and `dest`; `fd == minInt(c_int)` records "no file descriptor".
+/// Both `SystemError__*` bridges consume a borrowed pointer without touching
+/// field ownership: the consumer refs/derefs the BunStrings itself.
+const PrivateSystemError = extern struct {
+    errno: c_int = 0,
+    code: PrivateBunString = PrivateBunString.empty(),
+    message: PrivateBunString,
+    path: PrivateBunString = PrivateBunString.empty(),
+    syscall: PrivateBunString = PrivateBunString.empty(),
+    hostname: PrivateBunString = PrivateBunString.empty(),
+    fd: c_int = std.math.minInt(c_int),
+    dest: PrivateBunString = PrivateBunString.empty(),
+};
+
 const PrivateJSStringIterator = extern struct {
     data: ?*anyopaque,
     stop: u8,
@@ -303,6 +319,12 @@ comptime {
     if (@sizeOf(PrivateBunString) != 24 or @alignOf(PrivateBunString) != 8 or
         @offsetOf(PrivateBunString, "value") != 8)
         @compileError("private BunString must retain its pinned 24-byte/8-byte ABI");
+    if (@sizeOf(PrivateSystemError) != 160 or @alignOf(PrivateSystemError) != 8 or
+        @offsetOf(PrivateSystemError, "code") != 8 or @offsetOf(PrivateSystemError, "message") != 32 or
+        @offsetOf(PrivateSystemError, "path") != 56 or @offsetOf(PrivateSystemError, "syscall") != 80 or
+        @offsetOf(PrivateSystemError, "hostname") != 104 or @offsetOf(PrivateSystemError, "fd") != 128 or
+        @offsetOf(PrivateSystemError, "dest") != 136)
+        @compileError("private SystemError layout drifted from the pinned ABI");
     if (@sizeOf(PrivateStringBuilder) != 24 or @alignOf(PrivateStringBuilder) != 8)
         @compileError("private StringBuilder must retain its pinned 24-byte/8-byte ABI");
     if (@sizeOf(PrivateJSStringIterator) != 48 or @alignOf(PrivateJSStringIterator) != 8 or
@@ -4451,6 +4473,239 @@ export fn JSC__createTypeError(global: JSContextRef, message: *const PrivateBunS
 
 export fn JSC__createRangeError(global: JSContextRef, message: *const PrivateBunString) callconv(.c) EncodedValue {
     return privateBunStringErrorFactory(global, message, "RangeError");
+}
+
+/// JSC's `PropertyAttribute::DontDelete | 0`: writable and enumerable, but not
+/// configurable. The pinned SystemError bridge stamps every system field with
+/// exactly these attributes.
+const private_dont_delete_attr: value.PropAttr = .{
+    .writable = true,
+    .enumerable = true,
+    .configurable = false,
+};
+
+/// Install one optional SystemError string field as a DontDelete own data
+/// property. A `.empty` tag installs nothing; a conversion failure clears and
+/// skips the field, matching the pinned `scope.clearException()` fall-through.
+fn privateSystemErrorInstallField(
+    context: *Context,
+    machine: *interp.Interpreter,
+    object: *Object,
+    comptime name: []const u8,
+    string: *const PrivateBunString,
+) error{OutOfMemory}!void {
+    if (string.tag == .empty) return;
+    const field = privateBunStringValue(context, string, null) catch return;
+    try object.setOwn(machine.arena, machine.root_shape, name, field);
+    try object.setAttr(machine.arena, name, private_dont_delete_attr);
+}
+
+fn privateSystemErrorNumber(
+    machine: *interp.Interpreter,
+    object: *Object,
+    comptime name: []const u8,
+    number: c_int,
+) error{OutOfMemory}!void {
+    try object.setOwn(machine.arena, machine.root_shape, name, Value.num(@floatFromInt(number)));
+    try object.setAttr(machine.arena, name, private_dont_delete_attr);
+}
+
+/// Install one already-materialized SystemError value as a DontDelete own data
+/// property. The info-object bridge converts each BunString once (an `.empty`
+/// tag becomes the empty string) and reuses that exact value on both the error
+/// and its `info` object, so installation is unconditional.
+fn privateSystemErrorInstallValue(
+    machine: *interp.Interpreter,
+    object: *Object,
+    comptime name: []const u8,
+    field: Value,
+) error{OutOfMemory}!void {
+    try object.setOwn(machine.arena, machine.root_shape, name, field);
+    try object.setAttr(machine.arena, name, private_dont_delete_attr);
+}
+
+/// The pinned Bun `SystemError__toErrorInstance` bridge: an ordinary `Error`
+/// carrying the exact message plus the populated system fields, in pinned
+/// insertion order (`code`, `path`, `dest`, `fd`, `syscall`, `hostname`,
+/// `errno`). Field reads never run user code, and an already-pending VM
+/// exception is preserved untouched.
+export fn SystemError__toErrorInstance(this: ?*const PrivateSystemError, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null or this == null) return .empty;
+    const system_error = this.?;
+    const message_value = privateBunStringValue(context, &system_error.message, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const result = machine.makeError("Error", message_value.asStr()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const object = result.asObj();
+    // JSC materializes an own `message` property even for the empty string;
+    // makeError only installs one for non-empty messages.
+    if (message_value.asStr().len == 0) {
+        object.setOwn(machine.arena, machine.root_shape, "message", Value.staticStr("")) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+        object.setAttr(machine.arena, "message", .{
+            .writable = true,
+            .enumerable = false,
+            .configurable = true,
+        }) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    inline for (.{ "code", "path", "dest" }) |name| {
+        privateSystemErrorInstallField(context, &machine, object, name, &@field(system_error, name)) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    if (system_error.fd >= 0) {
+        privateSystemErrorNumber(&machine, object, "fd", system_error.fd) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    inline for (.{ "syscall", "hostname" }) |name| {
+        privateSystemErrorInstallField(context, &machine, object, name, &@field(system_error, name)) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    privateSystemErrorNumber(&machine, object, "errno", system_error.errno) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+/// The pinned Bun `SystemError__toErrorInstanceWithInfoObject` bridge: the
+/// `node:os` `ERR_SYSTEM_ERROR` shape. The error is named `SystemError` with a
+/// non-enumerable `code`, the composed summary message, and a plain `info`
+/// object carrying `code`/`syscall`/`message`/`errno`; `syscall` and `errno`
+/// also land on the error itself. All system fields are DontDelete.
+export fn SystemError__toErrorInstanceWithInfoObject(this: ?*const PrivateSystemError, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null or this == null) return .empty;
+    const system_error = this.?;
+    const code_value = privateBunStringValue(context, &system_error.code, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const syscall_value = privateBunStringValue(context, &system_error.syscall, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const message_value = privateBunStringValue(context, &system_error.message, null) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    const summary = std.fmt.allocPrint(
+        context.arena(),
+        "A system error occurred: {s} returned {s} ({s})",
+        .{ syscall_value.asStr(), code_value.asStr(), message_value.asStr() },
+    ) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const result = machine.makeError("Error", summary) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const object = result.asObj();
+    const dont_enum_attr: value.PropAttr = .{
+        .writable = true,
+        .enumerable = false,
+        .configurable = true,
+    };
+    object.setOwn(machine.arena, machine.root_shape, "name", Value.staticStr("SystemError")) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setAttr(machine.arena, "name", dont_enum_attr) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setOwn(machine.arena, machine.root_shape, "code", Value.staticStr("ERR_SYSTEM_ERROR")) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setAttr(machine.arena, "code", dont_enum_attr) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const info = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const info_object = info.asObj();
+    privateSystemErrorInstallValue(&machine, info_object, "code", code_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    // The pinned bridge installs `info.code` before exposing `info`, so the
+    // error's own order is name, code, info, syscall, errno.
+    object.setOwn(machine.arena, machine.root_shape, "info", info) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    object.setAttr(machine.arena, "info", private_dont_delete_attr) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSystemErrorInstallValue(&machine, object, "syscall", syscall_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSystemErrorInstallValue(&machine, info_object, "syscall", syscall_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSystemErrorInstallValue(&machine, info_object, "message", message_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSystemErrorNumber(&machine, info_object, "errno", system_error.errno) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    privateSystemErrorNumber(&machine, object, "errno", system_error.errno) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
 }
 
 fn privateMakeAggregateError(

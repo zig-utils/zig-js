@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 291,
-      "pending": 155
+      "implemented": 293,
+      "pending": 153
     }
   },
   "declarations": [
@@ -3625,10 +3625,10 @@
       "line": 55,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn SystemError__toErrorInstance(this: *const SystemError, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "931560b9d15959777a40a5445497ae4c2993e825449daa948b1c4f9c92d5dc2f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "SystemError__toErrorInstanceWithInfoObject",
@@ -3636,10 +3636,10 @@
       "line": 56,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn SystemError__toErrorInstanceWithInfoObject(this: *const SystemError, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "060646b7be71cdbb1d23c7599fcb1366b285db64b2f5a44ca7f2abaddc4de5b4",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "TopExceptionScope__assertNoException",
