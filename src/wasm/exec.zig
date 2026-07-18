@@ -230,6 +230,11 @@ pub const GcObject = struct {
     mark_epoch: u32 = 0,
 };
 
+const GcRootRegistration = struct {
+    roots: *js_value.WasmExecutionRoots,
+    next: ?*GcRootRegistration = null,
+};
+
 pub const Imports = struct {
     funcs: []const ImportFunc = &.{}, // in import declaration order, per kind
     tables: []const *TableInst = &.{},
@@ -262,6 +267,7 @@ pub const Instance = struct {
     gc_object_count: usize = 0,
     gc_object_lock: std.atomic.Mutex = .unlocked,
     gc_mark_epoch: u32 = 0,
+    gc_active_roots: ?*GcRootRegistration = null,
 };
 
 fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fields: []const ValueSlot) error{OutOfMemory}!*GcObject {
@@ -331,6 +337,11 @@ fn collectGcAggregatesQuiescent(inst: *Instance, roots: []const ValueSlot) error
     defer worklist.deinit(inst.gpa);
 
     for (roots) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+    var registration = inst.gc_active_roots;
+    while (registration) |active| : (registration = active.next) {
+        for (active.roots.stack) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+        for (active.roots.locals) |slot| try markGcSlot(inst, slot, epoch, &worklist);
+    }
     for (inst.globals) |global| try markGcSlot(inst, global.value, epoch, &worklist);
     for (inst.tables) |table| for (table.elems) |slot|
         try markGcSlot(inst, slot, epoch, &worklist);
@@ -1029,6 +1040,7 @@ fn runDefinedSlots(f: *const FuncInst, args: []const ValueSlot, results: []Value
     var arena = std.heap.ArenaAllocator.init(def.inst.gpa);
     defer arena.deinit();
     var s: State = .{ .alloc = arena.allocator(), .diag = diag, .root_hooks = def.inst.root_hooks };
+    defer unregisterGcRoots(&s);
     if (s.root_hooks) |hooks| {
         try hooks.enter(hooks.ctx, &s.roots);
         defer hooks.leave(hooks.ctx, &s.roots);
@@ -1092,6 +1104,7 @@ const State = struct {
     handlers: std.ArrayListUnmanaged(ExceptionHandler) = .empty,
     created_exceptions: std.ArrayListUnmanaged(*js_value.WasmException) = .empty,
     touched_instances: std.ArrayListUnmanaged(*Instance) = .empty,
+    gc_registrations: std.ArrayListUnmanaged(*GcRootRegistration) = .empty,
     roots: js_value.WasmExecutionRoots = .{},
     root_hooks: ?RootHooks = null,
 
@@ -1100,6 +1113,32 @@ const State = struct {
         return error.Trap;
     }
 };
+
+fn registerGcRoots(s: *State, inst: *Instance) error{OutOfMemory}!void {
+    const registration = try s.alloc.create(GcRootRegistration);
+    registration.* = .{ .roots = &s.roots };
+    try s.gc_registrations.append(s.alloc, registration);
+    while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+    registration.next = inst.gc_active_roots;
+    inst.gc_active_roots = registration;
+    inst.gc_object_lock.unlock();
+}
+
+fn unregisterGcRoots(s: *State) void {
+    for (s.touched_instances.items, s.gc_registrations.items) |inst, registration| {
+        while (!inst.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+        var link = &inst.gc_active_roots;
+        while (link.*) |candidate| {
+            if (candidate == registration) {
+                link.* = candidate.next;
+                break;
+            }
+            link = &candidate.next;
+        }
+        inst.gc_object_lock.unlock();
+    }
+    s.gc_registrations.items.len = 0;
+}
 
 fn checkpoint(s: *State) void {
     s.roots.stack = s.stack.items;
@@ -1241,10 +1280,13 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const immediate = instr.imm.gc_type_field;
             const object = try gcObjectFromSlot(s, popSlot(s));
             const field = inst.module.types[immediate.type_index].subtype.composite.struct_.fields[immediate.field_index];
+            while (!object.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            const field_value = object.fields[immediate.field_index];
+            object.owner.gc_object_lock.unlock();
             if (op == .struct_get) {
-                try pushSlot(s, object.fields[immediate.field_index]);
+                try pushSlot(s, field_value);
             } else {
-                try pushI32(s, readPackedField(field.storage, op == .struct_get_s, object.fields[immediate.field_index]));
+                try pushI32(s, readPackedField(field.storage, op == .struct_get_s, field_value));
             }
         },
         .struct_set => {
@@ -1252,6 +1294,8 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const value = popSlot(s);
             const object = try gcObjectFromSlot(s, popSlot(s));
             const field = inst.module.types[immediate.type_index].subtype.composite.struct_.fields[immediate.field_index];
+            while (!object.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            defer object.owner.gc_object_lock.unlock();
             object.fields[immediate.field_index] = normalizePackedField(field.storage, value);
         },
         .array_new, .array_new_default, .array_new_fixed => {
@@ -1312,10 +1356,13 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const object = try gcObjectFromSlot(s, popSlot(s));
             if (index >= object.fields.len) return s.trap("out of bounds array access");
             const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            while (!object.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            const field_value = object.fields[index];
+            object.owner.gc_object_lock.unlock();
             if (op == .array_get) {
-                try pushSlot(s, object.fields[index]);
+                try pushSlot(s, field_value);
             } else {
-                try pushI32(s, readPackedField(storage, op == .array_get_s, object.fields[index]));
+                try pushI32(s, readPackedField(storage, op == .array_get_s, field_value));
             }
         },
         .array_set => {
@@ -1324,6 +1371,8 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const object = try gcObjectFromSlot(s, popSlot(s));
             if (index >= object.fields.len) return s.trap("out of bounds array access");
             const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            while (!object.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            defer object.owner.gc_object_lock.unlock();
             object.fields[index] = normalizePackedField(storage, value);
         },
         .array_len => {
@@ -1337,6 +1386,8 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const object = try gcObjectFromSlot(s, popSlot(s));
             const range = checkedRange(start, count, object.fields.len) orelse return s.trap("out of bounds array access");
             const storage = inst.module.types[instr.imm.gc_type.type_index].subtype.composite.array.field.storage;
+            while (!object.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            defer object.owner.gc_object_lock.unlock();
             @memset(object.fields[range.start..range.end], normalizePackedField(storage, value));
         },
         .array_copy => {
@@ -1347,6 +1398,15 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const destination = try gcObjectFromSlot(s, popSlot(s));
             const source_range = checkedRange(source_index, count, source.fields.len) orelse return s.trap("out of bounds array access");
             const destination_range = checkedRange(destination_index, count, destination.fields.len) orelse return s.trap("out of bounds array access");
+            const first_owner = if (@intFromPtr(destination.owner) <= @intFromPtr(source.owner)) destination.owner else source.owner;
+            const second_owner = if (first_owner == destination.owner) source.owner else destination.owner;
+            while (!first_owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            if (second_owner != first_owner)
+                while (!second_owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            defer {
+                if (second_owner != first_owner) second_owner.gc_object_lock.unlock();
+                first_owner.gc_object_lock.unlock();
+            }
             const from = source.fields[source_range.start..source_range.end];
             const to = destination.fields[destination_range.start..destination_range.end];
             if (source != destination or destination_range.start <= source_range.start)
@@ -1362,6 +1422,8 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const immediate = instr.imm.gc_two_indices;
             const destination_range = checkedRange(destination_index, count, destination.fields.len) orelse
                 return s.trap("out of bounds array access");
+            while (!destination.owner.gc_object_lock.tryLock()) std.atomic.spinLoopHint();
+            defer destination.owner.gc_object_lock.unlock();
             if (op == .array_init_data) {
                 const segment = &inst.data_segments[immediate.second];
                 const bytes = if (segment.dropped) &.{} else segment.bytes;
@@ -2528,7 +2590,13 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
             break;
         }
     }
-    if (!seen_instance) try s.touched_instances.append(s.alloc, def.inst);
+    if (!seen_instance) {
+        try s.touched_instances.append(s.alloc, def.inst);
+        registerGcRoots(s, def.inst) catch |err| {
+            s.touched_instances.items.len -= 1;
+            return err;
+        };
+    }
     const mod = def.inst.module;
     const body = &mod.code[def.idx];
     const fty = mod.funcTypeAt(mod.funcs[def.idx]).?;
@@ -6472,11 +6540,13 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     try std.testing.expect(first.owner == &inst and second.owner == &inst);
     try std.testing.expect(first.fields[0].gcref == @as(*anyopaque, @ptrCast(second)));
     try std.testing.expect(second.fields[0].gcref == @as(*anyopaque, @ptrCast(first)));
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        try collectGcAggregatesQuiescent(&inst, &.{.{ .gcref = @ptrCast(first) }}),
-    );
+    const active_slots = [_]ValueSlot{.{ .gcref = @ptrCast(first) }};
+    var active_roots: js_value.WasmExecutionRoots = .{ .stack = &active_slots };
+    var registration: GcRootRegistration = .{ .roots = &active_roots };
+    inst.gc_active_roots = &registration;
+    try std.testing.expectEqual(@as(usize, 1), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+    inst.gc_active_roots = null;
     try std.testing.expectEqual(@as(usize, 2), try collectGcAggregatesQuiescent(&inst, &.{}));
     try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
 }
