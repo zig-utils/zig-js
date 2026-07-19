@@ -1376,6 +1376,12 @@ pub const Interpreter = struct {
     /// object each time. A child realm re-parses its source, producing distinct
     /// nodes, so realms never share an entry.
     template_cache: std.AutoHashMapUnmanaged(*const anyopaque, Value) = .empty,
+    /// A string literal is one immutable primitive per AST site, not a fresh
+    /// allocation on every tree-walker visit. Besides avoiding needless churn,
+    /// this lets parallel marking converge while another mutator loops over a
+    /// literal. The cache is interpreter-local, arena-backed, and traced as an
+    /// interpreter root while the activation is registered with the Context.
+    string_literal_cache: std.AutoHashMapUnmanaged(*const Node, Value) = .empty,
     /// Set by `lookupIdent` when an identifier resolved through a `with` binding
     /// object; `evalCall` reads it right after evaluating a bare-identifier
     /// callee to bind `this` to that object (WithBaseObject), then it's stale.
@@ -2606,7 +2612,12 @@ pub const Interpreter = struct {
         return switch (node.*) {
             .number => |n| Value.num(n),
             .bigint_lit => |b| if (b.text) |s| try self.makeBigIntText(s) else try self.makeBigInt(b.value),
-            .string => |s| try Value.strAlloc(self.arena, s),
+            .string => |s| blk: {
+                if (self.string_literal_cache.get(node)) |cached| break :blk cached;
+                const literal = try Value.strAlloc(self.arena, s);
+                try self.string_literal_cache.put(self.arena, node, literal);
+                break :blk literal;
+            },
             .boolean => |b| Value.boolVal(b),
             .null_lit => Value.nul(),
             .undefined_lit => Value.undef(),
