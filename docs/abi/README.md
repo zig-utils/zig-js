@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (304 implemented, 127 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (310 implemented, 121 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 304 private entries are implemented; the other 127 remain pending
+The first 310 private entries are implemented; the other 121 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 307/307 compiled fixture additionally
+sibling realms, GC, and reentry; the 313/313 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -691,6 +691,26 @@ any later parse. The remaining URL-cluster symbols (`URL__fromJS`,
 `URL__getHref*`, the file-URL helpers, `BunString__toURL`/`toJSDOMURL`,
 `DOMURL__*`, and `URL__originLength`) stay pending as follow-up sub-slices.
 
+The URL JS-value and static string helpers (#309, second URL-cluster
+sub-slice) complete the context-free and coercing halves of the cluster.
+`URL__fromJS` and `URL__getHrefFromJS` coerce any same-VM value through
+ToString: a throwing coercion publishes the pending exception and yields
+null/Dead (Bun's `RETURN_IF_EXCEPTION` rule), a foreign-VM value publishes a
+TypeError, and empty/invalid input yields null/Dead with no exception —
+`fromJS` returns the #308 native record on success. The static helpers need
+no realm: `URL__getHref` re-serializes with no base, `URL__getHrefJoin`
+resolves the relative reference against the parsed base through the existing
+`urlParse(rel, base)` path, `URL__getFileURLString` prefixes `file://` and
+percent-encodes each `/`-separated segment with the WHATWG path encode set
+(slashes preserved, dot segments NOT resolved — WTF sets the path
+post-parse), and `URL__pathFromFileURL` returns the percent-decoded path
+(`%XX` only — `+` stays literal) with no scheme check, matching
+`url.fileSystemPath()`. Engine support stayed minimal and allocator-first:
+`urlPercentEncode` gained `pub`, and one new `pub urlPercentDecode` helper
+mirrors the form decoder without the `+` rule. Remaining URL-cluster symbols
+after this slice: `BunString__toURL`/`toJSDOMURL` + `DOMURL__*` (JS DOMURL
+object creation) and `URL__originLength` (Home declares it un-wrapped).
+
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
 rejected-promise notification, exact ZigString module-entry deletion, and
@@ -846,7 +866,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 307-symbol
+the same frame/script identity and own every returned string. The 313-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -891,7 +911,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (297 implemented, 124 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (303 implemented, 118 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
