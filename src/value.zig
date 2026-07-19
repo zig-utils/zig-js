@@ -1416,7 +1416,8 @@ pub const ObjectBehaviorFlags = packed struct(u16) {
     is_shadow_realm: bool = false,
     is_getter_setter: bool = false,
     is_custom_getter_setter: bool = false,
-    _padding: u4 = 0,
+    is_abort_signal: bool = false,
+    _padding: u3 = 0,
 };
 
 pub const ObjectPrivateDataTag = enum(u8) {
@@ -1428,6 +1429,15 @@ pub const ObjectPrivateDataTag = enum(u8) {
     jsthread_thread_local,
     jsthread_unlock_token,
     jsthread_release_state,
+    abort_signal,
+};
+
+/// Type-erased bridge installed only on genuine engine-created AbortSignals.
+/// The private ABI owns the record; the interpreter calls the hook after the
+/// exact-once aborted/reason transition and before JavaScript abort steps.
+pub const AbortSignalNativeState = struct {
+    owner: ?*anyopaque = null,
+    run_abort_steps: ?*const fn (?*anyopaque, Value) void = null,
 };
 
 pub const PreparedInlineLiteralShape = struct {
@@ -1836,11 +1846,22 @@ pub const Object = struct {
         owner: *CApiObjectOwner,
         hooks: *const HostClassHooks,
     ) std.mem.Allocator.Error!void {
+        try self.setCApiObjectOwner(fallback, owner);
+        owner.hooks = hooks;
+    }
+
+    /// Attach a context-owned finalization record without changing the
+    /// object's property behavior. Native wrappers such as AbortSignal need
+    /// deterministic teardown but are not C-API host classes.
+    pub fn setCApiObjectOwner(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        owner: *CApiObjectOwner,
+    ) std.mem.Allocator.Error!void {
         const backing_locked = self.lockBacking();
         defer self.unlockBacking(backing_locked);
         const storage = (try self.ensureStorageLocked(fallback)).state;
         std.debug.assert(storage.c_api_object_owner.load(.monotonic) == null);
-        owner.hooks = hooks;
         storage.c_api_object_owner.store(owner, .release);
     }
 

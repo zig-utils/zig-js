@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 335,
-      "pending": 101
+      "implemented": 349,
+      "pending": 87
     }
   },
   "home_comparison": {
@@ -3961,10 +3961,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__abortReason(arg0: *AbortSignal) JSValue;",
       "declaration_sha256": "378a41359f6d7634dc5776bec7db74ebb0edd810dacbc272ea6e473233014fe0",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__aborted",
@@ -3972,10 +3972,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__aborted(arg0: *AbortSignal) bool;",
       "declaration_sha256": "176ceb5685026bc8b260832ac577958fc5203c089b6fa16f707b742889762930",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__addListener",
@@ -3983,10 +3983,10 @@
       "line": 4,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__addListener(arg0: *AbortSignal, arg1: ?*anyopaque, ArgFn2: ?*const fn (?*anyopaque, JSValue) callconv(.c) void) *AbortSignal;",
       "declaration_sha256": "acdba4dd338bac21af3cd3365fb5ac6a73d8b1c0c8b3806adefcbabe98f642ea",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__cleanNativeBindings",
@@ -3994,10 +3994,10 @@
       "line": 5,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__cleanNativeBindings(arg0: *AbortSignal, arg1: ?*anyopaque) void;",
       "declaration_sha256": "434f3fde239fc56931f3b39478b81943042a81f8648cc7766ace2862fa06aacf",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__create",
@@ -4005,10 +4005,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__create(arg0: *JSGlobalObject) JSValue;",
       "declaration_sha256": "4f38343aa3aee53eca87295e9de3319309994b223a59d7eabdad50f21c50361e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__decrementPendingActivity",
@@ -4016,10 +4016,10 @@
       "line": 56,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__decrementPendingActivity(*AbortSignal) void;",
       "declaration_sha256": "3299ae3cc78ea48e5e471d4b16fa855bbd499842fa5d052472af72700142853e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__fromJS",
@@ -4027,10 +4027,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__fromJS(JSValue0: JSValue) ?*AbortSignal;",
       "declaration_sha256": "3dc26afd7c4a4b31f08108d935184b3aaebbc1d3cd7c697b6cf62bf74a13ac38",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__getTimeout",
@@ -4049,10 +4049,10 @@
       "line": 55,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__incrementPendingActivity(*AbortSignal) void;",
       "declaration_sha256": "e9f1b060df78f2a07979d989fef4badd4e18c4478e662bec924d9af45a2f08f0",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__new",
@@ -4060,10 +4060,10 @@
       "line": 135,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__new(*JSGlobalObject) *AbortSignal;",
       "declaration_sha256": "228b8408a9f16aee6c99bcb4e81167878bf926d5a4a195f9251ccfc8340ee98b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__reasonIfAborted",
@@ -4071,10 +4071,10 @@
       "line": 76,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__reasonIfAborted(*AbortSignal, *jsc.JSGlobalObject, *u8) JSValue;",
       "declaration_sha256": "41d01022ac3b2db856d96a72fe7f91f836397289335d2de8de3caa39aece84f5",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__ref",
@@ -4082,10 +4082,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__ref(arg0: *AbortSignal) *AbortSignal;",
       "declaration_sha256": "ab097fb64444d11b5b2fd70be4b4d822f3212f75822d2fe545b9222dfee72972",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__signal",
@@ -4093,10 +4093,10 @@
       "line": 44,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__signal(*AbortSignal, *jsc.JSGlobalObject, CommonAbortReason) void;",
       "declaration_sha256": "345f16cd92999a63e2b9c6eeda2e0ce35d3151f79af8426eec418d24564a2b55",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__toJS",
@@ -4104,10 +4104,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__toJS(arg0: *AbortSignal, arg1: *JSGlobalObject) JSValue;",
       "declaration_sha256": "d01fa9ff018c74bc4db27fb8f5166d2c70fa95904a098883bf8e16a6cf7eb0dd",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__unref",
@@ -4115,10 +4115,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__unref(arg0: *AbortSignal) void;",
       "declaration_sha256": "ce0bfa3213b33433727c0fe686b0532f5b45b9d01c617a6e7ef44d192dacd893",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__CommonAbortReason__toJS",

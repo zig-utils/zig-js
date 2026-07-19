@@ -62,6 +62,7 @@ const PrivateForEachPropertyCallback = *const fn (
 ) callconv(.c) void;
 
 const PrivateCommonAbortReason = enum(u8) {
+    none = 0,
     timeout = 1,
     user_abort = 2,
     connection_closed = 3,
@@ -705,6 +706,29 @@ const PrivateWeakRef = struct {
     group: *CContextGroup,
     ref_type: PrivateWeakRefType,
     callback_context: ?*anyopaque,
+    alive: bool = true,
+};
+
+const PrivateAbortListener = struct {
+    context: ?*anyopaque,
+    callback: *const fn (?*anyopaque, EncodedValue) callconv(.c) void,
+};
+
+/// One native wrapper per genuine JavaScript AbortSignal. The JS object owns
+/// this record through a deferred C-API owner finalizer; native refs and
+/// pending activity add one precise root only while they are non-zero.
+const PrivateAbortSignal = struct {
+    native: value.AbortSignalNativeState = .{},
+    context: *Context,
+    group: *CContextGroup,
+    object: *Object,
+    root: Context.PrivateStrongRoot,
+    listeners: std.ArrayListUnmanaged(PrivateAbortListener) = .empty,
+    external_refs: u32 = 0,
+    pending_activity: u32 = 0,
+    operation_depth: u32 = 0,
+    common_reason: PrivateCommonAbortReason = .none,
+    rooted: bool = false,
     alive: bool = true,
 };
 
@@ -2493,6 +2517,7 @@ fn privateCommonAbortReasonToJS(
     defer context.popActiveInterpreter(&machine);
 
     const contract = switch (reason) {
+        .none => return .undefined,
         .timeout => .{ "TimeoutError", "The operation timed out." },
         .user_abort => .{ "AbortError", "The operation was aborted." },
         .connection_closed => .{ "AbortError", "The connection was closed." },
@@ -11381,6 +11406,293 @@ export fn WebCore__CommonAbortReason__toJS(
     reason: PrivateCommonAbortReason,
 ) callconv(.c) EncodedValue {
     return privateCommonAbortReasonToJS(global, reason);
+}
+
+fn privateAbortRemoveRoot(signal: *PrivateAbortSignal) void {
+    if (!signal.rooted) return;
+    const primary = signal.group.primary;
+    primary.realmLock();
+    defer primary.realmUnlock();
+    for (primary.private_strong_roots.items, 0..) |root, index| {
+        if (root == &signal.root) {
+            _ = primary.private_strong_roots.swapRemove(index);
+            break;
+        }
+    }
+    signal.rooted = false;
+}
+
+fn privateAbortEnsureRoot(signal: *PrivateAbortSignal) bool {
+    if (signal.rooted) return true;
+    const primary = signal.group.primary;
+    primary.realmLock();
+    defer primary.realmUnlock();
+    primary.private_strong_roots.append(primary.gpa, &signal.root) catch return false;
+    signal.rooted = true;
+    return true;
+}
+
+fn privateAbortMaybeRemoveRoot(signal: *PrivateAbortSignal) void {
+    if (signal.external_refs == 0 and signal.pending_activity == 0 and signal.operation_depth == 0)
+        privateAbortRemoveRoot(signal);
+}
+
+fn finishPrivateAbortSignal(owner: *value.CApiObjectOwner) void {
+    const raw = owner.payload orelse return;
+    const signal: *PrivateAbortSignal = @ptrCast(@alignCast(raw));
+    owner.payload = null;
+    signal.alive = false;
+    privateAbortRemoveRoot(signal);
+    signal.listeners.deinit(signal.context.gpa);
+    signal.context.gpa.destroy(signal);
+}
+
+fn privateAbortRunNativeSteps(raw: ?*anyopaque, reason: Value) void {
+    const signal: *PrivateAbortSignal = @ptrCast(@alignCast(raw orelse return));
+    if (!signal.alive) return;
+    const encoded = privateEncodedFromValue(signal.context, reason);
+    var callbacks = signal.listeners;
+    signal.listeners = .empty;
+    defer callbacks.deinit(signal.context.gpa);
+    for (callbacks.items) |listener| listener.callback(listener.context, encoded);
+}
+
+fn privateAbortFromObject(context: *Context, object: *Object, initial_refs: u32) ?*PrivateAbortSignal {
+    if (!object.behavior.is_abort_signal) return null;
+    if (object.private_data_tag == .abort_signal) {
+        const native: *value.AbortSignalNativeState = @ptrCast(@alignCast(object.private_data orelse return null));
+        const signal: *PrivateAbortSignal = @ptrCast(@alignCast(native.owner orelse return null));
+        return if (signal.alive) signal else null;
+    }
+    if (object.private_data_tag != .none or object.private_data != null or object.cApiObjectOwner() != null) return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const signal = context.gpa.create(PrivateAbortSignal) catch return null;
+    signal.* = .{
+        .context = context,
+        .group = group,
+        .object = object,
+        .root = .{ .value = Value.obj(object) },
+        .external_refs = initial_refs,
+    };
+    signal.native = .{ .owner = @ptrCast(signal), .run_abort_steps = privateAbortRunNativeSteps };
+    if (initial_refs > 0 and !privateAbortEnsureRoot(signal)) {
+        context.gpa.destroy(signal);
+        return null;
+    }
+    const owner = context.createCApiObjectOwner(@ptrCast(signal), finishPrivateAbortSignal) catch {
+        privateAbortRemoveRoot(signal);
+        context.gpa.destroy(signal);
+        return null;
+    };
+    owner.payload = @ptrCast(signal);
+    object.setCApiObjectOwner(context.arena(), owner) catch {
+        owner.finishOnce();
+        return null;
+    };
+    object.private_data = @ptrCast(&signal.native);
+    object.private_data_tag = .abort_signal;
+    return signal;
+}
+
+fn privateAbortSignalFromEncoded(encoded: EncodedValue) ?*PrivateAbortSignal {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    return privateAbortFromObject(boxed.owner, boxed.value.asObj(), 0);
+}
+
+fn privateAbortValid(signal: ?*PrivateAbortSignal) ?*PrivateAbortSignal {
+    const item = signal orelse return null;
+    if (!item.alive) return null;
+    item.context.assertOwnerThread();
+    return item;
+}
+
+fn privateAbortBeginOperation(signal: *PrivateAbortSignal) bool {
+    if (signal.operation_depth == std.math.maxInt(u32)) return false;
+    if (!privateAbortEnsureRoot(signal)) return false;
+    signal.operation_depth += 1;
+    return true;
+}
+
+fn privateAbortEndOperation(signal: *PrivateAbortSignal) void {
+    std.debug.assert(signal.operation_depth > 0);
+    signal.operation_depth -= 1;
+    privateAbortMaybeRemoveRoot(signal);
+}
+
+export fn WebCore__AbortSignal__new(global: JSContextRef) callconv(.c) ?*PrivateAbortSignal {
+    const context = ctxForEvaluation(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return null;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return null;
+    defer context.popActiveInterpreter(&machine);
+    const object = interp.makeAbortSignal(&machine) catch return null;
+    return privateAbortFromObject(context, object, 1);
+}
+
+export fn WebCore__AbortSignal__create(global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const object = interp.makeAbortSignal(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    _ = privateAbortFromObject(context, object, 0) orelse {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, Value.obj(object));
+}
+
+export fn WebCore__AbortSignal__fromJS(encoded: EncodedValue) callconv(.c) ?*PrivateAbortSignal {
+    return privateAbortSignalFromEncoded(encoded);
+}
+
+export fn WebCore__AbortSignal__toJS(signal_: ?*PrivateAbortSignal, global: JSContextRef) callconv(.c) EncodedValue {
+    const signal = privateAbortValid(signal_) orelse return .empty;
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    if (context.c_api_group != @as(?*anyopaque, @ptrCast(signal.group))) return .empty;
+    return privateEncodedFromValue(context, Value.obj(signal.object));
+}
+
+export fn WebCore__AbortSignal__ref(signal_: ?*PrivateAbortSignal) callconv(.c) ?*PrivateAbortSignal {
+    const signal = privateAbortValid(signal_) orelse return null;
+    if (signal.external_refs == std.math.maxInt(u32)) return null;
+    if (!privateAbortEnsureRoot(signal)) return null;
+    signal.external_refs += 1;
+    return signal;
+}
+
+export fn WebCore__AbortSignal__unref(signal_: ?*PrivateAbortSignal) callconv(.c) void {
+    const signal = privateAbortValid(signal_) orelse return;
+    if (signal.external_refs == 0) return;
+    signal.external_refs -= 1;
+    privateAbortMaybeRemoveRoot(signal);
+}
+
+export fn WebCore__AbortSignal__incrementPendingActivity(signal_: ?*PrivateAbortSignal) callconv(.c) void {
+    const signal = privateAbortValid(signal_) orelse return;
+    if (signal.pending_activity == std.math.maxInt(u32)) return;
+    if (!privateAbortEnsureRoot(signal)) return;
+    signal.pending_activity += 1;
+}
+
+export fn WebCore__AbortSignal__decrementPendingActivity(signal_: ?*PrivateAbortSignal) callconv(.c) void {
+    const signal = privateAbortValid(signal_) orelse return;
+    if (signal.pending_activity == 0) return;
+    signal.pending_activity -= 1;
+    privateAbortMaybeRemoveRoot(signal);
+}
+
+export fn WebCore__AbortSignal__aborted(signal_: ?*PrivateAbortSignal) callconv(.c) bool {
+    const signal = privateAbortValid(signal_) orelse return false;
+    return interp.abortSignalAborted(signal.object);
+}
+
+export fn WebCore__AbortSignal__abortReason(signal_: ?*PrivateAbortSignal) callconv(.c) EncodedValue {
+    const signal = privateAbortValid(signal_) orelse return .null;
+    if (!interp.abortSignalAborted(signal.object)) return .null;
+    return privateEncodedFromValue(signal.context, interp.abortSignalReason(signal.object));
+}
+
+export fn WebCore__AbortSignal__reasonIfAborted(
+    signal_: ?*PrivateAbortSignal,
+    global: JSContextRef,
+    out_reason: ?*u8,
+) callconv(.c) EncodedValue {
+    const output = out_reason orelse return .empty;
+    output.* = @intFromEnum(PrivateCommonAbortReason.none);
+    const signal = privateAbortValid(signal_) orelse return .empty;
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    if (context.c_api_group != @as(?*anyopaque, @ptrCast(signal.group))) return .empty;
+    if (!interp.abortSignalAborted(signal.object)) return .empty;
+    if (signal.common_reason != .none) {
+        output.* = @intFromEnum(signal.common_reason);
+        return .undefined;
+    }
+    return privateEncodedFromValue(context, interp.abortSignalReason(signal.object));
+}
+
+export fn WebCore__AbortSignal__signal(
+    signal_: ?*PrivateAbortSignal,
+    global: JSContextRef,
+    reason: PrivateCommonAbortReason,
+) callconv(.c) void {
+    const signal = privateAbortValid(signal_) orelse return;
+    const context = ctxForEvaluation(global) orelse return;
+    if (context.c_api_group != @as(?*anyopaque, @ptrCast(signal.group))) return;
+    if (interp.abortSignalAborted(signal.object)) return;
+    const contract = switch (reason) {
+        .timeout => .{ "TimeoutError", "The operation timed out." },
+        .user_abort => .{ "AbortError", "The operation was aborted." },
+        .connection_closed => .{ "AbortError", "The connection was closed." },
+        else => return,
+    };
+    if (!privateAbortBeginOperation(signal)) return;
+    defer privateAbortEndOperation(signal);
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const value_reason = machine.makeDOMException(contract[0], contract[1]) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    signal.common_reason = reason;
+    interp.signalAbort(&machine, signal.object, value_reason) catch |err| {
+        signal.common_reason = .none;
+        privateSetPendingAbrupt(context, &machine, err);
+    };
+}
+
+export fn WebCore__AbortSignal__addListener(
+    signal_: ?*PrivateAbortSignal,
+    listener_context: ?*anyopaque,
+    callback: ?*const fn (?*anyopaque, EncodedValue) callconv(.c) void,
+) callconv(.c) ?*PrivateAbortSignal {
+    const signal = privateAbortValid(signal_) orelse return null;
+    const function = callback orelse return signal;
+    if (interp.abortSignalAborted(signal.object)) {
+        function(listener_context, WebCore__AbortSignal__abortReason(signal));
+        return signal;
+    }
+    signal.listeners.append(signal.context.gpa, .{ .context = listener_context, .callback = function }) catch return null;
+    return signal;
+}
+
+export fn WebCore__AbortSignal__cleanNativeBindings(signal_: ?*PrivateAbortSignal, listener_context: ?*anyopaque) callconv(.c) void {
+    const signal = privateAbortValid(signal_) orelse return;
+    var index: usize = 0;
+    while (index < signal.listeners.items.len) {
+        if (signal.listeners.items[index].context == listener_context) {
+            _ = signal.listeners.orderedRemove(index);
+        } else index += 1;
+    }
 }
 
 export fn JSC__JSMap__create(global: JSContextRef) callconv(.c) ?*anyopaque {
@@ -24334,4 +24646,144 @@ test "private custom inspect invokes exact receiver options and helper" {
     try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, function, receiver, 0, 0, false));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(3220), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private AbortSignal boundary shares identity callbacks reasons and roots" {
+    const CallbackState = struct {
+        id: u8,
+        sequence: *[8]u8,
+        used: *usize,
+        calls: usize = 0,
+        reason: EncodedValue = .empty,
+        required: [2]?*PrivateAbortSignal = .{ null, null },
+        late: ?*@This() = null,
+        signal: ?*PrivateAbortSignal = null,
+        failed: bool = false,
+
+        fn callback(raw: ?*anyopaque, reason: EncodedValue) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(raw orelse return));
+            if (state.used.* >= state.sequence.len) {
+                state.failed = true;
+                return;
+            }
+            for (state.required) |required| if (required) |signal_| {
+                if (!WebCore__AbortSignal__aborted(signal_)) state.failed = true;
+            };
+            state.sequence[state.used.*] = state.id;
+            state.used.* += 1;
+            state.calls += 1;
+            state.reason = reason;
+            if (state.late) |late| {
+                state.late = null;
+                if (WebCore__AbortSignal__addListener(state.signal, late, callback) == null)
+                    state.failed = true;
+            }
+        }
+    };
+
+    const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group);
+    const global = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const sibling = JSGlobalContextCreateInGroup(group, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const context = ctxForEvaluation(global) orelse return error.ContextCreateFailed;
+    const internal_group: *CContextGroup = @ptrCast(@alignCast(context.c_api_group.?));
+
+    const encoded = privateEncodedFromValue(context, try context.evaluate(
+        "globalThis.__abort_controller_329 = new AbortController(); __abort_controller_329.signal",
+    ));
+    const signal = WebCore__AbortSignal__fromJS(encoded) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(signal, WebCore__AbortSignal__fromJS(encoded));
+    try std.testing.expectEqual(encoded, WebCore__AbortSignal__toJS(signal, sibling));
+    try std.testing.expect(!WebCore__AbortSignal__aborted(signal));
+    try std.testing.expectEqual(EncodedValue.null, WebCore__AbortSignal__abortReason(signal));
+    var common: u8 = 99;
+    try std.testing.expectEqual(EncodedValue.empty, WebCore__AbortSignal__reasonIfAborted(signal, global, &common));
+    try std.testing.expectEqual(@as(u8, 0), common);
+
+    var sequence: [8]u8 = @splat(0);
+    var used: usize = 0;
+    var late = CallbackState{ .id = 3, .sequence = &sequence, .used = &used };
+    var first = CallbackState{ .id = 1, .sequence = &sequence, .used = &used, .late = &late, .signal = signal };
+    var second = CallbackState{ .id = 2, .sequence = &sequence, .used = &used };
+    try std.testing.expectEqual(signal, WebCore__AbortSignal__addListener(signal, &first, CallbackState.callback));
+    try std.testing.expectEqual(signal, WebCore__AbortSignal__addListener(signal, &second, CallbackState.callback));
+    WebCore__AbortSignal__signal(signal, global, .timeout);
+    try std.testing.expect(WebCore__AbortSignal__aborted(signal));
+    try std.testing.expectEqualSlices(u8, &.{ 1, 3, 2 }, sequence[0..used]);
+    try std.testing.expect(!first.failed and !late.failed and !second.failed);
+    try std.testing.expectEqual(@as(usize, 1), first.calls);
+    try std.testing.expectEqual(@as(usize, 1), late.calls);
+    try std.testing.expectEqual(@as(usize, 1), second.calls);
+    try std.testing.expect(first.reason != .empty and first.reason == late.reason and first.reason == second.reason);
+    try std.testing.expectEqual(EncodedValue.undefined, WebCore__AbortSignal__reasonIfAborted(signal, sibling, &common));
+    try std.testing.expectEqual(@as(u8, 1), common);
+    try std.testing.expectEqual(first.reason, WebCore__AbortSignal__abortReason(signal));
+    WebCore__AbortSignal__signal(signal, global, .user_abort);
+    try std.testing.expectEqual(@as(usize, 3), used);
+
+    const arbitrary_encoded = privateEncodedFromValue(context, try context.evaluate(
+        "globalThis.__arbitrary_controller_329 = new AbortController(); __arbitrary_controller_329.signal",
+    ));
+    const arbitrary = WebCore__AbortSignal__fromJS(arbitrary_encoded) orelse return error.ValueCreateFailed;
+    var arbitrary_state = CallbackState{ .id = 4, .sequence = &sequence, .used = &used };
+    _ = WebCore__AbortSignal__addListener(arbitrary, &arbitrary_state, CallbackState.callback);
+    _ = try context.evaluate("__arbitrary_controller_329.abort({ marker: 329 })");
+    common = 99;
+    const arbitrary_reason = WebCore__AbortSignal__reasonIfAborted(arbitrary, global, &common);
+    try std.testing.expectEqual(@as(u8, 0), common);
+    try std.testing.expect(arbitrary_reason != .empty and arbitrary_reason == arbitrary_state.reason);
+    try std.testing.expect((privateValueFrom(global, arbitrary_reason) orelse return error.ValueCreateFailed).isObject());
+
+    const dependent_encoded = privateEncodedFromValue(context, try context.evaluate(
+        "globalThis.__source_controller_329 = new AbortController(); " ++
+            "globalThis.__dependent_signal_329 = AbortSignal.any([__source_controller_329.signal]); __dependent_signal_329",
+    ));
+    const source_encoded = privateEncodedFromValue(context, try context.evaluate("__source_controller_329.signal"));
+    const source = WebCore__AbortSignal__fromJS(source_encoded) orelse return error.ValueCreateFailed;
+    const dependent = WebCore__AbortSignal__fromJS(dependent_encoded) orelse return error.ValueCreateFailed;
+    var dependent_state = CallbackState{
+        .id = 5,
+        .sequence = &sequence,
+        .used = &used,
+        .required = .{ source, dependent },
+    };
+    _ = WebCore__AbortSignal__addListener(dependent, &dependent_state, CallbackState.callback);
+    _ = try context.evaluate("__source_controller_329.abort(329)");
+    try std.testing.expectEqual(@as(usize, 1), dependent_state.calls);
+    try std.testing.expect(!dependent_state.failed);
+
+    const clean_encoded = WebCore__AbortSignal__create(global);
+    const clean = WebCore__AbortSignal__fromJS(clean_encoded) orelse return error.ValueCreateFailed;
+    var removed = CallbackState{ .id = 6, .sequence = &sequence, .used = &used };
+    var kept = CallbackState{ .id = 7, .sequence = &sequence, .used = &used };
+    _ = WebCore__AbortSignal__addListener(clean, &removed, CallbackState.callback);
+    _ = WebCore__AbortSignal__addListener(clean, &removed, CallbackState.callback);
+    _ = WebCore__AbortSignal__addListener(clean, &kept, CallbackState.callback);
+    WebCore__AbortSignal__cleanNativeBindings(clean, &removed);
+    WebCore__AbortSignal__signal(clean, global, .connection_closed);
+    try std.testing.expectEqual(@as(usize, 0), removed.calls);
+    try std.testing.expectEqual(@as(usize, 1), kept.calls);
+
+    const roots_before = internal_group.primary.private_strong_roots.items.len;
+    const owned = WebCore__AbortSignal__new(global) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(roots_before + 1, internal_group.primary.private_strong_roots.items.len);
+    WebCore__AbortSignal__incrementPendingActivity(owned);
+    WebCore__AbortSignal__unref(owned);
+    try std.testing.expectEqual(roots_before + 1, internal_group.primary.private_strong_roots.items.len);
+    WebCore__AbortSignal__decrementPendingActivity(owned);
+    try std.testing.expectEqual(roots_before, internal_group.primary.private_strong_roots.items.len);
+    try std.testing.expectEqual(owned, WebCore__AbortSignal__ref(owned));
+    try std.testing.expectEqual(roots_before + 1, internal_group.primary.private_strong_roots.items.len);
+    WebCore__AbortSignal__unref(owned);
+    try std.testing.expectEqual(roots_before, internal_group.primary.private_strong_roots.items.len);
+
+    const fake = privateEncodedFromValue(context, try context.evaluate(
+        "Object.defineProperty({}, String.fromCharCode(0) + 'ASsig', { value: true })",
+    ));
+    try std.testing.expectEqual(@as(?*PrivateAbortSignal, null), WebCore__AbortSignal__fromJS(fake));
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    try std.testing.expectEqual(EncodedValue.empty, WebCore__AbortSignal__toJS(signal, foreign));
 }

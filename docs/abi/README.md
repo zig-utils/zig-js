@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (329 implemented, 102 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (343 implemented, 88 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 329 private entries are implemented; the other 102 remain pending
+The first 343 private entries are implemented; the other 88 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -899,6 +899,12 @@ compact embedded index, so behavior is cross-platform and adds no ICU, iconv,
 or other runtime dependency. The fixture covers stable canonical-name storage,
 owned results, split input, flush and stop-on-error state, deletion, and the
 registry's no-op BOM hook.
+The 14 shared AbortSignal exports attach a native owner only to genuine engine
+signals, preserving one identity and reason across JS and native calls. Native
+callbacks are exchanged before invocation for exact-once ordered reentrancy;
+context-selective cleanup, common-reason sentinels, dependent premarking, and
+ref/pending-activity roots share the same lifecycle. Bun's event-loop-owned
+timeout handle remains explicitly pending under #330.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
 cross-VM rejection, and exact append/set/swap-remove behavior. The private
@@ -924,7 +930,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 329-symbol
+the same frame/script identity and own every returned string. The 343-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -969,7 +975,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (320 implemented, 101 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (334 implemented, 87 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
@@ -986,5 +992,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 107
+not claim complete Bun runtime compatibility; #164 remains open for the 87
 pending core entries and later wider/generated profiles.

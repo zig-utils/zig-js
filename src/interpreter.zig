@@ -42035,11 +42035,12 @@ fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object
 // \x00ASaborted, \x00ASreason, \x00onabort (event-handler IDL attribute). An
 // AbortController holds its signal in \x00ACsig.
 fn abortIsSignal(v: Value) bool {
-    return v.isObject() and v.asObj().getOwn("\x00ASsig") != null;
+    return v.isObject() and v.asObj().behavior.is_abort_signal;
 }
-fn makeAbortSignal(self: *Interpreter) EvalError!*value.Object {
+pub fn makeAbortSignal(self: *Interpreter) EvalError!*value.Object {
     const sig = try gc_mod.allocObj(self.arena);
     sig.* = .{};
+    sig.behavior.is_abort_signal = true;
     if (self.env.get("AbortSignal")) |c| if (c.isObject()) {
         if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) sig.setProtoAtomic(pp.asObj());
     };
@@ -42066,11 +42067,23 @@ fn dispatchNamedEvent(self: *Interpreter, target: *value.Object, name: []const u
     try ev.setOwn(self.arena, rs, "\x00Ets", Value.num(0));
     _ = try etDispatchFn(self, Value.obj(target), &.{Value.obj(ev)});
 }
-fn signalAbort(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!void {
+fn markAbortSignal(self: *Interpreter, sig: *value.Object, reason: Value, ordered: *std.ArrayListUnmanaged(*value.Object)) EvalError!void {
     if (evBool(sig, "\x00ASaborted")) return;
-    const r = if (reason.isUndefined()) try self.makeDOMException("AbortError", "This operation was aborted") else reason;
-    try sig.setOwn(self.arena, self.root_shape, "\x00ASreason", r);
+    try sig.setOwn(self.arena, self.root_shape, "\x00ASreason", reason);
     try sig.setOwn(self.arena, self.root_shape, "\x00ASaborted", Value.boolVal(true));
+    try ordered.append(self.arena, sig);
+    if (sig.getOwn("\x00ASdeps")) |dv| if (dv.isObject()) {
+        for (try dv.asObj().internalElementsSnapshot(self.arena)) |dep| {
+            if (dep.isObject()) try markAbortSignal(self, dep.asObj(), reason, ordered);
+        }
+    };
+}
+
+fn runAbortSignalSteps(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!void {
+    if (sig.private_data_tag == .abort_signal) if (sig.private_data) |raw| {
+        const native: *value.AbortSignalNativeState = @ptrCast(@alignCast(raw));
+        if (native.run_abort_steps) |run| run(native.owner, reason);
+    };
     // Remove listeners that were added with this signal (addEventListener signal
     // option) before firing, so they do not run for the abort event.
     if (sig.getOwn("\x00ASremovals")) |rv| if (rv.isObject()) {
@@ -42082,13 +42095,23 @@ fn signalAbort(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!
         }
     };
     try dispatchNamedEvent(self, sig, "abort");
-    // Propagate to signals that depend on this one (AbortSignal.any sources),
-    // each aborting with this signal's reason.
-    if (sig.getOwn("\x00ASdeps")) |dv| if (dv.isObject()) {
-        for (try dv.asObj().internalElementsSnapshot(self.arena)) |dep| {
-            if (dep.isObject()) try signalAbort(self, dep.asObj(), r);
-        }
-    };
+}
+
+pub fn signalAbort(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!void {
+    if (!sig.behavior.is_abort_signal or evBool(sig, "\x00ASaborted")) return;
+    const r = if (reason.isUndefined()) try self.makeDOMException("AbortError", "This operation was aborted") else reason;
+    var ordered: std.ArrayListUnmanaged(*value.Object) = .empty;
+    try markAbortSignal(self, sig, r, &ordered);
+    for (ordered.items) |item| try runAbortSignalSteps(self, item, r);
+}
+
+pub fn abortSignalAborted(sig: *value.Object) bool {
+    return sig.behavior.is_abort_signal and evBool(sig, "\x00ASaborted");
+}
+
+pub fn abortSignalReason(sig: *value.Object) Value {
+    if (!sig.behavior.is_abort_signal) return Value.undef();
+    return sig.getOwn("\x00ASreason") orelse Value.undef();
 }
 fn abortSignalGetter(comptime which: []const u8) value.NativeFn {
     return struct {

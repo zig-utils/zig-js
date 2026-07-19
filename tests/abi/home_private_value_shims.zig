@@ -274,6 +274,7 @@ const JSStringIterator = extern struct {
 const PrivateCallFrame = opaque {};
 const PrivateArrayBufferHandle = opaque {};
 const TextCodec = opaque {};
+const AbortSignal = opaque {};
 const JSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
 const ImplementationVisibility = enum(u8) {
     public = 0,
@@ -356,6 +357,20 @@ extern "c" fn Bun__deleteTextCodec(*TextCodec) void;
 extern "c" fn Bun__stripBOMFromTextCodec(*TextCodec) void;
 extern "c" fn Bun__isEncodingSupported([*]const u8, usize) bool;
 extern "c" fn Bun__getCanonicalEncodingName([*]const u8, usize, *usize) ?[*]const u8;
+extern "c" fn WebCore__AbortSignal__new(JSContextRef) *AbortSignal;
+extern "c" fn WebCore__AbortSignal__create(JSContextRef) EncodedValue;
+extern "c" fn WebCore__AbortSignal__fromJS(EncodedValue) ?*AbortSignal;
+extern "c" fn WebCore__AbortSignal__toJS(*AbortSignal, JSContextRef) EncodedValue;
+extern "c" fn WebCore__AbortSignal__ref(*AbortSignal) *AbortSignal;
+extern "c" fn WebCore__AbortSignal__unref(*AbortSignal) void;
+extern "c" fn WebCore__AbortSignal__incrementPendingActivity(*AbortSignal) void;
+extern "c" fn WebCore__AbortSignal__decrementPendingActivity(*AbortSignal) void;
+extern "c" fn WebCore__AbortSignal__aborted(*AbortSignal) bool;
+extern "c" fn WebCore__AbortSignal__abortReason(*AbortSignal) EncodedValue;
+extern "c" fn WebCore__AbortSignal__reasonIfAborted(*AbortSignal, JSContextRef, *u8) EncodedValue;
+extern "c" fn WebCore__AbortSignal__signal(*AbortSignal, JSContextRef, u8) void;
+extern "c" fn WebCore__AbortSignal__addListener(*AbortSignal, ?*anyopaque, ?*const fn (?*anyopaque, EncodedValue) callconv(.c) void) *AbortSignal;
+extern "c" fn WebCore__AbortSignal__cleanNativeBindings(*AbortSignal, ?*anyopaque) void;
 extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
@@ -1500,6 +1515,67 @@ pub fn main() void {
         fail("private user-defined TextCodec mapping mismatch");
     if (user_value.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(user_value.value.wtf_string_impl);
     Bun__deleteTextCodec(user_codec);
+
+    // One JS/native AbortSignal identity with exact-once native callbacks,
+    // common/arbitrary reason channels, selective cleanup, and balanced roots.
+    const AbortCallback = struct {
+        calls: usize = 0,
+        reason: EncodedValue = .empty,
+
+        fn run(raw: ?*anyopaque, reason: EncodedValue) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(raw orelse return));
+            state.calls += 1;
+            state.reason = reason;
+        }
+    };
+    const abort_value = WebCore__AbortSignal__create(context);
+    const abort_signal = WebCore__AbortSignal__fromJS(abort_value) orelse
+        fail("private AbortSignal create/fromJS mismatch");
+    if (WebCore__AbortSignal__fromJS(abort_value) != abort_signal or
+        !JSC__JSValue__isStrictEqual(WebCore__AbortSignal__toJS(abort_signal, context), abort_value, context) or
+        WebCore__AbortSignal__aborted(abort_signal))
+        fail("private AbortSignal identity mismatch");
+    var common_abort_reason: u8 = 99;
+    if (WebCore__AbortSignal__reasonIfAborted(abort_signal, context, &common_abort_reason) != .empty or common_abort_reason != 0)
+        fail("private AbortSignal pending reason mismatch");
+    var abort_callback = AbortCallback{};
+    if (WebCore__AbortSignal__addListener(abort_signal, &abort_callback, AbortCallback.run) != abort_signal)
+        fail("private AbortSignal listener registration mismatch");
+    WebCore__AbortSignal__signal(abort_signal, context, 1);
+    if (!WebCore__AbortSignal__aborted(abort_signal) or abort_callback.calls != 1 or abort_callback.reason == .empty or
+        WebCore__AbortSignal__reasonIfAborted(abort_signal, context, &common_abort_reason) != .undefined or common_abort_reason != 1 or
+        !JSC__JSValue__isStrictEqual(WebCore__AbortSignal__abortReason(abort_signal), abort_callback.reason, context))
+        fail("private AbortSignal common abort mismatch");
+    WebCore__AbortSignal__signal(abort_signal, context, 2);
+    if (abort_callback.calls != 1) fail("private AbortSignal duplicate abort mismatch");
+
+    const cleaned_value = WebCore__AbortSignal__create(context);
+    const cleaned_signal = WebCore__AbortSignal__fromJS(cleaned_value) orelse fail("private AbortSignal cleanup creation failed");
+    var removed_callback = AbortCallback{};
+    _ = WebCore__AbortSignal__addListener(cleaned_signal, &removed_callback, AbortCallback.run);
+    WebCore__AbortSignal__cleanNativeBindings(cleaned_signal, &removed_callback);
+    WebCore__AbortSignal__signal(cleaned_signal, context, 3);
+    if (removed_callback.calls != 0) fail("private AbortSignal selective cleanup mismatch");
+
+    const js_abort_value = evaluate(context, "globalThis.__fixture_abort_329 = new AbortController(); __fixture_abort_329.signal");
+    const js_abort_signal = WebCore__AbortSignal__fromJS(js_abort_value) orelse fail("private JS AbortSignal downcast failed");
+    var js_abort_callback = AbortCallback{};
+    _ = WebCore__AbortSignal__addListener(js_abort_signal, &js_abort_callback, AbortCallback.run);
+    _ = evaluate(context, "__fixture_abort_329.abort({ marker: 329 })");
+    common_abort_reason = 99;
+    const js_abort_reason = WebCore__AbortSignal__reasonIfAborted(js_abort_signal, context, &common_abort_reason);
+    if (js_abort_callback.calls != 1 or common_abort_reason != 0 or js_abort_reason == .empty or
+        !JSC__JSValue__isStrictEqual(js_abort_reason, js_abort_callback.reason, context))
+        fail("private AbortSignal arbitrary reason mismatch");
+    if (WebCore__AbortSignal__fromJS(evaluate(context, "({})")) != null)
+        fail("private AbortSignal accepted unbranded object");
+
+    const owned_abort = WebCore__AbortSignal__new(context);
+    if (WebCore__AbortSignal__ref(owned_abort) != owned_abort) fail("private AbortSignal ref mismatch");
+    WebCore__AbortSignal__incrementPendingActivity(owned_abort);
+    WebCore__AbortSignal__decrementPendingActivity(owned_abort);
+    WebCore__AbortSignal__unref(owned_abort);
+    WebCore__AbortSignal__unref(owned_abort);
 
     if (JSC__JSValue__toBoolean(encoded_empty) or
         !JSC__JSValue__toBoolean(encoded_text) or
