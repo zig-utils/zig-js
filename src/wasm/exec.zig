@@ -2010,6 +2010,77 @@ inline fn shiftVec(comptime width: u8, amount: u32) @Vector(128 / width, std.mat
     return @splat(@intCast(amount & (width - 1)));
 }
 
+fn FT(comptime width: u8) type {
+    return if (width == 32) f32 else f64;
+}
+
+fn FVec(comptime width: u8) type {
+    return @Vector(128 / width, FT(width));
+}
+
+inline fn fvec(comptime width: u8, bits: u128) FVec(width) {
+    return @bitCast(bits);
+}
+
+/// Set the quiet bit on every NaN lane, matching replaceF32Lane/replaceF64Lane.
+inline fn canonFloat(comptime width: u8, v: FVec(width)) FVec(width) {
+    const exp_bits: u64 = if (width == 32) 0x7F800000 else 0x7FF0000000000000;
+    const mant_bits: u64 = if (width == 32) 0x007FFFFF else 0x000FFFFFFFFFFFFF;
+    const quiet_bit: u64 = if (width == 32) 0x00400000 else 0x0008000000000000;
+    const bits: UVec(width) = @bitCast(v);
+    const exp_mask: UVec(width) = @splat(@as(ULane(width), @truncate(exp_bits)));
+    const mant_mask: UVec(width) = @splat(@as(ULane(width), @truncate(mant_bits)));
+    const quiet: UVec(width) = @splat(@as(ULane(width), @truncate(quiet_bit)));
+    const zero: UVec(width) = @splat(0);
+    const is_nan = ((bits & exp_mask) == exp_mask) & ((bits & mant_mask) != zero);
+    return @bitCast(@select(ULane(width), is_nan, bits | quiet, bits));
+}
+
+inline fn signSet(comptime width: u8, v: FVec(width)) @Vector(128 / width, bool) {
+    const bits: UVec(width) = @bitCast(v);
+    const zero: UVec(width) = @splat(0);
+    return (bits >> shiftVec(width, width - 1)) != zero;
+}
+
+/// fmin per the spec pseudo-code: NaN propagates; min(-0,+0) = -0.
+fn floatMin(comptime width: u8, a: FVec(width), b: FVec(width)) FVec(width) {
+    const nan_a = a != a;
+    const nan_b = b != b;
+    const eq = a == b;
+    var r = @select(FT(width), (a < b) | (eq & signSet(width, a)), a, b);
+    r = @select(FT(width), nan_b, b, r);
+    r = @select(FT(width), nan_a, a, r);
+    return r;
+}
+
+/// fmax per the spec pseudo-code: NaN propagates; max(-0,+0) = +0.
+fn floatMax(comptime width: u8, a: FVec(width), b: FVec(width)) FVec(width) {
+    const nan_a = a != a;
+    const nan_b = b != b;
+    const eq = a == b;
+    const zero: UVec(width) = @splat(0);
+    const sign_clear = (@as(UVec(width), @bitCast(a)) >> shiftVec(width, width - 1)) == zero;
+    var r = @select(FT(width), (a > b) | (eq & sign_clear), a, b);
+    r = @select(FT(width), nan_b, b, r);
+    r = @select(FT(width), nan_a, a, r);
+    return r;
+}
+
+/// IEEE roundTiesToEven via the 2^52/2^23 add-subtract trick, per lane.
+fn nearestFloat(comptime width: u8, v: FVec(width)) FVec(width) {
+    const magic: FVec(width) = @splat(if (width == 32) 8388608.0 else 4503599627370496.0);
+    const bits: UVec(width) = @bitCast(v);
+    const sign_mask: UVec(width) = @splat(@as(ULane(width), 1) << (width - 1));
+    const magic_bits: UVec(width) = @bitCast(magic);
+    const m: FVec(width) = @bitCast((bits & sign_mask) | magic_bits);
+    const ax: FVec(width) = @bitCast(bits & ~sign_mask);
+    const r = (v + m) - m;
+    const zero: FVec(width) = @splat(0.0);
+    const signed_zero: FVec(width) = @bitCast(bits & sign_mask);
+    const fixed = @select(FT(width), r == zero, signed_zero, r);
+    return @select(FT(width), ax < magic, fixed, v);
+}
+
 fn readLittle(bytes: []const u8) u64 {
     var value: u64 = 0;
     for (bytes, 0..) |byte, index| value |= @as(u64, byte) << @intCast(index * 8);
@@ -2478,45 +2549,65 @@ fn replaceF64Lane(vector: u128, lane: u8, value: f64) u128 {
     return replaceLaneBits(vector, lane, 64, bits);
 }
 
+fn compareFloatLanes(comptime width: u8, left: u128, right: u128, relation: SimdRelation) u128 {
+    const a = fvec(width, left);
+    const b = fvec(width, right);
+    return maskVec(width, switch (relation) {
+        .eq => a == b,
+        .ne => a != b,
+        .lt => a < b,
+        .gt => a > b,
+        .le => a <= b,
+        .ge => a >= b,
+    });
+}
+
 fn executeSimdFloatComparison(s: *State, op: simd.Op) ExecError!bool {
+    const relation: SimdRelation = switch (op) {
+        .f32x4_eq, .f64x2_eq => .eq,
+        .f32x4_ne, .f64x2_ne => .ne,
+        .f32x4_lt, .f64x2_lt => .lt,
+        .f32x4_gt, .f64x2_gt => .gt,
+        .f32x4_le, .f64x2_le => .le,
+        .f32x4_ge, .f64x2_ge => .ge,
+        else => return false,
+    };
     const width: u8 = switch (op) {
         .f32x4_eq, .f32x4_ne, .f32x4_lt, .f32x4_gt, .f32x4_le, .f32x4_ge => 32,
         .f64x2_eq, .f64x2_ne, .f64x2_lt, .f64x2_gt, .f64x2_le, .f64x2_ge => 64,
-        else => return false,
+        else => unreachable,
     };
     const right = popVector(s);
     const left = popVector(s);
-    var result: u128 = 0;
-    for (0..128 / width) |lane| {
-        const matches = if (width == 32) blk: {
-            const a = f32Lane(left, @intCast(lane));
-            const b = f32Lane(right, @intCast(lane));
-            break :blk switch (op) {
-                .f32x4_eq => a == b,
-                .f32x4_ne => a != b,
-                .f32x4_lt => a < b,
-                .f32x4_gt => a > b,
-                .f32x4_le => a <= b,
-                .f32x4_ge => a >= b,
-                else => unreachable,
-            };
-        } else blk: {
-            const a = f64Lane(left, @intCast(lane));
-            const b = f64Lane(right, @intCast(lane));
-            break :blk switch (op) {
-                .f64x2_eq => a == b,
-                .f64x2_ne => a != b,
-                .f64x2_lt => a < b,
-                .f64x2_gt => a > b,
-                .f64x2_le => a <= b,
-                .f64x2_ge => a >= b,
-                else => unreachable,
-            };
-        };
-        if (matches) result = replaceLaneBits(result, @intCast(lane), width, std.math.maxInt(u64));
-    }
-    try pushVector(s, result);
+    try pushVector(s, if (width == 32)
+        compareFloatLanes(32, left, right, relation)
+    else
+        compareFloatLanes(64, left, right, relation));
     return true;
+}
+
+fn unaryFloatLanes(comptime width: u8, source: u128, op: simd.Op) u128 {
+    const bits = uvec(width, source);
+    switch (op) {
+        .f32x4_abs, .f64x2_abs => {
+            const sign_clear: UVec(width) = @splat(std.math.maxInt(ULane(width)) >> 1);
+            return fromVec(bits & sign_clear);
+        },
+        .f32x4_neg, .f64x2_neg => {
+            const sign_bit: UVec(width) = @splat(@as(ULane(width), 1) << (width - 1));
+            return fromVec(bits ^ sign_bit);
+        },
+        else => {},
+    }
+    const v = fvec(width, source);
+    return fromVec(canonFloat(width, switch (op) {
+        .f32x4_sqrt, .f64x2_sqrt => @sqrt(v),
+        .f32x4_ceil, .f64x2_ceil => @ceil(v),
+        .f32x4_floor, .f64x2_floor => @floor(v),
+        .f32x4_trunc, .f64x2_trunc => @trunc(v),
+        .f32x4_nearest, .f64x2_nearest => nearestFloat(width, v),
+        else => unreachable,
+    }));
 }
 
 fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
@@ -2526,41 +2617,31 @@ fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
         else => return false,
     };
     const source = popVector(s);
-    var result: u128 = 0;
-    for (0..128 / width) |lane| {
-        const bits = laneBits(source, @intCast(lane), width);
-        if (op == .f32x4_abs or op == .f64x2_abs) {
-            result = replaceLaneBits(result, @intCast(lane), width, bits & ~(@as(u64, 1) << @intCast(width - 1)));
-            continue;
-        }
-        if (op == .f32x4_neg or op == .f64x2_neg) {
-            result = replaceLaneBits(result, @intCast(lane), width, bits ^ (@as(u64, 1) << @intCast(width - 1)));
-            continue;
-        }
-        if (width == 32) {
-            const value = f32Lane(source, @intCast(lane));
-            result = replaceF32Lane(result, @intCast(lane), switch (op) {
-                .f32x4_sqrt => @sqrt(value),
-                .f32x4_ceil => @ceil(value),
-                .f32x4_floor => @floor(value),
-                .f32x4_trunc => @trunc(value),
-                .f32x4_nearest => nearestF32(value),
-                else => unreachable,
-            });
-        } else {
-            const value = f64Lane(source, @intCast(lane));
-            result = replaceF64Lane(result, @intCast(lane), switch (op) {
-                .f64x2_sqrt => @sqrt(value),
-                .f64x2_ceil => @ceil(value),
-                .f64x2_floor => @floor(value),
-                .f64x2_trunc => @trunc(value),
-                .f64x2_nearest => nearestF64(value),
-                else => unreachable,
-            });
-        }
-    }
-    try pushVector(s, result);
+    try pushVector(s, if (width == 32)
+        unaryFloatLanes(32, source, op)
+    else
+        unaryFloatLanes(64, source, op));
     return true;
+}
+
+fn binaryFloatLanes(comptime width: u8, left: u128, right: u128, op: simd.Op) u128 {
+    const a = fvec(width, left);
+    const b = fvec(width, right);
+    switch (op) {
+        .f32x4_pmin, .f64x2_pmin => return fromVec(@select(FT(width), b < a, b, a)),
+        .f32x4_pmax, .f64x2_pmax => return fromVec(@select(FT(width), a < b, b, a)),
+        else => {},
+    }
+    const computed: FVec(width) = switch (op) {
+        .f32x4_add, .f64x2_add => a + b,
+        .f32x4_sub, .f64x2_sub => a - b,
+        .f32x4_mul, .f64x2_mul => a * b,
+        .f32x4_div, .f64x2_div => a / b,
+        .f32x4_min, .f64x2_min => floatMin(width, a, b),
+        .f32x4_max, .f64x2_max => floatMax(width, a, b),
+        else => unreachable,
+    };
+    return fromVec(canonFloat(width, computed));
 }
 
 fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
@@ -2571,47 +2652,10 @@ fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
     };
     const right = popVector(s);
     const left = popVector(s);
-    var result: u128 = 0;
-    for (0..128 / width) |lane| {
-        if (width == 32) {
-            const a = f32Lane(left, @intCast(lane));
-            const b = f32Lane(right, @intCast(lane));
-            if (op == .f32x4_pmin or op == .f32x4_pmax) {
-                const choose_right = if (op == .f32x4_pmin) b < a else a < b;
-                const chosen = if (choose_right) right else left;
-                result = replaceLaneBits(result, @intCast(lane), 32, laneBits(chosen, @intCast(lane), 32));
-                continue;
-            }
-            result = replaceF32Lane(result, @intCast(lane), switch (op) {
-                .f32x4_add => a + b,
-                .f32x4_sub => a - b,
-                .f32x4_mul => a * b,
-                .f32x4_div => a / b,
-                .f32x4_min => fminF32(a, b),
-                .f32x4_max => fmaxF32(a, b),
-                else => unreachable,
-            });
-        } else {
-            const a = f64Lane(left, @intCast(lane));
-            const b = f64Lane(right, @intCast(lane));
-            if (op == .f64x2_pmin or op == .f64x2_pmax) {
-                const choose_right = if (op == .f64x2_pmin) b < a else a < b;
-                const chosen = if (choose_right) right else left;
-                result = replaceLaneBits(result, @intCast(lane), 64, laneBits(chosen, @intCast(lane), 64));
-                continue;
-            }
-            result = replaceF64Lane(result, @intCast(lane), switch (op) {
-                .f64x2_add => a + b,
-                .f64x2_sub => a - b,
-                .f64x2_mul => a * b,
-                .f64x2_div => a / b,
-                .f64x2_min => fminF64(a, b),
-                .f64x2_max => fmaxF64(a, b),
-                else => unreachable,
-            });
-        }
-    }
-    try pushVector(s, result);
+    try pushVector(s, if (width == 32)
+        binaryFloatLanes(32, left, right, op)
+    else
+        binaryFloatLanes(64, left, right, op));
     return true;
 }
 
