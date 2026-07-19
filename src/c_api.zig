@@ -8013,6 +8013,72 @@ export fn JSC__JSObject__create(global: JSContextRef, initial_capacity: usize, c
     return privateEncodedFromRef(object);
 }
 
+/// `URLSearchParams::create(str, nullptr)` wrapped via `toJSNewlyCreated`
+/// (URLSearchParams.cpp:34): decode the ZigString query and construct a
+/// realm-prototype `URLSearchParams` instance — the exact
+/// `new URLSearchParams(string)` engine path, so the result is
+/// `instanceof URLSearchParams` with fully working methods.
+export fn URLSearchParams__create(global: JSContextRef, input: ?*const PrivateZigString) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const init = privateZigStringValue(context, input orelse return .empty) catch |err| {
+        privatePublishBunStringError(context, err);
+        return .empty;
+    };
+    if (!init.isString()) return .empty;
+    const created = interp.urlSearchParamsCreateFromString(&machine, init.asStr()) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodedFromValue(context, created);
+}
+
+/// `WebCoreCast<JSURLSearchParams, URLSearchParams>` (URLSearchParams.cpp:41).
+/// zig-js has no separate native object — the instance IS the JS object
+/// carrying the engine's `\x00usp` pairs slot (native-created or
+/// JS-constructed alike, in any realm of the group) — so the returned pointer
+/// is the canonical cell handle, the same convention as `JSC__JSObject__create`.
+export fn URLSearchParams__fromJS(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return null;
+    if (boxed.value.asObj().getOwn("\x00usp") == null) return null;
+    return @ptrCast(boxed);
+}
+
+/// `urlSearchParams->toString()` handed out as a `ZigString`
+/// (URLSearchParams.cpp:49): serialize the instance's pairs exactly like the
+/// JS `toString` method and invoke the callback once with a stable borrowed
+/// ZigString view (latin-1 when the serialization is 8-bit). The owner realm
+/// is recovered from the handle — Bun's signature carries no global object.
+export fn URLSearchParams__toString(params: ?*anyopaque, ctx: ?*anyopaque, callback: ?*const fn (?*anyopaque, *const PrivateZigString) callconv(.c) void) callconv(.c) void {
+    const cb = callback orelse return;
+    const boxed = privateBoxFromCell(params) orelse return;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return;
+    if (boxed.value.asObj().getOwn("\x00usp") == null) return;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return;
+    defer context.popActiveInterpreter(&machine);
+    const bytes = interp.urlSearchParamsSerialize(&machine, boxed.value) catch return;
+    const view = privateBorrowedZigStringView(group, bytes) catch return;
+    cb(ctx, &view);
+}
+
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
     const gc_saved = gc_mod.setActiveHeap(context.gc);

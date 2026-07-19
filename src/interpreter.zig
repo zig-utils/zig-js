@@ -42302,9 +42302,10 @@ fn uspPairKV(pair: Value) struct { k: []const u8, v: []const u8 } {
     const v = if (kv.elementAt(1)) |x| (if (x.isString()) x.asStr() else "") else "";
     return .{ .k = k, .v = v };
 }
-fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+const UspAllocation = struct { obj: *value.Object, pairs: *value.Object };
+/// Shared instance setup for the JS constructor and the c_api create shim:
+/// realm prototype plus the mutable `\x00usp` pairs slot.
+fn uspAllocate(self: *Interpreter) EvalError!UspAllocation {
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{};
     if (self.env.get("URLSearchParams")) |c| if (c.isObject()) {
@@ -42312,6 +42313,29 @@ fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     };
     const pairs = (try self.newArray()).asObj();
     try obj.setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(pairs));
+    return .{ .obj = obj, .pairs = pairs };
+}
+
+/// c_api `URLSearchParams__create`: the `new URLSearchParams(string)` path —
+/// the form-urlencoded parse strips one leading `?` (WebKit
+/// URLSearchParams.cpp semantics), so `?a=1` and `a=1` are equivalent.
+pub fn urlSearchParamsCreateFromString(self: *Interpreter, init: []const u8) EvalError!Value {
+    const allocation = try uspAllocate(self);
+    try uspParseString(self, allocation.pairs, init);
+    return Value.obj(allocation.obj);
+}
+
+/// c_api `URLSearchParams__toString`: serialize the pairs slot exactly like
+/// the JS `toString` method (empty string when the slot is absent).
+pub fn urlSearchParamsSerialize(self: *Interpreter, this: Value) EvalError![]const u8 {
+    return uspToString(self, this);
+}
+
+fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const allocation = try uspAllocate(self);
+    const pairs = allocation.pairs;
     const init = if (args.len > 0) args[0] else Value.undef();
     if (init.isObject() and init.asObj().is_array) {
         for (try init.asObj().internalElementsSnapshot(self.arena)) |entry| {
@@ -42330,7 +42354,7 @@ fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     } else if (!init.isUndefined()) {
         try uspParseString(self, pairs, try self.toStringV(init));
     }
-    return Value.obj(obj);
+    return Value.obj(allocation.obj);
 }
 fn uspToString(self: *Interpreter, this: Value) EvalError![]const u8 {
     const pairs = try uspPairs(self, this);

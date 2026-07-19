@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 296,
-      "pending": 140
+      "implemented": 299,
+      "pending": 137
     }
   },
   "home_comparison": {
@@ -3664,10 +3664,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URLSearchParams__create(globalObject: *JSGlobalObject, *const ZigString) JSValue;",
       "declaration_sha256": "35b1c389c6bac578495a0cd9d097ebf8277f2f61d9dc318e506a387410a3026c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URLSearchParams__fromJS",
@@ -3675,10 +3675,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URLSearchParams__fromJS(JSValue) ?*URLSearchParams;",
       "declaration_sha256": "25e3a73a11385e4f25ca30945d308711500156a66f9dd55ea01e3746dd698a9d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URLSearchParams__toString",
@@ -3686,10 +3686,10 @@
       "line": 14,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URLSearchParams__toString( self: *URLSearchParams, ctx: *anyopaque, callback: *const fn (ctx: *anyopaque, str: *const ZigString) callconv(.c) void, ) void;",
       "declaration_sha256": "5abb7c5f2d6c77f7ad50f133a29f585b3a8176b41b5397788c3976adc0ff5b0e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__deinit",

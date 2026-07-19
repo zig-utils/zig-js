@@ -488,6 +488,9 @@ extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__createEmptyObject(JSContextRef, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) EncodedValue;
 extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
+extern "c" fn URLSearchParams__create(JSContextRef, *const ZigString) EncodedValue;
+extern "c" fn URLSearchParams__fromJS(EncodedValue) ?*anyopaque;
+extern "c" fn URLSearchParams__toString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -679,6 +682,29 @@ fn objectCreateInitializer(ctx: ?*anyopaque, obj: ?*anyopaque, global: ?*anyopaq
     object_create_state.ctx = ctx;
     object_create_state.obj = obj;
     object_create_state.global = global;
+}
+
+const UspToStringState = struct {
+    calls: usize = 0,
+    utf16: bool = false,
+    len: usize = 0,
+    bytes: [256]u8 = @splat(0),
+};
+var usp_to_string_state: UspToStringState = .{};
+fn uspToStringCallback(ctx: ?*anyopaque, str: *const ZigString) callconv(.c) void {
+    const state: *UspToStringState = @ptrCast(@alignCast(ctx.?));
+    state.calls += 1;
+    state.utf16 = (str.tagged_ptr & (@as(usize, 1) << 63)) != 0;
+    state.len = str.len;
+    if (str.len > state.bytes.len) fail("private URLSearchParams serialization exceeded fixture capacity");
+    const pointer = str.tagged_ptr & ~(@as(usize, 1) << 63);
+    if (state.utf16) {
+        const units: [*]const u16 = @ptrFromInt(pointer);
+        for (units[0..str.len], 0..) |unit, i| state.bytes[i] = @intCast(unit);
+    } else if (str.len > 0) {
+        const bytes: [*]const u8 = @ptrFromInt(pointer);
+        @memcpy(state.bytes[0..str.len], bytes[0..str.len]);
+    }
 }
 
 fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv(.c) void {
@@ -2859,6 +2885,59 @@ pub fn main() void {
         fail("private JSObject create capacity/null-initializer mismatch");
     if (JSC__JSObject__create(null, 0, null, objectCreateInitializer) != .empty or object_create_state.calls != 1)
         fail("private JSObject create null-VM tolerance mismatch");
+
+    // URLSearchParams boundary (#307): create decodes a ZigString query into
+    // a realm `instanceof URLSearchParams` object through the same parse the
+    // JS constructor uses (one leading `?` stripped, `+`/percent codec), and
+    // toString serializes through the JS method path into a borrowed
+    // ZigString view delivered exactly once.
+    const usp_query_bytes = "?a=1&b=two+words&b=3&c=%41%2C";
+    const usp_query = ZigString{ .tagged_ptr = @intFromPtr(usp_query_bytes.ptr), .len = usp_query_bytes.len };
+    const usp_object = URLSearchParams__create(context, &usp_query);
+    if (usp_object == .empty or URLSearchParams__fromJS(usp_object) == null)
+        fail("private URLSearchParams create/fromJS mismatch");
+    exposeCell(context, "__private_usp", usp_object);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_usp instanceof URLSearchParams")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_usp.get('b') === 'two words'")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_usp.getAll('b').length === 2")))
+        fail("private URLSearchParams engine integration mismatch");
+    usp_to_string_state = .{};
+    URLSearchParams__toString(URLSearchParams__fromJS(usp_object), &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or usp_to_string_state.utf16 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], "a=1&b=two+words&b=3&c=A%2C"))
+        fail("private URLSearchParams serialization mismatch");
+    const js_usp = evaluate(context, "new URLSearchParams('x=9&x=10')");
+    if (URLSearchParams__fromJS(js_usp) == null or
+        URLSearchParams__fromJS(empty_object) != null or
+        URLSearchParams__fromJS(encoded_text) != null or
+        URLSearchParams__fromJS(EncodedValue.fromInt32(7)) != null or
+        URLSearchParams__fromJS(.undefined) != null or
+        URLSearchParams__fromJS(.empty) != null)
+        fail("private URLSearchParams fromJS discrimination mismatch");
+    usp_to_string_state = .{};
+    URLSearchParams__toString(URLSearchParams__fromJS(js_usp), &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], "x=9&x=10"))
+        fail("private URLSearchParams JS-instance serialization mismatch");
+    const usp_empty_bytes = "";
+    const usp_empty_query = ZigString{ .tagged_ptr = @intFromPtr(usp_empty_bytes.ptr), .len = 0 };
+    const usp_empty = URLSearchParams__create(context, &usp_empty_query);
+    usp_to_string_state = .{};
+    URLSearchParams__toString(URLSearchParams__fromJS(usp_empty), &usp_to_string_state, uspToStringCallback);
+    if (usp_empty == .empty or usp_to_string_state.calls != 1 or usp_to_string_state.len != 0)
+        fail("private URLSearchParams empty-input mismatch");
+    // The owner realm is recovered from the handle: a foreign-realm instance
+    // serializes through its own context without the caller naming one.
+    const foreign_usp_object = URLSearchParams__create(foreign_context, &usp_query);
+    usp_to_string_state = .{};
+    URLSearchParams__toString(URLSearchParams__fromJS(foreign_usp_object), &usp_to_string_state, uspToStringCallback);
+    if (URLSearchParams__fromJS(foreign_usp_object) == null or usp_to_string_state.calls != 1 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], "a=1&b=two+words&b=3&c=A%2C"))
+        fail("private URLSearchParams foreign-realm mismatch");
+    URLSearchParams__toString(null, &usp_to_string_state, uspToStringCallback);
+    URLSearchParams__toString(URLSearchParams__fromJS(usp_object), null, null);
+    if (URLSearchParams__create(null, &usp_query) != .empty or usp_to_string_state.calls != 1)
+        fail("private URLSearchParams null tolerance mismatch");
 
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
@@ -5434,5 +5513,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 291/291 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 294/294 symbols linked; runtime matrix passed\n", .{});
 }
