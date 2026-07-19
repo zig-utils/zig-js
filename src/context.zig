@@ -4070,6 +4070,11 @@ pub const Context = struct {
                 if (!stale) {
                     const reason = try machine.makeDOMException("TimeoutError", "The operation timed out.");
                     try interp.signalAbort(machine, owner.object, reason);
+                    // Each fired timeout is its own task. Finish the microtask
+                    // checkpoint it created before selecting another due timer;
+                    // the interpreter's polling guard prevents recursive timer
+                    // selection during this nested drain.
+                    try machine.drainMicrotasks();
                 }
             }
         }

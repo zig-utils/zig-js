@@ -7220,20 +7220,22 @@ pub const Interpreter = struct {
         try poll(self.abort_timeout_ctx, self);
     }
 
-    /// Run one complete host checkpoint: process due unrefed AbortSignal
-    /// timers, then next ticks and Promise jobs, looping when the Promise phase
-    /// schedules more next-tick work.
+    /// Run one complete host checkpoint: finish the current task's next ticks
+    /// and Promise jobs before selecting timer tasks. Timer callbacks may queue
+    /// another microtask checkpoint, which the Context scheduler drains between
+    /// timer records rather than batching multiple tasks together.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
-        try self.pollAbortSignalTimeouts();
-        if (self.microtasks == null and self.next_ticks == null) return;
-        var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
-        defer batch.deinit(self.arena);
-        while (true) {
-            if (self.next_ticks) |queue| try self.drainJobQueue(queue, &batch);
-            if (self.microtasks) |queue| try self.drainJobQueue(queue, &batch);
-            const more_next_ticks = if (self.next_ticks) |queue| self.jobQueueHasPending(queue) else false;
-            if (!more_next_ticks) break;
+        if (self.microtasks != null or self.next_ticks != null) {
+            var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
+            defer batch.deinit(self.arena);
+            while (true) {
+                if (self.next_ticks) |queue| try self.drainJobQueue(queue, &batch);
+                if (self.microtasks) |queue| try self.drainJobQueue(queue, &batch);
+                const more_next_ticks = if (self.next_ticks) |queue| self.jobQueueHasPending(queue) else false;
+                if (!more_next_ticks) break;
+            }
         }
+        try self.pollAbortSignalTimeouts();
     }
 
     /// Move each pending burst out under its queue lock, then execute unlocked.

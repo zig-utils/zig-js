@@ -24819,6 +24819,15 @@ test "AbortSignal timeout owns observable signals and invalidates borrowed Bun h
     try std.testing.expect(!(try context.evaluate(
         "(() => { const signal = AbortSignal.timeout(0); return signal.aborted; })()",
     )).asBool());
+    _ = try context.evaluate(
+        "globalThis.__timeout_order_330 = []; " ++
+            "AbortSignal.timeout(0).addEventListener('abort', () => __timeout_order_330.push('abort')); " ++
+            "Promise.resolve().then(() => __timeout_order_330.push('promise'))",
+    );
+    try std.testing.expectEqualStrings(
+        "promise,abort",
+        (try context.evaluate("__timeout_order_330.join(',')")).asStr(),
+    );
 
     const encoded = privateEncodedFromValue(context, try context.evaluate(
         "globalThis.__timeout_signal_330 = AbortSignal.timeout(60000); __timeout_signal_330",
