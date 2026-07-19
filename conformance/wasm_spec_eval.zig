@@ -12,6 +12,36 @@
 const std = @import("std");
 const js = @import("js");
 
+fn reportEvaluationFailure(io: std.Io, ctx: *js.Context, err: anyerror) void {
+    const stderr = std.Io.File.stderr();
+    stderr.writeStreamingAll(io, "evaluation failed: ") catch return;
+    stderr.writeStreamingAll(io, @errorName(err)) catch return;
+    if (ctx.exception) |exception| {
+        stderr.writeStreamingAll(io, ": ") catch return;
+        if (exception.isObject()) {
+            const object = exception.asObj();
+            const name = if (object.getOwn("name")) |value|
+                if (value.isString()) value.asStr() else object.errorName()
+            else
+                object.errorName();
+            const message = if (object.getOwn("message")) |value|
+                if (value.isString()) value.asStr() else ""
+            else
+                "";
+            stderr.writeStreamingAll(io, if (name.len != 0) name else exception.typeOf()) catch return;
+            if (message.len != 0) {
+                stderr.writeStreamingAll(io, ": ") catch return;
+                stderr.writeStreamingAll(io, message) catch return;
+            }
+        } else if (exception.isString()) {
+            stderr.writeStreamingAll(io, exception.asStr()) catch return;
+        } else {
+            stderr.writeStreamingAll(io, exception.typeOf()) catch return;
+        }
+    }
+    stderr.writeStreamingAll(io, "\n") catch {};
+}
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -61,9 +91,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ctx.destroy();
     const result = ctx.evaluate(source) catch |err| {
-        var buf: [256]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "evaluation failed: {s}\n", .{@errorName(err)}) catch "evaluation failed\n";
-        std.Io.File.stderr().writeStreamingAll(io, line) catch {};
+        reportEvaluationFailure(io, ctx, err);
         return error.EvaluationFailed;
     };
     if (!result.isString()) return error.NonStringResult;
