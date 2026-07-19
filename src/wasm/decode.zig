@@ -414,7 +414,10 @@ const Reader = struct {
         if (address == .i64 and !self.features.memory64) return self.unsupportedFeature(flag_off, .memory64);
 
         const min_off = self.offset();
-        const min = try self.readU64Leb();
+        const min: u64 = switch (address) {
+            .i32 => try self.readU32Leb(),
+            .i64 => try self.readU64Leb(),
+        };
         const limit = if (kind == .memory) address.maxMemoryPages() else address.maxTableElements();
         if (min > limit) return if (kind == .memory)
             self.failAt(min_off, "memory size exceeds address type limit", .{})
@@ -422,7 +425,10 @@ const Reader = struct {
             self.failAt(min_off, "table size exceeds address type limit", .{});
         const maximum = if (flag & 0x01 != 0) blk: {
             const max_off = self.offset();
-            const max = try self.readU64Leb();
+            const max: u64 = switch (address) {
+                .i32 => try self.readU32Leb(),
+                .i64 => try self.readU64Leb(),
+            };
             if (max > limit) return if (kind == .memory)
                 self.failAt(max_off, "memory size exceeds address type limit", .{})
             else
@@ -1609,6 +1615,14 @@ test "wasm.decode memory64 feature gates and malformed u64 limits" {
         "\x01\x04\x80\x80\x80\x80\x80\x80\x80\x80\x80\x02",
     ));
     try expectMalformedWithFeatures(too_large, .{ .memory64 = true }, 12, "integer too large");
+}
+
+test "wasm.decode memory32 limits reject u32-overlong encodings" {
+    try expectMalformed(
+        hdr ++ "\x05\x0A\x02\x00\x01\x00\x82\x80\x80\x80\x80\x00",
+        14,
+        "integer representation too long",
+    );
 }
 
 test "wasm.decode multi-memory indices and feature gate" {
