@@ -8156,15 +8156,10 @@ fn privateUrlAppend(parts: *std.ArrayListUnmanaged(u8), arena: std.mem.Allocator
     return .{ .off = off, .len = s.len };
 }
 
-/// `WTF::URL(str)` + `new WTF::URL` (BunString.cpp:677): parse through the
+/// Shared `WTF::URL(str)` construction (BunString.cpp:677): parse through the
 /// engine's allocator-first `urlParse` with no base, null when invalid. The
 /// returned record owns its bytes; `URL__deinit` frees it.
-export fn URL__fromString(input: ?*const PrivateBunString) callconv(.c) ?*anyopaque {
-    const string = input orelse return null;
-    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const input_bytes = privateBunStringWTF8Alloc(arena, string) catch return null;
+fn privateUrlCreateFromWTF8(arena: std.mem.Allocator, input_bytes: []const u8) ?*PrivateUrl {
     const parts = (interp.urlParse(arena, input_bytes, null) catch return null) orelse return null;
     if (parts.scheme.len == 0) return null; // WTF validity: absolute URL needs a scheme
     const href = interp.urlSerialize(arena, parts, false) catch return null;
@@ -8206,6 +8201,26 @@ export fn URL__fromString(input: ?*const PrivateBunString) callconv(.c) ?*anyopa
         .flags = flags,
     };
     return url;
+}
+
+/// Shared `WTF::URL(base, relative).string()` serialization: parse with an
+/// optional already-parsed base and return the full href, null when invalid.
+fn privateUrlHrefWTF8(arena: std.mem.Allocator, input_bytes: []const u8, base: ?interp.UrlParts) ?[]const u8 {
+    const parts = (interp.urlParse(arena, input_bytes, base) catch return null) orelse return null;
+    if (parts.scheme.len == 0) return null;
+    return interp.urlSerialize(arena, parts, false) catch return null;
+}
+
+/// `WTF::URL(str)` + `new WTF::URL` (BunString.cpp:677): parse through the
+/// engine's allocator-first `urlParse` with no base, null when invalid. The
+/// returned record owns its bytes; `URL__deinit` frees it.
+export fn URL__fromString(input: ?*const PrivateBunString) callconv(.c) ?*anyopaque {
+    const string = input orelse return null;
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input_bytes = privateBunStringWTF8Alloc(arena, string) catch return null;
+    return privateUrlCreateFromWTF8(arena, input_bytes);
 }
 
 /// `delete url` (BunString.cpp:692). Null tolerated; the magic is cleared so a
@@ -8313,6 +8328,137 @@ export fn URL__fragmentIdentifier(raw: ?*anyopaque) callconv(.c) PrivateBunStrin
     const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
     if (url.flags & private_url_flag_fragment == 0) return privateUrlOwnedString("");
     return privateUrlOwnedString(privateUrlView(url, url.fragment));
+}
+
+/// `value.toWTFString` + `new WTF::URL` (BunString.cpp:596): coerce the JS
+/// value through ToString — a throwing coercion publishes the pending
+/// exception and yields null (Bun's `RETURN_IF_EXCEPTION → nullptr`) — then
+/// parse with no base. Empty or invalid input yields null without an
+/// exception; success returns the owned native record (`URL__deinit` frees).
+export fn URL__fromJS(encoded: EncodedValue, global: JSContextRef) callconv(.c) ?*anyopaque {
+    const context = ctxForEvaluation(global) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "URL value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    const text = machine.toStringV(internal) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    if (text.len == 0) return null;
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    return privateUrlCreateFromWTF8(arena_state.allocator(), text);
+}
+
+/// `value.toWTFString` + `WTF::URL(str).string()` (BunString.cpp:613): the
+/// full serialization of the coerced value, Dead when the coercion throws
+/// (exception published), when empty, or when invalid.
+export fn URL__getHrefFromJS(encoded: EncodedValue, global: JSContextRef) callconv(.c) PrivateBunString {
+    const context = ctxForEvaluation(global) orelse return PrivateBunString.dead();
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const internal = privateValueFrom(global, encoded) orelse {
+        const err = machine.throwError("TypeError", "URL value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    const text = machine.toStringV(internal) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    if (text.len == 0) return PrivateBunString.dead();
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const href = privateUrlHrefWTF8(arena_state.allocator(), text, null) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(href);
+}
+
+/// `WTF::URL(str).string()` (BunString.cpp:630): parse and re-serialize with
+/// no base, Dead for empty/invalid input. Context-free.
+export fn URL__getHref(input: ?*const PrivateBunString) callconv(.c) PrivateBunString {
+    const string = input orelse return PrivateBunString.dead();
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input_bytes = privateBunStringWTF8Alloc(arena, string) catch return PrivateBunString.dead();
+    const href = privateUrlHrefWTF8(arena, input_bytes, null) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(href);
+}
+
+/// `WTF::URL(WTF::URL(base), relative).string()` (BunString.cpp:650): resolve
+/// the relative reference against the parsed base, Dead when either side is
+/// invalid. Context-free.
+export fn URL__getHrefJoin(base: ?*const PrivateBunString, relative: ?*const PrivateBunString) callconv(.c) PrivateBunString {
+    const base_string = base orelse return PrivateBunString.dead();
+    const relative_string = relative orelse return PrivateBunString.dead();
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base_bytes = privateBunStringWTF8Alloc(arena, base_string) catch return PrivateBunString.dead();
+    const relative_bytes = privateBunStringWTF8Alloc(arena, relative_string) catch return PrivateBunString.dead();
+    const base_parts = (interp.urlParse(arena, base_bytes, null) catch return PrivateBunString.dead()) orelse return PrivateBunString.dead();
+    if (base_parts.scheme.len == 0) return PrivateBunString.dead();
+    const href = privateUrlHrefWTF8(arena, relative_bytes, base_parts) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(href);
+}
+
+/// `URL::fileURLWithFileSystemPath(path).stringWithoutFragmentIdentifier()`
+/// (BunString.cpp:564): `file://` plus each `/`-separated segment percent-
+/// encoded with the WHATWG path encode set. Slashes are preserved and dot
+/// segments are NOT resolved — WTF sets the path post-parse.
+export fn URL__getFileURLString(file_path: ?*const PrivateBunString) callconv(.c) PrivateBunString {
+    const string = file_path orelse return PrivateBunString.dead();
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const path = privateBunStringWTF8Alloc(arena, string) catch return PrivateBunString.dead();
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    out.appendSlice(arena, "file://") catch return PrivateBunString.dead();
+    var segments = std.mem.splitScalar(u8, path, '/');
+    var first = true;
+    while (segments.next()) |segment| {
+        if (!first) out.append(arena, '/') catch return PrivateBunString.dead();
+        first = false;
+        interp.urlPercentEncode(arena, &out, segment, .path) catch return PrivateBunString.dead();
+    }
+    return privateUrlOwnedString(out.items);
+}
+
+/// `WTF::URL(str).fileSystemPath()` (BunString.cpp:640): the percent-decoded
+/// path of the parsed input (`%XX` only — `+` stays literal, this is a path
+/// not a query), Dead when the input is empty or invalid.
+export fn URL__pathFromFileURL(input: ?*const PrivateBunString) callconv(.c) PrivateBunString {
+    const string = input orelse return PrivateBunString.dead();
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input_bytes = privateBunStringWTF8Alloc(arena, string) catch return PrivateBunString.dead();
+    const parts = (interp.urlParse(arena, input_bytes, null) catch return PrivateBunString.dead()) orelse return PrivateBunString.dead();
+    if (parts.scheme.len == 0) return PrivateBunString.dead();
+    const decoded = interp.urlPercentDecode(arena, parts.path) catch return PrivateBunString.dead();
+    return privateUrlOwnedString(decoded);
 }
 
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {

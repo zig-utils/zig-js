@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 319,
-      "pending": 127
+      "implemented": 325,
+      "pending": 121
     }
   },
   "declarations": [
@@ -3768,10 +3768,10 @@
       "line": 33,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__fromJS(JSValue, *JSGlobalObject) ?*URL;",
       "declaration_sha256": "5eea50c383a7f397287ae1a68a2b61fa16b192acc166e70f397af725f3c3b57f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__fromString",
@@ -3790,10 +3790,10 @@
       "line": 47,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__getFileURLString(*String) String;",
       "declaration_sha256": "39d3a471c9991cc599c402d60d4ba5d5ccaf3294975cf4723d344b96f82b9f8f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__getHref",
@@ -3801,10 +3801,10 @@
       "line": 46,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__getHref(*String) String;",
       "declaration_sha256": "1a03d8712cb22af151bbe421742d26487cfb93f6f2074dfa9829d787ff336504",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__getHrefFromJS",
@@ -3812,10 +3812,10 @@
       "line": 45,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__getHrefFromJS(JSValue, *JSGlobalObject) String;",
       "declaration_sha256": "94a284f3de0e080a4c3c6d952a7299808491477f4cff904b3dfaea43a90c0cc2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__getHrefJoin",
@@ -3823,10 +3823,10 @@
       "line": 48,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__getHrefJoin(*String, *String) String;",
       "declaration_sha256": "effec7df2815afc4919e67403c52321a5c8dc16cec79ee4194ec73144345138c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__hash",
@@ -3900,10 +3900,10 @@
       "line": 49,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__pathFromFileURL(*String) String;",
       "declaration_sha256": "bf764ba1282d77bfeb05a96d2a5fa2e7a9574fa0a98ffc017cc4726c5b6f3f7a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__pathname",

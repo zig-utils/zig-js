@@ -40711,7 +40711,7 @@ fn urlDefaultPort(s: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, s, "ftp")) return "21";
     return null;
 }
-const UrlEncSet = enum { c0, fragment, query, special_query, path, userinfo };
+pub const UrlEncSet = enum { c0, fragment, query, special_query, path, userinfo };
 fn urlShouldEncode(set: UrlEncSet, b: u8) bool {
     if (b <= 0x1F or b > 0x7E) return true;
     const in = struct {
@@ -40728,7 +40728,7 @@ fn urlShouldEncode(set: UrlEncSet, b: u8) bool {
         .userinfo => b == ' ' or in(b, "\"#<>?`{}/:;=@[\\]^|"),
     };
 }
-fn urlPercentEncode(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8, set: UrlEncSet) EvalError!void {
+pub fn urlPercentEncode(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), s: []const u8, set: UrlEncSet) EvalError!void {
     const utf8 = try wtf8ToUtf8Bytes(arena, s);
     const hex = "0123456789ABCDEF";
     for (utf8) |b| {
@@ -40738,6 +40738,27 @@ fn urlPercentEncode(arena: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), 
             try out.append(arena, hex[b & 0x0F]);
         } else try out.append(arena, b);
     }
+}
+/// Percent-decode `%XX` sequences (allocator-first). Unlike the
+/// form-urlencoded decoder there is no `+` rule — this is for URL paths.
+pub fn urlPercentDecode(arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c == '%' and i + 2 < s.len) {
+            if (hexDigit(s[i + 1])) |hi| {
+                if (hexDigit(s[i + 2])) |lo| {
+                    try out.append(arena, hi * 16 + lo);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        try out.append(arena, c);
+        i += 1;
+    }
+    return out.items;
 }
 fn urlStripTabsNewlines(a: std.mem.Allocator, s: []const u8) ![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;

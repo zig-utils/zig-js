@@ -504,6 +504,12 @@ extern "c" fn URL__port(?*anyopaque) u32;
 extern "c" fn URL__pathname(?*anyopaque) BunString;
 extern "c" fn URL__hash(?*anyopaque) BunString;
 extern "c" fn URL__fragmentIdentifier(?*anyopaque) BunString;
+extern "c" fn URL__fromJS(EncodedValue, JSContextRef) ?*anyopaque;
+extern "c" fn URL__getHrefFromJS(EncodedValue, JSContextRef) BunString;
+extern "c" fn URL__getHref(?*const BunString) BunString;
+extern "c" fn URL__getHrefJoin(?*const BunString, ?*const BunString) BunString;
+extern "c" fn URL__getFileURLString(?*const BunString) BunString;
+extern "c" fn URL__pathFromFileURL(?*const BunString) BunString;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -3088,6 +3094,117 @@ pub fn main() void {
     URL__deinit(native_url_a2);
     URL__deinit(null);
 
+    // URL JS-value and static string helpers (#309): fromJS/getHrefFromJS
+    // coerce through ToString with published-exception semantics; the static
+    // helpers are context-free BunString in/out shims over the same parser.
+    const url_js_input = evaluate(context, "'https://a:b@Example.COM:1/p?q#f'");
+    const native_url_js = URL__fromJS(url_js_input, context) orelse fail("private URL fromJS rejected a valid string");
+    if (!expectNativeUrlField(context, URL__href(native_url_js), "new URL('https://a:b@Example.COM:1/p?q#f').href") or
+        !expectNativeUrlField(context, URL__getHrefFromJS(url_js_input, context), "new URL('https://a:b@Example.COM:1/p?q#f').href"))
+        fail("private URL fromJS/getHrefFromJS parity mismatch");
+
+    // ToString coercion: an object with toString coerces; a throwing toString
+    // publishes the exception and yields null/Dead.
+    const url_coercible = evaluate(context, "({toString(){return 'http://h.com/x?q=1'}})");
+    const native_url_coerced = URL__fromJS(url_coercible, context) orelse fail("private URL fromJS rejected a coercible object");
+    if (!bunStringUtf8Equals(URL__href(native_url_coerced), "http://h.com/x?q=1") or
+        !bunStringUtf8Equals(URL__getHrefFromJS(url_coercible, context), "http://h.com/x?q=1"))
+        fail("private URL toString coercion mismatch");
+    const url_throwing = evaluate(context, "({toString(){throw new Error('boom')}})");
+    if (URL__fromJS(url_throwing, context) != null or !JSGlobalObject__hasException(context))
+        fail("private URL fromJS did not publish a throwing coercion");
+    JSGlobalObject__clearException(context);
+    if (URL__getHrefFromJS(url_throwing, context).tag != .dead or !JSGlobalObject__hasException(context))
+        fail("private URL getHrefFromJS did not publish a throwing coercion");
+    JSGlobalObject__clearException(context);
+
+    // Empty/invalid inputs coerce to null/Dead WITHOUT an exception;
+    // foreign-VM values publish a TypeError and yield null/Dead.
+    if (URL__fromJS(evaluate(context, "''"), context) != null or
+        URL__getHrefFromJS(evaluate(context, "''"), context).tag != .dead or
+        URL__fromJS(encoded_text, context) != null or // 'value' is not a URL
+        JSGlobalObject__hasException(context))
+        fail("private URL empty/invalid JS input mismatch");
+    const foreign_url_string = evaluate(foreign_context, "'http://h.com/x'");
+    if (URL__fromJS(foreign_url_string, context) != null or !JSGlobalObject__hasException(context))
+        fail("private URL fromJS accepted a foreign value");
+    JSGlobalObject__clearException(context);
+    if (URL__getHrefFromJS(foreign_url_string, context).tag != .dead or !JSGlobalObject__hasException(context))
+        fail("private URL getHrefFromJS accepted a foreign value");
+    JSGlobalObject__clearException(context);
+
+    // getHref (context-free): full re-serialization, Dead for invalid input.
+    if (!expectNativeUrlField(context, URL__getHref(&url_bunstring_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').href"))
+        fail("private URL getHref mismatch");
+    if (URL__getHref(&url_bunstring_bad).tag != .dead or
+        URL__getHref(&url_bunstring_bad3).tag != .dead or
+        URL__getHref(null).tag != .dead)
+        fail("private URL getHref invalid-input mismatch");
+
+    // getHrefJoin: WHATWG base resolution with JS `new URL(rel, base)` parity
+    // across relative, absolute-path, dot-segment, and file-base references.
+    const join_base_http = "http://h.com/a/b";
+    var join_base_http_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_base_http.ptr), .len = join_base_http.len } } };
+    const join_base_slash = "http://h.com/a/b/";
+    var join_base_slash_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_base_slash.ptr), .len = join_base_slash.len } } };
+    const join_base_file = "file:///tmp/a/";
+    var join_base_file_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_base_file.ptr), .len = join_base_file.len } } };
+    const join_rel_child = "c/d";
+    var join_rel_child_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_rel_child.ptr), .len = join_rel_child.len } } };
+    const join_rel_root = "/x";
+    var join_rel_root_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_rel_root.ptr), .len = join_rel_root.len } } };
+    const join_rel_dot = "../y";
+    var join_rel_dot_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_rel_dot.ptr), .len = join_rel_dot.len } } };
+    const join_rel_space = "b c.txt";
+    var join_rel_space_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_rel_space.ptr), .len = join_rel_space.len } } };
+    if (!expectNativeUrlField(context, URL__getHrefJoin(&join_base_http_bs, &join_rel_child_bs), "new URL('c/d', 'http://h.com/a/b').href") or
+        !expectNativeUrlField(context, URL__getHrefJoin(&join_base_http_bs, &join_rel_root_bs), "new URL('/x', 'http://h.com/a/b').href") or
+        !expectNativeUrlField(context, URL__getHrefJoin(&join_base_slash_bs, &join_rel_dot_bs), "new URL('../y', 'http://h.com/a/b/').href") or
+        !expectNativeUrlField(context, URL__getHrefJoin(&join_base_file_bs, &join_rel_space_bs), "new URL('b c.txt', 'file:///tmp/a/').href"))
+        fail("private URL getHrefJoin parity mismatch");
+    const join_rel_bad = "http://[::1";
+    var join_rel_bad_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(join_rel_bad.ptr), .len = join_rel_bad.len } } };
+    if (URL__getHrefJoin(&url_bunstring_bad, &join_rel_child_bs).tag != .dead or
+        URL__getHrefJoin(&join_base_http_bs, &join_rel_bad_bs).tag != .dead or
+        URL__getHrefJoin(null, &join_rel_child_bs).tag != .dead or
+        URL__getHrefJoin(&join_base_http_bs, null).tag != .dead)
+        fail("private URL getHrefJoin invalid-input mismatch");
+
+    // getFileURLString: each `/`-separated segment percent-encoded with the
+    // WHATWG path encode set — slashes preserved, dot segments NOT resolved
+    // (WTF sets the path post-parse). Latin-1 and UTF-16 inputs decode first.
+    const file_path_latin1 = "/tmp/a b/caf\xE9.txt";
+    var file_path_latin1_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(file_path_latin1.ptr), .len = file_path_latin1.len } } };
+    const file_path_dots = "/a/./b/../c";
+    var file_path_dots_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(file_path_dots.ptr), .len = file_path_dots.len } } };
+    const file_path_empty = "";
+    var file_path_empty_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(file_path_empty.ptr), .len = 0 } } };
+    const file_path_units = [_]u16{ '/', 't', 'm', 'p', '/', 0x20AC, ' ', 'x' };
+    var file_path_u16_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(&file_path_units) | (@as(usize, 1) << 63), .len = file_path_units.len } } };
+    if (!bunStringUtf8Equals(URL__getFileURLString(&file_path_latin1_bs), "file:///tmp/a%20b/caf%C3%A9.txt") or
+        !bunStringUtf8Equals(URL__getFileURLString(&file_path_dots_bs), "file:///a/./b/../c") or
+        !bunStringUtf8Equals(URL__getFileURLString(&file_path_empty_bs), "file://") or
+        !bunStringUtf8Equals(URL__getFileURLString(&file_path_u16_bs), "file:///tmp/%E2%82%AC%20x") or
+        URL__getFileURLString(null).tag != .dead)
+        fail("private URL getFileURLString mismatch");
+
+    // pathFromFileURL: percent-decoded path (`%XX` only — `+` stays literal);
+    // no scheme check, Dead for invalid input.
+    const file_url_encoded = "file:///tmp/a%20b/x+y";
+    var file_url_encoded_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(file_url_encoded.ptr), .len = file_url_encoded.len } } };
+    const file_url_utf8 = "file:///caf%C3%A9";
+    var file_url_utf8_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(file_url_utf8.ptr), .len = file_url_utf8.len } } };
+    const http_url_encoded = "http://h.com/a%20b";
+    var http_url_encoded_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(http_url_encoded.ptr), .len = http_url_encoded.len } } };
+    if (!bunStringUtf8Equals(URL__pathFromFileURL(&file_url_encoded_bs), "/tmp/a b/x+y") or
+        !bunStringUtf8Equals(URL__pathFromFileURL(&file_url_utf8_bs), "/caf\xC3\xA9") or
+        !bunStringUtf8Equals(URL__pathFromFileURL(&http_url_encoded_bs), "/a b") or
+        URL__pathFromFileURL(&url_bunstring_bad).tag != .dead or
+        URL__pathFromFileURL(null).tag != .dead)
+        fail("private URL pathFromFileURL mismatch");
+    URL__deinit(native_url_js);
+    URL__deinit(native_url_coerced);
+
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
     const int32_max_wrapper = evaluate(context, "new Number(2147483647)");
@@ -5662,5 +5779,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 307/307 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 313/313 symbols linked; runtime matrix passed\n", .{});
 }
