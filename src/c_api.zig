@@ -10455,6 +10455,8 @@ export fn JSC__JSValue__toZigException(
 }
 
 fn privateDebugScriptForFrame(context: *Context, frame: value.ErrorStackFrame) ?Context.DebugScript {
+    context.lockDebugRegistry();
+    defer context.unlockDebugRegistry();
     if (frame.script_id != 0) {
         for (context.debug_scripts.items) |script| if (script.id == frame.script_id) return script;
     }
@@ -11609,6 +11611,8 @@ fn inspectorScript(state: *const CInspectorState, id: u64) ?CInspectorScript {
 }
 
 fn inspectorResolvedLocation(state: *const CInspectorState, script_id: u64, line_number: usize, column_number: usize) ?InspectorProtocolLocation {
+    state.context.lockDebugRegistry();
+    defer state.context.unlockDebugRegistry();
     var best: ?InspectorProtocolLocation = null;
     var it = state.context.debug_statement_locations.valueIterator();
     while (it.next()) |entry| {
@@ -12263,7 +12267,9 @@ fn createInspectorSession(
             .pause_wait_ctx = pause_wait_ctx,
             .pause_wait_hook = pause_wait_hook,
         };
+        c.lockDebugRegistry();
         for (c.debug_scripts.items) |script| new_state.scripts.append(gpa, script) catch {
+            c.unlockDebugRegistry();
             new_state.scripts.deinit(gpa);
             gpa.destroy(new_state);
             return null;
@@ -12271,13 +12277,16 @@ fn createInspectorSession(
         c.debug_script_notify_ctx = new_state;
         c.debug_script_notify_hook = inspectorScriptRegistered;
         c.c_api_inspector_state = @ptrCast(new_state);
+        c.unlockDebugRegistry();
         state = new_state;
         created_state = true;
     }
     errdefer if (created_state) {
+        c.lockDebugRegistry();
         c.c_api_inspector_state = null;
         c.debug_script_notify_ctx = null;
         c.debug_script_notify_hook = null;
+        c.unlockDebugRegistry();
         state.?.scripts.deinit(gpa);
         gpa.destroy(state.?);
     };
@@ -12313,9 +12322,11 @@ fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
     gpa.destroy(session);
     refreshInspectorDebuggerHook(state);
     if (state.sessions.items.len == 0) {
+        state.context.lockDebugRegistry();
         state.context.c_api_inspector_state = null;
         state.context.debug_script_notify_ctx = null;
         state.context.debug_script_notify_hook = null;
+        state.context.unlockDebugRegistry();
         state.sessions.deinit(gpa);
         state.scripts.deinit(gpa);
         state.breakpoints.deinit(gpa);

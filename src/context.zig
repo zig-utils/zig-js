@@ -2405,6 +2405,11 @@ pub const Context = struct {
     host_statement_hook: ?interp.HostStatementHook = null,
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
+    /// Guards the script-id/list and statement-location registry only in a
+    /// no-GIL shared realm. This is deliberately separate from `realm_lock`:
+    /// parsing can allocate while publishing a script and must not enter a GC
+    /// trace-sensitive critical section.
+    debug_registry_lock: interp.DebugRegistryLock = .{},
     /// Context-owned script history outlives inspector sessions. This preserves
     /// stable identities/source for scripts parsed before attachment and across
     /// detach/reattach without making the engine core depend on the C protocol.
@@ -3244,6 +3249,7 @@ pub const Context = struct {
             .host_statement_ctx = self.host_statement_ctx,
             .host_statement_hook = self.host_statement_hook,
             .debug_statement_locations = &self.debug_statement_locations,
+            .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
             .debug_script_ctx = self,
             .debug_script_hook = registerInterpreterDebugScript,
             .debug_exception_ctx = self.debug_statement_ctx,
@@ -3296,29 +3302,102 @@ pub const Context = struct {
         };
     }
 
-    pub fn registerDebugScript(self: *Context, source: []const u8, url: []const u8, start_line: usize) !DebugScript {
+    pub fn lockDebugRegistry(self: *Context) void {
+        if (self.parallel_js) self.debug_registry_lock.lock();
+    }
+
+    pub fn unlockDebugRegistry(self: *Context) void {
+        if (self.parallel_js) self.debug_registry_lock.unlock();
+    }
+
+    fn registerDebugLocationsLocked(
+        self: *Context,
+        allocator: std.mem.Allocator,
+        script: DebugScript,
+        locations: []const parser_mod.StatementLocation,
+    ) !void {
+        const additional_locations = std.math.cast(u32, locations.len) orelse return error.OutOfMemory;
+        try self.debug_statement_locations.ensureUnusedCapacity(allocator, additional_locations);
+        for (locations) |entry| self.debug_statement_locations.putAssumeCapacity(entry.node, .{
+            .script_id = script.id,
+            .location = .{
+                .byte_offset = entry.location.byte_offset,
+                .line = entry.location.line + script.start_line - 1,
+                .column = entry.location.column,
+            },
+            .source_url = script.url,
+            .debugger_statement = entry.debugger_statement,
+        });
+    }
+
+    fn registerDebugLocations(
+        self: *Context,
+        script: DebugScript,
+        locations: []const parser_mod.StatementLocation,
+    ) !void {
+        self.lockDebugRegistry();
+        defer self.unlockDebugRegistry();
+        try self.registerDebugLocationsLocked(self.arena(), script, locations);
+    }
+
+    pub fn registerDebugScriptWithLocations(
+        self: *Context,
+        source: []const u8,
+        url: []const u8,
+        start_line: usize,
+        locations: []const parser_mod.StatementLocation,
+    ) !DebugScript {
         const allocator = self.arena();
+        const owned_url = try allocator.dupe(u8, url);
+        const owned_source = try allocator.dupe(u8, source);
+        self.lockDebugRegistry();
+        defer self.unlockDebugRegistry();
+        try self.debug_scripts.ensureUnusedCapacity(allocator, 1);
+        const additional_locations = std.math.cast(u32, locations.len) orelse return error.OutOfMemory;
+        try self.debug_statement_locations.ensureUnusedCapacity(allocator, additional_locations);
         const script = DebugScript{
             .id = self.next_debug_script_id,
-            .url = try allocator.dupe(u8, url),
-            .source = try allocator.dupe(u8, source),
+            .url = owned_url,
+            .source = owned_source,
             .start_line = @max(start_line, 1),
         };
-        try self.debug_scripts.append(allocator, script);
+        self.debug_scripts.appendAssumeCapacity(script);
         self.next_debug_script_id += 1;
+        for (locations) |entry| self.debug_statement_locations.putAssumeCapacity(entry.node, .{
+            .script_id = script.id,
+            .location = .{
+                .byte_offset = entry.location.byte_offset,
+                .line = entry.location.line + script.start_line - 1,
+                .column = entry.location.column,
+            },
+            .source_url = script.url,
+            .debugger_statement = entry.debugger_statement,
+        });
         if (self.debug_script_notify_hook) |hook| {
             if (!hook(self.debug_script_notify_ctx.?, script)) return error.OutOfMemory;
         }
         return script;
     }
 
-    fn registerInterpreterDebugScript(ctx: *anyopaque, source: []const u8, url: []const u8, start_line: usize) interp.EvalError!interp.DebugScriptRegistration {
+    pub fn registerDebugScript(self: *Context, source: []const u8, url: []const u8, start_line: usize) !DebugScript {
+        return self.registerDebugScriptWithLocations(source, url, start_line, &.{});
+    }
+
+    fn registerInterpreterDebugScript(
+        ctx: *anyopaque,
+        source: []const u8,
+        url: []const u8,
+        start_line: usize,
+        locations: []const parser_mod.StatementLocation,
+    ) interp.EvalError!interp.DebugScriptRegistration {
         const self: *Context = @ptrCast(@alignCast(ctx));
-        const script = self.registerDebugScript(source, url, start_line) catch return error.OutOfMemory;
+        const script = self.registerDebugScriptWithLocations(source, url, start_line, locations) catch return error.OutOfMemory;
         return .{ .id = script.id, .start_line = script.start_line };
     }
 
-    fn debugScriptById(self: *const Context, id: u64) ?DebugScript {
+    fn debugScriptById(self: *Context, id: u64) ?DebugScript {
+        self.lockDebugRegistry();
+        defer self.unlockDebugRegistry();
         for (self.debug_scripts.items) |script| if (script.id == id) return script;
         return null;
     }
@@ -4610,23 +4689,16 @@ pub const Context = struct {
             self.last_evaluation_diagnostic = parser.errorLocation();
             return err;
         };
-        const evaluation_script = if (self.debug_script_id != 0)
-            self.debugScriptById(self.debug_script_id).?
-        else
-            try self.registerDebugScript(owned_source, "", 1);
-        {
-            for (parser.statement_locations.items) |entry| {
-                try self.debug_statement_locations.put(a, entry.node, .{
-                    .script_id = evaluation_script.id,
-                    .location = .{
-                        .byte_offset = entry.location.byte_offset,
-                        .line = entry.location.line + evaluation_script.start_line - 1,
-                        .column = entry.location.column,
-                    },
-                    .source_url = evaluation_script.url,
-                    .debugger_statement = entry.debugger_statement,
-                });
-            }
+        if (self.debug_script_id != 0) {
+            const script = self.debugScriptById(self.debug_script_id).?;
+            try self.registerDebugLocations(script, parser.statement_locations.items);
+        } else {
+            _ = try self.registerDebugScriptWithLocations(
+                owned_source,
+                "",
+                1,
+                parser.statement_locations.items,
+            );
         }
         // Global (Script) code has no `super` binding, so a top-level SuperCall or
         // SuperProperty — including inside a top-level arrow — is an early
@@ -5091,13 +5163,12 @@ pub const Context = struct {
         const owned_source = try a.dupe(u8, source);
         var parser = try Parser.init(a, owned_source);
         const prog = try parser.parseModule();
-        const debug_script = try self.registerDebugScript(owned_source, path, 1);
-        for (parser.statement_locations.items) |entry| try self.debug_statement_locations.put(a, entry.node, .{
-            .script_id = debug_script.id,
-            .location = entry.location,
-            .source_url = debug_script.url,
-            .debugger_statement = entry.debugger_statement,
-        });
+        _ = try self.registerDebugScriptWithLocations(
+            owned_source,
+            path,
+            1,
+            parser.statement_locations.items,
+        );
         const items = prog.program;
 
         const env = try gc_mod.allocEnv(a);
@@ -12621,6 +12692,47 @@ test "parallel: shared closure read across threads via the real Thread entry res
     // Deterministic: 4 threads × 2000 reads × 41 = 328000. The read is pure
     // (no mutation), so there is no race — only the entry-path resolution.
     try std.testing.expectEqual(@as(f64, 4 * 2000 * 41), v.asNum());
+}
+
+test "parallel: debug registry publishes dynamic scripts atomically" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_threads = true });
+    defer ctx.destroy();
+    const workers = 8;
+    const scripts_per_worker = 64;
+    const result = try ctx.evaluate(
+        \\function buildScripts() {
+        \\  let sum = 0;
+        \\  for (let i = 0; i < 64; i++) {
+        \\    const fn = Function("x", "let y = x + 1; return y;");
+        \\    sum += fn(i);
+        \\  }
+        \\  return sum;
+        \\}
+        \\const threads = [];
+        \\for (let i = 0; i < 8; i++) threads.push(new Thread(buildScripts));
+        \\let total = 0;
+        \\for (const thread of threads) total += thread.join();
+        \\total;
+    );
+    try std.testing.expectEqual(
+        @as(f64, workers * (scripts_per_worker * (scripts_per_worker + 1) / 2)),
+        result.asNum(),
+    );
+
+    // One top-level script plus every dynamic Function. Publication order and
+    // ids are one transaction, and every visible location names a published
+    // script. The same workload is the TSan witness for concurrent map reads.
+    ctx.lockDebugRegistry();
+    defer ctx.unlockDebugRegistry();
+    try std.testing.expectEqual(@as(usize, 1 + workers * scripts_per_worker), ctx.debug_scripts.items.len);
+    for (ctx.debug_scripts.items, 1..) |script, expected_id| {
+        try std.testing.expectEqual(@as(u64, @intCast(expected_id)), script.id);
+    }
+    var locations = ctx.debug_statement_locations.valueIterator();
+    while (locations.next()) |location| {
+        try std.testing.expect(location.script_id > 0);
+        try std.testing.expect(location.script_id <= @as(u64, @intCast(ctx.debug_scripts.items.len)));
+    }
 }
 
 test "tree-walker entry into a VM closure resolves frame upvalues (native callback)" {

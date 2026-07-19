@@ -380,11 +380,48 @@ pub const DebugScriptRegistration = struct {
     start_line: usize,
 };
 
+/// Reentrant lock for the Context-owned debugger registry. Inspector callbacks
+/// may synchronously evaluate more source on the runtime thread, so a plain
+/// mutex would deadlock while publishing the nested script. The owner/depth
+/// bookkeeping is only touched by the owning thread; the atomic owner permits
+/// a same-thread fast path without racing a peer that is releasing the lock.
+pub const DebugRegistryLock = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    owner: std.atomic.Value(u64) = .init(0),
+    depth: usize = 0,
+
+    pub fn lock(self: *DebugRegistryLock) void {
+        const current: u64 = @intCast(std.Thread.getCurrentId());
+        if (self.owner.load(.acquire) == current) {
+            self.depth += 1;
+            return;
+        }
+        var spins: usize = 0;
+        while (!self.mutex.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        std.debug.assert(self.owner.load(.monotonic) == 0);
+        self.depth = 1;
+        self.owner.store(current, .release);
+    }
+
+    pub fn unlock(self: *DebugRegistryLock) void {
+        const current: u64 = @intCast(std.Thread.getCurrentId());
+        std.debug.assert(self.owner.load(.acquire) == current);
+        std.debug.assert(self.depth > 0);
+        self.depth -= 1;
+        if (self.depth != 0) return;
+        self.owner.store(0, .release);
+        self.mutex.unlock();
+    }
+};
+
 pub const DebugScriptHook = *const fn (
     ctx: *anyopaque,
     source: []const u8,
     url: []const u8,
     start_line: usize,
+    statement_locations: []const parser_mod.StatementLocation,
 ) EvalError!DebugScriptRegistration;
 
 pub const DebugStatementHook = *const fn (
@@ -1029,6 +1066,11 @@ pub const Interpreter = struct {
     host_statement_ctx: ?*anyopaque = null,
     host_statement_hook: ?HostStatementHook = null,
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
+    /// Non-null only for a no-GIL shared realm. Script publication mutates one
+    /// Context-owned registry while every interpreter reads it at statement
+    /// boundaries, so those map operations need a lock independent of object
+    /// and GC locks. Single-threaded/GIL contexts keep the null fast path.
+    debug_registry_lock: ?*DebugRegistryLock = null,
     debug_script_ctx: ?*anyopaque = null,
     debug_script_hook: ?DebugScriptHook = null,
     debug_dynamic_url_override: ?[]const u8 = null,
@@ -3380,10 +3422,23 @@ pub const Interpreter = struct {
         };
     }
 
+    pub fn lockDebugRegistry(self: *Interpreter) void {
+        if (self.debug_registry_lock) |registry| registry.lock();
+    }
+
+    pub fn unlockDebugRegistry(self: *Interpreter) void {
+        if (self.debug_registry_lock) |registry| registry.unlock();
+    }
+
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
         if (self.debug_statement_locations) |locations| {
-            if (locations.get(node)) |location| {
+            const maybe_location = blk: {
+                self.lockDebugRegistry();
+                defer self.unlockDebugRegistry();
+                break :blk locations.get(node);
+            };
+            if (maybe_location) |location| {
                 self.debug_current_location = location;
                 if (self.stack_trace_call_frame) |frame| frame.location = location;
                 if (self.debug_statement_hook) |hook| {
@@ -3404,18 +3459,13 @@ pub const Interpreter = struct {
 
     pub fn registerParsedDebugScript(self: *Interpreter, source: []const u8, url: []const u8, start_line: usize, parser: *const Parser) EvalError!void {
         const hook = self.debug_script_hook orelse return;
-        const registration = try hook(self.debug_script_ctx.?, source, url, start_line);
-        const locations = self.debug_statement_locations orelse return;
-        for (parser.statement_locations.items) |entry| try locations.put(self.arena, entry.node, .{
-            .script_id = registration.id,
-            .location = .{
-                .byte_offset = entry.location.byte_offset,
-                .line = entry.location.line + registration.start_line - 1,
-                .column = entry.location.column,
-            },
-            .source_url = url,
-            .debugger_statement = entry.debugger_statement,
-        });
+        _ = try hook(
+            self.debug_script_ctx.?,
+            source,
+            url,
+            start_line,
+            parser.statement_locations.items,
+        );
     }
 
     pub fn registerParsedDynamicDebugScript(self: *Interpreter, source: []const u8, fallback_url: []const u8, start_line: usize, parser: *const Parser) EvalError!void {

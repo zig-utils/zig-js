@@ -3806,7 +3806,11 @@ fn serviceVmDebugStatement(vm: *Interpreter, node: *const ast.Node, chunk: *Chun
 
 fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
     const locations = vm.debug_statement_locations orelse return;
-    const location = locations.get(node) orelse return;
+    const location = blk: {
+        vm.lockDebugRegistry();
+        defer vm.unlockDebugRegistry();
+        break :blk locations.get(node) orelse return;
+    };
     vm.debug_current_location = location;
     if (vm.stack_trace_call_frame) |frame| frame.location = location;
 }
