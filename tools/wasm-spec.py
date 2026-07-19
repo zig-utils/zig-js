@@ -175,8 +175,10 @@ PROFILES = {
         "repository": "https://github.com/WebAssembly/memory64.git",
         "tag": "proposal-revision",
         "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
-        "wabt_version": "1.0.39",
-        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "converter_kind": "wasm-tools",
+        "converter_repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "converter_version": "1.253.0",
+        "converter_commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
         "evaluator_profile": "memory64",
         "features": [
             "memory64", "multi_memory", "typed_function_references",
@@ -193,11 +195,7 @@ PROFILES = {
             "table_get.wast", "table_grow.wast", "table_init.wast",
             "table_set.wast", "table_size.wast",
         ],
-        "converter_args": [
-            "--enable-memory64", "--enable-multi-memory",
-            "--enable-function-references", "--enable-tail-call",
-            "--enable-exceptions",
-        ],
+        "converter_args": [],
     },
     "gc": {
         "kind": "webassembly_gc_runtime_inventory",
@@ -1233,6 +1231,20 @@ def feature_area(profile_name: str, filename: str) -> str:
     return "shared_core"
 
 
+def select_corpus_files(all_wast: list[Path], profile: dict, filter_text: str | None) -> list[Path]:
+    if profile.get("default_files"):
+        selected_names = set(profile["default_files"])
+        declared = [path for path in all_wast if path.name in selected_names]
+        missing = selected_names - {path.name for path in declared}
+        if missing:
+            fail(f"pinned profile files missing: {sorted(missing)}")
+    else:
+        declared = all_wast
+    if filter_text:
+        return [path for path in declared if filter_text in path.as_posix()]
+    return declared
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
@@ -1285,16 +1297,7 @@ def main() -> int:
     inventory_path = args.inventory or default_inventories[args.profile]
     verify_tools(spec_root, converter, engine, profile)
     all_wast = sorted(spec_root.glob(profile["corpus_glob"]))
-    if args.filter:
-        selected = [path for path in all_wast if args.filter in path.as_posix()]
-    elif profile.get("default_files"):
-        selected_names = set(profile["default_files"])
-        selected = [path for path in all_wast if path.name in selected_names]
-        missing = selected_names - {path.name for path in selected}
-        if missing:
-            fail(f"pinned profile files missing: {sorted(missing)}")
-    else:
-        selected = all_wast
+    selected = select_corpus_files(all_wast, profile, args.filter)
     if not selected:
         fail("no corpus files selected")
 

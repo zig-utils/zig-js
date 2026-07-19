@@ -146,6 +146,19 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertFalse(sharded)
         self.assertEqual(shards, [document])
 
+    def test_corpus_filter_cannot_escape_declared_profile(self) -> None:
+        paths = [
+            pathlib.Path("test/core/table.wast"),
+            pathlib.Path("test/core/br_table.wast"),
+            pathlib.Path("test/core/try_table.wast"),
+        ]
+        selected = wasm_spec.select_corpus_files(
+            paths,
+            {"default_files": ["table.wast"]},
+            "table.wast",
+        )
+        self.assertEqual(selected, [pathlib.Path("test/core/table.wast")])
+
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
         exceptions = wasm_spec.PROFILES["exception-handling"]
@@ -167,11 +180,9 @@ class ScriptGenerationTests(unittest.TestCase):
             ["--enable-exceptions", "--enable-tail-call"],
         )
         self.assertEqual(len(memory64["default_files"]), 23)
-        self.assertEqual(memory64["converter_args"], [
-            "--enable-memory64", "--enable-multi-memory",
-            "--enable-function-references", "--enable-tail-call",
-            "--enable-exceptions",
-        ])
+        self.assertEqual(memory64["converter_kind"], "wasm-tools")
+        self.assertEqual(memory64["converter_version"], "1.253.0")
+        self.assertEqual(memory64["converter_args"], [])
         self.assertEqual(len(gc["default_files"]), 18)
         self.assertEqual(gc["converter_kind"], "wasm-tools")
         self.assertEqual(gc["converter_version"], "1.253.0")
