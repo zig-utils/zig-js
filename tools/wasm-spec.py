@@ -755,9 +755,20 @@ const __spectest = {
   global_f32: 666.6,
   global_f64: 666.6,
   table: new WebAssembly.Table({ initial: 10, maximum: 20, element: 'anyfunc' }),
-  table64: new WebAssembly.Table({ address: 'i64', initial: 10n, maximum: 20n, element: 'anyfunc' }),
   memory: new WebAssembly.Memory({ initial: 1, maximum: 2 }),
 };
+// `table64` belongs only to the memory64 proposal. Keep it lazy so the shared
+// prelude can initialize under ordinary profiles, while caching the first value
+// preserves the import object's identity across modules in memory64 scripts.
+let __spectestTable64;
+Object.defineProperty(__spectest, 'table64', {
+  enumerable: true,
+  get() {
+    return __spectestTable64 ??= new WebAssembly.Table({
+      address: 'i64', initial: 10n, maximum: 20n, element: 'anyfunc'
+    });
+  },
+});
 __registry.spectest = __spectest;
 """
 

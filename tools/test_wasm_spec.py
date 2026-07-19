@@ -203,7 +203,9 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn("item.type === 'eqref'", wasm_spec.PRELUDE)
         self.assertIn("item.type === 'refnull'", wasm_spec.PRELUDE)
         self.assertIn("return typeof actual === 'function'", wasm_spec.PRELUDE)
-        self.assertIn("table64: new WebAssembly.Table({ address: 'i64'", wasm_spec.PRELUDE)
+        self.assertIn("Object.defineProperty(__spectest, 'table64'", wasm_spec.PRELUDE)
+        self.assertIn("return __spectestTable64 ??= new WebAssembly.Table({", wasm_spec.PRELUDE)
+        self.assertNotIn("table64: new WebAssembly.Table", wasm_spec.PRELUDE)
 
 
 if __name__ == "__main__":
