@@ -511,6 +511,12 @@ extern "c" fn URL__getHrefJoin(?*const BunString, ?*const BunString) BunString;
 extern "c" fn URL__getFileURLString(?*const BunString) BunString;
 extern "c" fn URL__pathFromFileURL(?*const BunString) BunString;
 extern "c" fn URL__originLength(?[*]const u8, usize) u32;
+extern "c" fn BunString__toURL(?*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn BunString__toJSDOMURL(JSContextRef, ?*const BunString) EncodedValue;
+extern "c" fn WebCore__DOMURL__cast_(EncodedValue, ?*anyopaque) ?*anyopaque;
+extern "c" fn WebCore__DOMURL__href_(?*anyopaque, ?*ZigString) void;
+extern "c" fn WebCore__DOMURL__pathname_(?*anyopaque, ?*ZigString) void;
+extern "c" fn WebCore__DOMURL__fileSystemPath(?*anyopaque, ?*c_int) BunString;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -739,6 +745,20 @@ fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
         if (unit != byte) return false;
     }
     return true;
+}
+
+fn zigStringUtf8Equals(actual: ZigString, expected: []const u8) bool {
+    if (actual.len != expected.len) return false;
+    const untagged = actual.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (actual.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+        const units: [*]align(1) const u16 = @ptrFromInt(untagged);
+        for (units[0..actual.len], expected) |unit, byte| {
+            if (unit != byte) return false;
+        }
+        return true;
+    }
+    const bytes: [*]const u8 = @ptrFromInt(untagged);
+    return std.mem.eql(u8, bytes[0..actual.len], expected);
 }
 
 fn expectNativeUrlField(context: JSContextRef, actual: BunString, js_source: [*:0]const u8) bool {
@@ -3239,6 +3259,98 @@ pub fn main() void {
         URL__originLength(origin_bad.ptr, 0) != 0 or
         URL__originLength(null, 3) != 0)
         fail("private URL originLength invalid-input mismatch");
+
+    // DOMURL object boundary (#313): toJSDOMURL/toURL create the realm's
+    // URL-interface object (DOMURL::create semantics — invalid input throws),
+    // cast_ is the VM-scoped downcast borrowing the live object, and the
+    // getters read through that borrow.
+    const domurl_input = "https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag";
+    var domurl_bunstring = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(domurl_input.ptr), .len = domurl_input.len } } };
+    const domurl_value = BunString__toJSDOMURL(context, &domurl_bunstring);
+    if (domurl_value == .empty) fail("private DOMURL toJSDOMURL rejected a valid URL");
+    exposeCell(context, "__du", domurl_value);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__du instanceof URL")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__du.href === new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').href")) or
+        !JSC__JSValue__toBoolean(evaluate(context, "__du.searchParams.get('q') === '1'")))
+        fail("private DOMURL object shape mismatch");
+    const domurl_zig_input = "http://zig.example/path only";
+    const domurl_zig_string = ZigString{ .tagged_ptr = @intFromPtr(domurl_zig_input.ptr), .len = domurl_zig_input.len };
+    const domurl_value2 = BunString__toURL(&domurl_zig_string, context);
+    if (domurl_value2 == .empty) fail("private DOMURL toURL rejected a valid URL");
+    exposeCell(context, "__du2", domurl_value2);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__du2 instanceof URL && __du2.href === new URL('http://zig.example/path only').href")))
+        fail("private DOMURL toURL object mismatch");
+
+    // Invalid input publishes the TypeError and returns an empty handle;
+    // null input returns empty without an exception.
+    const domurl_bad = "not a url";
+    var domurl_bad_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(domurl_bad.ptr), .len = domurl_bad.len } } };
+    const domurl_bad_zs = ZigString{ .tagged_ptr = @intFromPtr(domurl_bad.ptr), .len = domurl_bad.len };
+    if (BunString__toJSDOMURL(context, &domurl_bad_bs) != .empty or !JSGlobalObject__hasException(context))
+        fail("private DOMURL toJSDOMURL did not publish invalid input");
+    JSGlobalObject__clearException(context);
+    if (BunString__toURL(&domurl_bad_zs, context) != .empty or !JSGlobalObject__hasException(context))
+        fail("private DOMURL toURL did not publish invalid input");
+    JSGlobalObject__clearException(context);
+    if (BunString__toJSDOMURL(context, null) != .empty or
+        BunString__toURL(null, context) != .empty or
+        JSGlobalObject__hasException(context))
+        fail("private DOMURL null-input mismatch");
+
+    // cast_: VM-scoped downcast accepting native-created AND JS-constructed
+    // URL objects (any same-VM realm), rejecting everything else.
+    const domurl_vm = JSC__JSGlobalObject__vm(context);
+    const domurl_native = WebCore__DOMURL__cast_(domurl_value, domurl_vm) orelse fail("private DOMURL cast_ rejected its own object");
+    const domurl_from_ctor = evaluate(context, "new URL('http://h.com/a b?q=1#f')");
+    if (WebCore__DOMURL__cast_(domurl_from_ctor, domurl_vm) == null)
+        fail("private DOMURL cast_ rejected a JS-constructed URL");
+    if (WebCore__DOMURL__cast_(encoded_object, domurl_vm) != null or
+        WebCore__DOMURL__cast_(encoded_text, domurl_vm) != null or
+        WebCore__DOMURL__cast_(domurl_value, null) != null)
+        fail("private DOMURL cast_ acceptance mismatch");
+    const foreign_domurl = BunString__toJSDOMURL(foreign_context, &domurl_bunstring);
+    if (foreign_domurl == .empty) fail("private DOMURL foreign-realm creation failed");
+    if (WebCore__DOMURL__cast_(foreign_domurl, domurl_vm) != null)
+        fail("private DOMURL cast_ accepted a foreign-VM value");
+    if (WebCore__DOMURL__cast_(foreign_domurl, JSC__JSGlobalObject__vm(foreign_context)) == null)
+        fail("private DOMURL cast_ rejected a same-VM foreign-realm object");
+
+    // href_/pathname_ read through the borrow as interned borrowed views.
+    var domurl_href_view = ZigString{ .tagged_ptr = 0, .len = 7 };
+    WebCore__DOMURL__href_(domurl_native, &domurl_href_view);
+    if (!zigStringUtf8Equals(domurl_href_view, "https://user:pw@example.com:8443/a%20b?q=1&x=#frag"))
+        fail("private DOMURL href_ mismatch");
+    var domurl_path_view = ZigString{ .tagged_ptr = 0, .len = 7 };
+    WebCore__DOMURL__pathname_(domurl_native, &domurl_path_view);
+    if (!zigStringUtf8Equals(domurl_path_view, "/a%20b"))
+        fail("private DOMURL pathname_ mismatch");
+    WebCore__DOMURL__href_(null, &domurl_href_view);
+    WebCore__DOMURL__pathname_(null, &domurl_path_view);
+    if (domurl_href_view.len != 0 or domurl_path_view.len != 0)
+        fail("private DOMURL null getter mismatch");
+
+    // fileSystemPath: decoded path for file: URLs; the three error codes.
+    const domurl_file_input = "file:///tmp/a%20b/x+y";
+    var domurl_file_bs = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(domurl_file_input.ptr), .len = domurl_file_input.len } } };
+    const domurl_file_value = BunString__toJSDOMURL(context, &domurl_file_bs);
+    const domurl_file_native = WebCore__DOMURL__cast_(domurl_file_value, domurl_vm) orelse fail("private DOMURL cast_ rejected a file URL");
+    var domurl_error_code: c_int = 0;
+    if (!bunStringUtf8Equals(WebCore__DOMURL__fileSystemPath(domurl_file_native, &domurl_error_code), "/tmp/a b/x+y") or domurl_error_code != 0)
+        fail("private DOMURL fileSystemPath mismatch");
+    const domurl_host_url = evaluate(context, "new URL('file://host/x')");
+    domurl_error_code = 0;
+    if (WebCore__DOMURL__fileSystemPath(WebCore__DOMURL__cast_(domurl_host_url, domurl_vm), &domurl_error_code).tag != .dead or domurl_error_code != 1)
+        fail("private DOMURL fileSystemPath host error mismatch");
+    const domurl_2f_url = evaluate(context, "new URL('file:///a%2Fb')");
+    domurl_error_code = 0;
+    if (WebCore__DOMURL__fileSystemPath(WebCore__DOMURL__cast_(domurl_2f_url, domurl_vm), &domurl_error_code).tag != .dead or domurl_error_code != 2)
+        fail("private DOMURL fileSystemPath %2f error mismatch");
+    domurl_error_code = 0;
+    if (WebCore__DOMURL__fileSystemPath(domurl_native, &domurl_error_code).tag != .dead or domurl_error_code != 3)
+        fail("private DOMURL fileSystemPath non-file error mismatch");
+    domurl_error_code = 0;
+    if (WebCore__DOMURL__fileSystemPath(null, &domurl_error_code).tag != .dead or domurl_error_code != 2)
+        fail("private DOMURL fileSystemPath null tolerance mismatch");
 
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
@@ -5814,5 +5926,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 314/314 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 320/320 symbols linked; runtime matrix passed\n", .{});
 }

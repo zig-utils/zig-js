@@ -41078,7 +41078,7 @@ fn urlStore(self: *Interpreter, o: *value.Object, p: UrlParts) EvalError!void {
     if (p.query) |q| try S.put(self, o, "\x00Uq", q) else try o.setOwn(self.arena, self.root_shape, "\x00Uq", Value.nul());
     if (p.fragment) |f| try S.put(self, o, "\x00Uf", f) else try o.setOwn(self.arena, self.root_shape, "\x00Uf", Value.nul());
 }
-fn urlLoad(o: *value.Object) UrlParts {
+pub fn urlLoad(o: *value.Object) UrlParts {
     const has_host = if (o.getOwn("\x00Uhh")) |v| v.toBoolean() else false;
     const qv = o.getOwn("\x00Uq");
     const fv = o.getOwn("\x00Uf");
@@ -41116,6 +41116,27 @@ fn urlConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
         const sp = try self.construct(uspc, &.{if (parts.query) |q| try Value.strAlloc(self.arena, q) else Value.str("")});
         try obj.setOwn(self.arena, self.root_shape, "\x00Usp", sp);
         // Live link: the params write back into this URL's query on mutation.
+        if (sp.isObject()) try sp.asObj().setOwn(self.arena, self.root_shape, "\x00Uspurl", Value.obj(obj));
+    };
+    return Value.obj(obj);
+}
+/// `WebCore::DOMURL::create(str, "")` (BunString.cpp:588): build the realm's
+/// URL-interface object exactly like `new URL(str)` but without the
+/// new-target check — same URL prototype, hidden component slots, and live
+/// searchParams snapshot. Invalid input raises the TypeError through the
+/// caller (the private ABI publishes it and returns an empty handle).
+pub fn urlCreateDomUrlObject(self: *Interpreter, input: []const u8) EvalError!Value {
+    const parts = (try urlParse(self.arena, input, null)) orelse
+        return self.throwError("TypeError", "Invalid URL");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("URL")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
+    };
+    try urlStore(self, obj, parts);
+    if (self.env.get("URLSearchParams")) |uspc| if (uspc.isObject()) {
+        const sp = try self.construct(uspc, &.{if (parts.query) |q| try Value.strAlloc(self.arena, q) else Value.str("")});
+        try obj.setOwn(self.arena, self.root_shape, "\x00Usp", sp);
         if (sp.isObject()) try sp.asObj().setOwn(self.arena, self.root_shape, "\x00Uspurl", Value.obj(obj));
     };
     return Value.obj(obj);

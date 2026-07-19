@@ -4181,12 +4181,12 @@ export fn StringBuilder__toString(raw: ?*anyopaque, global: JSContextRef) callco
     return encoded;
 }
 
-fn privateBorrowedZigStringView(
-    group: *CContextGroup,
+fn privateInternZigStringView(
+    views: *std.StringHashMapUnmanaged(PrivateZigStringView),
     bytes: []const u8,
 ) PrivateBunStringError!PrivateZigString {
     if (bytes.len == 0) return .{ .tagged_ptr = @intFromPtr("".ptr), .len = 0 };
-    if (group.zig_string_views.get(bytes)) |view| return view.result;
+    if (views.get(bytes)) |view| return view.result;
 
     const units = try privateWTF8ToUTF16(gpa, bytes);
     var owns_units = true;
@@ -4212,8 +4212,29 @@ fn privateBorrowedZigStringView(
     };
     const key = try gpa.dupe(u8, bytes);
     errdefer gpa.free(key);
-    try group.zig_string_views.put(gpa, key, view);
+    try views.put(gpa, key, view);
     return view.result;
+}
+
+fn privateBorrowedZigStringView(
+    group: *CContextGroup,
+    bytes: []const u8,
+) PrivateBunStringError!PrivateZigString {
+    return privateInternZigStringView(&group.zig_string_views, bytes);
+}
+
+/// Process-global borrowed-view store for the context-free `WebCore__DOMURL__*`
+/// getters: Bun's ZigString views borrow the DOMURL's own WTF strings, so the
+/// bytes must outlive the call without a free hook. Same latin1/UTF-16
+/// conversion as the group-level store, mutex-guarded because it is not
+/// thread-affine.
+var private_global_zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty;
+var private_global_zig_string_views_mutex: std.atomic.Mutex = .unlocked;
+
+fn privateGlobalZigStringView(bytes: []const u8) PrivateBunStringError!PrivateZigString {
+    while (!private_global_zig_string_views_mutex.tryLock()) {}
+    defer private_global_zig_string_views_mutex.unlock();
+    return privateInternZigStringView(&private_global_zig_string_views, bytes);
 }
 
 export fn JSC__JSString__toZigString(
@@ -8488,6 +8509,160 @@ export fn URL__originLength(latin1_slice: ?[*]const u8, len: usize) callconv(.c)
         start += 2;
     }
     return @intCast(@min(start, std.math.maxInt(u32)));
+}
+
+/// The URL-interface slot predicate behind `WebCoreCast<JSDOMURL, DOMURL>`
+/// (bindings.cpp:2132): URL-builtin objects carry hidden component slots
+/// written only by `urlStore`, invisible to script.
+fn privateDomUrlFromValue(internal: Value) ?*Object {
+    if (!internal.isObject()) return null;
+    const object = internal.asObj();
+    const scheme = object.getOwn("\x00Us") orelse return null;
+    if (!scheme.isString()) return null;
+    const host_flag = object.getOwn("\x00Uhh") orelse return null;
+    if (!host_flag.isBoolean()) return null;
+    return object;
+}
+
+fn privateDomUrlObjectFromOpaque(raw: ?*anyopaque) ?*Object {
+    const pointer = raw orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(Object) != 0) return null;
+    return privateDomUrlFromValue(Value.obj(@ptrCast(@alignCast(pointer))));
+}
+
+fn privateCreateDomUrlValue(context: *Context, machine: *interp.Interpreter, input: []const u8) EncodedValue {
+    const result = interp.urlCreateDomUrlObject(machine, input) catch |err| {
+        privateSetPendingAbrupt(context, machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, machine, result);
+}
+
+/// `DOMURL::create(str, String())` + `toJSNewlyCreated` (BunString.cpp:580):
+/// the realm's URL-interface object for the BunString input — same shape as
+/// `new URL(str)` minus the new-target check. `DOMURL::create` is
+/// `ExceptionOr` (webcore/DOMURL.h:45): invalid input publishes the TypeError
+/// and returns an empty handle (Bun's `RETURN_IF_EXCEPTION → {}`).
+export fn BunString__toJSDOMURL(global: JSContextRef, input: ?*const PrivateBunString) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const string = input orelse return .empty;
+    const bytes = privateBunStringPropertyKey(context, string) orelse return .empty;
+    return privateCreateDomUrlValue(context, &machine, bytes);
+}
+
+/// `ZigString.toURL()` (Home ZigString.zig:148; not vendored in the upstream
+/// C++ subset): the ZigString-input sibling of `BunString__toJSDOMURL` with
+/// string-first argument order — same `DOMURL::create(url, "")` semantics,
+/// invalid input publishes the TypeError and returns an empty handle.
+export fn BunString__toURL(input: ?*const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const string = input orelse return .empty;
+    const bytes = privateZigStringPropertyKey(context, string) orelse return .empty;
+    return privateCreateDomUrlValue(context, &machine, bytes);
+}
+
+/// `WebCoreCast<JSDOMURL, DOMURL>` (bindings.cpp:2132): VM-scoped downcast.
+/// The `VM*` is the VM identity zig-js publishes from
+/// `JSC__JSGlobalObject__vm`/`bunVM` (the context group); any same-VM realm's
+/// URL object qualifies. The returned pointer BORROWS the live JS object —
+/// valid while the caller's value keeps it alive; no ownership transfer.
+export fn WebCore__DOMURL__cast_(encoded: EncodedValue, vm_handle: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const pointer = vm_handle orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(CContextGroup) != 0) return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(pointer));
+    const primary = group.primary;
+    if (@intFromPtr(primary) % @alignOf(Context) != 0) return null;
+    if (primary.c_api_group != pointer) return null; // not a zig-js VM handle
+    const internal = privateValueFrom(@ptrCast(primary), encoded) orelse return null;
+    const object = privateDomUrlFromValue(internal) orelse return null;
+    return @ptrCast(object);
+}
+
+/// `domURL->href().string()` (bindings.cpp:2137): the full serialization as a
+/// borrowed ZigString view interned in the process-global store. Null/stale
+/// input zeroes the out-param.
+export fn WebCore__DOMURL__href_(raw: ?*anyopaque, output: ?*PrivateZigString) callconv(.c) void {
+    const out = output orelse return;
+    out.* = .{};
+    const object = privateDomUrlObjectFromOpaque(raw) orelse return;
+    const parts = interp.urlLoad(object);
+    if (parts.scheme.len == 0) return;
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const href = interp.urlSerialize(arena_state.allocator(), parts, false) catch return;
+    out.* = privateGlobalZigStringView(href) catch return;
+}
+
+/// `domURL->href().path()` (bindings.cpp:2142): the serialized path as a
+/// borrowed ZigString view interned in the process-global store. Null/stale
+/// input zeroes the out-param.
+export fn WebCore__DOMURL__pathname_(raw: ?*anyopaque, output: ?*PrivateZigString) callconv(.c) void {
+    const out = output orelse return;
+    out.* = .{};
+    const object = privateDomUrlObjectFromOpaque(raw) orelse return;
+    const parts = interp.urlLoad(object);
+    if (parts.scheme.len == 0) return;
+    out.* = privateGlobalZigStringView(parts.path) catch return;
+}
+
+/// `domURL->href().fileSystemPath()` (bindings.cpp:2149): percent-decoded path
+/// of a `file:` URL as an owned BunString. Error codes: 1 non-empty host,
+/// 2 case-insensitive `%2f` in the serialized path, 3 not a `file:` URL;
+/// written only on failure (success leaves the caller's code untouched).
+/// Context-free: no GC allocation, so the borrowed object needs no active
+/// realm. A null `DOMURL*` yields error 2 Dead (Bun dereferences
+/// unconditionally).
+export fn WebCore__DOMURL__fileSystemPath(raw: ?*anyopaque, error_code: ?*c_int) callconv(.c) PrivateBunString {
+    const object = privateDomUrlObjectFromOpaque(raw) orelse {
+        if (error_code) |code| code.* = 2;
+        return PrivateBunString.dead();
+    };
+    const parts = interp.urlLoad(object);
+    if (!std.mem.eql(u8, parts.scheme, "file")) {
+        if (error_code) |code| code.* = 3;
+        return PrivateBunString.dead();
+    }
+    if (parts.host) |host| {
+        if (host.len > 0) {
+            if (error_code) |code| code.* = 1;
+            return PrivateBunString.dead();
+        }
+    }
+    var scan: usize = 0;
+    while (scan + 2 < parts.path.len) : (scan += 1) {
+        if (parts.path[scan] == '%' and parts.path[scan + 1] == '2' and
+            (parts.path[scan + 2] == 'f' or parts.path[scan + 2] == 'F'))
+        {
+            if (error_code) |code| code.* = 2;
+            return PrivateBunString.dead();
+        }
+    }
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const decoded = interp.urlPercentDecode(arena_state.allocator(), parts.path) catch return PrivateBunString.dead();
+    return privateUrlOwnedString(decoded);
 }
 
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {

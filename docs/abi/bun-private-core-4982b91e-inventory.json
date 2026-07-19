@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 319,
-      "pending": 117
+      "implemented": 323,
+      "pending": 113
     }
   },
   "home_comparison": {
@@ -215,10 +215,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toJSDOMURL(globalObject: *jsc.JSGlobalObject, in: *String) jsc.JSValue;",
       "declaration_sha256": "c13b28f1f08f1b71a272e9f94e6c6a18756843dfced666c9dbe4a481b1a5a021",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__toJSWithLength",
@@ -237,10 +237,10 @@
       "line": 148,
       "calling_convention": ".c",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toURL(this: *const ZigString, *jsc.JSGlobalObject) callconv(.c) jsc.JSValue;",
       "declaration_sha256": "7df2f87f205e0274da8391901fa7411e727417bb31b72cfa26ea5c9e733acef2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__transferToJS",
@@ -4225,10 +4225,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn WebCore__DOMURL__cast_(JSValue0: JSValue, arg1: *VM) ?*DOMURL;",
       "declaration_sha256": "6ea25ee2e7f733b21ec82ae7b3cc2fba72b9c5395a0224556462ae7b4b1acf12",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMURL__fileSystemPath",
@@ -4236,10 +4236,10 @@
       "line": 22,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMURL__fileSystemPath(arg0: *DOMURL, error_code: *c_int) bun.String;",
       "declaration_sha256": "851f083780c66ac9c71adc4c8f700b7a957f4dd1ae0ae11b7c9428aec262a5b2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__append",

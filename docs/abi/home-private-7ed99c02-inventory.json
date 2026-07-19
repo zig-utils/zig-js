@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 326,
-      "pending": 120
+      "implemented": 332,
+      "pending": 114
     }
   },
   "declarations": [
@@ -165,10 +165,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toJSDOMURL(globalObject: *jsc.JSGlobalObject, in: *String) jsc.JSValue;",
       "declaration_sha256": "c13b28f1f08f1b71a272e9f94e6c6a18756843dfced666c9dbe4a481b1a5a021",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__toJSWithLength",
@@ -187,10 +187,10 @@
       "line": 148,
       "calling_convention": ".c",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunString__toURL(this: *const ZigString, *jsc.JSGlobalObject) callconv(.c) jsc.JSValue;",
       "declaration_sha256": "7df2f87f205e0274da8391901fa7411e727417bb31b72cfa26ea5c9e733acef2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__transferToJS",
@@ -4263,10 +4263,10 @@
       "line": 27,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern fn WebCore__DOMURL__cast_(JSValue0: JSValue, arg1: *VM) ?*DOMURL;",
       "declaration_sha256": "6ea25ee2e7f733b21ec82ae7b3cc2fba72b9c5395a0224556462ae7b4b1acf12",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMURL__fileSystemPath",
@@ -4274,10 +4274,10 @@
       "line": 52,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMURL__fileSystemPath(arg0: *DOMURL, error_code: *c_int) String;",
       "declaration_sha256": "f10d3e20d461b823bd08fc031ed6738d1665820423877c1de75e3efa169d597f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMURL__href_",
@@ -4285,10 +4285,10 @@
       "line": 41,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMURL__href_(this: *DOMURL, out: *ZigString) void;",
       "declaration_sha256": "e5f3cc5f4ef1e0e654d1b15c30f2d1e6bd9c2312c9764823fe02c2eb519dd8ac",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMURL__pathname_",
@@ -4296,10 +4296,10 @@
       "line": 71,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMURL__pathname_(this: *DOMURL, out: *ZigString) void;",
       "declaration_sha256": "b9a82b5cd589766e9820db81ee77bcc3e418ec14e4d2914f71476b48f2dbca52",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__append",
