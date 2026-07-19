@@ -96,8 +96,7 @@ fn valTypeEquivalentInGroups(
     b_group: types.RecGroup,
     depth: usize,
 ) bool {
-    if (a == b) return true;
-    const a_ref = a.refType() orelse return false;
+    const a_ref = a.refType() orelse return a == b;
     const b_ref = b.refType() orelse return false;
     return a_ref.nullable == b_ref.nullable and
         heapTypeEquivalentInGroups(mod, a_ref.heap, b_ref.heap, a_group, b_group, depth);
@@ -3259,4 +3258,20 @@ test "wasm.validate GC ref tests accept operands below the target type" {
         sec(3, "\x01\x02") ++
         code1("\xD0\x01\xFB\x15\x00\x1A\x0B"));
     try expectValidWithFeatures(bytes, gc_validation_features);
+}
+
+test "wasm.validate recursive groups do not capture earlier type indices" {
+    const bytes = hdr ++
+        "\x01\x2D\x04\x4E\x02\x50\x00\x60\x00\x00\x5F\x01\x64\x00\x00" ++
+        "\x4E\x02\x50\x00\x60\x00\x00\x5F\x01\x64\x00\x00" ++
+        "\x4E\x02\x50\x01\x00\x60\x00\x00\x5F\x00" ++
+        "\x4E\x02\x50\x01\x02\x60\x00\x00\x5F\x00" ++
+        "\x03\x02\x01\x06\x06\x07\x01\x64\x04\x00\xD2\x00\x0B" ++
+        "\x0A\x04\x01\x02\x00\x0B";
+    var diag: types.Diagnostic = .{};
+    const mod = try decode.decodeWithFeatures(std.testing.allocator, bytes, gc_validation_features, &diag);
+    defer decode.destroyModule(std.testing.allocator, mod);
+    try std.testing.expect(!definedTypeEquivalent(mod, 2, 0));
+    try std.testing.expect(!heapTypeMatches(mod, .concrete(6), .concrete(4)));
+    try std.testing.expectError(error.Invalid, validate(mod, &diag));
 }
