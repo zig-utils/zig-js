@@ -740,7 +740,11 @@ fn checkConstExpr(
         },
         .ref_func => |funcidx| {
             if (funcidx >= mod.totalFuncs()) return failModFmt(diag, "unknown function {d}", .{funcidx});
-            if (!valTypeMatches(mod, .funcref, expected)) return failMod(diag, "type mismatch");
+            const result_type = if (mod.features.typed_function_references)
+                types.ValType.fromRef(.{ .nullable = false, .heap = .concrete(mod.funcTypeIndex(funcidx)) })
+            else
+                types.ValType.funcref;
+            if (!valTypeMatches(mod, result_type, expected)) return failMod(diag, "type mismatch");
         },
         .extended => |extended| try checkExtendedConstExpr(mod, extended, expected, visible_globals, diag, allocator),
         else => if (!valTypeMatches(mod, expr.valType(), expected))
@@ -1832,7 +1836,14 @@ const FuncValidator = struct {
                 .ref_func => {
                     if (instr.imm.idx >= self.mod.totalFuncs()) return self.fail("unknown function");
                     if (!isDeclaredFunction(self.mod, instr.imm.idx)) return self.fail("undeclared function reference");
-                    self.push(.funcref);
+                    const result_type = if (self.mod.features.typed_function_references)
+                        types.ValType.fromRef(.{
+                            .nullable = false,
+                            .heap = .concrete(self.mod.funcTypeIndex(instr.imm.idx)),
+                        })
+                    else
+                        types.ValType.funcref;
+                    self.push(stackVal(result_type));
                 },
                 .table_grow => {
                     const tableidx = instr.imm.idx;
@@ -3040,6 +3051,15 @@ test "wasm.validate GC array segment copy and initialization signatures" {
     var features = gc_validation_features;
     features.bulk_memory = true;
     try expectValidWithFeatures(bytes, features);
+
+    const precise_ref_func = comptime (hdr ++
+        sec(1, "\x03\x60\x00\x00\x5E\x64\x00\x00\x60\x00\x00") ++
+        sec(3, "\x02\x00\x02") ++
+        sec(7, "\x01\x01f\x00\x00") ++
+        sec(10, "\x02" ++
+            codeBody("\x00", "\x0B") ++
+            codeBody("\x00", "\xD2\x00\x41\x01\xFB\x06\x01\x1A\x0B")));
+    try expectValidWithFeatures(precise_ref_func, gc_validation_features);
 }
 
 test "wasm.validate GC nominal subtypes finality and field variance" {

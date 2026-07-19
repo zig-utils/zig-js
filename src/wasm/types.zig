@@ -978,19 +978,22 @@ pub const Module = struct {
         return self.funcTypeAt(self.tags[i].type_index).?;
     }
 
+    /// Type index of any function in the index space (imported or defined).
+    pub fn funcTypeIndex(self: *const Module, funcidx: u32) u32 {
+        var i: u32 = funcidx;
+        for (self.imports) |imp| switch (imp.desc) {
+            .func => |type_index| {
+                if (i == 0) return type_index;
+                i -= 1;
+            },
+            else => {},
+        };
+        return self.funcs[i];
+    }
+
     /// Type of any function in the index space (imported or defined).
     pub fn funcType(self: *const Module, funcidx: u32) FuncType {
-        var i: u32 = funcidx;
-        for (self.imports) |imp| {
-            switch (imp.desc) {
-                .func => |t| {
-                    if (i == 0) return self.funcTypeAt(t).?;
-                    i -= 1;
-                },
-                else => {},
-            }
-        }
-        return self.funcTypeAt(self.funcs[i]).?;
+        return self.funcTypeAt(self.funcTypeIndex(funcidx)).?;
     }
 
     /// Global type of any global in the index space (imported or defined).
