@@ -8461,6 +8461,35 @@ export fn URL__pathFromFileURL(input: ?*const PrivateBunString) callconv(.c) Pri
     return privateUrlOwnedString(decoded);
 }
 
+/// `WTF::URL(StringView(latin1)).pathStart()` (BunString.cpp:569): the byte
+/// offset where the path begins in the canonical serialization — the origin
+/// length for tuple-origin URLs. The latin-1 slice is widened to WTF-8 before
+/// parsing (WTF 8-bit string semantics); empty/invalid input yields 0, and a
+/// null slice yields 0 (Bun dereferences unconditionally). Context-free.
+export fn URL__originLength(latin1_slice: ?[*]const u8, len: usize) callconv(.c) u32 {
+    const slice = latin1_slice orelse return 0;
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input_bytes = privateLatin1ToWTF8(arena, slice[0..len]) catch return 0;
+    const parts = (interp.urlParse(arena, input_bytes, null) catch return 0) orelse return 0;
+    if (parts.scheme.len == 0) return 0;
+    // Mirror urlSerialize's prefix emission exactly: `scheme:` plus, when a
+    // host component is present, `//` + userinfo (`user[:pw]@`, only when
+    // non-empty) + host + (`:port` when set); the `/.` sentinel precedes a
+    // non-opaque path that begins with `//`.
+    var start: usize = parts.scheme.len + 1;
+    if (parts.host) |host| {
+        start += 2 + host.len;
+        if (parts.username.len > 0 or parts.password.len > 0)
+            start += parts.username.len + (if (parts.password.len > 0) 1 + parts.password.len else 0) + 1;
+        if (parts.port.len > 0) start += 1 + parts.port.len;
+    } else if (!parts.opaque_path and std.mem.startsWith(u8, parts.path, "//")) {
+        start += 2;
+    }
+    return @intCast(@min(start, std.math.maxInt(u32)));
+}
+
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
     const gc_saved = gc_mod.setActiveHeap(context.gc);

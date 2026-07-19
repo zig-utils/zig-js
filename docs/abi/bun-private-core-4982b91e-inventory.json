@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 318,
-      "pending": 118
+      "implemented": 319,
+      "pending": 117
     }
   },
   "home_comparison": {
@@ -3829,10 +3829,10 @@
       "line": 144,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__originLength(latin1_slice: [*]const u8, len: usize) u32;",
       "declaration_sha256": "57138d0b3c8a9d1eb5900a0e3cfdfebed395cd61ca8a4fb3aa4b24490f99c273",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__password",

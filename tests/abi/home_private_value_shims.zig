@@ -510,6 +510,7 @@ extern "c" fn URL__getHref(?*const BunString) BunString;
 extern "c" fn URL__getHrefJoin(?*const BunString, ?*const BunString) BunString;
 extern "c" fn URL__getFileURLString(?*const BunString) BunString;
 extern "c" fn URL__pathFromFileURL(?*const BunString) BunString;
+extern "c" fn URL__originLength(?[*]const u8, usize) u32;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -3205,6 +3206,40 @@ pub fn main() void {
     URL__deinit(native_url_js);
     URL__deinit(native_url_coerced);
 
+    // URL__originLength (#312): byte offset where the path begins in the
+    // canonical serialization — the origin length for tuple-origin URLs.
+    const origin_userinfo = "http://user:pw@example.com:8080/p?q";
+    const origin_default_port = "http://example.com:80/";
+    const origin_file = "file:///tmp/x";
+    const origin_opaque = "mailto:a@b.com";
+    if (URL__originLength(origin_userinfo.ptr, origin_userinfo.len) != 31 or // "http://user:pw@example.com:8080"
+        URL__originLength(origin_default_port.ptr, origin_default_port.len) != 18 or // default port elided
+        URL__originLength(origin_file.ptr, origin_file.len) != 7 or // empty authority present
+        URL__originLength(origin_opaque.ptr, origin_opaque.len) != 7) // scheme-only prefix
+        fail("private URL originLength mismatch");
+    // JS-derived parity: for URLs without query/fragment, pathStart equals
+    // href.length - pathname.length — covers non-special hierarchical URLs
+    // and the `/.`-sentinel case without hard-coding parser outcomes.
+    const origin_sentinel = "foo:////p";
+    exposeCell(context, "__ol", EncodedValue.fromInt32(@intCast(URL__originLength(origin_sentinel.ptr, origin_sentinel.len))));
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__ol === (()=>{const u=new URL('foo:////p'); return u.href.length - u.pathname.length})()")))
+        fail("private URL originLength sentinel parity mismatch");
+    const origin_nonspecial = "foo://host:9/p";
+    exposeCell(context, "__ol", EncodedValue.fromInt32(@intCast(URL__originLength(origin_nonspecial.ptr, origin_nonspecial.len))));
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__ol === (()=>{const u=new URL('foo://host:9/p'); return u.href.length - u.pathname.length})()")))
+        fail("private URL originLength non-special parity mismatch");
+    // http(s) cross-check against the JS origin getter.
+    const origin_https = "https://example.com:8443/a";
+    exposeCell(context, "__ol", EncodedValue.fromInt32(@intCast(URL__originLength(origin_https.ptr, origin_https.len))));
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__ol === new URL('https://example.com:8443/a').origin.length")))
+        fail("private URL originLength origin parity mismatch");
+    // Invalid/empty/null input yields 0.
+    const origin_bad = "not a url";
+    if (URL__originLength(origin_bad.ptr, origin_bad.len) != 0 or
+        URL__originLength(origin_bad.ptr, 0) != 0 or
+        URL__originLength(null, 3) != 0)
+        fail("private URL originLength invalid-input mismatch");
+
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
     const int32_max_wrapper = evaluate(context, "new Number(2147483647)");
@@ -5779,5 +5814,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 313/313 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 314/314 symbols linked; runtime matrix passed\n", .{});
 }
