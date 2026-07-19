@@ -8079,6 +8079,242 @@ export fn URLSearchParams__toString(params: ?*anyopaque, ctx: ?*anyopaque, callb
     cb(ctx, &view);
 }
 
+// ===== URL native record boundary (#308) =====
+// Bun's `WTF::URL*` is a context-free heap object: `URL__fromString` carries no
+// global object, so the zig-js mapping is a native parsed-URL record owning its
+// component bytes in one c_allocator backing allocation — never a JS object.
+// The engine's allocator-first `urlParse`/`urlSerialize` do the WHATWG work on
+// a per-call arena; the record copies the results out and outlives the arena.
+const private_url_magic: usize = 0x5a4a_5552_4c30_3031; // "ZJURL01"
+const private_url_flag_host: u8 = 1;
+const private_url_flag_query: u8 = 2;
+const private_url_flag_fragment: u8 = 4;
+const private_url_flag_opaque_path: u8 = 8;
+
+const PrivateUrlSlice = extern struct { off: usize, len: usize };
+const PrivateUrl = extern struct {
+    magic: usize,
+    backing: ?[*]u8,
+    backing_len: usize,
+    href: PrivateUrlSlice,
+    scheme: PrivateUrlSlice,
+    username: PrivateUrlSlice,
+    password: PrivateUrlSlice,
+    host: PrivateUrlSlice,
+    port: PrivateUrlSlice,
+    path: PrivateUrlSlice,
+    query: PrivateUrlSlice,
+    fragment: PrivateUrlSlice,
+    flags: u8,
+};
+
+fn privateUrlView(url: *const PrivateUrl, s: PrivateUrlSlice) []const u8 {
+    const backing = url.backing orelse return "";
+    return backing[s.off .. s.off + s.len];
+}
+
+fn privateUrlFromOpaque(raw: ?*anyopaque) ?*PrivateUrl {
+    const pointer = raw orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(PrivateUrl) != 0) return null;
+    const url: *PrivateUrl = @ptrCast(@alignCast(pointer));
+    if (url.magic != private_url_magic) return null;
+    return url;
+}
+
+fn privateBunStringWTF8Alloc(allocator: std.mem.Allocator, string: *const PrivateBunString) PrivateBunStringError![]const u8 {
+    switch (string.tag) {
+        .dead => return error.InvalidString,
+        .empty => return allocator.alloc(u8, 0),
+        .wtf_string_impl => {
+            const impl = string.value.wtf_string_impl orelse return error.InvalidString;
+            if (impl.m_length == 0) return allocator.alloc(u8, 0);
+            if (impl.m_hash_and_flags & private_wtf_flag_8_bit_buffer != 0)
+                return privateLatin1ToWTF8(allocator, impl.m_ptr[0..impl.m_length]);
+            const units: [*]align(1) const u16 = @ptrCast(impl.m_ptr);
+            return privateUTF16ToWTF8(allocator, units[0..impl.m_length]);
+        },
+        .zig_string, .static_zig_string => {
+            const zig_string = string.value.zig_string;
+            if (zig_string.len == 0) return allocator.alloc(u8, 0);
+            const untagged = zig_string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+            if (untagged == 0) return error.InvalidString;
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+                const units: [*]align(1) const u16 = @ptrFromInt(untagged);
+                return privateUTF16ToWTF8(allocator, units[0..zig_string.len]);
+            }
+            const source: [*]const u8 = @ptrFromInt(untagged);
+            if (zig_string.tagged_ptr & (@as(usize, 1) << 61) != 0)
+                return privateUTF8PrefixAsWTF8(allocator, source[0..zig_string.len], null);
+            return privateLatin1ToWTF8(allocator, source[0..zig_string.len]);
+        },
+    }
+}
+
+fn privateUrlAppend(parts: *std.ArrayListUnmanaged(u8), arena: std.mem.Allocator, s: []const u8) error{OutOfMemory}!PrivateUrlSlice {
+    const off = parts.items.len;
+    try parts.appendSlice(arena, s);
+    return .{ .off = off, .len = s.len };
+}
+
+/// `WTF::URL(str)` + `new WTF::URL` (BunString.cpp:677): parse through the
+/// engine's allocator-first `urlParse` with no base, null when invalid. The
+/// returned record owns its bytes; `URL__deinit` frees it.
+export fn URL__fromString(input: ?*const PrivateBunString) callconv(.c) ?*anyopaque {
+    const string = input orelse return null;
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input_bytes = privateBunStringWTF8Alloc(arena, string) catch return null;
+    const parts = (interp.urlParse(arena, input_bytes, null) catch return null) orelse return null;
+    if (parts.scheme.len == 0) return null; // WTF validity: absolute URL needs a scheme
+    const href = interp.urlSerialize(arena, parts, false) catch return null;
+
+    var concat: std.ArrayListUnmanaged(u8) = .empty;
+    const href_s = privateUrlAppend(&concat, arena, href) catch return null;
+    const scheme_s = privateUrlAppend(&concat, arena, parts.scheme) catch return null;
+    const username_s = privateUrlAppend(&concat, arena, parts.username) catch return null;
+    const password_s = privateUrlAppend(&concat, arena, parts.password) catch return null;
+    const host_s = privateUrlAppend(&concat, arena, parts.host orelse "") catch return null;
+    const port_s = privateUrlAppend(&concat, arena, parts.port) catch return null;
+    const path_s = privateUrlAppend(&concat, arena, parts.path) catch return null;
+    const query_s = privateUrlAppend(&concat, arena, parts.query orelse "") catch return null;
+    const fragment_s = privateUrlAppend(&concat, arena, parts.fragment orelse "") catch return null;
+
+    const backing = private_string_allocator.dupe(u8, concat.items) catch return null;
+    const url = private_string_allocator.create(PrivateUrl) catch {
+        private_string_allocator.free(backing);
+        return null;
+    };
+    var flags: u8 = 0;
+    if (parts.host != null) flags |= private_url_flag_host;
+    if (parts.query != null) flags |= private_url_flag_query;
+    if (parts.fragment != null) flags |= private_url_flag_fragment;
+    if (parts.opaque_path) flags |= private_url_flag_opaque_path;
+    url.* = .{
+        .magic = private_url_magic,
+        .backing = backing.ptr,
+        .backing_len = backing.len,
+        .href = href_s,
+        .scheme = scheme_s,
+        .username = username_s,
+        .password = password_s,
+        .host = host_s,
+        .port = port_s,
+        .path = path_s,
+        .query = query_s,
+        .fragment = fragment_s,
+        .flags = flags,
+    };
+    return url;
+}
+
+/// `delete url` (BunString.cpp:692). Null tolerated; the magic is cleared so a
+/// double deinit or stale pointer is observably inert rather than corrupting.
+export fn URL__deinit(raw: ?*anyopaque) callconv(.c) void {
+    const url = privateUrlFromOpaque(raw) orelse return;
+    url.magic = 0;
+    if (url.backing) |backing| private_string_allocator.free(backing[0..url.backing_len]);
+    url.backing = null;
+    private_string_allocator.destroy(url);
+}
+
+fn privateUrlOwnedString(bytes: []const u8) PrivateBunString {
+    return privateOwnedWTF8String(bytes) catch return PrivateBunString.dead();
+}
+
+/// `url->string()` (BunString.cpp:697): the full serialization, fragment
+/// included, exactly as parsed. Bun dereferences the pointer unconditionally;
+/// zig-js returns Dead for a null/stale record instead.
+export fn URL__href(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.href));
+}
+
+/// `url->protocol()` (BunString.cpp:687): the scheme without the colon.
+export fn URL__protocol(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.scheme));
+}
+
+/// `url->user()` (BunString.cpp:702).
+export fn URL__username(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.username));
+}
+
+/// `url->password()` (BunString.cpp:707).
+export fn URL__password(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.password));
+}
+
+/// `url->query()` (BunString.cpp:712): the query WITH a leading `?` when a
+/// query component is present (even an empty one), the empty string otherwise.
+export fn URL__search(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    if (url.flags & private_url_flag_query == 0) return privateUrlOwnedString("");
+    const query = privateUrlView(url, url.query);
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const prefixed = std.mem.concat(arena_state.allocator(), u8, &.{ "?", query }) catch return PrivateBunString.dead();
+    return privateUrlOwnedString(prefixed);
+}
+
+/// `url->host()` (BunString.cpp:724): host WITHOUT the port — deliberately not
+/// the JS `host` getter.
+export fn URL__host(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.host));
+}
+
+/// `url->hostAndPort()` (BunString.cpp:736): host WITH the port — deliberately
+/// not the JS `hostname` getter.
+export fn URL__hostname(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    const host = privateUrlView(url, url.host);
+    const port = privateUrlView(url, url.port);
+    if (port.len == 0) return privateUrlOwnedString(host);
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const joined = std.mem.concat(arena_state.allocator(), u8, &.{ host, ":", port }) catch return PrivateBunString.dead();
+    return privateUrlOwnedString(joined);
+}
+
+/// `url->port()` (BunString.cpp:741): `maxInt(u32)` when the URL has no port;
+/// the parser guarantees any present port is within the u16 range.
+export fn URL__port(raw: ?*anyopaque) callconv(.c) u32 {
+    const url = privateUrlFromOpaque(raw) orelse return std.math.maxInt(u32);
+    const port = privateUrlView(url, url.port);
+    if (port.len == 0) return std.math.maxInt(u32);
+    return std.fmt.parseInt(u32, port, 10) catch std.math.maxInt(u32);
+}
+
+/// `url->path()` (BunString.cpp:752).
+export fn URL__pathname(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    return privateUrlOwnedString(privateUrlView(url, url.path));
+}
+
+/// `url->fragmentIdentifierWithLeadingNumberSign()` (BunString.cpp:661): the
+/// fragment WITH a leading `#`, empty when the fragment is absent or empty.
+export fn URL__hash(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    if (url.flags & private_url_flag_fragment == 0) return privateUrlOwnedString("");
+    const fragment = privateUrlView(url, url.fragment);
+    if (fragment.len == 0) return privateUrlOwnedString("");
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const prefixed = std.mem.concat(arena_state.allocator(), u8, &.{ "#", fragment }) catch return PrivateBunString.dead();
+    return privateUrlOwnedString(prefixed);
+}
+
+/// `url->fragmentIdentifier()` (BunString.cpp:669): the fragment WITHOUT `#`.
+export fn URL__fragmentIdentifier(raw: ?*anyopaque) callconv(.c) PrivateBunString {
+    const url = privateUrlFromOpaque(raw) orelse return PrivateBunString.dead();
+    if (url.flags & private_url_flag_fragment == 0) return privateUrlOwnedString("");
+    return privateUrlOwnedString(privateUrlView(url, url.fragment));
+}
+
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
     const gc_saved = gc_mod.setActiveHeap(context.gc);

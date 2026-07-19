@@ -491,6 +491,19 @@ extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn
 extern "c" fn URLSearchParams__create(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn URLSearchParams__fromJS(EncodedValue) ?*anyopaque;
 extern "c" fn URLSearchParams__toString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
+extern "c" fn URL__fromString(?*const BunString) ?*anyopaque;
+extern "c" fn URL__deinit(?*anyopaque) void;
+extern "c" fn URL__href(?*anyopaque) BunString;
+extern "c" fn URL__protocol(?*anyopaque) BunString;
+extern "c" fn URL__username(?*anyopaque) BunString;
+extern "c" fn URL__password(?*anyopaque) BunString;
+extern "c" fn URL__search(?*anyopaque) BunString;
+extern "c" fn URL__host(?*anyopaque) BunString;
+extern "c" fn URL__hostname(?*anyopaque) BunString;
+extern "c" fn URL__port(?*anyopaque) u32;
+extern "c" fn URL__pathname(?*anyopaque) BunString;
+extern "c" fn URL__hash(?*anyopaque) BunString;
+extern "c" fn URL__fragmentIdentifier(?*anyopaque) BunString;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -705,6 +718,26 @@ fn uspToStringCallback(ctx: ?*anyopaque, str: *const ZigString) callconv(.c) voi
         const bytes: [*]const u8 = @ptrFromInt(pointer);
         @memcpy(state.bytes[0..str.len], bytes[0..str.len]);
     }
+}
+
+fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
+    if (actual.tag == .empty) return expected.len == 0;
+    if (actual.tag != .wtf_string_impl) return false;
+    const impl = actual.value.wtf_string_impl orelse return false;
+    if (impl.length != expected.len) return false;
+    if (impl.hash_and_flags & 4 != 0) // 8-bit buffer
+        return std.mem.eql(u8, impl.bytes[0..impl.length], expected);
+    const units: [*]align(1) const u16 = @ptrCast(impl.bytes);
+    for (units[0..impl.length], expected) |unit, byte| {
+        if (unit != byte) return false;
+    }
+    return true;
+}
+
+fn expectNativeUrlField(context: JSContextRef, actual: BunString, js_source: [*:0]const u8) bool {
+    exposeCell(context, "__nu_actual", BunString__toJS(context, &actual));
+    exposeCell(context, "__nu_expected", evaluate(context, js_source));
+    return JSC__JSValue__toBoolean(evaluate(context, "__nu_actual === __nu_expected"));
 }
 
 fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv(.c) void {
@@ -2938,6 +2971,122 @@ pub fn main() void {
     URLSearchParams__toString(URLSearchParams__fromJS(usp_object), null, null);
     if (URLSearchParams__create(null, &usp_query) != .empty or usp_to_string_state.calls != 1)
         fail("private URLSearchParams null tolerance mismatch");
+
+    // URL native record boundary (#308): fromString parses through the
+    // engine's WHATWG urlParse into an owned native record (no realm), and the
+    // component getters match Bun/WTF semantics — host WITHOUT port, hostname
+    // WITH port — with JS `new URL` parity wherever semantics overlap.
+    const url_input_a = "https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag";
+    var url_bunstring_a = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_input_a.ptr), .len = url_input_a.len } } };
+    const native_url_a = URL__fromString(&url_bunstring_a) orelse fail("private URL fromString rejected a valid URL");
+    if (!expectNativeUrlField(context, URL__href(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').href"))
+        fail("private URL href JS parity mismatch");
+    // WTF `url->protocol()` is the scheme WITHOUT the colon — native
+    // semantics, deliberately not the JS `protocol` getter.
+    if (!bunStringUtf8Equals(URL__protocol(native_url_a), "https"))
+        fail("private URL protocol semantics mismatch");
+    if (!expectNativeUrlField(context, URL__username(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').username"))
+        fail("private URL username JS parity mismatch");
+    if (!expectNativeUrlField(context, URL__password(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').password"))
+        fail("private URL password JS parity mismatch");
+    if (!expectNativeUrlField(context, URL__pathname(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').pathname"))
+        fail("private URL pathname JS parity mismatch");
+    if (!expectNativeUrlField(context, URL__search(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').search"))
+        fail("private URL search JS parity mismatch");
+    if (!expectNativeUrlField(context, URL__hash(native_url_a), "new URL('https://user:pw@Example.COM:8443/p/../a%20b?q=1&x=#frag').hash"))
+        fail("private URL hash JS parity mismatch");
+    if (!bunStringUtf8Equals(URL__host(native_url_a), "example.com") or
+        !bunStringUtf8Equals(URL__hostname(native_url_a), "example.com:8443") or
+        URL__port(native_url_a) != 8443 or
+        !bunStringUtf8Equals(URL__fragmentIdentifier(native_url_a), "frag"))
+        fail("private URL native getter semantics mismatch");
+    const native_url_a_href = URL__href(native_url_a);
+
+    // Default-port elision: the port component vanishes and port/hostname
+    // follow WTF, not the JS getters.
+    const url_input_b = "http://example.com:80/";
+    var url_bunstring_b = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_input_b.ptr), .len = url_input_b.len } } };
+    const native_url_b = URL__fromString(&url_bunstring_b) orelse fail("private URL fromString rejected a default-port URL");
+    if (URL__port(native_url_b) != std.math.maxInt(u32) or
+        !bunStringUtf8Equals(URL__hostname(native_url_b), "example.com") or
+        !bunStringUtf8Equals(URL__host(native_url_b), "example.com") or
+        !expectNativeUrlField(context, URL__href(native_url_b), "new URL('http://example.com:80/').href"))
+        fail("private URL default-port mismatch");
+
+    // Non-special opaque-path URL: no host, path is the opaque body.
+    const url_input_c = "mailto:someone@example.com";
+    var url_bunstring_c = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_input_c.ptr), .len = url_input_c.len } } };
+    const native_url_c = URL__fromString(&url_bunstring_c) orelse fail("private URL fromString rejected an opaque-path URL");
+    if (!bunStringUtf8Equals(URL__protocol(native_url_c), "mailto") or
+        !bunStringUtf8Equals(URL__host(native_url_c), "") or
+        !bunStringUtf8Equals(URL__hostname(native_url_c), "") or
+        URL__port(native_url_c) != std.math.maxInt(u32) or
+        !bunStringUtf8Equals(URL__search(native_url_c), "") or
+        !bunStringUtf8Equals(URL__hash(native_url_c), "") or
+        !expectNativeUrlField(context, URL__pathname(native_url_c), "new URL('mailto:someone@example.com').pathname") or
+        !expectNativeUrlField(context, URL__href(native_url_c), "new URL('mailto:someone@example.com').href"))
+        fail("private URL opaque-path mismatch");
+
+    // Present-but-empty query keeps its `?` under WTF `url->query()` —
+    // deliberately NOT the JS `search` getter, which the WHATWG DOM spec
+    // maps to "" for an empty query. Absent and empty fragments both produce
+    // an empty hash (WTF `fragmentIdentifier().isEmpty()` rule).
+    const url_input_d = "http://x.com/?";
+    var url_bunstring_d = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_input_d.ptr), .len = url_input_d.len } } };
+    const native_url_d = URL__fromString(&url_bunstring_d) orelse fail("private URL fromString rejected an empty-query URL");
+    const url_input_e = "http://x.com/#";
+    var url_bunstring_e = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_input_e.ptr), .len = url_input_e.len } } };
+    const native_url_e = URL__fromString(&url_bunstring_e) orelse fail("private URL fromString rejected an empty-fragment URL");
+    if (!bunStringUtf8Equals(URL__search(native_url_d), "?") or
+        !JSC__JSValue__toBoolean(evaluate(context, "new URL('http://x.com/?').search === ''")) or
+        !bunStringUtf8Equals(URL__hash(native_url_d), "") or
+        !bunStringUtf8Equals(URL__hash(native_url_e), "") or
+        !bunStringUtf8Equals(URL__fragmentIdentifier(native_url_e), ""))
+        fail("private URL empty-component mismatch");
+
+    // UTF-16 BunString input decodes to the identical record.
+    const url_units = [_]u16{ 'm', 'a', 'i', 'l', 't', 'o', ':', 'a', 'b' };
+    var url_bunstring_u16 = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(&url_units) | (@as(usize, 1) << 63), .len = url_units.len } } };
+    const native_url_u16 = URL__fromString(&url_bunstring_u16) orelse fail("private URL fromString rejected a UTF-16 input");
+    if (!bunStringUtf8Equals(URL__href(native_url_u16), "mailto:ab"))
+        fail("private URL UTF-16 input mismatch");
+
+    // Invalid and empty inputs return null; returned strings stay valid after
+    // later parses; a second record is fully independent of the first.
+    const url_invalid_1 = "not a url";
+    var url_bunstring_bad = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_invalid_1.ptr), .len = url_invalid_1.len } } };
+    const url_invalid_2 = "http://[::1";
+    var url_bunstring_bad2 = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_invalid_2.ptr), .len = url_invalid_2.len } } };
+    const url_invalid_3 = "";
+    var url_bunstring_bad3 = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(url_invalid_3.ptr), .len = 0 } } };
+    if (URL__fromString(&url_bunstring_bad) != null or
+        URL__fromString(&url_bunstring_bad2) != null or
+        URL__fromString(&url_bunstring_bad3) != null or
+        URL__fromString(null) != null)
+        fail("private URL invalid-input mismatch");
+    const native_url_a2 = URL__fromString(&url_bunstring_a) orelse fail("private URL second parse failed");
+    if (native_url_a2 == native_url_a or
+        !bunStringUtf8Equals(native_url_a_href, "https://user:pw@example.com:8443/a%20b?q=1&x=#frag") or
+        !bunStringUtf8Equals(URL__href(native_url_a2), "https://user:pw@example.com:8443/a%20b?q=1&x=#frag"))
+        fail("private URL record independence mismatch");
+
+    // Null tolerance: Bun dereferences unconditionally (UB), zig-js returns
+    // safe sentinels instead; deinit frees the record, null is a no-op.
+    if (URL__href(null).tag != .dead or URL__protocol(null).tag != .dead or
+        URL__username(null).tag != .dead or URL__password(null).tag != .dead or
+        URL__search(null).tag != .dead or URL__host(null).tag != .dead or
+        URL__hostname(null).tag != .dead or URL__pathname(null).tag != .dead or
+        URL__hash(null).tag != .dead or URL__fragmentIdentifier(null).tag != .dead or
+        URL__port(null) != std.math.maxInt(u32))
+        fail("private URL null tolerance mismatch");
+    URL__deinit(native_url_a);
+    URL__deinit(native_url_b);
+    URL__deinit(native_url_c);
+    URL__deinit(native_url_d);
+    URL__deinit(native_url_e);
+    URL__deinit(native_url_u16);
+    URL__deinit(native_url_a2);
+    URL__deinit(null);
 
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
@@ -5513,5 +5662,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 294/294 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 307/307 symbols linked; runtime matrix passed\n", .{});
 }

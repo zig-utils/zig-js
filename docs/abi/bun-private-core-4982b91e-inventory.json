@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 299,
-      "pending": 137
+      "implemented": 312,
+      "pending": 124
     }
   },
   "home_comparison": {
@@ -3697,10 +3697,10 @@
       "line": 12,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__deinit(*URL) void;",
       "declaration_sha256": "431734cb453d041b91bad6044281f153559c5bd3dcd41ac12ba9222f08c91879",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__fragmentIdentifier",
@@ -3708,10 +3708,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__fragmentIdentifier(*URL) String;",
       "declaration_sha256": "fdeb30db4d26bf7b4c27c012ab2545ec39129ea5c30568e18f742f883c3e0d86",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__fromJS",
@@ -3730,10 +3730,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__fromString(*bun.String) ?*URL;",
       "declaration_sha256": "11997c7ccb8e36d04c3f08754c0a2f21af3db1fbe09c197d22eb0bc2b32bcb6b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__getFileURLString",
@@ -3785,10 +3785,10 @@
       "line": 19,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__hash(*URL) String;",
       "declaration_sha256": "eec93b7f53557f35513d1eb3ae37a8c17d78c6c34b82d24064cb09a8c8d14736",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__host",
@@ -3796,10 +3796,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__host(*URL) String;",
       "declaration_sha256": "0f89e30d81956075d1760ab6964d2abe318780def60cfab420195f2a09791eff",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__hostname",
@@ -3807,10 +3807,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__hostname(*URL) String;",
       "declaration_sha256": "cc986f3e997c2d1aded794ed67835fdc34f648082a26e582cf5ecd7b5777da84",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__href",
@@ -3818,10 +3818,10 @@
       "line": 5,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__href(*URL) String;",
       "declaration_sha256": "e662dab48b39d2ddbfae84754a1c8b847fcc91d58c3021985eeccc247a6cadc8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__originLength",
@@ -3840,10 +3840,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__password(*URL) String;",
       "declaration_sha256": "45fc601db2ddc975bd2f5f8927f197b5f7e0928a1f2c02a83fe0b258a8ab0f1d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__pathFromFileURL",
@@ -3862,10 +3862,10 @@
       "line": 13,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__pathname(*URL) String;",
       "declaration_sha256": "49e6879924c698ff0b704d4849c06ffdb9346faf8b6cba6df8fcdedc5923fc90",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__port",
@@ -3873,10 +3873,10 @@
       "line": 11,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__port(*URL) u32;",
       "declaration_sha256": "90cc1016f02a3e733f426c9dab529c7e691de6a89122b8bee16bf082902c6ac4",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__protocol",
@@ -3884,10 +3884,10 @@
       "line": 4,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__protocol(*URL) String;",
       "declaration_sha256": "6ae8c363386f825b0fd895da144c7980a3572dfeca866c6038c960214bdac505",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__search",
@@ -3895,10 +3895,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__search(*URL) String;",
       "declaration_sha256": "e2f33acfdb6587921a9ae0e5dbdea027691ae8b3de4d4987f119a82abe2f3e57",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "URL__username",
@@ -3906,10 +3906,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn URL__username(*URL) String;",
       "declaration_sha256": "90a2710cf87a9c7797126f83ec170b4d4486b2bc029dee8a54aca12ee580884d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WTF__numberOfProcessorCores",
