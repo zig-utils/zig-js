@@ -56,6 +56,7 @@ pub const c_api = @import("c_api.zig");
 // The precise-GC binding (issue #1 Phase 7). Opt-in contexts allocate heap
 // cells through it; see docs/threads/P7-gc-design.md.
 pub const gc = @import("gc.zig");
+pub const gc_relocation = @import("gc_relocation.zig");
 
 /// Convenience: evaluate a snippet in a throwaway context, returning the
 /// completion value. The caller owns nothing — the context is destroyed, so
@@ -93,6 +94,7 @@ test {
     _ = @import("context.zig");
     _ = @import("c_api.zig");
     _ = @import("gc.zig");
+    _ = @import("gc_relocation.zig");
     _ = @import("nanbox.zig");
     _ = @import("strcell.zig");
     _ = @import("text_codec.zig");

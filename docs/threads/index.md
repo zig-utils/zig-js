@@ -75,6 +75,8 @@ rules.
   CI gates.
 - [Memory Model](./memory-model.md) - JS program races, engine-state races, and
   the TSan suppression boundary.
+- [GC Relocation Contract](./gc-relocation.md) - the audited pointer, stable
+  identity, forwarding, rewrite, and pinning boundary for moving collection.
 - [Production Readiness](./production-readiness.md) - current no-GIL status and
   remaining hardening work.
 - [Limits & Roadmap](./limits.md) - unsupported surfaces, test-only knobs, and

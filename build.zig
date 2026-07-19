@@ -595,6 +595,16 @@ pub fn build(b: *std.Build) void {
     );
     release_compatibility_step.dependOn(&release_compatibility_cmd.step);
 
+    const gc_relocation_inventory_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/gc-relocation-inventory.py",
+    });
+    const gc_relocation_inventory_step = b.step(
+        "gc-relocation-inventory-check",
+        "Validate the moving-GC pointer and relocation contract",
+    );
+    gc_relocation_inventory_step.dependOn(&gc_relocation_inventory_cmd.step);
+
     const release_ready_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/release-compatibility.py",
