@@ -5283,6 +5283,85 @@ test "wasm.exec mixed multi-memory lifecycle stress keeps stores independent" {
     for (0..32) |_| try exerciseMixedMultiMemoryWithAllocator(talloc);
 }
 
+test "wasm.exec multi-memory deterministic operation fuzz matches independent stores" {
+    const memory_count = 4;
+    var memories: [memory_count]*MemoryInst = undefined;
+    var models: [memory_count][]u8 = undefined;
+    var initialized: usize = 0;
+    defer for (0..initialized) |index| {
+        destroyMemory(talloc, memories[index]);
+        talloc.free(models[index]);
+    };
+
+    for (0..memory_count) |index| {
+        const address: types.AddressType = if (index % 2 == 0) .i32 else .i64;
+        const memory = try createMemoryAddressed(talloc, address, 1, 3, false);
+        errdefer destroyMemory(talloc, memory);
+        const model = try talloc.alloc(u8, types.PAGE_SIZE);
+        @memset(model, 0);
+        memories[index] = memory;
+        models[index] = model;
+        initialized += 1;
+    }
+
+    var prng = std.Random.DefaultPrng.init(0x6d75_6c74_696d_656d);
+    const random = prng.random();
+    for (0..512) |_| {
+        switch (random.uintLessThan(u8, 4)) {
+            0 => {
+                const memory_index = random.uintLessThan(usize, memory_count);
+                const width: usize = switch (random.uintLessThan(u8, 4)) {
+                    0 => 1,
+                    1 => 2,
+                    2 => 4,
+                    else => 8,
+                };
+                const offset = random.uintLessThan(usize, models[memory_index].len - width + 1);
+                const value = random.int(u64);
+                memories[memory_index].writeUnordered(offset, width, value);
+                for (0..width) |byte_index|
+                    models[memory_index][offset + byte_index] = @truncate(value >> @intCast(byte_index * 8));
+            },
+            1 => {
+                const memory_index = random.uintLessThan(usize, memory_count);
+                const len = random.uintLessThan(usize, 65);
+                const offset = random.uintLessThan(usize, models[memory_index].len - len + 1);
+                const byte = random.int(u8);
+                memories[memory_index].fillUnordered(offset, len, byte);
+                @memset(models[memory_index][offset..][0..len], byte);
+            },
+            2 => {
+                const destination = random.uintLessThan(usize, memory_count);
+                const source = random.uintLessThan(usize, memory_count);
+                const len = random.uintLessThan(usize, 65);
+                const destination_offset = random.uintLessThan(usize, models[destination].len - len + 1);
+                const source_offset = random.uintLessThan(usize, models[source].len - len + 1);
+                copyMemoryUnordered(memories[destination], destination_offset, memories[source], source_offset, len);
+                const to = models[destination][destination_offset..][0..len];
+                const from = models[source][source_offset..][0..len];
+                if (destination != source or destination_offset <= source_offset)
+                    std.mem.copyForwards(u8, to, from)
+                else
+                    std.mem.copyBackwards(u8, to, from);
+            },
+            else => {
+                const memory_index = random.uintLessThan(usize, memory_count);
+                const old_pages = memories[memory_index].pages();
+                if (old_pages == 3) {
+                    try std.testing.expectEqual(@as(?u64, null), memoryGrowAddressed(memories[memory_index], 1));
+                } else {
+                    try std.testing.expectEqual(@as(?u64, old_pages), memoryGrowAddressed(memories[memory_index], 1));
+                    const old_len = models[memory_index].len;
+                    models[memory_index] = try talloc.realloc(models[memory_index], old_len + types.PAGE_SIZE);
+                    @memset(models[memory_index][old_len..], 0);
+                }
+            },
+        }
+        for (memories, models) |memory, model|
+            try std.testing.expectEqualSlices(u8, model, memory.bytes());
+    }
+}
+
 test "wasm.exec memory64 table64 size grow and overflow traps" {
     const bytes = comptime (hdr ++
         typesSec(&.{ ft("", I64), ft(I64, I64), ft(I64, "\x70") }) ++

@@ -355,6 +355,11 @@ execution paths. It remains disabled by default and is independent of
 Memory64; mixed memory32/memory64 validation uses each selected memory's
 address type.
 
+Focused robustness coverage fault-injects every allocation point, runs 32
+mixed-memory lifecycle cycles, and checks 512 deterministic random operations
+against independent byte-store models. Run it with
+`zig build test -Dtest-filter="multi-memory"`.
+
 Reproduce the score with pinned WABT 1.0.39:
 
 ```sh
