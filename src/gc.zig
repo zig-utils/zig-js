@@ -1075,10 +1075,11 @@ pub const Binding = struct {
         self.context.runPrivateWeakFinalizers();
     }
 
-    /// Drain embedder-owner callbacks only after zig-gc has completed sweep and
-    /// released its allocation lock. Finalizers themselves merely enqueue.
+    /// Drain embedder callbacks only after zig-gc has completed sweep, released
+    /// its allocation lock, and restored allocation publication. Cell
+    /// finalizers themselves merely enqueue stable Context-owned records.
     pub fn afterSweep(self: *Binding) void {
-        self.context.runDeferredExternalOwnerReleases();
+        self.context.runDeferredPostSweepCallbacks();
     }
 
     /// A cell is being reclaimed. Arena-mode `ArrayBufferData` is released with
@@ -1090,7 +1091,7 @@ pub const Binding = struct {
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                if (o.cApiObjectOwner()) |owner| owner.finishOnce();
+                if (o.cApiObjectOwner()) |owner| self.context.queueCApiObjectFinish(owner);
                 if (o.wasmGcReference()) |state| {
                     if (state.root) |root| if (state.release) |release| release(root, o);
                     state.root = null;

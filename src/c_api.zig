@@ -18635,27 +18635,56 @@ test "C-API: JSClassRef copies definitions and owns inherited instance lifecycle
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, State.events[0..State.count]);
 }
 
-test "C-API: GC and context teardown finalize class instances exactly once" {
+test "C-API: class finalizers run once after sweep and may reenter collection" {
     const State = struct {
         var finalizations: usize = 0;
+        var reentries: usize = 0;
+        var callback_failed: bool = false;
+        var context: JSContextRef = null;
+
         fn finalize(_: JSObjectRef) callconv(.c) void {
             finalizations += 1;
+            if (reentries != 0) return;
+            reentries += 1;
+
+            const created = JSObjectMake(context, null, null) orelse {
+                callback_failed = true;
+                return;
+            };
+            JSValueProtect(context, created);
+            JSGarbageCollect(context);
+            if (!JSValueIsObject(context, created)) callback_failed = true;
+            JSValueUnprotect(context, created);
         }
     };
     State.finalizations = 0;
+    State.reentries = 0;
+    State.callback_failed = false;
 
     var definition: JSClassDefinition = .{ .finalize = State.finalize };
     const class = JSClassCreate(&definition) orelse return error.ClassCreateFailed;
     const context = Context.createWith(gpa, .{ .enable_gc = true }) catch return error.JSCInitFailed;
     context.initCApiRef();
     const ctx: JSContextRef = @ptrCast(context);
+    State.context = ctx;
     _ = JSObjectMake(ctx, class, null) orelse return error.ObjectCreateFailed;
-    JSClassRelease(class);
 
     JSGarbageCollect(ctx);
     try std.testing.expectEqual(@as(usize, 1), State.finalizations);
+    try std.testing.expectEqual(@as(usize, 1), State.reentries);
+    try std.testing.expect(!State.callback_failed);
+
+    // A second live instance and two protected aliases still describe one
+    // owner, so teardown must invoke exactly one more class callback.
+    const survivor = JSObjectMake(ctx, class, null) orelse return error.ObjectCreateFailed;
+    JSValueProtect(ctx, survivor);
+    JSValueProtect(ctx, survivor);
+    JSClassRelease(class);
     JSGlobalContextRelease(ctx);
-    try std.testing.expectEqual(@as(usize, 1), State.finalizations);
+    State.context = null;
+    try std.testing.expectEqual(@as(usize, 2), State.finalizations);
+    try std.testing.expectEqual(@as(usize, 1), State.reentries);
+    try std.testing.expect(!State.callback_failed);
 }
 
 test "C-API: GC roots shared class prototypes and static functions" {

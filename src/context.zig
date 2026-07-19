@@ -2488,6 +2488,10 @@ pub const Context = struct {
     /// may finish a record early; teardown finishes arena-mode survivors and
     /// destroys every record after all object cells are gone.
     c_api_object_owners: std.ArrayListUnmanaged(*value.CApiObjectOwner) = .empty,
+    /// Class callbacks are arbitrary embedder code. Sweep only publishes their
+    /// stable Context-owned owner records here; the post-sweep hook invokes the
+    /// callbacks after collector locks are released and publication is restored.
+    c_api_object_finish_head: std.atomic.Value(?*value.CApiObjectOwner) = .init(null),
     /// WebAssembly native allocations owned by this context (issue #141).
     /// Every decoded module / instance / host-created store object goes here so
     /// `teardownWasmStore` can free them (with `gpa`, never the arena) at
@@ -3494,7 +3498,7 @@ pub const Context = struct {
             }
             self.gc = null;
         }
-        self.runDeferredExternalOwnerReleases();
+        self.runDeferredPostSweepCallbacks();
         if (self.gc_cell_backing) |backing| {
             backing.deinit(); // safe now: heap.deinit() is done using it
             self.gc_cell_backing = null;
@@ -3698,7 +3702,25 @@ pub const Context = struct {
         }
     }
 
-    pub fn runDeferredExternalOwnerReleases(self: *Context) void {
+    pub fn queueCApiObjectFinish(self: *Context, owner: *value.CApiObjectOwner) void {
+        if (owner.finalized.load(.acquire)) return;
+        if (owner.finish_queued.swap(true, .acq_rel)) return;
+        var head = self.c_api_object_finish_head.load(.acquire);
+        while (true) {
+            owner.pending_next = head;
+            if (self.c_api_object_finish_head.cmpxchgWeak(head, owner, .release, .acquire)) |observed| {
+                head = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    /// Invoke every callback a cell finalizer published only after zig-gc has
+    /// released collector locks. Each intrusive stack is allocation-free on the
+    /// sweep path and is drained to a fixed point so reentrant collections are
+    /// harmless.
+    pub fn runDeferredPostSweepCallbacks(self: *Context) void {
         while (self.external_owner_release_head.swap(null, .acq_rel)) |first| {
             var current: ?*value.ExternalBufferOwner = first;
             while (current) |owner| {
@@ -3716,6 +3738,16 @@ pub const Context = struct {
                 owner.pending_next = null;
                 owner.release_queued.store(false, .release);
                 _ = owner.release();
+                current = next;
+            }
+        }
+        while (self.c_api_object_finish_head.swap(null, .acq_rel)) |first| {
+            var current: ?*value.CApiObjectOwner = first;
+            while (current) |owner| {
+                const next = owner.pending_next;
+                owner.pending_next = null;
+                owner.finish_queued.store(false, .release);
+                owner.finishOnce();
                 current = next;
             }
         }

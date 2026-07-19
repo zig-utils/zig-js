@@ -438,6 +438,12 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   allocators. The generator and object finalizers free those buffers when their
   cells die. Validated by GC-enabled tests for suspended generators,
   async-generator queued requests, and live mapped-arguments aliasing.
+  *Embedder class finalization boundary landed:* object sweep publishes
+  Context-owned C-API class records to an allocation-free intrusive queue.
+  `Binding.afterSweep` invokes each class chain exactly once only after zig-gc
+  releases collector locks and restores allocation publication, so callbacks
+  may allocate and re-enter collection. Heap teardown drains the same queue
+  after making the heap unavailable (#326).
   *Shell `gc()` requests landed:* the test-shell `gc()` hook no longer calls
   `Heap.collect()` while JS is live on the Zig stack. It sets a per-Context
   pending bit, and `evaluate` / `evaluateModule` service that request at the
@@ -720,7 +726,7 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   GC-enabled contexts allocate immutable StringCells as a first-class cell
   kind, trace string-valued roots/edges, and finalize canonical byte storage. Static
   literals, explicit intern-table entries, and property-name strings owned by
-  arena-resident Shapes remain permanent and carry `gc_managed = false`.
+  arena-resident Shapes remain permanent and report `isGcManaged() == false`.
   External-owner releases are now queued without allocating during finalization
   and drained through zig-gc's post-sweep hook only after collector locks and
   publication state are restored. The exact Latin-1/UTF-16 external StringCell

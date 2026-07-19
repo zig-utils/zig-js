@@ -1091,6 +1091,8 @@ pub const FinalizationRecord = struct {
 /// the instance's retained JSClassRef.
 pub const CApiObjectOwner = struct {
     finalized: std.atomic.Value(bool) = .init(false),
+    finish_queued: std.atomic.Value(bool) = .init(false),
+    pending_next: ?*CApiObjectOwner = null,
     allocator: std.mem.Allocator,
     object_ref: ?*anyopaque = null,
     class_ref: ?*anyopaque,
