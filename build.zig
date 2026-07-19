@@ -364,6 +364,24 @@ pub fn build(b: *std.Build) void {
     );
     home_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
 
+    const bun_private_abort_signal_fixture = b.addExecutable(.{
+        .name = "bun-private-abort-signal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_abort_signal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    bun_private_abort_signal_fixture.root_module.linkLibrary(lib);
+    const run_bun_private_abort_signal_fixture = b.addRunArtifact(bun_private_abort_signal_fixture);
+    run_bun_private_abort_signal_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_abort_signal_test_step = b.step(
+        "test-bun-private-abort-signal",
+        "Compile, link, and run Bun's private AbortSignal timeout boundary",
+    );
+    bun_private_abort_signal_test_step.dependOn(&run_bun_private_abort_signal_fixture.step);
+
     const private_jstype_fixture = b.addExecutable(.{
         .name = "private-jstype-shims",
         .root_module = b.createModule(.{
