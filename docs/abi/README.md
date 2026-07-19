@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (288 implemented, 143 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (291 implemented, 140 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 288 private entries are implemented; the other 143 remain pending
+The first 291 private entries are implemented; the other 140 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 291/291 compiled fixture additionally
+sibling realms, GC, and reentry; the 294/294 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -649,6 +649,25 @@ private cell boundary, and the same global handle. The capacity argument
 stays a performance-only hint — JSC clamps it to `maxInlineCapacity`, zig-js
 shapes grow on demand — a null initializer still creates the object, and a
 null VM returns empty without invoking the callback.
+
+The URLSearchParams boundary is thin plumbing over the engine's existing
+builtin: `URLSearchParams__create` decodes the ZigString query through the
+exact `new URLSearchParams(string)` path (URLSearchParams.cpp:34) — the
+form-urlencoded parse strips one leading `?` and applies the `+`/percent
+codec — so the result is a realm-prototype `instanceof URLSearchParams`
+object whose methods all work. `URLSearchParams__fromJS` is the
+`WebCoreCast<JSURLSearchParams, URLSearchParams>` downcast
+(URLSearchParams.cpp:41): zig-js has no separate native object, the instance
+IS the JS object carrying the engine's `\x00usp` pairs slot, so acceptance is
+exactly "object with the pairs slot" — native-created or JS-constructed
+alike, in any realm of the group — and the returned pointer is the canonical
+cell handle per the object-marshalling convention above.
+`URLSearchParams__toString` (URLSearchParams.cpp:49) serializes the pairs
+exactly like the JS `toString` method and invokes the callback once with a
+stable borrowed ZigString view, recovering the owner realm from the handle
+because Bun's signature carries no global object. All three exports tolerate
+null handles, and the full WHATWG URL parser surface (`URL__*`, `DOMURL__*`,
+`BunString__toURL`/`toJSDOMURL`) stays deferred with the URL.zig cluster.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -805,7 +824,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 291-symbol
+the same frame/script identity and own every returned string. The 294-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -850,7 +869,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (281 implemented, 140 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (284 implemented, 137 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
