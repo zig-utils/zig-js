@@ -13,18 +13,12 @@ const value = try ctx.evaluate("let x = 40; x + 2");
 
 ## Status
 
-All numbers below are scoped, reproducible results—not claims that every JavaScript or JSC surface exists.
+Scoped, reproducible results—not claims that every JavaScript or JSC surface exists:
 
 | profile | result | evidence |
 | --- | ---: | --- |
 | configured test262 | **53,175 / 53,175** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
-| Wasm MVP + Core 2 | **46,277 / 46,277 applicable** | [MVP](docs/.data/wasm-spec-inventory.json) · [Core 2](docs/.data/wasm-core-2-structural-inventory.json) |
-| Wasm SIMD + Threads | **26,017 / 26,017** | [SIMD](docs/.data/wasm-simd-inventory.json) · [Threads](docs/.data/wasm-threads-inventory.json) |
-| Wasm tail calls + exceptions | **192 / 192 applicable** | [tail calls](docs/.data/wasm-tail-call-inventory.json) · [exceptions](docs/.data/wasm-exception-handling-inventory.json) |
-| Wasm GC | **697 / 697 applicable** | [inventory](docs/.data/wasm-gc-runtime-inventory.json) |
-| Wasm Memory64 + multi-memory | **14,655 / 14,655 applicable** | [Memory64](docs/.data/wasm-memory64-runtime-inventory.json) · [multi-memory](docs/.data/wasm-multi-memory-runtime-inventory.json) |
-
-The [nine-profile matrix](docs/.data/wasm-conformance-matrix.json) records **87,838 / 87,838 applicable** passes, pins, modes, and host scope; reproduction lives in [WebAssembly status](docs/wasm.md).
+| nine-profile WebAssembly matrix | **87,838 / 87,838 applicable** | [matrix](docs/.data/wasm-conformance-matrix.json) · [reproduce](docs/wasm.md) |
 
 ## Performance
 
@@ -47,25 +41,10 @@ A throughput ratio above 1.00x favors zig-js. Shared-realm threads share one obj
 
 ### WebAssembly
 
-[SIMD report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [224 samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv), identical Wasm bytes, warmed independent contexts.
+- **SIMD:** 3.67–4.58x eight-lane scaling; 0.10–0.14x JSC throughput across four kernels ([report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [224 samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)).
+- **Threads:** at eight workers, 17.23 M/s contended adds, 4.74 M/s CAS increments, 17.28 M/s disjoint adds, and 287,444 wait/notify handoffs/s ([report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [105 samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)).
 
-| SIMD kernel | zig-js 1 lane | zig-js 8 lanes | scaling | JSC 8 lanes | zig-js / JSC |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| integer | 7.73 M/s | 28.35 M/s | 3.67x | 280.32 M/s | 0.10x |
-| float | 7.06 M/s | 27.66 M/s | 3.92x | 283.33 M/s | 0.10x |
-| shuffle | 6.74 M/s | 29.00 M/s | 4.30x | 286.75 M/s | 0.10x |
-| memory | 8.98 M/s | 41.13 M/s | 4.58x | 291.96 M/s | 0.14x |
-
-[Threads report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [105 samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv). Public macOS JSC has no equivalent shared-realm worker embedding.
-
-| workers | contended add | CAS increment | disjoint add | wait/notify handoffs |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 14.56 M/s | 8.81 M/s | 13.87 M/s | — |
-| 2 | 19.19 M/s | 7.22 M/s | 19.31 M/s | 259,476/s |
-| 4 | 18.88 M/s | 6.18 M/s | 19.87 M/s | 1,067,241/s |
-| 8 | 17.23 M/s | 4.74 M/s | 17.28 M/s | 287,444/s |
-
-Methodology and raw results: [Performance benchmarks](docs/benchmarks.md).
+Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
 
