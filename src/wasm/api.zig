@@ -266,6 +266,8 @@ const FunctionOwner = struct {
     func: *exec.FuncInst,
     inst: *exec.Instance,
     function_type: types.FuncType,
+    nominal_type_owner: *const types.Module,
+    nominal_type_index: u32,
     runtime_error_proto: *Object,
 };
 
@@ -1579,10 +1581,19 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                 const function_type = module.funcTypeAt(type_index) orelse
                     return throwWasmWithProto(self, "LinkError", "WebAssembly function import references a non-function type", descriptor.link_error_proto);
                 if (!imported.isCallable()) return throwWasmWithProto(self, "LinkError", "WebAssembly function import is not callable", descriptor.link_error_proto);
+                var nominal_type_owner: ?*const types.Module = null;
+                var nominal_type_index: ?u32 = null;
                 if (imported.isObject()) if (imported.asObj().wasmFunction()) |state| {
                     const owner: *FunctionOwner = @ptrCast(@alignCast(state.func orelse return throwWasmWithProto(self, "LinkError", "WebAssembly function import is unavailable", descriptor.link_error_proto)));
-                    if (owner.store != store or !validate_mod.funcTypesEquivalentAcross(owner.inst.module, owner.function_type, module, function_type))
+                    if (owner.store != store or !validate_mod.heapTypeMatchesAcross(
+                        owner.nominal_type_owner,
+                        .concrete(owner.nominal_type_index),
+                        module,
+                        .concrete(type_index),
+                    ))
                         return throwWasmWithProto(self, "LinkError", "incompatible WebAssembly function import type", descriptor.link_error_proto);
+                    nominal_type_owner = owner.nominal_type_owner;
+                    nominal_type_index = owner.nominal_type_index;
                 };
                 bridges[fi] = .{ .store = store, .callable = imported, .function_type = function_type, .js_tag = descriptor.js_tag };
                 funcs[fi] = .{
@@ -1592,6 +1603,8 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
                     .call_slots = jsImportCallSlots,
                     .take_exception = takeJsImportException,
                     .clear_exception = clearJsImportException,
+                    .nominal_type_owner = nominal_type_owner,
+                    .nominal_type_index = nominal_type_index,
                 };
                 fi += 1;
             },
@@ -1683,6 +1696,16 @@ fn functionValueFor(
 ) value.HostError!Value {
     if (!cache[index].isUndefined()) return cache[index];
     const function_type = inst.module.funcType(index);
+    const nominal_type: struct { owner: *const types.Module, index: u32 } = switch (inst.funcs[index].*) {
+        .defined => |defined| .{
+            .owner = defined.inst.module,
+            .index = defined.inst.module.funcTypeIndex(defined.inst.module.imported_funcs + defined.idx),
+        },
+        .imported => |imported| .{
+            .owner = imported.nominal_type_owner orelse inst.module,
+            .index = imported.nominal_type_index orelse inst.module.funcTypeIndex(index),
+        },
+    };
     var function_name = display_name;
     if (std.mem.eql(u8, display_name, "wasm-function")) for (inst.module.exports) |entry| {
         if (entry.kind == .func and entry.index == index) {
@@ -1699,6 +1722,8 @@ fn functionValueFor(
         .func = inst.funcs[index],
         .inst = inst,
         .function_type = function_type,
+        .nominal_type_owner = nominal_type.owner,
+        .nominal_type_index = nominal_type.index,
         .runtime_error_proto = descriptor.runtime_error_proto,
     };
     const state = try object.wasmFunctionState(self.arena);

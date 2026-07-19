@@ -58,6 +58,10 @@ pub const ImportFunc = struct {
     take_exception: ?*const fn (ctx: *anyopaque) ?HostException = null,
     clear_exception: ?*const fn (ctx: *anyopaque) void = null,
     owner_instance: ?*Instance = null,
+    /// Runtime nominal type of a function imported from another Wasm
+    /// instance. Host JavaScript functions leave these null.
+    nominal_type_owner: ?*const types.Module = null,
+    nominal_type_index: ?u32 = null,
 };
 
 pub const FunctionHost = struct {
@@ -913,6 +917,20 @@ fn importedFuncTypeCompatible(owner: ?*Instance, actual: types.FuncType, target_
     return validate.funcTypesEquivalentAcross(actual_mod, actual, target_mod, declared);
 }
 
+fn importedFunctionSubtype(imported: ImportFunc, target_mod: *const types.Module, target_index: u32) bool {
+    if (imported.nominal_type_owner) |actual_mod| {
+        const actual_index = imported.nominal_type_index orelse return false;
+        return validate.heapTypeMatchesAcross(
+            actual_mod,
+            .concrete(actual_index),
+            target_mod,
+            .concrete(target_index),
+        );
+    }
+    const declared = target_mod.funcTypeAt(target_index) orelse return false;
+    return types.funcTypeEql(imported.type, declared);
+}
+
 fn evalConstExpr(inst: *Instance, ce: types.ConstExpr) error{OutOfMemory}!ValueSlot {
     return switch (ce) {
         .i32 => |v| .{ .numeric = @as(u32, @bitCast(v)) },
@@ -1044,13 +1062,20 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         return error.Link;
     }
     {
+        var fi: usize = 0;
         var ti: usize = 0;
         var mi: usize = 0;
         var gi: usize = 0;
         var tag_i: usize = 0;
         for (mod.imports) |imp| {
             switch (imp.desc) {
-                .func => {},
+                .func => |type_index| {
+                    if (!importedFunctionSubtype(imports.funcs[fi], mod, type_index)) {
+                        diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
+                        return error.Link;
+                    }
+                    fi += 1;
+                },
                 .table => |tt| {
                     if (imports.tables[ti].address != tt.address or
                         !importedValTypeCompatible(imports.tables[ti].owner_instance, imports.tables[ti].type, mod, tt.elem) or
@@ -1537,7 +1562,15 @@ fn gcReferenceMatches(inst: ?*const Instance, slot: WasmSlot, target: types.RefT
                         target_inst.module,
                         target.heap,
                     ),
-                    .imported => false,
+                    .imported => |imported| if (imported.nominal_type_owner) |actual_mod|
+                        validate.heapTypeMatchesAcross(
+                            actual_mod,
+                            .concrete(imported.nominal_type_index orelse break :blk false),
+                            target_inst.module,
+                            target.heap,
+                        )
+                    else
+                        false,
                 };
             }
             break :blk target.heap == .func;
@@ -3423,7 +3456,15 @@ fn indirectCallable(
             inst.module,
             types.HeapType.concrete(immediate.type_index),
         ),
-        .imported => |imported| types.funcTypeEql(expected, imported.type),
+        .imported => |imported| if (imported.nominal_type_owner) |actual_mod|
+            validate.heapTypeMatchesAcross(
+                actual_mod,
+                .concrete(imported.nominal_type_index orelse return s.trap("indirect call type mismatch")),
+                inst.module,
+                .concrete(immediate.type_index),
+            )
+        else
+            types.funcTypeEql(expected, imported.type),
     };
     if (!compatible) return s.trap("indirect call type mismatch");
     return callable;
