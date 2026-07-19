@@ -52,6 +52,19 @@ fn compositeKind(definition: types.DefType) enum { func, struct_, array } {
     };
 }
 
+fn topHeapType(mod: *const types.Module, heap: types.HeapType) types.HeapType {
+    if (heap.concreteIndex()) |index| return switch (compositeKind(mod.types[index])) {
+        .func => .func,
+        .struct_, .array => .any,
+    };
+    return switch (heap) {
+        .func, .nofunc => .func,
+        .extern_, .noextern => .extern_,
+        .any, .eq, .i31, .struct_, .array, .none => .any,
+        else => unreachable,
+    };
+}
+
 fn groupContains(group: types.RecGroup, index: u32) bool {
     return index >= group.start and index - group.start < group.len;
 }
@@ -1424,9 +1437,10 @@ const FuncValidator = struct {
                     .nullable = op == .ref_test_null or op == .ref_cast_null,
                     .heap = immediate.heap,
                 };
-                const source = try self.popReference();
-                if (source) |source_ref|
-                    if (!refTypeMatches(self.mod, target_ref, source_ref)) return self.fail("type mismatch");
+                try self.popExpect(types.ValType.fromRef(.{
+                    .nullable = true,
+                    .heap = topHeapType(self.mod, target_ref.heap),
+                }));
                 if (op == .ref_test or op == .ref_test_null) {
                     self.push(.i32);
                 } else {
@@ -3233,4 +3247,12 @@ test "wasm.validate GC cast branches refine fallthrough types" {
         .typed_function_references = true,
         .gc = true,
     }, 0, 5, "type mismatch");
+}
+
+test "wasm.validate GC ref tests accept operands below the target type" {
+    const bytes = comptime (hdr ++
+        sec(1, "\x03\x50\x00\x5F\x00\x50\x01\x00\x5F\x01\x7F\x00\x60\x00\x00") ++
+        sec(3, "\x01\x02") ++
+        code1("\xD0\x01\xFB\x15\x00\x1A\x0B"));
+    try expectValidWithFeatures(bytes, gc_validation_features);
 }

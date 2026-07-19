@@ -1524,6 +1524,25 @@ fn gcObjectFromSlot(s: *State, slot: WasmSlot) ExecError!*GcObject {
 fn gcReferenceMatches(inst: ?*const Instance, slot: WasmSlot, target: types.RefType) bool {
     if (slotIsNull(slot)) return target.nullable;
     return switch (slot) {
+        .funcref => |raw| blk: {
+            const function: *const FuncInst = @ptrCast(@alignCast(raw.?));
+            if (target.heap.concreteIndex() != null) {
+                const target_inst = inst orelse break :blk false;
+                break :blk switch (function.*) {
+                    .defined => |defined| validate.heapTypeMatchesAcross(
+                        defined.inst.module,
+                        types.HeapType.concrete(defined.inst.module.funcTypeIndex(
+                            defined.inst.module.imported_funcs + defined.idx,
+                        )),
+                        target_inst.module,
+                        target.heap,
+                    ),
+                    .imported => false,
+                };
+            }
+            break :blk target.heap == .func;
+        },
+        .externref, .externalized_gcref, .externalized_i31 => target.heap == .extern_,
         .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
         .hostref => target.heap == .any,
         .gcref => |raw| blk: {
