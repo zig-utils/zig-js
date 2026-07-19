@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 334,
-      "pending": 112
+      "implemented": 335,
+      "pending": 111
     }
   },
   "declarations": [
@@ -1716,10 +1716,10 @@
       "line": 2070,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSValue__callCustomInspectFunction( *jsc.JSGlobalObject, JSValue, JSValue, depth: u32, max_depth: u32, colors: bool, ) JSValue;",
       "declaration_sha256": "c61d126d77e986c14150fe962282c7b70aa4a46d79d55ac7397cc179f5cff928",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__createEmptyArray",

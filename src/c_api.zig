@@ -6481,6 +6481,195 @@ export fn JSC__JSValue__getName(
     };
 }
 
+fn privateInspectNativeFunction(
+    machine: *interp.Interpreter,
+    name: []const u8,
+    length: usize,
+    native: value.NativeFn,
+) interp.EvalError!Value {
+    const function = try gc_mod.allocObj(machine.arena);
+    function.* = .{ .native = native, .proto = machine.functionProto() };
+    try interp.installNativeProps(machine.arena, machine.root_shape, function, name, length);
+    return Value.obj(function);
+}
+
+fn privateInspectStylizeNoColor(_: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    return if (args.len == 0) Value.undef() else args[0];
+}
+
+fn privateInspectStyleCodes(style_type: []const u8) ?struct { u8, u8 } {
+    if (std.mem.eql(u8, style_type, "special")) return .{ 36, 39 };
+    if (std.mem.eql(u8, style_type, "number") or std.mem.eql(u8, style_type, "bigint") or
+        std.mem.eql(u8, style_type, "boolean")) return .{ 33, 39 };
+    if (std.mem.eql(u8, style_type, "undefined")) return .{ 90, 39 };
+    if (std.mem.eql(u8, style_type, "null")) return .{ 1, 22 };
+    if (std.mem.eql(u8, style_type, "string") or std.mem.eql(u8, style_type, "symbol")) return .{ 32, 39 };
+    if (std.mem.eql(u8, style_type, "date")) return .{ 35, 39 };
+    if (std.mem.eql(u8, style_type, "regexp")) return .{ 31, 39 };
+    if (std.mem.eql(u8, style_type, "module")) return .{ 4, 24 };
+    return null;
+}
+
+fn privateInspectStylizeColor(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+    const input = if (args.len == 0) Value.undef() else args[0];
+    const text = try machine.toStringV(input);
+    const style_type = if (args.len > 1) try machine.toStringV(args[1]) else "";
+    const codes = privateInspectStyleCodes(style_type) orelse return Value.strAlloc(machine.arena, text);
+    return Value.strAlloc(machine.arena, try std.fmt.allocPrint(
+        machine.arena,
+        "\x1b[{d}m{s}\x1b[{d}m",
+        .{ codes[0], text, codes[1] },
+    ));
+}
+
+fn privateInspectRecursive(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
+    const input = if (args.len == 0) Value.undef() else args[0];
+    var style: []const u8 = "special";
+    const rendered = switch (input.kind()) {
+        .undefined => blk: {
+            style = "undefined";
+            break :blk "undefined";
+        },
+        .null => blk: {
+            style = "null";
+            break :blk "null";
+        },
+        .boolean => blk: {
+            style = "boolean";
+            break :blk if (input.asBool()) "true" else "false";
+        },
+        .number => blk: {
+            style = "number";
+            break :blk try value.numberToString(machine.arena, input.asNum());
+        },
+        .string => blk: {
+            style = "string";
+            break :blk try std.fmt.allocPrint(machine.arena, "'{s}'", .{input.asStr()});
+        },
+        .object => blk: {
+            const object = input.asObj();
+            if (object.is_symbol) {
+                style = "symbol";
+                const description = object.symbolDescription() orelse "";
+                break :blk try std.fmt.allocPrint(machine.arena, "Symbol({s})", .{description});
+            }
+            if (object.is_bigint) {
+                style = "bigint";
+                break :blk try std.fmt.allocPrint(machine.arena, "{s}n", .{try value.bigIntToString(object, machine.arena)});
+            }
+            break :blk "[object Object]";
+        },
+    };
+
+    var colors = false;
+    if (args.len > 1 and args[1].isObject()) {
+        const candidate = try machine.getProperty(args[1], "colors");
+        colors = candidate.toBoolean();
+    }
+    const rendered_value = try Value.strAlloc(machine.arena, rendered);
+    if (!colors) return rendered_value;
+    return privateInspectStylizeColor(ctx, Value.undef(), &.{ rendered_value, try Value.strAlloc(machine.arena, style) });
+}
+
+/// Exact Bun/Home custom-inspect call frame: `(depth, options, inspect)` with
+/// the inspected value as `this`. The helper functions and options object are
+/// ordinary realm-owned GC values, so the interpreter's active call frame roots
+/// them across arbitrary user code and explicit collections.
+export fn JSC__JSValue__callCustomInspectFunction(
+    global: JSContextRef,
+    encoded_function: EncodedValue,
+    encoded_this: EncodedValue,
+    depth: u32,
+    max_depth: u32,
+    colors: bool,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const function = privateValueFrom(global, encoded_function) orelse {
+        const abrupt = machine.throwError("TypeError", "Custom inspect function belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    const this_value = privateValueFrom(global, encoded_this) orelse {
+        const abrupt = machine.throwError("TypeError", "Custom inspect receiver belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    if (!function.isObject() or !function.asObj().isCallableObject()) {
+        const abrupt = machine.throwError("TypeError", "Custom inspect value is not callable");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    }
+
+    const stylize = privateInspectNativeFunction(
+        &machine,
+        if (colors) "stylizeWithColor" else "stylizeWithNoColor",
+        2,
+        if (colors) privateInspectStylizeColor else privateInspectStylizeNoColor,
+    ) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const inspect_roots_mark = machine.pushTempRoot(stylize) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer machine.restoreTempRoots(inspect_roots_mark);
+    const inspect_function = privateInspectNativeFunction(&machine, "inspect", 2, privateInspectRecursive) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    _ = machine.pushTempRoot(inspect_function) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const options_value = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    _ = machine.pushTempRoot(options_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const options = options_value.asObj();
+    options.setOwn(machine.arena, machine.root_shape, "stylize", stylize) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    options.setOwn(machine.arena, machine.root_shape, "depth", Value.num(@floatFromInt(max_depth))) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    options.setOwn(machine.arena, machine.root_shape, "colors", Value.boolVal(colors)) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+
+    const result = machine.callValueWithThis(
+        function,
+        &.{ Value.num(@floatFromInt(depth)), options_value, inspect_function },
+        this_value,
+    ) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 fn privateJSONStringify(
     encoded: EncodedValue,
     global: JSContextRef,
@@ -23512,10 +23701,10 @@ test "private async Error stacks follow pending Promise await chains" {
 
 test "private structured serialization owns bytes and preserves clone semantics" {
     const Probe = struct {
-        fn expose(global: JSContextRef, name: [*:0]const u8, encoded: EncodedValue) !void {
+        fn expose(global: JSContextRef, name: [*:0]const u8, result: EncodedValue) !void {
             const key = JSStringCreateWithUTF8CString(name) orelse return error.StringCreateFailed;
             defer JSStringRelease(key);
-            const ref = privateRefFromEncoded(global, encoded) orelse return error.ValueCreateFailed;
+            const ref = privateRefFromEncoded(global, result) orelse return error.ValueCreateFailed;
             var exception: JSValueRef = null;
             JSObjectSetProperty(global, JSContextGetGlobalObject(global), key, ref, 0, &exception);
             if (exception != null) return error.PropertySetFailed;
@@ -23612,4 +23801,78 @@ test "private structured serialization owns bytes and preserves clone semantics"
         privateSerializeJSValue(context, EncodedValue.fromInt32(323), 0, failing.allocator()),
         context,
     );
+}
+
+test "private custom inspect invokes exact receiver options and helper" {
+    const Probe = struct {
+        fn encoded(context: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context, try context.evaluate(source));
+        }
+
+        fn expose(global: JSContextRef, name: [*:0]const u8, result: EncodedValue) !void {
+            const key = JSStringCreateWithUTF8CString(name) orelse return error.StringCreateFailed;
+            defer JSStringRelease(key);
+            const ref = privateRefFromEncoded(global, result) orelse return error.ValueCreateFailed;
+            var exception: JSValueRef = null;
+            JSObjectSetProperty(global, JSContextGetGlobalObject(global), key, ref, 0, &exception);
+            if (exception != null) return error.PropertySetFailed;
+        }
+
+        fn clearExpected(global: JSContextRef) !void {
+            try std.testing.expect(JSGlobalObject__hasException(global));
+            JSGlobalObject__clearException(global);
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const receiver = try Probe.encoded(internal, "({ marker: 322, value: 323 })");
+    const function = try Probe.encoded(
+        internal,
+        "(function (depth, options, inspect) { gc(); return {" ++
+            "receiver: this.marker, depth, maxDepth: options.depth, colors: options.colors," ++
+            "keys: Object.keys(options).join(','), helperType: typeof inspect," ++
+            "helperName: inspect.name, recursive: inspect(this.value, options)," ++
+            "plain: options.stylize('plain', 'number')}; })",
+    );
+    const result = JSC__JSValue__callCustomInspectFunction(context, function, receiver, 7, 11, false);
+    try std.testing.expect(result != .empty and !JSGlobalObject__hasException(context));
+    try Probe.expose(context, "__inspect_result_322", result);
+    try std.testing.expect((try internal.evaluate(
+        "__inspect_result_322.receiver === 322 && __inspect_result_322.depth === 7 &&" ++
+            "__inspect_result_322.maxDepth === 11 && __inspect_result_322.colors === false &&" ++
+            "__inspect_result_322.keys === 'stylize,depth,colors' &&" ++
+            "__inspect_result_322.helperType === 'function' && __inspect_result_322.helperName === 'inspect' &&" ++
+            "__inspect_result_322.recursive === '323' && __inspect_result_322.plain === 'plain'",
+    )).asBool());
+
+    const color_function = try Probe.encoded(internal, "(function (_, options) { return options.stylize('323', 'number'); })");
+    const colored = JSC__JSValue__callCustomInspectFunction(context, color_function, receiver, 0, std.math.maxInt(u32), true);
+    try std.testing.expectEqualStrings(
+        "\x1b[33m323\x1b[39m",
+        (privateValueFrom(context, colored) orelse return error.ValueCreateFailed).asStr(),
+    );
+
+    const throwing = try Probe.encoded(internal, "(function () { throw 322; })");
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, throwing, receiver, 0, 0, false));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(322), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, receiver, receiver, 0, 0, false));
+    try Probe.clearExpected(context);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_function = try Probe.encoded(foreign_internal, "(function () { return 1; })");
+    const foreign_receiver = try Probe.encoded(foreign_internal, "({})");
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, foreign_function, receiver, 0, 0, false));
+    try Probe.clearExpected(context);
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, function, foreign_receiver, 0, 0, false));
+    try Probe.clearExpected(context);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(3220));
+    try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__callCustomInspectFunction(context, function, receiver, 0, 0, false));
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3220), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }

@@ -328,6 +328,7 @@ extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringR
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
+extern "c" fn JSC__JSValue__callCustomInspectFunction(JSContextRef, EncodedValue, EncodedValue, u32, u32, bool) EncodedValue;
 extern "c" fn JSC__JSValue__toBoolean(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
 extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
@@ -1402,6 +1403,16 @@ pub fn main() void {
     const encoded_empty = EncodedValue.fromRef(empty_value);
     const encoded_text = EncodedValue.fromRef(text_value);
     const encoded_object = EncodedValue.fromRef(object);
+
+    // Invoke this ABI near the start of the independently compiled consumer so
+    // later long-running watchdog coverage cannot mask a linkage/runtime fault.
+    const inspect_receiver = evaluate(context, "({ value: 322 })");
+    const inspect_function = evaluate(context, "(function(d,o,i){return this.value===322&&d===3&&o.depth===9&&!o.colors&&" ++
+        "Object.keys(o).join(',')==='stylize,depth,colors'&&typeof o.stylize==='function'&&" ++
+        "typeof i==='function'&&i(322,o)==='322'})");
+    if (JSC__JSValue__callCustomInspectFunction(context, inspect_function, inspect_receiver, 3, 9, false) != .true)
+        fail("private custom inspect invocation mismatch");
+
     if (JSC__JSValue__toBoolean(encoded_empty) or
         !JSC__JSValue__toBoolean(encoded_text) or
         !JSC__JSValue__toBoolean(encoded_object))
@@ -5988,5 +5999,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 323/323 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 324/324 symbols linked; runtime matrix passed\n", .{});
 }
