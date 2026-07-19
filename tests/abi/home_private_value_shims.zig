@@ -487,6 +487,7 @@ extern "c" fn JSC__JSCell__getObject(?*anyopaque) JSObjectRef;
 extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__createEmptyObject(JSContextRef, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) EncodedValue;
+extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
 extern "c" fn JSC__JSValue__unwrapBoxedPrimitive(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn JSC__JSValue__toObject(EncodedValue, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__getPrototype(EncodedValue, JSContextRef) EncodedValue;
@@ -664,6 +665,20 @@ var api_lock_null_callback_ran: bool = false;
 fn apiLockNullCallback(raw: ?*anyopaque) callconv(.c) void {
     _ = raw;
     api_lock_null_callback_ran = true;
+}
+
+const ObjectCreateState = struct {
+    calls: usize = 0,
+    ctx: ?*anyopaque = null,
+    obj: ?*anyopaque = null,
+    global: ?*anyopaque = null,
+};
+var object_create_state: ObjectCreateState = .{};
+fn objectCreateInitializer(ctx: ?*anyopaque, obj: ?*anyopaque, global: ?*anyopaque) callconv(.c) void {
+    object_create_state.calls += 1;
+    object_create_state.ctx = ctx;
+    object_create_state.obj = obj;
+    object_create_state.global = global;
 }
 
 fn markedArgumentFixtureCallback(raw: ?*anyopaque, buffer: ?*anyopaque) callconv(.c) void {
@@ -2819,6 +2834,31 @@ pub fn main() void {
         !JSC__JSValue__isStrictEqual(EncodedValue.fromRef(null_prototype), .null, context) or
         JSC__JSValue__isStrictEqual(empty_object, reserved_object, context))
         fail("ordinary object construction mismatch");
+
+    // `JSC__JSObject__create` (#306): empty realm object plus exactly one
+    // synchronous consumer initializer receiving the pass-through ctx, the
+    // stable cell pointer the returned value exposes, and the same global.
+    var create_sentinel: usize = 0xC0FFEE;
+    object_create_state = .{};
+    const marshalled_object = JSC__JSObject__create(context, 8, &create_sentinel, objectCreateInitializer);
+    if (marshalled_object == .empty or object_create_state.calls != 1 or
+        object_create_state.ctx != @as(?*anyopaque, @ptrCast(&create_sentinel)) or
+        object_create_state.global != @as(?*anyopaque, @ptrCast(context)) or
+        object_create_state.obj == null or
+        object_create_state.obj != EncodedValue.cellPointer(marshalled_object))
+        fail("private JSObject create initializer mismatch");
+    const marshalled_prototype = JSObjectGetPrototype(context, EncodedValue.cellPointer(marshalled_object)) orelse fail("marshalled object prototype lookup failed");
+    if (!JSC__JSValue__isStrictEqual(EncodedValue.fromRef(marshalled_prototype), object_prototype, context))
+        fail("private JSObject create prototype mismatch");
+    // Capacity beyond JSC's maxInlineCapacity clamp is observably identical,
+    // a null initializer still creates a distinct object, and a null VM
+    // returns empty without invoking the callback.
+    const over_reserved_object = JSC__JSObject__create(context, 1 << 20, null, null);
+    if (over_reserved_object == .empty or
+        JSC__JSValue__isStrictEqual(over_reserved_object, marshalled_object, context))
+        fail("private JSObject create capacity/null-initializer mismatch");
+    if (JSC__JSObject__create(null, 0, null, objectCreateInitializer) != .empty or object_create_state.calls != 1)
+        fail("private JSObject create null-VM tolerance mismatch");
 
     const number_wrapper = evaluate(context, "new Number(42)");
     const int32_min_wrapper = evaluate(context, "new Number(-2147483648)");
@@ -5394,5 +5434,5 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 290/290 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 291/291 symbols linked; runtime matrix passed\n", .{});
 }

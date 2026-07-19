@@ -7998,6 +7998,21 @@ export fn JSC__JSValue__createEmptyObjectWithNullPrototype(global: JSContextRef)
     return privateEncodedFromRef(object);
 }
 
+/// `JSC::constructEmptyObject(globalObject, objectPrototype, min(capacity,
+/// JSFinalObject::maxInlineCapacity))` followed by the consumer initializer
+/// (bindings.cpp:2477): Bun's struct-marshalling path populates the fresh POJO
+/// inside the callback. zig-js shapes grow on demand, so the capacity clamp is
+/// a performance hint with no observable effect. The callback receives the
+/// stable canonical cell handle — the same address the returned EncodedJSValue
+/// exposes at the private cell boundary — and runs exactly once, synchronously,
+/// before the object is handed back.
+export fn JSC__JSObject__create(global: JSContextRef, initial_capacity: usize, ctx: ?*anyopaque, initializer: ?*const fn (?*anyopaque, ?*anyopaque, JSContextRef) callconv(.c) void) callconv(.c) EncodedValue {
+    _ = initial_capacity;
+    const object = JSObjectMake(global, null, null) orelse return .empty;
+    if (initializer) |init| init(ctx, @ptrCast(object), global);
+    return privateEncodedFromRef(object);
+}
+
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
     const gc_saved = gc_mod.setActiveHeap(context.gc);
