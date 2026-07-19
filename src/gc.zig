@@ -64,7 +64,7 @@ pub inline fn markValue(v: anytype, val: Value) void {
         v.mark(val.asObj());
     } else if (val.isString()) {
         const cell = val.asStringCell();
-        if (cell.gc_managed) v.mark(@constCast(cell));
+        if (cell.isGcManaged()) v.mark(@constCast(cell));
     }
 }
 
@@ -1137,14 +1137,14 @@ pub const Binding = struct {
             },
             .string => {
                 const string: *StringCell = @ptrCast(@alignCast(cell));
-                if (string.external_owner) |owner| {
+                if (string.externalOwner()) |owner| {
                     self.context.queueExternalStringRelease(owner);
-                    string.external_owner = null;
+                    string.setExternalOwner(null);
                 }
                 if (string.bytes.len > 0) self.context.gpa.free(@constCast(string.bytes));
                 _ = @atomicRmw(usize, &self.context.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
                 string.bytes = &.{};
-                string.gc_managed = false;
+                string.setGcManaged(false);
             },
             .environment => finalizeEnv(@ptrCast(@alignCast(cell))),
             .generator => finalizeGenerator(
@@ -1306,7 +1306,8 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
     errdefer heap.ctx.context.gpa.free(bytes);
     const cell = try heap.create(StringCell, .string);
-    cell.* = .{ .bytes = bytes, .hash = strcell.hashBytes(bytes), .gc_managed = true };
+    cell.* = .{ .bytes = bytes, .hash = strcell.hashBytes(bytes) };
+    cell.setGcManaged(true);
     _ = @atomicRmw(usize, &heap.ctx.context.gc_string_bytes_live, .Add, bytes.len, .monotonic);
     return cell;
 }
@@ -1380,7 +1381,7 @@ pub inline fn barrierValue(v: Value) void {
         gc_runtime.barrier(@ptrCast(v.asObj()));
     } else if (v.isString()) {
         const cell = v.asStringCell();
-        if (cell.gc_managed) gc_runtime.barrier(@constCast(cell));
+        if (cell.isGcManaged()) gc_runtime.barrier(@constCast(cell));
     }
 }
 
@@ -1389,7 +1390,7 @@ pub inline fn barrierValueFrom(owner: ?*anyopaque, v: Value) void {
         gc_runtime.barrierFrom(owner, @ptrCast(v.asObj()));
     } else if (v.isString()) {
         const cell = v.asStringCell();
-        if (cell.gc_managed) gc_runtime.barrierFrom(owner, @constCast(cell));
+        if (cell.isGcManaged()) gc_runtime.barrierFrom(owner, @constCast(cell));
     }
 }
 

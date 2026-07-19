@@ -60,16 +60,43 @@ pub const ExternalStringOwner = struct {
 /// or an arena); `hash` is the cached FNV-1a content hash. Immutable after
 /// creation, so it is safe to share read-only across threads.
 pub const StringCell = struct {
+    const gc_managed_mask: usize = 1;
+
     bytes: []const u8,
     hash: u64,
+    /// The aligned owner pointer leaves its low bit available for managed-cell
+    /// classification. Keeping both facts in one word preserves StringCell's
+    /// 32-byte hot footprint even when a string retains external storage.
+    owner_and_gc: usize = 0,
+
     /// True only when the cell itself was allocated by zig-gc. Static literals,
     /// arena strings, and intern-table entries remain outside the heap and must
     /// never be handed to the collector's strict `mark` entry point.
-    gc_managed: bool = false,
+    pub fn isGcManaged(self: *const StringCell) bool {
+        return self.owner_and_gc & gc_managed_mask != 0;
+    }
+
+    pub fn setGcManaged(self: *StringCell, managed: bool) void {
+        if (managed) {
+            self.owner_and_gc |= gc_managed_mask;
+        } else {
+            self.owner_and_gc &= ~gc_managed_mask;
+        }
+    }
+
     /// Original embedder allocation retained by private external-string
     /// constructors. Internal bytes may be canonical WTF-8; this obligation is
     /// released only when the cell dies or its arena Context is destroyed.
-    external_owner: ?*ExternalStringOwner = null,
+    pub fn externalOwner(self: *const StringCell) ?*ExternalStringOwner {
+        const address = self.owner_and_gc & ~gc_managed_mask;
+        return if (address == 0) null else @ptrFromInt(address);
+    }
+
+    pub fn setExternalOwner(self: *StringCell, owner: ?*ExternalStringOwner) void {
+        const address = if (owner) |record| @intFromPtr(record) else 0;
+        std.debug.assert(address & gc_managed_mask == 0);
+        self.owner_and_gc = address | (self.owner_and_gc & gc_managed_mask);
+    }
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
         if (self == other) return true; // interned ⇒ pointer identity is enough
@@ -481,5 +508,5 @@ test "strcell: StringCell stays a compact NaN-box payload target" {
     // A NaN-boxed string remains one pointer. The target carries {ptr,len}, a
     // cached hash, and immutable ownership classification for strict GC marks.
     try std.testing.expect(@sizeOf(StringCell) >= 2 * @sizeOf(usize) + @sizeOf(u64) + 1);
-    try std.testing.expect(@sizeOf(StringCell) <= 32);
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(StringCell));
 }

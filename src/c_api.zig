@@ -3407,12 +3407,12 @@ fn privateExternalZigString(
         return .empty;
     };
     const cell = @constCast(result.asStringCell());
-    cell.external_owner = owner;
+    cell.setExternalOwner(owner);
     attached = true;
 
     const encoded = privateEncodedFromValue(context, result);
     if (encoded == .empty) {
-        cell.external_owner = null;
+        cell.setExternalOwner(null);
         attached = false;
         privatePublishBunStringError(context, error.OutOfMemory);
     }

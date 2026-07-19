@@ -15,7 +15,7 @@ inline fn gcBarrier(owner: *Object, v: Value) void {
         gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(v.asObj()));
     } else if (v.isString()) {
         const cell = v.asStringCell();
-        if (cell.gc_managed) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(@constCast(cell)));
+        if (cell.isGcManaged()) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(@constCast(cell)));
     }
 }
 

@@ -17999,8 +17999,8 @@ test "enable_gc: runtime StringCells are traced and finalized" {
         const owned_source = try ctx.gpa.dupe(u8, owned_text);
         const owned = try Value.strOwned(ctx.gpa, owned_source);
         _ = try Value.strAlloc(ctx.arena(), garbage_text);
-        try std.testing.expect(kept.asStringCell().gc_managed);
-        try std.testing.expect(owned.asStringCell().gc_managed);
+        try std.testing.expect(kept.asStringCell().isGcManaged());
+        try std.testing.expect(owned.asStringCell().isGcManaged());
         try ctx.env.put("__gc_kept_string", kept);
         try ctx.env.put("__gc_owned_string", owned);
     }
