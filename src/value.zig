@@ -2278,10 +2278,40 @@ pub const Object = struct {
         return self.ensureRare(fallback, .wasm_instance, .{});
     }
 
-    pub inline fn wasmMemory(self: *const Object) ?*@FieldType(ObjectRareState, "wasm_memory") {
+    /// Copy the complete Memory wrapper record while it is stable. Shared
+    /// memory growth replaces `buffer_obj` after the wrapper has already been
+    /// published to other no-GIL mutators, so callers must not retain a raw
+    /// pointer into the rare-state union across that replacement.
+    pub fn wasmMemorySnapshot(self: *Object) ?@FieldType(ObjectRareState, "wasm_memory") {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
         const cold = self.coldState() orelse return null;
         if (!cold.hasRare(.wasm_memory)) return null;
-        return &cold.rare.wasm_memory;
+        return cold.rare.wasm_memory;
+    }
+
+    /// Atomically replace a Memory wrapper's current buffer. For unshared
+    /// memory, detaching the historical ArrayBuffer and publishing its
+    /// replacement occur under the same wrapper lock, so a concurrent getter
+    /// observes either the complete old record or the complete new record.
+    pub fn replaceWasmMemoryBuffer(self: *Object, fresh: *Object, detach_old: bool) bool {
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        const cold = self.coldState() orelse return false;
+        if (!cold.hasRare(.wasm_memory)) return false;
+        const state = &cold.rare.wasm_memory;
+        const old_object = state.buffer_obj orelse return false;
+        if (detach_old) {
+            const old = old_object.arrayBuffer() orelse return false;
+            // Generated native handles promise stable backing ownership.
+            if (old.native_handle.load(.acquire) != null) return false;
+            old.lockBuffer();
+            old.swapLocalData(&.{});
+            old.setDetached(true);
+            old.unlockBuffer();
+        }
+        state.buffer_obj = fresh;
+        return true;
     }
 
     pub fn wasmMemoryState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*@FieldType(ObjectRareState, "wasm_memory") {

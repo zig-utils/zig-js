@@ -620,36 +620,24 @@ fn memoryDidGrow(raw: *anyopaque, mem: *exec.MemoryInst) bool {
     if (owner.mem != mem) return false;
     const self: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return false));
     const fresh = makeMemoryBuffer(self, owner.store, mem) catch return false;
-    const state = owner.wrapper.wasmMemory() orelse return false;
-    const old_object = state.buffer_obj orelse return false;
-    const old = old_object.arrayBuffer() orelse return false;
     if (mem.isShared()) {
         // Shared memory growth never detaches the historical buffer. The new
         // fixed-length wrapper aliases the same Shared Data Block at the new
         // length, exactly as the Threads JS API requires.
-        state.buffer_obj = fresh;
+        if (!owner.wrapper.replaceWasmMemoryBuffer(fresh, false)) return false;
         gc.barrierCellFrom(owner.wrapper, fresh);
         return true;
     }
-    // Generated native handles promise stable backing ownership. The private
-    // conversion rejects Memory buffers, but keep this defensive boundary so a
-    // future caller cannot retire bytes underneath an already-issued handle.
-    if (old.native_handle.load(.acquire) != null) return false;
-
     // The replacement is fully allocated before the old view changes, so an
     // OOM leaves the memory and its buffer identity untouched.
-    old.lockBuffer();
-    old.swapLocalData(&.{});
-    old.setDetached(true);
-    old.unlockBuffer();
-    state.buffer_obj = fresh;
+    if (!owner.wrapper.replaceWasmMemoryBuffer(fresh, true)) return false;
     gc.barrierCellFrom(owner.wrapper, fresh);
     return true;
 }
 
 fn memoryFromThis(self: *Interpreter, this: Value, operation: []const u8) value.HostError!*MemoryOwner {
     const object = languageObject(this) orelse return self.throwError("TypeError", operation);
-    const state = object.wasmMemory() orelse return self.throwError("TypeError", operation);
+    const state = object.wasmMemorySnapshot() orelse return self.throwError("TypeError", operation);
     return @ptrCast(@alignCast(state.mem orelse return self.throwError("TypeError", operation)));
 }
 
@@ -690,7 +678,7 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
 fn memoryBufferGetter(ctx: *anyopaque, this: Value, _: []const Value) value.HostError!Value {
     const self = activeInterpreter(ctx);
     const object = languageObject(this) orelse return self.throwError("TypeError", "WebAssembly.Memory.prototype.buffer getter requires a Memory");
-    const state = object.wasmMemory() orelse return self.throwError("TypeError", "WebAssembly.Memory.prototype.buffer getter requires a Memory");
+    const state = object.wasmMemorySnapshot() orelse return self.throwError("TypeError", "WebAssembly.Memory.prototype.buffer getter requires a Memory");
     _ = state.mem orelse return self.throwError("TypeError", "WebAssembly.Memory.prototype.buffer getter requires a Memory");
     return Value.obj(state.buffer_obj orelse return self.throwError("TypeError", "WebAssembly.Memory buffer is unavailable"));
 }
@@ -1619,7 +1607,7 @@ fn resolveImports(self: *Interpreter, store: *context.Context, module: *types.Mo
             },
             .mem => {
                 const object = languageObject(imported) orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", descriptor.link_error_proto);
-                const state = object.wasmMemory() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", descriptor.link_error_proto);
+                const state = object.wasmMemorySnapshot() orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is not a Memory", descriptor.link_error_proto);
                 const owner: *MemoryOwner = @ptrCast(@alignCast(state.mem orelse return throwWasmWithProto(self, "LinkError", "WebAssembly memory import is unavailable", descriptor.link_error_proto)));
                 if (owner.store != store) return throwWasmWithProto(self, "LinkError", "WebAssembly memory import belongs to another store", descriptor.link_error_proto);
                 mems[mi] = owner.mem;
@@ -3422,6 +3410,50 @@ test "wasm api shared Memory preserves fixed historical buffers and aliases back
         \\Object.prototype.toString.call(shared.buffer) === '[object SharedArrayBuffer]' && mismatch;
     );
     try std.testing.expect(defined_and_imported.isBoolean() and defined_and_imported.asBool());
+}
+
+test "wasm api shared Memory publishes grow buffers under no-GIL contention" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .wasm_features = .{ .threads = true },
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error('expected no-GIL execution');
+        \\const memory = new WebAssembly.Memory({ initial: 1, maximum: 65, shared: true });
+        \\const gate = { ready: 0, go: 0, done: 0 };
+        \\const readers = [];
+        \\for (let lane = 0; lane < 8; lane++) readers.push(new Thread(() => {
+        \\  Atomics.add(gate, 'ready', 1);
+        \\  Atomics.notify(gate, 'ready');
+        \\  while (Atomics.load(gate, 'go') === 0)
+        \\    Atomics.wait(gate, 'go', 0, 100);
+        \\  let observations = 0;
+        \\  do {
+        \\    const buffer = memory.buffer;
+        \\    const length = buffer.byteLength;
+        \\    const view = new Uint8Array(buffer);
+        \\    if (length < 65536 || length > 65 * 65536 || length % 65536 !== 0 ||
+        \\        view.byteLength !== length ||
+        \\        Object.prototype.toString.call(buffer) !== '[object SharedArrayBuffer]')
+        \\      return -1;
+        \\    observations++;
+        \\  } while (Atomics.load(gate, 'done') === 0);
+        \\  return observations;
+        \\}));
+        \\while (Atomics.load(gate, 'ready') !== readers.length)
+        \\  Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 100);
+        \\Atomics.store(gate, 'go', 1);
+        \\Atomics.notify(gate, 'go', readers.length);
+        \\for (let page = 1; page < 65; page++) {
+        \\  if (memory.grow(1) !== page) throw new Error('bad previous page count');
+        \\  if ((page & 7) === 0) Atomics.wait(gate, 'go', 1, 1);
+        \\}
+        \\Atomics.store(gate, 'done', 1);
+        \\Atomics.notify(gate, 'done', readers.length);
+        \\memory.buffer.byteLength === 65 * 65536 && readers.every(reader => reader.join() > 0);
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api atomic exports scale across no-GIL Threads and wake waiters" {
