@@ -3180,7 +3180,9 @@ test "wasm.validate GC canonical recursive type identity" {
         "\x60\x00\x00");
     const function_section = comptime sec(3, "\x01\x02");
     const equivalent_cast = comptime (hdr ++ equivalent_types ++ function_section ++
-        code1("\xD0\x00\xFB\x00\x00\xFB\x16\x01\x1A\x0B"));
+        // struct.get type 1 accepts the type-0 value only when the two
+        // separately declared recursive groups are canonically equivalent.
+        code1("\xD0\x00\xFB\x00\x00\xFB\x02\x01\x00\x1A\x0B"));
     try expectValidWithFeatures(equivalent_cast, gc_validation_features);
 
     const distinct_types = comptime sec(1, "\x03" ++
@@ -3188,7 +3190,7 @@ test "wasm.validate GC canonical recursive type identity" {
         "\x5F\x01\x7F\x00" ++
         "\x60\x00\x00");
     const distinct_cast = comptime (hdr ++ distinct_types ++ function_section ++
-        code1("\xD0\x00\xFB\x00\x00\xFB\x16\x01\x1A\x0B"));
+        code1("\xD0\x00\xFB\x00\x00\xFB\x02\x01\x00\x1A\x0B"));
     try expectInvalidAtWithFeatures(distinct_cast, gc_validation_features, 0, 2, "type mismatch");
 
     const illegal_forward_reference = comptime (hdr ++ sec(1, "\x02" ++
