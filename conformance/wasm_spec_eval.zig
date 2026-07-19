@@ -6,7 +6,8 @@
 //! `WASM_SPEC_PROFILE=core-2-structural` enables the completed structural set;
 //! `WASM_SPEC_PROFILE=simd` adds fixed-width SIMD; `threads` selects shared
 //! memories and atomic execution; `tail-calls`, `exception-handling`,
-//! `memory64`, and `gc` select their exact pinned proposal feature gates.
+//! `multi-memory`, `memory64`, and `gc` select their exact pinned proposal
+//! feature gates.
 
 const std = @import("std");
 const js = @import("js");
@@ -25,12 +26,14 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, profile, "simd") or
         std.mem.eql(u8, profile, "tail-calls") or
         std.mem.eql(u8, profile, "exception-handling") or
+        std.mem.eql(u8, profile, "multi-memory") or
         std.mem.eql(u8, profile, "memory64") or
         std.mem.eql(u8, profile, "gc");
     const simd = std.mem.eql(u8, profile, "simd");
     const threads = std.mem.eql(u8, profile, "threads");
     const tail_calls = std.mem.eql(u8, profile, "tail-calls");
     const exception_handling = std.mem.eql(u8, profile, "exception-handling");
+    const multi_memory = std.mem.eql(u8, profile, "multi-memory");
     const memory64 = std.mem.eql(u8, profile, "memory64");
     const wasm_gc = std.mem.eql(u8, profile, "gc");
     const ctx = try js.Context.createWithTestingOptions(gpa, .{
@@ -53,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
             .typed_function_references = wasm_gc or memory64,
             .gc = wasm_gc,
             .memory64 = memory64,
-            .multi_memory = memory64,
+            .multi_memory = multi_memory or memory64,
         } else .{},
     });
     defer ctx.destroy();

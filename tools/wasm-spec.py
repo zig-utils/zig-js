@@ -144,6 +144,32 @@ PROFILES = {
         "default_files": ["tag.wast", "throw.wast", "throw_ref.wast", "try_table.wast"],
         "converter_args": ["--enable-exceptions", "--enable-tail-call"],
     },
+    "multi-memory": {
+        "kind": "webassembly_multi_memory_runtime_inventory",
+        "repository": "https://github.com/WebAssembly/multi-memory.git",
+        "tag": "proposal-revision",
+        "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+        "wabt_version": "1.0.39",
+        "wabt_commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "evaluator_profile": "multi-memory",
+        "features": ["multi_value", "reference_types", "bulk_memory", "multi_memory"],
+        "corpus_root": "test/core",
+        "corpus_glob": "test/core/**/*.wast",
+        "default_files": [
+            "address0.wast", "address1.wast", "align0.wast", "binary0.wast",
+            "data0.wast", "data1.wast", "data_drop0.wast", "exports0.wast",
+            "float_exprs0.wast", "float_exprs1.wast", "float_memory0.wast",
+            "imports0.wast", "imports1.wast", "imports2.wast", "imports3.wast",
+            "imports4.wast", "linking0.wast", "linking1.wast", "linking2.wast",
+            "linking3.wast", "load0.wast", "load1.wast", "load2.wast",
+            "memory-multi.wast", "memory_copy0.wast", "memory_copy1.wast",
+            "memory_fill0.wast", "memory_init0.wast", "memory_size0.wast",
+            "memory_size1.wast", "memory_size2.wast", "memory_size3.wast",
+            "memory_trap0.wast", "memory_trap1.wast", "start0.wast",
+            "store0.wast", "store1.wast", "traps0.wast",
+        ],
+        "converter_args": ["--enable-multi-memory"],
+    },
     "memory64": {
         "kind": "webassembly_memory64_runtime_inventory",
         "repository": "https://github.com/WebAssembly/memory64.git",
@@ -238,7 +264,7 @@ def converter_command(profile: dict, converter: Path, source: Path, output: Path
 
 
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
-    corpus_root = spec_root / Path(profile["corpus_glob"]).parent
+    corpus_root = spec_root / profile.get("corpus_root", Path(profile["corpus_glob"]).parent)
     if not corpus_root.is_dir():
         fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
@@ -1186,6 +1212,8 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "tail_calls"
     if profile_name == "exception-handling":
         return "exception_handling"
+    if profile_name == "multi-memory":
+        return "multi_memory"
     if profile_name == "memory64":
         return "memory64"
     if profile_name == "gc":
@@ -1255,6 +1283,7 @@ def main() -> int:
         "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
         "tail-calls": ROOT / "docs/.data/wasm-tail-call-inventory.json",
         "exception-handling": ROOT / "docs/.data/wasm-exception-handling-inventory.json",
+        "multi-memory": ROOT / "docs/.data/wasm-multi-memory-runtime-inventory.json",
         "memory64": ROOT / "docs/.data/wasm-memory64-runtime-inventory.json",
         "gc": ROOT / "docs/.data/wasm-gc-runtime-inventory.json",
     }
