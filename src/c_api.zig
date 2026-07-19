@@ -40,6 +40,7 @@ const promise = @import("promise.zig");
 const structured_clone = @import("structured_clone.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
+const text_codec = @import("text_codec.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
 const private_jstype = @import("private_abi/jstype.zig");
 const WorkerMod = @import("worker.zig");
@@ -3080,6 +3081,74 @@ fn privateOwnedWTF8String(bytes: []const u8) PrivateBunStringError!PrivateBunStr
 }
 
 const PrivateBunStringError = error{ OutOfMemory, StringTooLong, InvalidString };
+
+export fn Bun__createTextCodec(
+    encoding_name: [*c]const u8,
+    encoding_name_len: usize,
+) callconv(.c) ?*text_codec.Codec {
+    if (encoding_name_len > 0 and encoding_name == null) return null;
+    const label = if (encoding_name_len == 0) &.{} else encoding_name[0..encoding_name_len];
+    const encoding = text_codec.canonicalEncoding(label) orelse return null;
+    const codec = private_string_allocator.create(text_codec.Codec) catch return null;
+    codec.* = text_codec.Codec.init(encoding);
+    return codec;
+}
+
+export fn Bun__decodeWithTextCodec(
+    codec: ?*text_codec.Codec,
+    data: [*c]const u8,
+    length: usize,
+    flush: bool,
+    stop_on_error: bool,
+    out_saw_error: ?*bool,
+) callconv(.c) PrivateBunString {
+    const saw_error = out_saw_error orelse return PrivateBunString.empty();
+    saw_error.* = false;
+    const decoder = codec orelse return PrivateBunString.empty();
+    if (length > 0 and data == null) return PrivateBunString.empty();
+    const input = if (length == 0) &.{} else data[0..length];
+    const decoded = decoder.decode(private_string_allocator, input, flush, stop_on_error) catch
+        return PrivateBunString.dead();
+    defer decoded.deinit(private_string_allocator);
+    saw_error.* = decoded.saw_error;
+    return privateOwnedWTF8String(decoded.bytes) catch PrivateBunString.dead();
+}
+
+export fn Bun__deleteTextCodec(codec: ?*text_codec.Codec) callconv(.c) void {
+    const decoder = codec orelse return;
+    decoder.deinit();
+    private_string_allocator.destroy(decoder);
+}
+
+/// None of the codecs in the pinned fallback registry overrides WebKit's
+/// default no-op `TextCodec::stripByteOrderMark` implementation.
+export fn Bun__stripBOMFromTextCodec(codec: ?*text_codec.Codec) callconv(.c) void {
+    _ = codec;
+}
+
+export fn Bun__isEncodingSupported(
+    encoding_name: [*c]const u8,
+    encoding_name_len: usize,
+) callconv(.c) bool {
+    if (encoding_name_len > 0 and encoding_name == null) return false;
+    const label = if (encoding_name_len == 0) &.{} else encoding_name[0..encoding_name_len];
+    return text_codec.canonicalEncoding(label) != null;
+}
+
+export fn Bun__getCanonicalEncodingName(
+    encoding_name: [*c]const u8,
+    encoding_name_len: usize,
+    out_len: ?*usize,
+) callconv(.c) ?[*]const u8 {
+    const length = out_len orelse return null;
+    length.* = 0;
+    if (encoding_name_len > 0 and encoding_name == null) return null;
+    const label = if (encoding_name_len == 0) &.{} else encoding_name[0..encoding_name_len];
+    const encoding = text_codec.canonicalEncoding(label) orelse return null;
+    const canonical = encoding.canonicalName();
+    length.* = canonical.len;
+    return canonical.ptr;
+}
 
 fn privateLatin1ToWTF8(allocator: std.mem.Allocator, bytes: []const u8) error{OutOfMemory}![]u8 {
     const capacity = std.math.mul(usize, bytes.len, 2) catch return error.OutOfMemory;

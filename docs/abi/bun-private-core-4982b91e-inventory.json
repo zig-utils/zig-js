@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 329,
-      "pending": 107
+      "implemented": 335,
+      "pending": 101
     }
   },
   "home_comparison": {
@@ -666,10 +666,10 @@
       "line": 1,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__createTextCodec(encodingName: [*]const u8, encodingNameLen: usize) ?*TextCodec;",
       "declaration_sha256": "1429150bc900453b66d31fa75ab89a3adf3e5ec48aead254569cb7d8978e5097",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__createUint8ArrayForCopy",
@@ -688,10 +688,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__decodeWithTextCodec(codec: *TextCodec, data: [*]const u8, length: usize, flush: bool, stopOnError: bool, outSawError: *bool) bun.String;",
       "declaration_sha256": "aa11e29be56d4984160c5671bdebebf75c2dd6d7c82e8582fe9d5c0eb7a627ed",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__deleteTextCodec",
@@ -699,10 +699,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__deleteTextCodec(codec: *TextCodec) void;",
       "declaration_sha256": "b94bacdae3a3ed6665da93d50ba075d46290c42666add8ba4d63628a50521ab6",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__emitHandledPromiseEvent",
@@ -743,10 +743,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__getCanonicalEncodingName(encodingName: [*]const u8, encodingNameLen: usize, outLen: *usize) ?[*]const u8;",
       "declaration_sha256": "f4b8f5a2460d69bbcfddac0039acf39a7c737ab1263c36da24eca7097a0dd341",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__handleUncaughtException",
@@ -776,10 +776,10 @@
       "line": 5,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__isEncodingSupported(encodingName: [*]const u8, encodingNameLen: usize) bool;",
       "declaration_sha256": "6641a54a961d846bfa99a0392b42cef7e61ac25fa86c082fe508030bb7681998",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__loadHTMLEntryPoint",
@@ -930,10 +930,10 @@
       "line": 4,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__stripBOMFromTextCodec(codec: *TextCodec) void;",
       "declaration_sha256": "53c0139d78802a15c04dc6eaa61545b6b2fd582c4ca6af938b740d959533c3ac",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__wrapUnhandledRejectionErrorForUncaughtException",

@@ -273,6 +273,7 @@ const JSStringIterator = extern struct {
 
 const PrivateCallFrame = opaque {};
 const PrivateArrayBufferHandle = opaque {};
+const TextCodec = opaque {};
 const JSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
 const ImplementationVisibility = enum(u8) {
     public = 0,
@@ -349,6 +350,12 @@ extern "c" fn JSC__JSBigInt__toInt64(?*anyopaque) i64;
 extern "c" fn JSC__JSBigInt__toString(?*anyopaque, JSContextRef) BunString;
 extern "c" fn Bun__WTFStringImpl__ref(?*WTFStringImpl) void;
 extern "c" fn Bun__WTFStringImpl__deref(?*WTFStringImpl) void;
+extern "c" fn Bun__createTextCodec([*]const u8, usize) ?*TextCodec;
+extern "c" fn Bun__decodeWithTextCodec(*TextCodec, [*]const u8, usize, bool, bool, *bool) BunString;
+extern "c" fn Bun__deleteTextCodec(*TextCodec) void;
+extern "c" fn Bun__stripBOMFromTextCodec(*TextCodec) void;
+extern "c" fn Bun__isEncodingSupported([*]const u8, usize) bool;
+extern "c" fn Bun__getCanonicalEncodingName([*]const u8, usize, *usize) ?[*]const u8;
 extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
@@ -1430,6 +1437,69 @@ pub fn main() void {
         "typeof i==='function'&&i(322,o)==='322'})");
     if (JSC__JSValue__callCustomInspectFunction(context, inspect_function, inspect_receiver, 3, 9, false) != .true)
         fail("private custom inspect invocation mismatch");
+
+    // Revision-pinned native TextCodec fallback (#327): exact registry,
+    // stable canonical-name storage, incremental state, errors, and ownership.
+    const sjis_label = "sJiS";
+    const sjis_alias = "windows-31j";
+    if (!Bun__isEncodingSupported(sjis_label.ptr, sjis_label.len) or
+        Bun__isEncodingSupported("utf-8".ptr, "utf-8".len) or
+        Bun__isEncodingSupported(" sjis".ptr, " sjis".len))
+        fail("private TextCodec support registry mismatch");
+    var canonical_len: usize = 99;
+    const canonical = Bun__getCanonicalEncodingName(sjis_label.ptr, sjis_label.len, &canonical_len) orelse
+        fail("private TextCodec canonical name missing");
+    var alias_len: usize = 99;
+    const canonical_alias = Bun__getCanonicalEncodingName(sjis_alias.ptr, sjis_alias.len, &alias_len) orelse
+        fail("private TextCodec canonical alias missing");
+    if (!std.mem.eql(u8, canonical[0..canonical_len], "Shift_JIS") or
+        canonical != canonical_alias or canonical_len != alias_len)
+        fail("private TextCodec canonical name mismatch");
+    var rejected_len: usize = 99;
+    if (Bun__getCanonicalEncodingName("utf-8".ptr, "utf-8".len, &rejected_len) != null or rejected_len != 0)
+        fail("private TextCodec canonical rejection mismatch");
+
+    const sjis_codec = Bun__createTextCodec(sjis_label.ptr, sjis_label.len) orelse
+        fail("private TextCodec creation failed");
+    var saw_codec_error = true;
+    const sjis_lead = [_]u8{0x82};
+    const split_empty = Bun__decodeWithTextCodec(sjis_codec, &sjis_lead, sjis_lead.len, false, false, &saw_codec_error);
+    if (!bunStringUtf8Equals(split_empty, "") or saw_codec_error)
+        fail("private TextCodec incremental lead mismatch");
+    const sjis_trail = [_]u8{0xa0};
+    const split_value = Bun__decodeWithTextCodec(sjis_codec, &sjis_trail, sjis_trail.len, false, false, &saw_codec_error);
+    if (!bunStringUtf8Equals(split_value, "\u{3042}") or saw_codec_error)
+        fail("private TextCodec incremental trail mismatch");
+    if (split_value.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(split_value.value.wtf_string_impl);
+    const invalid_sjis = [_]u8{ 0xfd, 'A' };
+    const stopped_value = Bun__decodeWithTextCodec(sjis_codec, &invalid_sjis, invalid_sjis.len, true, true, &saw_codec_error);
+    if (!bunStringUtf8Equals(stopped_value, "\u{fffd}") or !saw_codec_error)
+        fail("private TextCodec stop-on-error mismatch");
+    if (stopped_value.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(stopped_value.value.wtf_string_impl);
+    Bun__stripBOMFromTextCodec(sjis_codec);
+    Bun__deleteTextCodec(sjis_codec);
+
+    const replacement_label = "replacement";
+    const replacement_codec = Bun__createTextCodec(replacement_label.ptr, replacement_label.len) orelse
+        fail("private replacement TextCodec creation failed");
+    const replacement_first = Bun__decodeWithTextCodec(replacement_codec, "ignored".ptr, "ignored".len, false, false, &saw_codec_error);
+    if (!bunStringUtf8Equals(replacement_first, "\u{fffd}") or !saw_codec_error)
+        fail("private replacement TextCodec first result mismatch");
+    if (replacement_first.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(replacement_first.value.wtf_string_impl);
+    const replacement_second = Bun__decodeWithTextCodec(replacement_codec, "ignored".ptr, "ignored".len, true, true, &saw_codec_error);
+    if (!bunStringUtf8Equals(replacement_second, "") or !saw_codec_error)
+        fail("private replacement TextCodec state mismatch");
+    Bun__deleteTextCodec(replacement_codec);
+
+    const user_label = "x-user-defined";
+    const user_codec = Bun__createTextCodec(user_label.ptr, user_label.len) orelse
+        fail("private user-defined TextCodec creation failed");
+    const user_bytes = [_]u8{ 0x41, 0x80, 0xff };
+    const user_value = Bun__decodeWithTextCodec(user_codec, &user_bytes, user_bytes.len, true, false, &saw_codec_error);
+    if (!bunStringUtf8Equals(user_value, "A\u{f780}\u{f7ff}") or saw_codec_error)
+        fail("private user-defined TextCodec mapping mismatch");
+    if (user_value.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(user_value.value.wtf_string_impl);
+    Bun__deleteTextCodec(user_codec);
 
     if (JSC__JSValue__toBoolean(encoded_empty) or
         !JSC__JSValue__toBoolean(encoded_text) or
@@ -6046,5 +6116,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 327/327 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 333/333 symbols linked; runtime matrix passed\n", .{});
 }
