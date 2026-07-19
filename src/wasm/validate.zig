@@ -635,10 +635,8 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
         );
     }
     for (mod.code) |body| {
-        for (body.locals) |local| {
+        for (body.locals) |local|
             try validateValType(mod, local, diag);
-            if (!valTypeDefaultable(local)) return failMod(diag, "type is not defaultable");
-        }
     }
 
     // 4. Element segments.
@@ -826,6 +824,8 @@ fn checkExtendedConstExpr(
         .diag = diag,
         .params = &.{},
         .locals = &.{},
+        .locals_init = &.{},
+        .init_stack = &.{},
         .instrs = extended.instrs,
         .offsets = extended.offsets,
         .opds = opds,
@@ -885,6 +885,7 @@ const Frame = struct {
     params: []const types.ValType,
     results: []const types.ValType,
     height: usize,
+    init_height: usize,
     unreach: bool = false,
     saw_else: bool = false,
 
@@ -958,6 +959,9 @@ const FuncValidator = struct {
     diag: *types.Diagnostic,
     params: []const types.ValType,
     locals: []const types.ValType, // declared locals (params excluded)
+    locals_init: []bool,
+    init_stack: []u32,
+    init_len: usize = 0,
     instrs: []const types.Instr,
     offsets: []const u32,
     pc: usize = 0,
@@ -1029,9 +1033,29 @@ const FuncValidator = struct {
 
     fn pushFrame(self: *FuncValidator, kind: FrameKind, ft: types.FuncType) Error!void {
         try self.popTypes(ft.params);
-        self.frames[self.fr_len] = .{ .kind = kind, .params = ft.params, .results = ft.results, .height = self.op_len };
+        self.frames[self.fr_len] = .{
+            .kind = kind,
+            .params = ft.params,
+            .results = ft.results,
+            .height = self.op_len,
+            .init_height = self.init_len,
+        };
         self.fr_len += 1;
         self.pushTypes(ft.params);
+    }
+
+    fn resetLocals(self: *FuncValidator, height: usize) void {
+        while (self.init_len > height) {
+            self.init_len -= 1;
+            self.locals_init[self.init_stack[self.init_len]] = false;
+        }
+    }
+
+    fn setLocalInitialized(self: *FuncValidator, index: u32) void {
+        if (self.locals_init[index]) return;
+        self.locals_init[index] = true;
+        self.init_stack[self.init_len] = index;
+        self.init_len += 1;
     }
 
     /// End-of-frame rule: the operands above the frame height must be exactly
@@ -1041,6 +1065,7 @@ const FuncValidator = struct {
         const f = self.frames[self.fr_len - 1];
         try self.popTypes(f.results);
         if (self.op_len != f.height) return self.fail("type mismatch");
+        self.resetLocals(f.init_height);
         self.fr_len -= 1;
         return f;
     }
@@ -1632,6 +1657,7 @@ const FuncValidator = struct {
                     // The if-arm must produce the frame results.
                     try self.popTypes(f.results);
                     if (self.op_len != f.height) return self.fail("type mismatch");
+                    self.resetLocals(f.init_height);
                     self.op_len = f.height;
                     f.unreach = false;
                     f.saw_else = true;
@@ -1752,17 +1778,20 @@ const FuncValidator = struct {
                 .local_get => {
                     const t = self.localType(instr.imm.idx) orelse
                         return self.fail("unknown local");
+                    if (!self.locals_init[instr.imm.idx]) return self.fail("uninitialized local");
                     self.push(stackVal(t));
                 },
                 .local_set => {
                     const t = self.localType(instr.imm.idx) orelse
                         return self.fail("unknown local");
                     try self.popExpect(t);
+                    self.setLocalInitialized(instr.imm.idx);
                 },
                 .local_tee => {
                     const t = self.localType(instr.imm.idx) orelse
                         return self.fail("unknown local");
                     try self.popExpect(t);
+                    self.setLocalInitialized(instr.imm.idx);
                     self.push(stackVal(t));
                 },
                 .global_get => {
@@ -1976,12 +2005,22 @@ fn validateFunc(
     defer allocator.free(opds);
     const frames = try allocator.alloc(Frame, n);
     defer allocator.free(frames);
+    const local_count = ft.params.len + body.locals.len;
+    const locals_init = try allocator.alloc(bool, local_count);
+    defer allocator.free(locals_init);
+    const init_stack = try allocator.alloc(u32, local_count);
+    defer allocator.free(init_stack);
+    for (locals_init, 0..) |*initialized, index| {
+        initialized.* = index < ft.params.len or valTypeDefaultable(body.locals[index - ft.params.len]);
+    }
 
     var v: FuncValidator = .{
         .mod = mod,
         .diag = diag,
         .params = ft.params,
         .locals = body.locals,
+        .locals_init = locals_init,
+        .init_stack = init_stack,
         .instrs = body.instrs,
         .offsets = body.offsets,
         .opds = opds,
@@ -3087,9 +3126,18 @@ test "wasm.validate GC packed access mutability and defaultability" {
         code1("\x41\x00\xFB\x07\x00\x1A\x0B"));
     try expectInvalidAtWithFeatures(nondefaultable, gc_validation_features, 0, 1, "type is not defaultable");
 
-    const nondefaultable_local = comptime (hdr ++ array_types ++ array_function ++
-        sec(10, "\x01" ++ codeBody("\x01\x01\x64\x00", "\x0B")));
-    try expectInvalidWithFeatures(nondefaultable_local, gc_validation_features, "type is not defaultable");
+    const local_decl = "\x01\x01\x64\x00";
+    const initialized_local = comptime (hdr ++ array_types ++ array_function ++
+        sec(10, "\x01" ++ codeBody(local_decl, "\xFB\x08\x00\x00\x21\x00\x20\x00\x1A\x0B")));
+    try expectValidWithFeatures(initialized_local, gc_validation_features);
+
+    const unset_local = comptime (hdr ++ array_types ++ array_function ++
+        sec(10, "\x01" ++ codeBody(local_decl, "\x20\x00\x1A\x0B")));
+    try expectInvalidAtWithFeatures(unset_local, gc_validation_features, 0, 0, "uninitialized local");
+
+    const block_local = comptime (hdr ++ array_types ++ array_function ++
+        sec(10, "\x01" ++ codeBody(local_decl, "\x02\x40\xFB\x08\x00\x00\x21\x00\x0B\x20\x00\x1A\x0B")));
+    try expectInvalidAtWithFeatures(block_local, gc_validation_features, 0, 4, "uninitialized local");
 }
 
 test "wasm.validate GC cast branches refine fallthrough types" {
