@@ -218,6 +218,20 @@ const Reader = struct {
         return result;
     }
 
+    fn readMemArg(self: *Reader) DecodeError!types.Instr.MemArg {
+        const flags_off = self.offset();
+        const flags = try self.readU32Leb();
+        const has_memory_index = flags & 0x40 != 0;
+        if (has_memory_index and !self.features.multi_memory)
+            return self.unsupportedFeature(flags_off, .multi_memory);
+        const memory_index = if (has_memory_index) try self.readU32Leb() else 0;
+        return .{
+            .align_ = if (has_memory_index) flags - 0x40 else flags,
+            .offset = try self.readU64Leb(),
+            .memory_index = memory_index,
+        };
+    }
+
     /// Signed LEB128 of `bits`-bit range; unused high bits of the last byte
     /// must be a sign-extension of the value's sign bit.
     fn readSignedLeb(self: *Reader, comptime bits: u32) DecodeError!i64 {
@@ -1092,9 +1106,13 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 instr.imm = .{ .br_table = .{ .targets = targets, .default = try r.readU32Leb() } };
             },
             .memory_size, .memory_grow => {
-                const z_off = r.offset();
-                if (try r.readU8() != 0x00)
-                    return r.failAt(z_off, "zero flag expected", .{});
+                if (r.features.multi_memory) {
+                    instr.imm = .{ .idx = try r.readU32Leb() };
+                } else {
+                    const z_off = r.offset();
+                    if (try r.readU8() != 0x00)
+                        return r.failAt(z_off, "zero flag expected", .{});
+                }
             },
             .i32_const => instr.imm = .{ .i32 = try r.readI32Leb() },
             .i64_const => instr.imm = .{ .i64 = try r.readI64Leb() },
@@ -1145,10 +1163,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     return r.failAt(subopcode_off, "invalid 0xfd subopcode", .{});
                 switch (simd_op.immediate()) {
                     .none => instr.imm = .{ .simd = simd_op },
-                    .memarg => instr.imm = .{ .simd_memarg = .{ .op = simd_op, .memarg = .{
-                        .align_ = try r.readU32Leb(),
-                        .offset = try r.readU64Leb(),
-                    } } },
+                    .memarg => instr.imm = .{ .simd_memarg = .{ .op = simd_op, .memarg = try r.readMemArg() } },
                     .v128 => instr.imm = .{ .simd_v128 = .{
                         .op = simd_op,
                         .bits = std.mem.readInt(u128, (try r.readBytes(16))[0..16], .little),
@@ -1161,7 +1176,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                     .lane => instr.imm = .{ .simd_lane = .{ .op = simd_op, .lane = try r.readU8() } },
                     .memarg_lane => instr.imm = .{ .simd_memarg_lane = .{
                         .op = simd_op,
-                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU64Leb() },
+                        .memarg = try r.readMemArg(),
                         .lane = try r.readU8(),
                     } },
                 }
@@ -1173,7 +1188,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 switch (atomic_op.immediate()) {
                     .memarg => instr.imm = .{ .atomic_memarg = .{
                         .op = atomic_op,
-                        .memarg = .{ .align_ = try r.readU32Leb(), .offset = try r.readU64Leb() },
+                        .memarg = try r.readMemArg(),
                     } },
                     .fence => {
                         const reserved_off = r.offset();
@@ -1186,10 +1201,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             else => {
                 const v = @intFromEnum(op);
                 if (v >= 0x28 and v <= 0x3E) {
-                    instr.imm = .{ .memarg = .{
-                        .align_ = try r.readU32Leb(),
-                        .offset = try r.readU64Leb(),
-                    } };
+                    instr.imm = .{ .memarg = try r.readMemArg() };
                 }
             },
         }
@@ -1597,6 +1609,31 @@ test "wasm.decode memory64 feature gates and malformed u64 limits" {
         "\x01\x04\x80\x80\x80\x80\x80\x80\x80\x80\x80\x02",
     ));
     try expectMalformedWithFeatures(too_large, .{ .memory64 = true }, 12, "integer too large");
+}
+
+test "wasm.decode multi-memory indices and feature gate" {
+    const bytes = comptime (hdr ++
+        func_sec_1 ++
+        testSection(5, "\x02\x00\x01\x00\x01") ++
+        testCode(
+            "\x41\x00" ++ // i32.const 0
+                "\x28\x42\x01\x00" ++ // i32.load memory 1, align 2, offset 0
+                "\x3F\x01" ++ // memory.size 1
+                "\x40\x01" ++ // memory.grow 1
+                "\x0B",
+        ));
+    try expectMalformedWithFeatures(bytes, .{}, 27, "WebAssembly feature multi-memory is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{ .multi_memory = true }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(@as(usize, 2), mod.mems.len);
+    try std.testing.expectEqualDeep(
+        types.Instr.MemArg{ .align_ = 2, .offset = 0, .memory_index = 1 },
+        mod.code[0].instrs[1].imm.memarg,
+    );
+    try std.testing.expectEqual(@as(u32, 1), mod.code[0].instrs[2].imm.idx);
+    try std.testing.expectEqual(@as(u32, 1), mod.code[0].instrs[3].imm.idx);
 }
 
 fn decodeMemory64WithFailingAllocator(gpa: Allocator) !void {

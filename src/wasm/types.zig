@@ -24,6 +24,7 @@ pub const Feature = enum {
     gc,
     exception_handling,
     memory64,
+    multi_memory,
 
     pub fn name(self: Feature) []const u8 {
         return switch (self) {
@@ -39,6 +40,7 @@ pub const Feature = enum {
             .gc => "gc",
             .exception_handling => "exception-handling",
             .memory64 => "memory64",
+            .multi_memory => "multi-memory",
         };
     }
 };
@@ -56,6 +58,7 @@ pub const Features = struct {
     gc: bool = false,
     exception_handling: bool = false,
     memory64: bool = false,
+    multi_memory: bool = false,
 
     pub const DependencyFailure = struct {
         feature: Feature,
@@ -596,6 +599,7 @@ pub const Instr = struct {
     pub const MemArg = struct {
         align_: u32,
         offset: u64,
+        memory_index: u32 = 0,
     };
 
     pub const CallIndirect = struct {

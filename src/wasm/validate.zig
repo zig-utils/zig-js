@@ -620,7 +620,7 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
 
     // 2. MVP allows at most one table and one memory (imports + defined).
     if (mod.totalTables() > 1 and !mod.features.reference_types) return failMod(diag, "multiple tables");
-    if (mod.totalMems() > 1) return failMod(diag, "multiple memories");
+    if (mod.totalMems() > 1 and !mod.features.multi_memory) return failMod(diag, "multiple memories");
     for (0..mod.totalTables()) |tableidx| {
         const elem_type = mod.tableType(@intCast(tableidx)).elem;
         if (elem_type != .funcref) try validateValType(mod, elem_type, diag);
@@ -1138,13 +1138,13 @@ const FuncValidator = struct {
     }
 
     fn memAccess(self: *FuncValidator, memarg: types.Instr.MemArg, log2_bytes: u32) Error!types.ValType {
-        if (self.mod.totalMems() == 0) return self.fail("unknown memory 0");
-        const address = self.mod.memoryType(0).address;
+        const address_type = try self.memAddressType(memarg.memory_index);
+        const address = self.mod.memoryType(memarg.memory_index).address;
         if (address == .i32 and memarg.offset > std.math.maxInt(u32))
             return self.fail("memory offset exceeds address type");
         if (memarg.align_ > log2_bytes)
             return self.fail("alignment must not be larger than natural");
-        return address.valType();
+        return address_type;
     }
 
     fn callFunc(self: *FuncValidator, ft: types.FuncType) Error!void {
@@ -1987,11 +1987,11 @@ const FuncValidator = struct {
                     try self.popExpect(address_type);
                 },
                 .memory_size => {
-                    const address_type = try self.memAddressType(0);
+                    const address_type = try self.memAddressType(if (self.mod.features.multi_memory) instr.imm.idx else 0);
                     self.push(stackVal(address_type));
                 },
                 .memory_grow => {
-                    const address_type = try self.memAddressType(0);
+                    const address_type = try self.memAddressType(if (self.mod.features.multi_memory) instr.imm.idx else 0);
                     try self.popExpect(address_type);
                     self.push(stackVal(address_type));
                 },
@@ -2545,6 +2545,25 @@ test "wasm.validate multiple memories" {
     try expectInvalid(hdr ++ sec(5, "\x02\x00\x01\x00\x01"), "multiple memories");
     try expectInvalid(hdr ++ sec(2, "\x01\x01a\x01m\x02\x00\x01") ++
         sec(5, "\x01\x00\x01"), "multiple memories");
+}
+
+test "wasm.validate multi-memory selects indexed address type" {
+    const features: types.Features = .{ .memory64 = true, .multi_memory = true };
+    const memories = comptime sec(5, "\x02\x00\x01\x04\x01");
+    const valid = comptime (hdr ++ type_void ++ func0 ++ memories ++ code1(
+        "\x42\x00\x28\x42\x01\x00\x1A" ++ // i32.load from memory64 1
+            "\x3F\x01\x1A" ++ // memory.size 1 returns i64
+            "\x42\x01\x40\x01\x1A\x0B", // memory.grow 1 consumes/returns i64
+    ));
+    try expectValidWithFeatures(valid, features);
+
+    const wrong_address = comptime (hdr ++ type_void ++ func0 ++ memories ++
+        code1("\x41\x00\x28\x42\x01\x00\x1A\x0B"));
+    try expectInvalidAtWithFeatures(wrong_address, features, 0, 1, "type mismatch");
+
+    const unknown_memory = comptime (hdr ++ type_void ++ func0 ++ memories ++
+        code1("\x42\x00\x28\x42\x02\x00\x1A\x0B"));
+    try expectInvalidAtWithFeatures(unknown_memory, features, 0, 1, "unknown memory");
 }
 
 test "wasm.validate multiple tables" {
