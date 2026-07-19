@@ -132,6 +132,20 @@ class ScriptGenerationTests(unittest.TestCase):
                     self.assertGreater(index, 0)
                     self.assertEqual(commands[index - 1]["type"], "module")
 
+    def test_command_shards_fall_back_for_registered_modules(self) -> None:
+        document = {"commands": [
+            {"type": "module", "line": 1, "filename": "a.wasm"},
+            {"type": "register", "line": 2, "name": "a"},
+            {
+                "type": "assert_return",
+                "line": 3,
+                "action": {"type": "invoke", "module": "a", "field": "value"},
+            },
+        ]}
+        shards, sharded = wasm_spec.module_command_shards_or_serial(document, 8)
+        self.assertFalse(sharded)
+        self.assertEqual(shards, [document])
+
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
         exceptions = wasm_spec.PROFILES["exception-handling"]

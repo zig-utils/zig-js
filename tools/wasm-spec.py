@@ -1054,6 +1054,14 @@ def module_command_shards(document: dict, shard_count: int) -> list[dict]:
     return [{**document, "commands": shard} for shard in shards]
 
 
+def module_command_shards_or_serial(document: dict, shard_count: int) -> tuple[list[dict], bool]:
+    """Use parallel shards only when the script has no cross-module state."""
+    try:
+        return module_command_shards(document, shard_count), shard_count > 1
+    except WastSyntaxError:
+        return [document], False
+
+
 def run_file(
     wast: Path,
     converter: Path,
@@ -1121,20 +1129,7 @@ def run_file(
         for command in document["commands"]:
             if command.get("type") == "module" and command.get("line") in definition_lines:
                 command["type"] = "module_definition"
-    try:
-        documents = module_command_shards(document, command_shard_count)
-    except WastSyntaxError as error:
-        detail = str(error)
-        return {
-            "path": wast.relative_to(spec_root).as_posix(),
-            "commands": [{
-                "index": index,
-                "line": command.get("line", 0),
-                "type": command["type"],
-                "status": "runner_error",
-                "detail": detail,
-            } for index, command in enumerate(document["commands"])],
-        }
+    documents, sharded = module_command_shards_or_serial(document, command_shard_count)
 
     merged_commands = []
     for shard_index, shard_document in enumerate(documents):
@@ -1172,7 +1167,7 @@ def run_file(
                 })
             continue
         reported = report["commands"]
-        if command_shard_count > 1 and len(reported) != len(shard_document["commands"]):
+        if sharded and len(reported) != len(shard_document["commands"]):
             detail = "sharded evaluator command count mismatch"
             for command in shard_document["commands"]:
                 merged_commands.append({
