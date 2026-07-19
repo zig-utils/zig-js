@@ -2569,6 +2569,9 @@ pub const Context = struct {
     /// byte slabs. This is not an embedder API; it lets tests prove collection
     /// frees backing storage before context teardown.
     gc_array_buffer_bytes_live: usize = 0,
+    /// Bytes owned by heap-managed runtime StringCells. Static literals,
+    /// arena-only strings, and intern-table storage are intentionally excluded.
+    gc_string_bytes_live: usize = 0,
     /// Internal verification/accounting for GC-owned Promise reaction entries.
     /// Not an embedder API; tests use it to prove settlement/finalization frees
     /// reaction-list backing before teardown.
@@ -2871,6 +2874,7 @@ pub const Context = struct {
         cells: usize = 0,
         bulk_cell_frees_skipped: usize = 0,
         objects: usize = 0,
+        strings: usize = 0,
         environments: usize = 0,
         functions: usize = 0,
         bound_functions: usize = 0,
@@ -2887,6 +2891,7 @@ pub const Context = struct {
             self.cells += 1;
             switch (kind) {
                 .object => self.objects += 1,
+                .string => self.strings += 1,
                 .environment => self.environments += 1,
                 .function => self.functions += 1,
                 .bound_fn => self.bound_functions += 1,
@@ -3049,7 +3054,8 @@ pub const Context = struct {
             context_gpa.destroy(arena_state);
         }
         // When threads (or the parallel-GC bring-up) are enabled, every
-        // arena-allocated structure — shapes, strings, AST, binding tables —
+        // arena-allocated structure — shapes, scratch strings/buffers, AST,
+        // binding tables —
         // must allocate through a thread-safe wrapper, because the raw
         // `ArenaAllocator` corrupts under parallel allocation (#1). Crucially the
         // wrapper must be installed *before* `a` is captured here: `root_shape`,
@@ -13370,16 +13376,22 @@ test "enable_gc nursery: owner barriers preserve old object, environment, and pr
 
     _ = try ctx.evaluate(
         \\holder.child = { value: 40 };
+        \\holder.text = "object-" + 40;
         \\let nurseryLexicalChild = { value: 2 };
-        \\resolveNurseryPromise({ value: 7 });
+        \\let nurseryLexicalText = "env-" + 2;
+        \\resolveNurseryPromise({ value: 7, text: "promise-" + 7 });
     );
     ctx.gc.?.collectYoung();
 
     const object_and_env = try ctx.evaluate("holder.child.value + nurseryLexicalChild.value");
     try std.testing.expectEqual(@as(f64, 42), object_and_env.asNum());
-    _ = try ctx.evaluate("nurseryPromise.then(v => { globalThis.promiseValue = v.value; });");
+    const string_edges = try ctx.evaluate("holder.text + ',' + nurseryLexicalText");
+    try std.testing.expectEqualStrings("object-40,env-2", string_edges.asStr());
+    _ = try ctx.evaluate("nurseryPromise.then(v => { globalThis.promiseValue = v.value; globalThis.promiseText = v.text; });");
     const promise_value = try ctx.evaluate("globalThis.promiseValue");
     try std.testing.expectEqual(@as(f64, 7), promise_value.asNum());
+    const promise_text = try ctx.evaluate("globalThis.promiseText");
+    try std.testing.expectEqualStrings("promise-7", promise_text.asStr());
 }
 
 test "enable_gc nursery: promoted functions retain immutable closure and home-object edges" {
@@ -13994,7 +14006,7 @@ test "LockedArena: current local chunk resize/free skips arena lock" {
 
 test "parallel_gc (M3 GIL-removal bring-up): mutators create+shape+mutate disjoint objects in parallel" {
     // The payoff of the GIL-removal prerequisites composed: with thread-safe cell
-    // allocation (setParallel), thread-safe arena (LockedArena → shapes/strings),
+    // allocation (setParallel), thread-safe arena (LockedArena → shapes/scratch),
     // atomic backing counters, and the per-structure object/shape locks, multiple
     // mutators run real object operations *in parallel with no GIL* — allocating
     // cells, transitioning shapes (shared root, converging under transition_lock),
@@ -17876,6 +17888,54 @@ test "enable_gc: bulk destroy skips one backing free per finalized cell" {
 
     try std.testing.expect(stats.cells > 0);
     try std.testing.expectEqual(stats.cells, stats.bulk_cell_frees_skipped);
+}
+
+test "enable_gc: runtime StringCells are traced and finalized" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    // Retire bootstrap garbage first so the byte-accounting assertions below
+    // describe only the three cells created by this test.
+    ctx.collectGarbage();
+    const baseline = ctx.gc_string_bytes_live;
+
+    const kept_text = "kept-\xF0\x9F\x98\x80";
+    const owned_text = "owned-\xED\xA0\x80"; // one lone WTF-8 high surrogate
+    const garbage_text = "garbage-string";
+    {
+        const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const string_arena_saved = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(string_arena_saved);
+
+        const kept = try Value.strAlloc(ctx.arena(), kept_text);
+        const owned_source = try ctx.gpa.dupe(u8, owned_text);
+        const owned = try Value.strOwned(ctx.gpa, owned_source);
+        _ = try Value.strAlloc(ctx.arena(), garbage_text);
+        try std.testing.expect(kept.asStringCell().gc_managed);
+        try std.testing.expect(owned.asStringCell().gc_managed);
+        try ctx.env.put("__gc_kept_string", kept);
+        try ctx.env.put("__gc_owned_string", owned);
+    }
+
+    try std.testing.expectEqual(
+        baseline + kept_text.len + owned_text.len + garbage_text.len,
+        ctx.gc_string_bytes_live,
+    );
+    var stats = Context.GcFinalizerStats{};
+    ctx.gc_finalizer_stats_out = &stats;
+    defer ctx.gc_finalizer_stats_out = null;
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline + kept_text.len + owned_text.len, ctx.gc_string_bytes_live);
+    try std.testing.expectEqualStrings(kept_text, ctx.env.get("__gc_kept_string").?.asStr());
+    try std.testing.expectEqualStrings(owned_text, ctx.env.get("__gc_owned_string").?.asStr());
+    try std.testing.expectEqual(@as(usize, 1), stats.strings);
+
+    try ctx.env.put("__gc_kept_string", Value.undef());
+    try ctx.env.put("__gc_owned_string", Value.undef());
+    ctx.collectGarbage();
+    try std.testing.expectEqual(baseline, ctx.gc_string_bytes_live);
+    try std.testing.expectEqual(@as(usize, 3), stats.strings);
 }
 
 test "enable_gc: FinalizationRegistry automatic cleanup delivers collected holdings" {

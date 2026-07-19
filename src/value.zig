@@ -8,9 +8,15 @@ const StringCell = strcell.StringCell;
 
 /// GC insertion barrier for a `Value` stored into a live cell. It records an
 /// old-to-young edge for minor collection and shades the child during an active
-/// incremental/full mark. Only `.object` carries a cell.
+/// incremental/full mark. Runtime strings may also carry a GC-managed cell;
+/// static, arena, and interned strings explicitly remain outside the heap.
 inline fn gcBarrier(owner: *Object, v: Value) void {
-    if (v.isObject()) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(v.asObj()));
+    if (v.isObject()) {
+        gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(v.asObj()));
+    } else if (v.isString()) {
+        const cell = v.asStringCell();
+        if (cell.gc_managed) gc_runtime.barrierFrom(@ptrCast(owner), @ptrCast(@constCast(cell)));
+    }
 }
 
 /// The C-ABI shape of a host (Zig/C) function exposed to JS via
@@ -4255,8 +4261,10 @@ pub const Value = struct {
         return @bitCast(self.bits);
     }
     pub inline fn asStr(self: Value) []const u8 {
-        const cell: *const StringCell = @ptrFromInt(self.bits & payload_mask);
-        return cell.bytes;
+        return self.asStringCell().bytes;
+    }
+    pub inline fn asStringCell(self: Value) *const StringCell {
+        return @ptrFromInt(self.bits & payload_mask);
     }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);

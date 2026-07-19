@@ -102,8 +102,8 @@ are locals inside `test` blocks.
 
 A file-scope scan found no other current `src/` mutable globals beyond the
 rows above. Specifically verified clean: `ast.zig`, `bytecode.zig`,
-`cldr_*.zig`, `compiler.zig`, `context.zig`, `jsstring.zig` (no string-interning
-table exists — strings live in context arenas), `lexer.zig`,
+`cldr_*.zig`, `compiler.zig`, `context.zig`, `jsstring.zig` (no mutable global
+string-interning table; runtime StringCells use the active context heap/arena), `lexer.zig`,
 `numbering_systems.zig` (its `var arr` is inside a `comptime` block producing a
 `const`), `parser.zig` (reentrant, no statics), `promise.zig`, `root.zig`,
 `shape.zig`, `shared_buffer.zig`, `structured_clone.zig`, `unicode_case*.zig`,

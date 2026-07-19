@@ -1428,7 +1428,7 @@ const UnlockTokenRecord = struct {
 };
 
 inline fn traceThreadValue(v: anytype, val: Value) void {
-    if (val.isObject()) v.mark(val.asObj());
+    gc_mod.markValue(v, val);
 }
 
 fn traceHoldJob(job: *HoldJob, v: anytype) void {

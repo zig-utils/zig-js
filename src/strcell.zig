@@ -37,6 +37,10 @@ pub fn hashBytes(bytes: []const u8) u64 {
 pub const StringCell = struct {
     bytes: []const u8,
     hash: u64,
+    /// True only when the cell itself was allocated by zig-gc. Static literals,
+    /// arena strings, and intern-table entries remain outside the heap and must
+    /// never be handed to the collector's strict `mark` entry point.
+    gc_managed: bool = false,
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
         if (self == other) return true; // interned ⇒ pointer identity is enough
@@ -74,7 +78,7 @@ pub fn staticCell(comptime s: []const u8) *const StringCell {
 /// strings one canonical byte image. Lone surrogates (no adjacent partner) stay
 /// WTF-8, and length/charCodeAt/codePointAt already decode astral UTF-8 into two
 /// code units, so this is transparent to every other string op.
-fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]u8 {
+pub fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error![]u8 {
     // A surrogate needs an 0xED lead byte (U+D800..U+DFFF encode as ED A0..BF xx);
     // no 0xED means nothing to fold — the overwhelmingly common path.
     if (std.mem.indexOfScalar(u8, bytes, 0xED) == null) return allocator.dupe(u8, bytes);
@@ -110,6 +114,8 @@ fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) std.m
 /// needs; interning is optional (below). `allocator` owns both the cell and the
 /// byte copy.
 pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
+    if (active_managed_factory) |factory|
+        return factory.create(factory.context, allocator, bytes);
     const owned = try canonicalizeSurrogates(allocator, bytes);
     errdefer allocator.free(owned);
     const cell = try allocator.create(StringCell);
@@ -122,6 +128,8 @@ pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Alloc
 /// surrogate pair, the returned cell owns a canonicalized copy and `owned` is
 /// released through the same allocator.
 pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Allocator.Error!*StringCell {
+    if (active_managed_factory) |factory|
+        return factory.create_owned(factory.context, allocator, owned);
     var owns_original = true;
     errdefer if (owns_original) allocator.free(owned);
     const bytes = if (std.mem.indexOfScalar(u8, owned, 0xED) == null) owned else blk: {
@@ -135,6 +143,24 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
     const cell = try allocator.create(StringCell);
     cell.* = .{ .bytes = bytes, .hash = hashBytes(bytes) };
     return cell;
+}
+
+/// Type-erased bridge installed by `gc.zig` while a context heap is active.
+/// Keeping the bridge here avoids a `value -> gc -> value` import cycle while
+/// letting every existing `Value.strAlloc`/`strOwned` site use one allocation
+/// funnel. The GC side owns canonical byte allocation and the StringCell.
+pub const ManagedFactory = struct {
+    context: *anyopaque,
+    create: *const fn (*anyopaque, std.mem.Allocator, []const u8) std.mem.Allocator.Error!*StringCell,
+    create_owned: *const fn (*anyopaque, std.mem.Allocator, []u8) std.mem.Allocator.Error!*StringCell,
+};
+
+threadlocal var active_managed_factory: ?ManagedFactory = null;
+
+pub fn setActiveManagedFactory(factory: ?ManagedFactory) ?ManagedFactory {
+    const previous = active_managed_factory;
+    active_managed_factory = factory;
+    return previous;
 }
 
 /// A sharded, thread-safe string intern table: equal byte sequences map to one
@@ -422,8 +448,9 @@ test "strcell: concurrent interning converges to one cell per string" {
     }
 }
 
-test "strcell: StringCell is two words (the NaN-box string payload target)" {
-    // A NaN-boxed string is one pointer to this cell; the cell itself is the
-    // {ptr,len} pair the old inline slice used, plus the cached hash.
-    try std.testing.expectEqual(@as(usize, 2 * @sizeOf(usize) + @sizeOf(u64)), @sizeOf(StringCell));
+test "strcell: StringCell stays a compact NaN-box payload target" {
+    // A NaN-boxed string remains one pointer. The target carries {ptr,len}, a
+    // cached hash, and immutable ownership classification for strict GC marks.
+    try std.testing.expect(@sizeOf(StringCell) >= 2 * @sizeOf(usize) + @sizeOf(u64) + 1);
+    try std.testing.expect(@sizeOf(StringCell) <= 32);
 }

@@ -501,6 +501,8 @@ const ReachabilityVisitor = struct {
         const Pointer = @TypeOf(cell);
         const kind: gc_mod.CellKind = if (Pointer == *Object)
             .object
+        else if (Pointer == *strcell.StringCell)
+            .string
         else if (Pointer == *interp.Environment)
             .environment
         else if (Pointer == *interp.Function)
@@ -3178,10 +3180,15 @@ fn privateBunStringValue(
     string: *const PrivateBunString,
     max_utf16_units: ?usize,
 ) PrivateBunStringError!Value {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+
     if (string.tag == .empty) return Value.staticStr("");
     if (string.tag == .dead) return error.StringTooLong;
 
-    const allocator = context.arena();
+    const allocator = if (context.gc != null) context.gpa else context.arena();
     const bytes = switch (string.tag) {
         .wtf_string_impl => blk: {
             const impl = string.value.wtf_string_impl orelse return error.InvalidString;
@@ -4214,12 +4221,17 @@ export fn StringBuilder__toString(raw: ?*anyopaque, global: JSContextRef) callco
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
     }
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     const units: []const u16 = if (builder.units) |pointer| pointer[0..builder.length] else &.{};
-    const bytes = privateUTF16ToWTF8(context.arena(), units) catch {
+    const allocator = if (context.gc != null) context.gpa else context.arena();
+    const bytes = privateUTF16ToWTF8(allocator, units) catch {
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
     };
-    const result = Value.strOwned(context.arena(), bytes) catch {
+    const result = Value.strOwned(allocator, bytes) catch {
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
     };
@@ -6817,6 +6829,11 @@ fn privateNoSideEffectOwnedString(context: *Context, bytes: []const u8) EncodedV
 }
 
 fn privateNoSideEffectValue(context: *Context, input: Value) !Value {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+
     return switch (input.kind()) {
         .undefined => Value.str("undefined"),
         .null => Value.str("null"),
@@ -11234,6 +11251,10 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) {
+        const gc_saved = gc_mod.setActiveHeap(ctx.gc);
+        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const sa_saved = strcell.setActiveArena(ctx.arena());
+        defer _ = strcell.setActiveArena(sa_saved);
         const v = Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory");
         exc[0] = box(ctx, v);
     }
@@ -13349,8 +13370,11 @@ export fn JSValueMakeNumber(ctx: JSContextRef, n: f64) callconv(.c) JSValueRef {
 export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const s = strFrom(str) orelse return null;
-    const copy = c.arena().dupe(u8, s.bytes) catch return null;
-    return box(c, Value.strOwned(c.arena(), copy) catch return null);
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    return box(c, Value.strAlloc(c.arena(), s.bytes) catch return null);
 }
 
 export fn JSValueMakeSymbol(ctx: JSContextRef, description: JSStringRef) callconv(.c) JSValueRef {
@@ -14002,6 +14026,10 @@ export fn JSObjectMakeFunction(
     exception: ExceptionRef,
 ) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
+    const gc_saved = gc_mod.setActiveHeap(c.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(c.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
     if (parameter_count > 0 and parameter_names == null) {
         setException(c, exception, "TypeError: parameterCount > 0 requires parameterNames");
         return null;
@@ -23405,6 +23433,32 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
     try std.testing.expect(!ZJSValueUnprotect(ctx, held));
+}
+
+test "C-API: protected handles trace managed StringCells" {
+    const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx_obj.destroy();
+    const ctx: JSContextRef = @ptrCast(ctx_obj);
+    JSGarbageCollect(ctx);
+
+    const source = JSStringCreateWithUTF8CString("managed-325") orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const held = JSValueMakeString(ctx, source) orelse return error.StringInitFailed;
+    try std.testing.expect(ZJSValueProtect(ctx, held));
+    JSGarbageCollect(ctx);
+    const protected_bytes = ctx_obj.gc_string_bytes_live;
+
+    const copy = JSValueToStringCopy(ctx, held, null) orelse return error.StringInitFailed;
+    defer JSStringRelease(copy);
+    const max = JSStringGetMaximumUTF8CStringSize(copy);
+    const bytes = try std.testing.allocator.alloc(u8, max);
+    defer std.testing.allocator.free(bytes);
+    const written = JSStringGetUTF8CString(copy, bytes.ptr, bytes.len);
+    try std.testing.expectEqualStrings("managed-325", bytes[0 .. written - 1]);
+
+    try std.testing.expect(ZJSValueUnprotect(ctx, held));
+    JSGarbageCollect(ctx);
+    try std.testing.expect(ctx_obj.gc_string_bytes_live < protected_bytes);
 }
 
 test "C-API: JSValueProtect reserves handle capacity chunks" {

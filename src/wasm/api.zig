@@ -766,7 +766,7 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     state.table = @ptrCast(owner);
     state.refs = refs;
     try store.appendWasmOwned(.{ .table = @ptrCast(owner) });
-    if (fill.value.isObject()) gc.barrierValueFrom(object, fill.value);
+    gc.barrierValueFrom(object, fill.value);
     return Value.obj(object);
 }
 

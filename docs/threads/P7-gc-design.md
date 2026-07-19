@@ -88,6 +88,7 @@ The engine heap is one monolithic `Object` (`value.zig:430`) plus side cells.
 | Kind | Type | References to visit |
 |---|---|---|
 | `object` | `value.zig` `Object` | `shape`, `proto`, `ctor_ref`, `proxy_target`, `proxy_handler` (`*Object`); every `Value` in `slots` and strong `elements`; `accessors` map get/set Values; `prim` (`?Value`); `js_func`/`gen`/`bound`/`promise`/`iter_helper`/`module_ns`/`arg_map_env` (type-erased cells); engine-owned native `private_data` records for Promise/VM async callbacks; `array_buffer`/`typed_array`/`data_view`/`temporal`; **weak**: `weak_ref_target` and WeakMap/WeakSet `weak_entries`; **ephemeron**: WeakMap values when their keys are live |
+| `string` | `strcell.zig` `StringCell` | no outgoing references; **finalize** canonical runtime bytes. Immutable `gc_managed` metadata distinguishes heap cells from static literals, arena strings, and intern-table entries before strict marking. |
 | `shape` | `shape.zig` `Shape` | `parent`; the `*Shape` values in `transitions` (the keys are property-name strings) |
 | `env` | `interpreter.zig:126` `Environment` | every `Value` in `vars`; `parent`; `aliases` (live cross-env bindings); `disposables` |
 | `function` | `interpreter.zig:266` `Function` | closure `env`; bound `this`/home-object Values (AST nodes are immutable — see below) |
@@ -701,7 +702,8 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   automatic cleanup delivery, and per-owner accounting tests for ArrayBuffer,
   Promise, Environment, and Object backing finalization including dense
   elements, typed-view/Temporal metadata, generator buffers, async-generator
-  request queues, and mapped-arguments parameter maps), targeted
+  request queues, mapped-arguments parameter maps, and runtime StringCell byte
+  ownership), targeted
   `WeakRef`/`FinalizationRegistry`/`WeakMap` test262 buckets as each weak
   semantic lands, `zig build test262` non-regression at each milestone, TSan on
   M3.
@@ -714,11 +716,13 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   immediately tenures survivors. Parallel mid-script collection intentionally
   remains full-heap; future work is sizing, pause tuning, and deciding whether a
   multi-age or moving nursery earns its complexity.
-- **String ownership:** property-name strings are arena-owned today
-  (`Shape.transition` dupes into the shape's arena). Decide in M1 whether
-  strings become GC cells or stay in a permanent string arena (simpler; keeps
-  them out of the trace surface). Default: permanent arena until M3 needs a
-  sharded intern table.
+- **String ownership:** the runtime foundation tracked by #325 is in place:
+  GC-enabled contexts allocate immutable StringCells as a first-class cell
+  kind, trace string-valued roots/edges, and finalize canonical byte storage. Static
+  literals, explicit intern-table entries, and property-name strings owned by
+  arena-resident Shapes remain permanent and carry `gc_managed = false`.
+  External embedder buffers and exact-once release callbacks build on this
+  lifecycle under #324.
 - **Generational depth?** Measure the landed one-cycle nursery first. Add ages,
   copying/moving storage, or parallel minor collection only with demonstrated
   pause/throughput gains and equivalent weak/no-GIL correctness gates.

@@ -16307,7 +16307,7 @@ fn callCapabilityResolve(self: *Interpreter, c: *promise.Combine, value_arg: Val
 }
 
 inline fn tracePrivateValue(v: anytype, val: Value) void {
-    if (val.isObject()) v.mark(val.asObj());
+    gc_mod.markValue(v, val);
 }
 
 /// Trace engine-owned `private_data` carried by native closures allocated in

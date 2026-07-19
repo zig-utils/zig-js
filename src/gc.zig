@@ -26,11 +26,13 @@ const jsthread = @import("jsthread.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const stack_scan = @import("stack_scan.zig");
 const agent = @import("agent.zig");
+const strcell = @import("strcell.zig");
 
 const Value = value.Value;
 const Object = value.Object;
 const Shape = @import("shape.zig").Shape;
 const Environment = interp.Environment;
+const StringCell = strcell.StringCell;
 
 var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
 
@@ -44,6 +46,7 @@ pub fn objectBatchCellsForTesting() u64 {
 /// never appear here.
 pub const CellKind = enum {
     object,
+    string,
     environment,
     function,
     bound_fn,
@@ -53,10 +56,16 @@ pub const CellKind = enum {
     module_ns,
 };
 
-/// Mark a `Value` if it carries a heap reference (only `.object` does — every
-/// other variant is an immediate or a primitive).
-inline fn markValue(v: anytype, val: Value) void {
-    if (val.isObject()) v.mark(val.asObj());
+/// Mark a `Value` if it carries a heap reference. Objects always use the heap
+/// in GC mode. Strings carry immutable ownership metadata because static,
+/// arena, and intern-table cells intentionally coexist with managed cells.
+pub inline fn markValue(v: anytype, val: Value) void {
+    if (val.isObject()) {
+        v.mark(val.asObj());
+    } else if (val.isString()) {
+        const cell = val.asStringCell();
+        if (cell.gc_managed) v.mark(@constCast(cell));
+    }
 }
 
 inline fn markValueOpt(v: anytype, val: ?Value) void {
@@ -1015,6 +1024,7 @@ pub const Binding = struct {
         }
         switch (kind) {
             .object => traceObject(@ptrCast(@alignCast(cell)), v),
+            .string => {},
             .environment => traceEnv(@ptrCast(@alignCast(cell)), v),
             .function => traceFunction(@ptrCast(@alignCast(cell)), v),
             .bound_fn => traceBoundFn(@ptrCast(@alignCast(cell)), v),
@@ -1033,7 +1043,7 @@ pub const Binding = struct {
     /// rewritten afterward, so promoting the function and its edges together is
     /// sufficient and avoids retracing every old builtin closure each cycle.
     pub fn traceOldOnMinor(kind: Kind) bool {
-        return kind != .object and kind != .environment and kind != .function;
+        return kind != .object and kind != .string and kind != .environment and kind != .function;
     }
 
     pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
@@ -1115,6 +1125,13 @@ pub const Binding = struct {
                     }
                 }
             },
+            .string => {
+                const string: *StringCell = @ptrCast(@alignCast(cell));
+                if (string.bytes.len > 0) self.context.gpa.free(@constCast(string.bytes));
+                _ = @atomicRmw(usize, &self.context.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
+                string.bytes = &.{};
+                string.gc_managed = false;
+            },
             .environment => finalizeEnv(@ptrCast(@alignCast(cell))),
             .generator => finalizeGenerator(
                 @ptrCast(@alignCast(cell)),
@@ -1161,6 +1178,7 @@ test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
 fn managedCellType(comptime kind: CellKind) type {
     return switch (kind) {
         .object => Object,
+        .string => StringCell,
         .environment => Environment,
         .function => interp.Function,
         .bound_fn => interp.Interpreter.BoundFn,
@@ -1249,6 +1267,11 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
     active_heap = h;
     if (h) |raw| {
         const heap: *Heap = @ptrCast(@alignCast(raw));
+        _ = strcell.setActiveManagedFactory(.{
+            .context = raw,
+            .create = allocManagedString,
+            .create_owned = allocManagedStringOwned,
+        });
         // Non-cell object side stores do not need the GC cell slab classifier in
         // single-mutator GC mode. True-parallel JS keeps the synchronized wrapper
         // because the embedder's allocator may not be thread-safe.
@@ -1259,10 +1282,47 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
         } });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
     } else {
+        _ = strcell.setActiveManagedFactory(null);
         _ = gc_runtime.setActive(.{});
         _ = gc_runtime.setBarrier(null, null, null);
     }
     return prev;
+}
+
+fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
+    errdefer heap.ctx.context.gpa.free(bytes);
+    const cell = try heap.create(StringCell, .string);
+    cell.* = .{ .bytes = bytes, .hash = strcell.hashBytes(bytes), .gc_managed = true };
+    _ = @atomicRmw(usize, &heap.ctx.context.gc_string_bytes_live, .Add, bytes.len, .monotonic);
+    return cell;
+}
+
+fn allocManagedString(
+    raw: *anyopaque,
+    _: std.mem.Allocator,
+    source: []const u8,
+) std.mem.Allocator.Error!*StringCell {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const bytes = try strcell.canonicalizeSurrogates(heap.ctx.context.gpa, source);
+    return finishManagedString(heap, bytes);
+}
+
+fn allocManagedStringOwned(
+    raw: *anyopaque,
+    source_allocator: std.mem.Allocator,
+    source: []u8,
+) std.mem.Allocator.Error!*StringCell {
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const target_allocator = heap.ctx.context.gpa;
+    if (source_allocator.ptr == target_allocator.ptr and
+        source_allocator.vtable == target_allocator.vtable and
+        std.mem.indexOfScalar(u8, source, 0xED) == null)
+    {
+        return finishManagedString(heap, source);
+    }
+    defer source_allocator.free(source);
+    const bytes = try strcell.canonicalizeSurrogates(target_allocator, source);
+    return finishManagedString(heap, bytes);
 }
 
 /// Whether the current thread's cell-allocation funnels target the GC heap.
@@ -1298,14 +1358,25 @@ fn weakBarrierThunk(raw_heap: *anyopaque, owner: ?*anyopaque) void {
     heap.writeBarrierWeak(owner);
 }
 
-/// Insertion write barrier for a stored `Value` (only `.object` carries a cell).
+/// Insertion write barrier for a stored `Value`. Objects and heap-managed
+/// runtime strings carry cells; static/arena/interned strings are filtered.
 /// Call at every post-creation store of a reference into a live GC cell.
 pub inline fn barrierValue(v: Value) void {
-    if (v.isObject()) gc_runtime.barrier(@ptrCast(v.asObj()));
+    if (v.isObject()) {
+        gc_runtime.barrier(@ptrCast(v.asObj()));
+    } else if (v.isString()) {
+        const cell = v.asStringCell();
+        if (cell.gc_managed) gc_runtime.barrier(@constCast(cell));
+    }
 }
 
 pub inline fn barrierValueFrom(owner: ?*anyopaque, v: Value) void {
-    if (v.isObject()) gc_runtime.barrierFrom(owner, @ptrCast(v.asObj()));
+    if (v.isObject()) {
+        gc_runtime.barrierFrom(owner, @ptrCast(v.asObj()));
+    } else if (v.isString()) {
+        const cell = v.asStringCell();
+        if (cell.gc_managed) gc_runtime.barrierFrom(owner, @constCast(cell));
+    }
 }
 
 /// Insertion write barrier for a stored cell pointer (Object/Environment/…).
