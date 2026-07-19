@@ -341,6 +341,8 @@ exact cleanup plus unregister-token suppression,
 adds a typed-array waitAsync/finalization subprogram that keeps native waiter
 reaction roots pending while notifying child threads stay parked through a
 finishing sweep, then verifies `asyncJoin` settlement and exact cleanup,
+uses the 12-second TSan helper-wait budget for both of those mid-GC pressure
+windows while retaining the outer per-seed watchdog as the hang oracle,
 adds a Condition.asyncWait/finalization subprogram that keeps async reacquire
 tickets and child `asyncJoin` observers pending through a finishing sweep, then
 verifies exact reacquire, asyncJoin, and cleanup oracles,

@@ -6477,7 +6477,10 @@ fn runFinalizationAsyncJoinCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
     const pressure_rounds = if (midgc) 8 + r.uintLessThan(usize, 5) else 0;
     const pressure_per_round = if (midgc) 640 + r.uintLessThan(usize, 480) else 0;
     const spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3200) else 0;
-    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1500 + r.uintLessThan(usize, 800);
+    // Mid-GC deliberately performs allocation pressure before releasing these
+    // peers. Use the TSan budget there too; the outer seed watchdog remains the
+    // actual hang oracle, so runner load cannot become a semantic failure.
+    const wait_timeout_ms = if (midgc or builtin.sanitize_thread) 12_000 else 1500 + r.uintLessThan(usize, 800);
     const seed_marker = seed % 10_000;
 
     var expected_cleanup_count: usize = 0;
@@ -6999,7 +7002,9 @@ fn runWaitAsyncFinalizationCleanupInterleavingKind(gpa: std.mem.Allocator, seed:
     const r = prng.random();
     const nthreads = 3 + r.uintLessThan(usize, 4);
     const per_thread = 6 + r.uintLessThan(usize, 8);
-    const wait_timeout_ms = if (builtin.sanitize_thread) 12_000 else 1200 + r.uintLessThan(usize, 800);
+    // The mid-GC pressure window is intentionally longer than the ordinary
+    // lifecycle case and is bounded independently by the seed watchdog.
+    const wait_timeout_ms = if (midgc or builtin.sanitize_thread) 12_000 else 1200 + r.uintLessThan(usize, 800);
     const pressure_rounds = if (midgc) 8 + r.uintLessThan(usize, 5) else 0;
     const pressure_per_round = if (midgc) 650 + r.uintLessThan(usize, 480) else 0;
     const spin_iters = if (midgc) 1800 + r.uintLessThan(usize, 3200) else 0;
