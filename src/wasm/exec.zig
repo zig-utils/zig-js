@@ -108,25 +108,88 @@ pub const MemoryInst = struct {
     /// while avoiding host-language data races with atomic instructions.
     pub fn readUnordered(self: *const MemoryInst, offset: usize, len: usize) u64 {
         const data = self.bytes();
+        if (!self.isShared()) {
+            return switch (len) {
+                inline 1, 2, 4, 8 => |n| std.mem.readInt(@Int(.unsigned, n * 8), data[offset..][0..n], .little),
+                else => unreachable,
+            };
+        }
+        const address = @intFromPtr(data.ptr) + offset;
+        switch (len) {
+            inline 1, 2, 4, 8 => |n| {
+                const T = @Int(.unsigned, n * 8);
+                if (address % @alignOf(T) == 0)
+                    return @atomicLoad(T, @as(*T, @ptrFromInt(address)), .monotonic);
+            },
+            else => unreachable,
+        }
         var raw: u64 = 0;
         for (0..len) |i| {
-            const byte = if (self.isShared())
-                @atomicLoad(u8, &data[offset + i], .monotonic)
-            else
-                data[offset + i];
-            raw |= @as(u64, byte) << @intCast(i * 8);
+            raw |= @as(u64, @atomicLoad(u8, &data[offset + i], .monotonic)) << @intCast(i * 8);
         }
         return raw;
     }
 
     pub fn writeUnordered(self: *MemoryInst, offset: usize, len: usize, raw: u64) void {
         const data = self.bytes();
+        if (!self.isShared()) {
+            switch (len) {
+                inline 1, 2, 4, 8 => |n| std.mem.writeInt(@Int(.unsigned, n * 8), data[offset..][0..n], @truncate(raw), .little),
+                else => unreachable,
+            }
+            return;
+        }
+        const address = @intFromPtr(data.ptr) + offset;
+        switch (len) {
+            inline 1, 2, 4, 8 => |n| {
+                const T = @Int(.unsigned, n * 8);
+                if (address % @alignOf(T) == 0) {
+                    @atomicStore(T, @as(*T, @ptrFromInt(address)), @truncate(raw), .monotonic);
+                    return;
+                }
+            },
+            else => unreachable,
+        }
         for (0..len) |i| {
             const byte: u8 = @truncate(raw >> @intCast(i * 8));
-            if (self.isShared())
-                @atomicStore(u8, &data[offset + i], byte, .monotonic)
-            else
-                data[offset + i] = byte;
+            @atomicStore(u8, &data[offset + i], byte, .monotonic);
+        }
+    }
+
+    /// 128-bit plain accesses tear freely under the threads proposal, so the
+    /// shared path uses two aligned 64-bit monotonic accesses when it can.
+    pub fn readV128Unordered(self: *const MemoryInst, offset: usize) u128 {
+        const data = self.bytes();
+        if (!self.isShared())
+            return std.mem.readInt(u128, data[offset..][0..16], .little);
+        const address = @intFromPtr(data.ptr) + offset;
+        if (address % 8 == 0) {
+            const lo: u64 = @atomicLoad(u64, @as(*u64, @ptrFromInt(address)), .monotonic);
+            const hi: u64 = @atomicLoad(u64, @as(*u64, @ptrFromInt(address + 8)), .monotonic);
+            return @as(u128, hi) << 64 | lo;
+        }
+        var raw: u128 = 0;
+        for (0..16) |i| {
+            raw |= @as(u128, @atomicLoad(u8, &data[offset + i], .monotonic)) << @intCast(i * 8);
+        }
+        return raw;
+    }
+
+    pub fn writeV128Unordered(self: *MemoryInst, offset: usize, raw: u128) void {
+        const data = self.bytes();
+        if (!self.isShared()) {
+            std.mem.writeInt(u128, data[offset..][0..16], raw, .little);
+            return;
+        }
+        const address = @intFromPtr(data.ptr) + offset;
+        if (address % 8 == 0) {
+            @atomicStore(u64, @as(*u64, @ptrFromInt(address)), @truncate(raw), .monotonic);
+            @atomicStore(u64, @as(*u64, @ptrFromInt(address + 8)), @truncate(raw >> 64), .monotonic);
+            return;
+        }
+        for (0..16) |i| {
+            const byte: u8 = @truncate(raw >> @intCast(i * 8));
+            @atomicStore(u8, &data[offset + i], byte, .monotonic);
         }
     }
 
@@ -2661,8 +2724,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     switch (op) {
         .v128_load => {
             const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
-            try pushVector(s, @as(u128, range.readLittle(0, 8)) |
-                (@as(u128, range.readLittle(8, 8)) << 64));
+            try pushVector(s, range.mem.readV128Unordered(range.offset));
         },
         .v128_load8x8_s => try pushVector(s, loadExtendedLanes(8, true, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
         .v128_load8x8_u => try pushVector(s, loadExtendedLanes(8, false, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
@@ -2697,8 +2759,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
         .v128_store => {
             const vector = popVector(s);
             const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 16);
-            range.writeLittle(0, 8, @truncate(vector));
-            range.writeLittle(8, 8, @truncate(vector >> 64));
+            range.mem.writeV128Unordered(range.offset, vector);
         },
         .v128_load8_lane, .v128_load16_lane, .v128_load32_lane, .v128_load64_lane => {
             const vector = popVector(s);
