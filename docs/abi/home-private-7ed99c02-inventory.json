@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 2,
-      "implemented": 335,
-      "pending": 111
+      "implemented": 338,
+      "pending": 108
     }
   },
   "declarations": [
@@ -4791,10 +4791,10 @@
       "line": 755,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__external( this: *const ZigString, global: *JSGlobalObject, ctx: ?*anyopaque, callback: *const fn (ctx: ?*anyopaque, ptr: ?*anyopaque, len: usize) callconv(.c) void, ) JSValue;",
       "declaration_sha256": "9fd5c5aeff4d139b9c77fbff1df6bf9291a0fb7f709b103c74585f32732c3845",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__to16BitValue",
@@ -4846,10 +4846,10 @@
       "line": 570,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toExternalU16(ptr: [*]const u16, len: usize, global: *JSGlobalObject) JSValue;",
       "declaration_sha256": "8ddef32df078cb3ae857d11cc63720475bee9c0741cd57c243ff20043aff9a84",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toExternalValueWithCallback",
@@ -4857,10 +4857,10 @@
       "line": 742,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigString__toExternalValueWithCallback( this: *const ZigString, global: *JSGlobalObject, callback: *const fn (ctx: ?*anyopaque, ptr: ?*anyopaque, len: usize) callconv(.c) void, ) JSValue;",
       "declaration_sha256": "32db42157c73faf68c4436a885f438d05ce8bf66215b8cc4ea8cfa0e5ca92aaa",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__toJSONObject",

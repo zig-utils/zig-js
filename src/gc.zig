@@ -1137,6 +1137,10 @@ pub const Binding = struct {
             },
             .string => {
                 const string: *StringCell = @ptrCast(@alignCast(cell));
+                if (string.external_owner) |owner| {
+                    self.context.queueExternalStringRelease(owner);
+                    string.external_owner = null;
+                }
                 if (string.bytes.len > 0) self.context.gpa.free(@constCast(string.bytes));
                 _ = @atomicRmw(usize, &self.context.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
                 string.bytes = &.{};

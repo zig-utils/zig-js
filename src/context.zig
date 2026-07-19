@@ -2478,6 +2478,8 @@ pub const Context = struct {
     /// sweep. Finalizers only publish here; zig-gc's post-sweep hook drains it
     /// after collector locks are released so callbacks may safely re-enter.
     external_owner_release_head: std.atomic.Value(?*value.ExternalBufferOwner) = .init(null),
+    external_string_owners: std.ArrayListUnmanaged(*strcell.ExternalStringOwner) = .empty,
+    external_string_release_head: std.atomic.Value(?*strcell.ExternalStringOwner) = .init(null),
     /// Globally allocated backing handles installed by generated
     /// IDLArrayBufferRef conversion. The tracking reference keeps each list
     /// entry valid until teardown even after JS GC and native drops.
@@ -3522,6 +3524,11 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.external_buffer_owners.deinit(self.gpa);
+        for (self.external_string_owners.items) |owner| {
+            _ = owner.release();
+            self.gpa.destroy(owner);
+        }
+        self.external_string_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.module_loader_sources.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
@@ -3582,6 +3589,11 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.external_buffer_owners.deinit(self.gpa);
+        for (self.external_string_owners.items) |owner| {
+            _ = owner.release();
+            self.gpa.destroy(owner);
+        }
+        self.external_string_owners.deinit(self.gpa);
         self.module_registry.deinit(self.arena());
         self.module_loader_sources.deinit(self.arena());
         self.unhandled_rejections.deinit(self.arena());
@@ -3653,9 +3665,52 @@ pub const Context = struct {
         }
     }
 
+    pub fn createExternalStringOwner(
+        self: *Context,
+        pointer: ?*anyopaque,
+        len: usize,
+        callback_context: ?*anyopaque,
+        deallocator: strcell.ExternalStringDeallocator,
+    ) !*strcell.ExternalStringOwner {
+        const owner = try self.gpa.create(strcell.ExternalStringOwner);
+        errdefer self.gpa.destroy(owner);
+        owner.* = .{
+            .pointer = pointer,
+            .len = len,
+            .context = callback_context,
+            .deallocator = deallocator,
+        };
+        try self.external_string_owners.append(self.gpa, owner);
+        return owner;
+    }
+
+    pub fn queueExternalStringRelease(self: *Context, owner: *strcell.ExternalStringOwner) void {
+        if (owner.released.load(.acquire)) return;
+        if (owner.release_queued.swap(true, .acq_rel)) return;
+        var head = self.external_string_release_head.load(.acquire);
+        while (true) {
+            owner.pending_next = head;
+            if (self.external_string_release_head.cmpxchgWeak(head, owner, .release, .acquire)) |observed| {
+                head = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
     pub fn runDeferredExternalOwnerReleases(self: *Context) void {
         while (self.external_owner_release_head.swap(null, .acq_rel)) |first| {
             var current: ?*value.ExternalBufferOwner = first;
+            while (current) |owner| {
+                const next = owner.pending_next;
+                owner.pending_next = null;
+                owner.release_queued.store(false, .release);
+                _ = owner.release();
+                current = next;
+            }
+        }
+        while (self.external_string_release_head.swap(null, .acq_rel)) |first| {
+            var current: ?*strcell.ExternalStringOwner = first;
             while (current) |owner| {
                 const next = owner.pending_next;
                 owner.pending_next = null;

@@ -723,8 +723,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   arena-resident Shapes remain permanent and carry `gc_managed = false`.
   External-owner releases are now queued without allocating during finalization
   and drained through zig-gc's post-sweep hook only after collector locks and
-  publication state are restored. Exact external StringCell adapters build on
-  that lifecycle under #324.
+  publication state are restored. The exact Latin-1/UTF-16 external StringCell
+  adapters use that lifecycle and preserve their original pointer, unit count,
+  callback context, and exact-once release obligation (#324).
 - **Generational depth?** Measure the landed one-cycle nursery first. Add ages,
   copying/moving storage, or parallel minor collection only with demonstrated
   pause/throughput gains and equivalent weak/no-GIL correctness gates.

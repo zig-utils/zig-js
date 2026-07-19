@@ -416,6 +416,9 @@ extern "c" fn ZigString__toDOMExceptionInstance(*const ZigString, JSContextRef, 
 extern "c" fn ZigString__toValueGC(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__to16BitValue(*const ZigString, JSContextRef) EncodedValue;
 extern "c" fn ZigString__toAtomicValue(*const ZigString, JSContextRef) EncodedValue;
+extern "c" fn ZigString__external(*const ZigString, JSContextRef, ?*anyopaque, *const fn (?*anyopaque, ?*anyopaque, usize) callconv(.c) void) EncodedValue;
+extern "c" fn ZigString__toExternalValueWithCallback(*const ZigString, JSContextRef, *const fn (?*anyopaque, ?*anyopaque, usize) callconv(.c) void) EncodedValue;
+extern "c" fn ZigString__toExternalU16([*]const u16, usize, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSValue__createRopeString(EncodedValue, EncodedValue, JSContextRef) EncodedValue;
 extern "c" fn JSC__JSString__toZigString(?*anyopaque, JSContextRef, *ZigString) void;
 extern "c" fn JSC__JSValue__toZigString(EncodedValue, *ZigString, JSContextRef) void;
@@ -1260,6 +1263,21 @@ fn exposeCell(context: JSContextRef, name: [*:0]const u8, encoded: EncodedValue)
     JSObjectSetProperty(context, global, property, cell, 0, &exception);
     if (exception != null) fail("global property write failed");
 }
+
+const ExternalStringProbe = struct {
+    expected_pointer: ?*anyopaque,
+    expected_len: usize,
+
+    fn release(raw: ?*anyopaque, pointer: ?*anyopaque, len: usize) callconv(.c) void {
+        const self: *@This() = @ptrCast(@alignCast(raw orelse fail("external ZigString callback context missing")));
+        if (pointer != self.expected_pointer or len != self.expected_len)
+            fail("external ZigString callback arguments mismatch");
+    }
+
+    fn releaseNull(raw: ?*anyopaque, _: ?*anyopaque, _: usize) callconv(.c) void {
+        if (raw != null) fail("external ZigString null callback context mismatch");
+    }
+};
 
 fn promiseCallback(context: *anyopaque, global: JSContextRef) callconv(.c) EncodedValue {
     _ = global;
@@ -2771,6 +2789,35 @@ pub fn main() void {
         JSC__JSValue__asString(atomic_second),
     ) or !JSC__JSValue__isStrictEqual(atomic_first, evaluate(context, "'atom'"), context))
         fail("ZigString atomic value canonicalization/copy mismatch");
+
+    var external_latin1 = [_]u8{ 'e', 'x', 't', 0xe9 };
+    const external_latin1_string = ZigString{ .tagged_ptr = @intFromPtr(&external_latin1), .len = external_latin1.len };
+    var external_probe = ExternalStringProbe{
+        .expected_pointer = @ptrCast(&external_latin1),
+        .expected_len = external_latin1.len,
+    };
+    const external_latin1_value = ZigString__external(&external_latin1_string, context, &external_probe, ExternalStringProbe.release);
+    if (!JSC__JSValue__isStrictEqual(external_latin1_value, evaluate(context, "'exté'"), context))
+        fail("external ZigString Latin-1 construction mismatch");
+    exposeCell(context, "__private_external_latin1", external_latin1_value);
+
+    var external_utf16 = [_]u16{ 'E', 0xd83d, 0xde00, 0xd800 };
+    const external_utf16_string = ZigString{
+        .tagged_ptr = @intFromPtr(&external_utf16) | (@as(usize, 1) << 63),
+        .len = external_utf16.len,
+    };
+    const external_utf16_value = ZigString__toExternalValueWithCallback(&external_utf16_string, context, ExternalStringProbe.releaseNull);
+    if (!JSC__JSValue__isStrictEqual(external_utf16_value, evaluate(context, "'E😀\\uD800'"), context))
+        fail("external ZigString UTF-16 construction mismatch");
+    exposeCell(context, "__private_external_utf16", external_utf16_value);
+
+    const transferred_raw = std.c.malloc(3 * @sizeOf(u16)) orelse fail("external U16 allocation failed");
+    const transferred_u16: [*]u16 = @ptrCast(@alignCast(transferred_raw));
+    @memcpy(transferred_u16[0..3], &[_]u16{ 'U', 0xd83d, 0xde00 });
+    const external_u16_value = ZigString__toExternalU16(transferred_u16, 3, context);
+    if (!JSC__JSValue__isStrictEqual(external_u16_value, evaluate(context, "'U😀'"), context))
+        fail("external transferred U16 construction mismatch");
+    exposeCell(context, "__private_external_u16", external_u16_value);
 
     const rope_left_units = [_]u16{ 'A', 0xd83d };
     const rope_right_units = [_]u16{ 0xde00, 'Z' };
@@ -5999,5 +6046,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 324/324 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 327/327 symbols linked; runtime matrix passed\n", .{});
 }

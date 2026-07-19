@@ -30,6 +30,31 @@ pub fn hashBytes(bytes: []const u8) u64 {
     return h;
 }
 
+pub const ExternalStringDeallocator = *const fn (
+    context: ?*anyopaque,
+    pointer: ?*anyopaque,
+    len: usize,
+) callconv(.c) void;
+
+/// Context-owned exact-once obligation for an embedder string allocation.
+/// The StringCell keeps this pointer until collection; the Context owns the
+/// record itself so arena-mode teardown provides the same lifetime contract.
+pub const ExternalStringOwner = struct {
+    pointer: ?*anyopaque,
+    len: usize,
+    context: ?*anyopaque,
+    deallocator: ExternalStringDeallocator,
+    released: std.atomic.Value(bool) = .init(false),
+    release_queued: std.atomic.Value(bool) = .init(false),
+    pending_next: ?*ExternalStringOwner = null,
+
+    pub fn release(self: *ExternalStringOwner) bool {
+        if (self.released.swap(true, .acq_rel)) return false;
+        self.deallocator(self.context, self.pointer, self.len);
+        return true;
+    }
+};
+
 /// An immutable string cell: a single allocation the engine can point at with
 /// one 48-bit word. `bytes` is owned by whoever allocated the cell (the GC heap
 /// or an arena); `hash` is the cached FNV-1a content hash. Immutable after
@@ -41,6 +66,10 @@ pub const StringCell = struct {
     /// arena strings, and intern-table entries remain outside the heap and must
     /// never be handed to the collector's strict `mark` entry point.
     gc_managed: bool = false,
+    /// Original embedder allocation retained by private external-string
+    /// constructors. Internal bytes may be canonical WTF-8; this obligation is
+    /// released only when the cell dies or its arena Context is destroyed.
+    external_owner: ?*ExternalStringOwner = null,
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
         if (self == other) return true; // interned ⇒ pointer identity is enough

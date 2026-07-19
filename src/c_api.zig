@@ -3336,6 +3336,148 @@ export fn ZigString__toValueGC(
     return privateZigStringToCopiedValue(string, global);
 }
 
+fn privateExternalZigString(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+    callback_context: ?*anyopaque,
+    callback: strcell.ExternalStringDeallocator,
+) EncodedValue {
+    const address = string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    const pointer: ?*anyopaque = if (address == 0) null else @ptrFromInt(address);
+    const context = ctxForHandleInspection(global) orelse {
+        callback(callback_context, pointer, string.len);
+        return .empty;
+    };
+    const opaque_group = context.c_api_group orelse {
+        callback(callback_context, pointer, string.len);
+        return .empty;
+    };
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) {
+        callback(callback_context, pointer, string.len);
+        return .empty;
+    }
+
+    const owner = context.createExternalStringOwner(pointer, string.len, callback_context, callback) catch {
+        callback(callback_context, pointer, string.len);
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    var attached = false;
+    defer {
+        if (!attached) _ = owner.release();
+    }
+
+    if (string.len > std.math.maxInt(u32)) {
+        privatePublishBunStringError(context, error.StringTooLong);
+        return .empty;
+    }
+    if (string.len != 0 and address == 0) {
+        privatePublishBunStringError(context, error.InvalidString);
+        return .empty;
+    }
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    const allocator = if (context.gc != null) context.gpa else context.arena();
+    const bytes = if (string.len == 0)
+        allocator.alloc(u8, 0) catch {
+            privatePublishBunStringError(context, error.OutOfMemory);
+            return .empty;
+        }
+    else if (string.tagged_ptr & (@as(usize, 1) << 63) != 0) blk: {
+        const units: [*]align(1) const u16 = @ptrFromInt(address);
+        break :blk privateUTF16ToWTF8(allocator, units[0..string.len]) catch {
+            privatePublishBunStringError(context, error.OutOfMemory);
+            return .empty;
+        };
+    } else blk: {
+        // The pinned JSC bridge treats every non-UTF16 external ZigString as
+        // Latin-1; the UTF-8 tag is intentionally not consulted here.
+        const source: [*]const u8 = @ptrFromInt(address);
+        break :blk privateLatin1ToWTF8(allocator, source[0..string.len]) catch {
+            privatePublishBunStringError(context, error.OutOfMemory);
+            return .empty;
+        };
+    };
+    const result = Value.strOwned(allocator, bytes) catch {
+        privatePublishBunStringError(context, error.OutOfMemory);
+        return .empty;
+    };
+    const cell = @constCast(result.asStringCell());
+    cell.external_owner = owner;
+    attached = true;
+
+    const encoded = privateEncodedFromValue(context, result);
+    if (encoded == .empty) {
+        cell.external_owner = null;
+        attached = false;
+        privatePublishBunStringError(context, error.OutOfMemory);
+    }
+    return encoded;
+}
+
+export fn ZigString__external(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+    callback_context: ?*anyopaque,
+    callback: strcell.ExternalStringDeallocator,
+) callconv(.c) EncodedValue {
+    return privateExternalZigString(string, global, callback_context, callback);
+}
+
+export fn ZigString__toExternalValueWithCallback(
+    string: *const PrivateZigString,
+    global: JSContextRef,
+    callback: strcell.ExternalStringDeallocator,
+) callconv(.c) EncodedValue {
+    return privateExternalZigString(string, global, null, callback);
+}
+
+var private_external_u16_release_count: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
+
+fn privateFallbackZigStringFreeGlobal(pointer: [*]const u8, _: usize) callconv(.c) void {
+    if (builtin.is_test) _ = private_external_u16_release_count.fetchAdd(1, .monotonic);
+    std.c.free(@constCast(pointer));
+}
+
+comptime {
+    // Home/Bun provide a strong ZigString__freeGlobal backed by their default
+    // allocator. Standalone consumers get the same ownership shape through a
+    // weak libc fallback, which a real embedder definition overrides at link.
+    @export(&privateFallbackZigStringFreeGlobal, .{
+        .name = "ZigString__freeGlobal",
+        .linkage = .weak,
+    });
+}
+
+extern fn ZigString__freeGlobal(pointer: [*]const u8, len: usize) callconv(.c) void;
+
+fn privateReleaseExternalU16(_: ?*anyopaque, pointer: ?*anyopaque, len: usize) callconv(.c) void {
+    const bytes: [*]const u8 = @ptrCast(pointer orelse return);
+    ZigString__freeGlobal(bytes, len);
+}
+
+export fn ZigString__toExternalU16(
+    pointer: [*]const u16,
+    len: usize,
+    global: JSContextRef,
+) callconv(.c) EncodedValue {
+    // Match the pinned JSC bridge: the shared VM empty string owns no external
+    // allocation and therefore installs no finalizer for the zero-length case.
+    if (len == 0) {
+        const context = ctxForHandleInspection(global) orelse return .empty;
+        return privateEncodedFromValue(context, Value.staticStr(""));
+    }
+    const string = PrivateZigString{
+        .tagged_ptr = @intFromPtr(pointer) | (@as(usize, 1) << 63),
+        .len = len,
+    };
+    return privateExternalZigString(&string, global, null, privateReleaseExternalU16);
+}
+
 export fn ZigString__to16BitValue(
     string: *const PrivateZigString,
     global: JSContextRef,
@@ -18902,6 +19044,147 @@ test "C-API: GC finalization releases no-copy bytes before context teardown" {
     JSGlobalContextRelease(teardown_ctx);
     try std.testing.expectEqual(@as(usize, 1), teardown_state.calls);
     try std.testing.expect(teardown_state.reentered);
+}
+
+test "private external ZigString callbacks are exact-once and post-sweep" {
+    const Factory = struct {
+        fn create() !*CContextGroup {
+            const primary = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+            errdefer primary.destroy();
+            const group = try gpa.create(CContextGroup);
+            group.* = .{
+                .owner_thread = std.Thread.getCurrentId(),
+                .primary = primary,
+                .atom_strings = strcell.InternTable.init(gpa),
+            };
+            primary.c_api_group = @ptrCast(group);
+            primary.initCApiRef();
+            return group;
+        }
+    };
+    const State = struct {
+        context: JSContextRef,
+        expected_context: ?*anyopaque,
+        expected_pointer: ?*anyopaque,
+        expected_len: usize,
+        calls: usize = 0,
+        exact_args: bool = false,
+        reentered: bool = false,
+
+        fn release(raw: ?*anyopaque, pointer: ?*anyopaque, len: usize) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            self.exact_args = raw == self.expected_context and pointer == self.expected_pointer and len == self.expected_len;
+            JSGarbageCollect(self.context);
+            self.reentered = true;
+        }
+    };
+    const NullContextState = struct {
+        var current: ?*@This() = null;
+        context: JSContextRef,
+        expected_pointer: ?*anyopaque,
+        expected_len: usize,
+        calls: usize = 0,
+        exact_args: bool = false,
+        reentered: bool = false,
+
+        fn release(raw: ?*anyopaque, pointer: ?*anyopaque, len: usize) callconv(.c) void {
+            const self = current orelse return;
+            self.calls += 1;
+            self.exact_args = raw == null and pointer == self.expected_pointer and len == self.expected_len;
+            JSGarbageCollect(self.context);
+            self.reentered = true;
+        }
+    };
+
+    const group = try Factory.create();
+    const context = group.primary;
+    const global: JSContextRef = @ptrCast(context);
+
+    var latin1 = [_]u8{ 'c', 'a', 'f', 0xe9 };
+    var latin1_state = State{
+        .context = global,
+        .expected_context = undefined,
+        .expected_pointer = @ptrCast(&latin1),
+        .expected_len = latin1.len,
+    };
+    latin1_state.expected_context = &latin1_state;
+    const latin1_input = PrivateZigString{ .tagged_ptr = @intFromPtr(&latin1), .len = latin1.len };
+    const latin1_encoded = ZigString__external(&latin1_input, global, &latin1_state, State.release);
+    const latin1_value = privateValueFrom(global, latin1_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("café", latin1_value.asStr());
+
+    var utf16 = [_]u16{ 'A', 0xd83d, 0xde00, 0xd800, 'Z' };
+    var utf16_state = NullContextState{
+        .context = global,
+        .expected_pointer = @ptrCast(&utf16),
+        .expected_len = utf16.len,
+    };
+    NullContextState.current = &utf16_state;
+    defer NullContextState.current = null;
+    const utf16_input = PrivateZigString{
+        .tagged_ptr = @intFromPtr(&utf16) | (@as(usize, 1) << 63),
+        .len = utf16.len,
+    };
+    const utf16_encoded = ZigString__toExternalValueWithCallback(&utf16_input, global, NullContextState.release);
+    const utf16_value = privateValueFrom(global, utf16_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("A😀\xed\xa0\x80Z", utf16_value.asStr());
+
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_latin1", latin1_value);
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_utf16", utf16_value);
+    JSGarbageCollect(global);
+    try std.testing.expectEqual(@as(usize, 0), latin1_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), utf16_state.calls);
+
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_latin1", Value.undef());
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_utf16", Value.undef());
+    JSGarbageCollect(global);
+    try std.testing.expectEqual(@as(usize, 1), latin1_state.calls);
+    try std.testing.expect(latin1_state.exact_args and latin1_state.reentered);
+    try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
+    try std.testing.expect(utf16_state.exact_args and utf16_state.reentered);
+    JSGarbageCollect(global);
+    try std.testing.expectEqual(@as(usize, 1), latin1_state.calls);
+    try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
+
+    const u16_releases = private_external_u16_release_count.load(.monotonic);
+    const transferred_raw = std.c.malloc(4 * @sizeOf(u16)) orelse return error.OutOfMemory;
+    const transferred: [*]u16 = @ptrCast(@alignCast(transferred_raw));
+    @memcpy(transferred[0..4], &[_]u16{ 'X', 0xd83d, 0xde00, 0xd800 });
+    const transferred_encoded = ZigString__toExternalU16(transferred, 4, global);
+    const transferred_value = privateValueFrom(global, transferred_encoded) orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("X😀\xed\xa0\x80", transferred_value.asStr());
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_u16", transferred_value);
+    JSGarbageCollect(global);
+    try std.testing.expectEqual(u16_releases, private_external_u16_release_count.load(.monotonic));
+    try context.global_object.setOwn(context.arena(), context.root_shape, "__external_u16", Value.undef());
+    JSGarbageCollect(global);
+    try std.testing.expectEqual(u16_releases + 1, private_external_u16_release_count.load(.monotonic));
+
+    const empty_encoded = ZigString__toExternalU16(@ptrFromInt(@alignOf(u16)), 0, global);
+    try std.testing.expectEqualStrings("", (privateValueFrom(global, empty_encoded) orelse return error.ValueInitFailed).asStr());
+    try std.testing.expectEqual(u16_releases + 1, private_external_u16_release_count.load(.monotonic));
+
+    latin1_state.expected_len = @as(usize, std.math.maxInt(u32)) + 1;
+    const oversized_input = PrivateZigString{
+        .tagged_ptr = @intFromPtr(&latin1),
+        .len = latin1_state.expected_len,
+    };
+    try std.testing.expectEqual(EncodedValue.empty, ZigString__external(&oversized_input, global, &latin1_state, State.release));
+    try std.testing.expectEqual(@as(usize, 2), latin1_state.calls);
+    try std.testing.expect(JSGlobalObject__hasException(global));
+    JSGlobalObject__clearException(global);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(global), global, EncodedValue.fromInt32(324));
+    latin1_state.expected_len = latin1.len;
+    try std.testing.expectEqual(EncodedValue.empty, ZigString__external(&latin1_input, global, &latin1_state, State.release));
+    try std.testing.expectEqual(@as(usize, 3), latin1_state.calls);
+    const preserved = JSGlobalObject__tryTakeException(global);
+    try std.testing.expectEqual(EncodedValue.fromInt32(324), JSC__Exception__asJSValue(@ptrFromInt(try preserved.asCellAddress())));
+
+    if (group.release()) group.destroy();
+    try std.testing.expectEqual(@as(usize, 3), latin1_state.calls);
+    try std.testing.expectEqual(@as(usize, 1), utf16_state.calls);
 }
 
 test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {
