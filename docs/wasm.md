@@ -358,7 +358,8 @@ address type.
 Focused robustness coverage fault-injects every allocation point, runs 32
 mixed-memory lifecycle cycles, and checks 512 deterministic random operations
 against independent byte-store models. Run it with
-`zig build test -Dtest-filter="multi-memory"`.
+`zig build test -Dtest-filter="multi-memory"`; the CI unit shards repeat it
+under Linux TSan, and `-Doptimize=ReleaseSafe` covers the optimized safety path.
 
 Reproduce the score with pinned WABT 1.0.39:
 
