@@ -29,6 +29,7 @@ def verify_terminal_inventory(
     commit: str,
     features: list[str],
     files: list[tuple[str, int, int]],
+    pass_modes: tuple[str, ...] = ("javascript_api",),
 ) -> None:
     document = json.loads(path.read_text())
     require(document.get("schema_version") == 2, f"{profile}: unsupported terminal inventory schema")
@@ -77,7 +78,9 @@ def verify_terminal_inventory(
         )
         require(
             all(
-                command.get("mode") == ("not_applicable" if command.get("status") == "not_applicable" else "javascript_api")
+                command.get("mode") == "not_applicable"
+                if command.get("status") == "not_applicable"
+                else command.get("mode") in pass_modes
                 for command in commands
             ),
             f"{profile}: command execution mode drift",
@@ -150,6 +153,11 @@ def main() -> int:
         "--exception-handling-terminal-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-exception-handling-inventory.json",
+    )
+    parser.add_argument(
+        "--multi-memory-terminal-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-multi-memory-runtime-inventory.json",
     )
     parser.add_argument(
         "--memory64-inventory",
@@ -478,6 +486,46 @@ def main() -> int:
         features=["multi_value", "reference_types", "bulk_memory", "tail_calls", "exception_handling"],
         files=[("tag.wast", 4, 0), ("throw.wast", 13, 0), ("throw_ref.wast", 15, 0), ("try_table.wast", 52, 2)],
     )
+    multi_memory_feature = next(feature for feature in features if feature["id"] == "multi_memory")
+    verify_terminal_inventory(
+        args.multi_memory_terminal_inventory,
+        kind="webassembly_multi_memory_runtime_inventory",
+        profile="multi-memory",
+        repository=multi_memory_feature["repository"],
+        commit=multi_memory_feature["commit"],
+        features=["multi_value", "reference_types", "bulk_memory", "multi_memory"],
+        files=[
+            ("memory-multi.wast", 6, 0), ("address0.wast", 92, 0),
+            ("address1.wast", 127, 0), ("align0.wast", 5, 0),
+            ("binary0.wast", 7, 0), ("data0.wast", 7, 0),
+            ("data1.wast", 14, 0), ("data_drop0.wast", 11, 0),
+            ("exports0.wast", 8, 0), ("float_exprs0.wast", 14, 0),
+            ("float_exprs1.wast", 3, 0), ("float_memory0.wast", 30, 0),
+            ("imports0.wast", 8, 0), ("imports1.wast", 5, 0),
+            ("imports2.wast", 20, 0), ("imports3.wast", 10, 0),
+            ("imports4.wast", 16, 0), ("linking0.wast", 6, 0),
+            ("linking1.wast", 14, 0), ("linking2.wast", 11, 0),
+            ("linking3.wast", 14, 0), ("load0.wast", 3, 0),
+            ("load1.wast", 18, 0), ("load2.wast", 38, 0),
+            ("memory_copy0.wast", 29, 0), ("memory_copy1.wast", 14, 0),
+            ("memory_fill0.wast", 16, 0), ("memory_init0.wast", 13, 0),
+            ("memory_size0.wast", 8, 0), ("memory_size1.wast", 15, 0),
+            ("memory_size2.wast", 21, 0), ("memory_size3.wast", 2, 0),
+            ("memory_trap0.wast", 14, 0), ("memory_trap1.wast", 168, 0),
+            ("start0.wast", 9, 0), ("store0.wast", 5, 0),
+            ("store1.wast", 13, 0), ("traps0.wast", 15, 0),
+        ],
+        pass_modes=("javascript_api", "bit_exact"),
+    )
+    multi_memory_terminal = json.loads(args.multi_memory_terminal_inventory.read_text())
+    require(
+        sum(
+            command.get("mode") == "bit_exact"
+            for entry in multi_memory_terminal.get("files", [])
+            for command in entry.get("commands", [])
+        ) == 6,
+        "multi-memory: bit-exact assertion count drift",
+    )
     memory64_feature = next(feature for feature in features if feature["id"] == "memory64")
     memory64 = json.loads(args.memory64_inventory.read_text())
     require(memory64.get("schema_version") == 1, "memory64 inventory: unsupported schema version")
@@ -499,10 +547,10 @@ def main() -> int:
             (entry.get("flag"), entry.get("address_type"), entry.get("minimum"), entry.get("maximum"), entry.get("shared"))
             for entry in memory64.get("limit_flags", [])
         ] == [
-            (0, "i32", "u64", None, False),
-            (1, "i32", "u64", "u64", False),
-            (2, "i32", "u64", None, True),
-            (3, "i32", "u64", "u64", True),
+            (0, "i32", "u32", None, False),
+            (1, "i32", "u32", "u32", False),
+            (2, "i32", "u32", None, True),
+            (3, "i32", "u32", "u32", True),
             (4, "i64", "u64", None, False),
             (5, "i64", "u64", "u64", False),
             (6, "i64", "u64", None, True),

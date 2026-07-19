@@ -40,7 +40,19 @@
         "typed_function_references",
         "gc",
         "exception_handling",
+        "multi_memory",
         "memory64"
+      ]
+    },
+    {
+      "id": "multi_memory",
+      "default": false,
+      "status": "planned",
+      "features": [
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "multi_memory"
       ]
     }
   ],
@@ -145,6 +157,15 @@
       "edition": "3.0",
       "dependencies": ["reference_types"],
       "issue": 266
+    },
+    {
+      "id": "multi_memory",
+      "repository": "https://github.com/WebAssembly/multi-memory.git",
+      "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": [],
+      "issue": 305
     },
     {
       "id": "memory64",

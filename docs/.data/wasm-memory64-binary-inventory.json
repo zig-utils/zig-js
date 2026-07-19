@@ -37,29 +37,29 @@
     {
       "flag": 0,
       "address_type": "i32",
-      "minimum": "u64",
+      "minimum": "u32",
       "maximum": null,
       "shared": false
     },
     {
       "flag": 1,
       "address_type": "i32",
-      "minimum": "u64",
-      "maximum": "u64",
+      "minimum": "u32",
+      "maximum": "u32",
       "shared": false
     },
     {
       "flag": 2,
       "address_type": "i32",
-      "minimum": "u64",
+      "minimum": "u32",
       "maximum": null,
       "shared": true
     },
     {
       "flag": 3,
       "address_type": "i32",
-      "minimum": "u64",
-      "maximum": "u64",
+      "minimum": "u32",
+      "maximum": "u32",
       "shared": true
     },
     {

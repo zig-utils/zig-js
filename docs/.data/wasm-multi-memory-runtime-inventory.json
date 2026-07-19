@@ -1,0 +1,7213 @@
+{
+  "command_shards": 1,
+  "converter": {
+    "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+    "kind": "wabt",
+    "repository": "https://github.com/WebAssembly/wabt.git",
+    "version": "1.0.39"
+  },
+  "engine_commit": "3cdb0b87ba00623f29b9fb19e90bddca80071120",
+  "features": [
+    "multi_value",
+    "reference_types",
+    "bulk_memory",
+    "multi_memory"
+  ],
+  "files": [
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 6,
+        "runner_error": 0,
+        "total": 6
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/memory-multi.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 111,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 120,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 121,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 123,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 127,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 129,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 131,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 132,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 135,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 136,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 29,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 30,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 31,
+          "line": 141,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 32,
+          "line": 142,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 33,
+          "line": 143,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 34,
+          "line": 144,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 35,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 36,
+          "line": 147,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 37,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 38,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 39,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 40,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 41,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 42,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 43,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 44,
+          "line": 156,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 45,
+          "line": 157,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 46,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 47,
+          "line": 160,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 48,
+          "line": 161,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 49,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 50,
+          "line": 163,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 51,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 52,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 53,
+          "line": 167,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 54,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 55,
+          "line": 169,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 56,
+          "line": 171,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 57,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 58,
+          "line": 173,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 59,
+          "line": 174,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 60,
+          "line": 175,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 61,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 62,
+          "line": 178,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 63,
+          "line": 179,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 64,
+          "line": 180,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 65,
+          "line": 181,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 66,
+          "line": 183,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 67,
+          "line": 184,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 68,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 69,
+          "line": 186,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 70,
+          "line": 187,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 71,
+          "line": 189,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 72,
+          "line": 190,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 73,
+          "line": 191,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 74,
+          "line": 192,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 75,
+          "line": 193,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 76,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 77,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 78,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 79,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 80,
+          "line": 199,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 81,
+          "line": 200,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 82,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 83,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 84,
+          "line": 204,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 85,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 86,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 87,
+          "line": 208,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 88,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 89,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 90,
+          "line": 211,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 91,
+          "line": 212,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 92,
+        "runner_error": 0,
+        "total": 92
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/address0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 147,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 152,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 156,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 158,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 160,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 161,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 167,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 170,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 171,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 173,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 174,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 176,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 178,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 29,
+          "line": 179,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 30,
+          "line": 180,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 31,
+          "line": 182,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 32,
+          "line": 183,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 33,
+          "line": 184,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 34,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 35,
+          "line": 186,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 36,
+          "line": 188,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 37,
+          "line": 189,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 38,
+          "line": 190,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 39,
+          "line": 191,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 40,
+          "line": 192,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 41,
+          "line": 194,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 42,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 43,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 44,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 45,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 46,
+          "line": 200,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 47,
+          "line": 201,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 48,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 49,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 50,
+          "line": 204,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 51,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 52,
+          "line": 207,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 53,
+          "line": 208,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 54,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 55,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 56,
+          "line": 212,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 57,
+          "line": 213,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 58,
+          "line": 214,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 59,
+          "line": 215,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 60,
+          "line": 216,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 61,
+          "line": 218,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 62,
+          "line": 219,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 63,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 64,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 65,
+          "line": 222,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 66,
+          "line": 224,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 67,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 68,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 69,
+          "line": 227,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 70,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 71,
+          "line": 230,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 72,
+          "line": 231,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 73,
+          "line": 232,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 74,
+          "line": 233,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 75,
+          "line": 234,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 76,
+          "line": 236,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 77,
+          "line": 237,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 78,
+          "line": 238,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 79,
+          "line": 239,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 80,
+          "line": 240,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 81,
+          "line": 242,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 82,
+          "line": 243,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 83,
+          "line": 244,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 84,
+          "line": 245,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 85,
+          "line": 246,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 86,
+          "line": 248,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 87,
+          "line": 249,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 88,
+          "line": 250,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 89,
+          "line": 251,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 90,
+          "line": 252,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 91,
+          "line": 254,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 92,
+          "line": 255,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 93,
+          "line": 256,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 94,
+          "line": 257,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 95,
+          "line": 258,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 96,
+          "line": 260,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 97,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 98,
+          "line": 262,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 99,
+          "line": 263,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 100,
+          "line": 264,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 101,
+          "line": 266,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 102,
+          "line": 267,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 103,
+          "line": 268,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 104,
+          "line": 269,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 105,
+          "line": 270,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 106,
+          "line": 272,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 107,
+          "line": 273,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 108,
+          "line": 274,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 109,
+          "line": 275,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 110,
+          "line": 276,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 111,
+          "line": 277,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 112,
+          "line": 278,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 113,
+          "line": 280,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 114,
+          "line": 281,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 115,
+          "line": 282,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 116,
+          "line": 283,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 117,
+          "line": 284,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 118,
+          "line": 285,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 119,
+          "line": 286,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 120,
+          "line": 288,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 121,
+          "line": 289,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 122,
+          "line": 290,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 123,
+          "line": 291,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 124,
+          "line": 292,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 125,
+          "line": 293,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 126,
+          "line": 294,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 127,
+        "runner_error": 0,
+        "total": 127
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/address1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 5,
+        "runner_error": 0,
+        "total": 5
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/align0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_malformed"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_malformed"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 7,
+        "runner_error": 0,
+        "total": 7
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/binary0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 57,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 7,
+        "runner_error": 0,
+        "total": 7
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/data0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 61,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/data1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 11,
+        "runner_error": 0,
+        "total": 11
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/data_drop0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 8,
+        "runner_error": 0,
+        "total": 8
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/exports0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/float_exprs0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 3,
+        "runner_error": 0,
+        "total": 3
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/float_exprs1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 5,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 21,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 27,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 33,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 46,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 47,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 53,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 55,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 56,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 57,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 29,
+          "line": 59,
+          "mode": "bit_exact",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 30,
+        "runner_error": 0,
+        "total": 30
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/float_memory0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 8,
+        "runner_error": 0,
+        "total": 8
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/imports0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 5,
+        "runner_error": 0,
+        "total": 5
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/imports1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 7,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 9,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 62,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 70,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 20,
+        "runner_error": 0,
+        "total": 20
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/imports2.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 55,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 70,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 10,
+        "runner_error": 0,
+        "total": 10
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/imports3.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 16,
+        "runner_error": 0,
+        "total": 16
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/imports4.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 6,
+        "runner_error": 0,
+        "total": 6
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/linking0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 45,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/linking1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 11,
+        "runner_error": 0,
+        "total": 11
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/linking2.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_uninstantiable"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/linking3.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 3,
+        "runner_error": 0,
+        "total": 3
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/load0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 8,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 10,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 18,
+        "runner_error": 0,
+        "total": 18
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/load1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 169,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 170,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 174,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 175,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 176,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 178,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 179,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 180,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 182,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 183,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 184,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 186,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 187,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 188,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 189,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 191,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 192,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 193,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 29,
+          "line": 199,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 30,
+          "line": 200,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 31,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 32,
+          "line": 204,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 33,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 34,
+          "line": 207,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 35,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 36,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 37,
+          "line": 212,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 38,
+        "runner_error": 0,
+        "total": 38
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/load2.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 45,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 56,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 29,
+        "runner_error": 0,
+        "total": 29
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_copy0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_copy1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 16,
+        "runner_error": 0,
+        "total": 16
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_fill0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 13,
+        "runner_error": 0,
+        "total": 13
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_init0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 8,
+        "runner_error": 0,
+        "total": 8
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_size0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 15,
+        "runner_error": 0,
+        "total": 15
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_size1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 16,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 21,
+        "runner_error": 0,
+        "total": 21
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_size2.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 4,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 2,
+        "runner_error": 0,
+        "total": 2
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_size3.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 14,
+        "runner_error": 0,
+        "total": 14
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_trap0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 88,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 15,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 16,
+          "line": 94,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 17,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 18,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 19,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 20,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 21,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 22,
+          "line": 100,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 23,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 24,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 25,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 26,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 27,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 28,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 29,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 30,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 31,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 32,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 33,
+          "line": 111,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 34,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 35,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 36,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 37,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 38,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 39,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 40,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 41,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 42,
+          "line": 120,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 43,
+          "line": 121,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 44,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 45,
+          "line": 123,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 46,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 47,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 48,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 49,
+          "line": 127,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 50,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 51,
+          "line": 129,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 52,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 53,
+          "line": 131,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 54,
+          "line": 132,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 55,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 56,
+          "line": 134,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 57,
+          "line": 135,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 58,
+          "line": 136,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 59,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 60,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 61,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 62,
+          "line": 140,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 63,
+          "line": 141,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 64,
+          "line": 142,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 65,
+          "line": 143,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 66,
+          "line": 144,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 67,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 68,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 69,
+          "line": 147,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 70,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 71,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 72,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 73,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 74,
+          "line": 152,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 75,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 76,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 77,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 78,
+          "line": 156,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 79,
+          "line": 157,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 80,
+          "line": 158,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 81,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 82,
+          "line": 160,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 83,
+          "line": 161,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 84,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 85,
+          "line": 163,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 86,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 87,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 88,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 89,
+          "line": 167,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 90,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 91,
+          "line": 169,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 92,
+          "line": 170,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 93,
+          "line": 171,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 94,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 95,
+          "line": 173,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 96,
+          "line": 174,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 97,
+          "line": 175,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 98,
+          "line": 176,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 99,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 100,
+          "line": 178,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 101,
+          "line": 179,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 102,
+          "line": 180,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 103,
+          "line": 181,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 104,
+          "line": 182,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 105,
+          "line": 183,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 106,
+          "line": 184,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 107,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 108,
+          "line": 186,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 109,
+          "line": 187,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 110,
+          "line": 188,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 111,
+          "line": 189,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 112,
+          "line": 190,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 113,
+          "line": 191,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 114,
+          "line": 192,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 115,
+          "line": 193,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 116,
+          "line": 194,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 117,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 118,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 119,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 120,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 121,
+          "line": 199,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 122,
+          "line": 200,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 123,
+          "line": 201,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 124,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 125,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 126,
+          "line": 204,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 127,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 128,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 129,
+          "line": 207,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 130,
+          "line": 208,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 131,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 132,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 133,
+          "line": 211,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 134,
+          "line": 212,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 135,
+          "line": 213,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 136,
+          "line": 214,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 137,
+          "line": 215,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 138,
+          "line": 216,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 139,
+          "line": 217,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 140,
+          "line": 218,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 141,
+          "line": 219,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 142,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 143,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 144,
+          "line": 222,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 145,
+          "line": 223,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 146,
+          "line": 224,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 147,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 148,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 149,
+          "line": 227,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 150,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 151,
+          "line": 229,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 152,
+          "line": 230,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 153,
+          "line": 231,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 154,
+          "line": 232,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 155,
+          "line": 233,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 156,
+          "line": 234,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 157,
+          "line": 237,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 158,
+          "line": 238,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 159,
+          "line": 242,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 160,
+          "line": 243,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 161,
+          "line": 244,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 162,
+          "line": 245,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 163,
+          "line": 246,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 164,
+          "line": 247,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 165,
+          "line": 248,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 166,
+          "line": 249,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 167,
+          "line": 250,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 168,
+        "runner_error": 0,
+        "total": 168
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/memory_trap1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 9,
+        "runner_error": 0,
+        "total": 9
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/start0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 5,
+        "runner_error": 0,
+        "total": 5
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/store0.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 11,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 13,
+        "runner_error": 0,
+        "total": 13
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/store1.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "multi_memory",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 1,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 2,
+          "line": 23,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 3,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 4,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 5,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 6,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 7,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 8,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 9,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 10,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 11,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 12,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 13,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "multi_memory",
+          "index": 14,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 15,
+        "runner_error": 0,
+        "total": 15
+      },
+      "feature_area": "multi_memory",
+      "path": "test/core/multi-memory/traps0.wast"
+    }
+  ],
+  "kind": "webassembly_multi_memory_runtime_inventory",
+  "profile": "multi-memory",
+  "schema_version": 2,
+  "spec": {
+    "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+    "declared_files": [
+      "memory-multi.wast",
+      "address0.wast",
+      "address1.wast",
+      "align0.wast",
+      "binary0.wast",
+      "data0.wast",
+      "data1.wast",
+      "data_drop0.wast",
+      "exports0.wast",
+      "float_exprs0.wast",
+      "float_exprs1.wast",
+      "float_memory0.wast",
+      "imports0.wast",
+      "imports1.wast",
+      "imports2.wast",
+      "imports3.wast",
+      "imports4.wast",
+      "linking0.wast",
+      "linking1.wast",
+      "linking2.wast",
+      "linking3.wast",
+      "load0.wast",
+      "load1.wast",
+      "load2.wast",
+      "memory_copy0.wast",
+      "memory_copy1.wast",
+      "memory_fill0.wast",
+      "memory_init0.wast",
+      "memory_size0.wast",
+      "memory_size1.wast",
+      "memory_size2.wast",
+      "memory_size3.wast",
+      "memory_trap0.wast",
+      "memory_trap1.wast",
+      "start0.wast",
+      "store0.wast",
+      "store1.wast",
+      "traps0.wast"
+    ],
+    "files_available": 186,
+    "files_declared": 38,
+    "files_scored": 38,
+    "license": "Apache-2.0",
+    "repository": "https://github.com/WebAssembly/multi-memory.git",
+    "suite": "test/core/**/*.wast",
+    "tag": "proposal-revision"
+  },
+  "totals": {
+    "fail": 0,
+    "not_applicable": 0,
+    "pass": 829,
+    "runner_error": 0,
+    "total": 829
+  },
+  "totals_by_feature_area": {
+    "multi_memory": {
+      "fail": 0,
+      "not_applicable": 0,
+      "pass": 829,
+      "runner_error": 0,
+      "total": 829
+    }
+  }
+}

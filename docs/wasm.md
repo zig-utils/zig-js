@@ -177,7 +177,7 @@ WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
-the official proposal tracker and 12 selected proposal repositories by exact
+the official proposal tracker and 13 selected proposal repositories by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
 keeps MVP as the only default complete profile until all features in a named
@@ -331,6 +331,30 @@ python3 tools/wasm-spec.py --profile exception-handling \
 zig build wasm-feature-profiles-check
 ```
 
+### Multi-memory terminal profile
+
+The finished Wasm 3.0 multi-memory proposal is pinned independently at
+`WebAssembly/multi-memory@cf8b5aa27257311b8eac80ae83f4ba22ee308064`.
+Its [terminal inventory](.data/wasm-multi-memory-runtime-inventory.json) scores
+all 38 proposal files and **829/829 commands**, with zero failures, skips, or
+runner errors.
+
+`Features.multi_memory` retains every memory index through scalar, SIMD,
+atomic, bulk-memory, size, grow, import, export, data-segment, validation, and
+execution paths. It remains disabled by default and is independent of
+Memory64; mixed memory32/memory64 validation uses each selected memory's
+address type.
+
+Reproduce the score with pinned WABT 1.0.39:
+
+```sh
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py --profile multi-memory \
+  --spec-root /path/to/multi-memory \
+  --wast2json /path/to/wabt-1.0.39/wast2json \
+  --engine zig-out/bin/wasm-spec-eval
+```
+
 ### Memory64 binary, validation, runtime, and JavaScript API boundary
 
 The finished Wasm 3.0 memory64 proposal is pinned at
@@ -343,7 +367,7 @@ with 824 textual memory64 declarations and 151 table64 declarations; these are
 inventory facts, not a terminal pass score.
 
 Behind `Features.memory64`, memory and table types retain an explicit i32/i64
-address type, limits retain their normative u64 encoding, and every scalar,
+address type, i32 limits use u32 while i64 limits use u64, and every scalar,
 SIMD, and atomic memory argument retains its u64 offset. The decoder enforces
 the i32 memory limit of 2^16 pages, i64 memory limit of 2^48 pages, i32 table
 limit of 2^32-1 elements, and i64 table limit of 2^64-1 elements. It rejects
@@ -750,8 +774,8 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
-execution are separate scored profiles. Remaining Memory64/multi-memory profile
-coverage and shell-only hooks stay tracked separately.
+execution are separate scored profiles. Remaining Memory64 terminal coverage
+and shell-only hooks stay tracked separately.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,
