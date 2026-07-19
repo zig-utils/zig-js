@@ -677,6 +677,8 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/threads-reference-audit.py",
         "--fail-on-uncategorized",
+        "--check-inventory",
+        "--self-test-inventory",
     });
     const threads_reference_audit_step = b.step("threads-reference-audit", "Audit remaining reference-only PR-249 files");
     threads_reference_audit_step.dependOn(&threads_reference_audit_cmd.step);

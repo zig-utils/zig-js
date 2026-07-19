@@ -67,7 +67,7 @@ See `zig build --help` for proposal, sanitizer, fuzzing, ABI, profiling, and cac
 ## What Is Not Implemented
 
 - remaining JavaScriptCore framework/private internals and Bun/Home private ABI;
-- shell-only Wasm/JIT hooks and final host-wide Threads stress evidence;
+- 24 dispositioned PR-249 shell/JIT/GC/Wasm cases and final host-wide Threads stress evidence ([inventory](docs/.data/pr249-reference-inventory.json));
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).

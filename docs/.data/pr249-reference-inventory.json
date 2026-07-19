@@ -1,0 +1,4301 @@
+{
+  "dependency_catalog": {
+    "buffer-lifetime": {
+      "description": "Resizable, transferred, and creator-owned buffer lifetime under concurrent access",
+      "owner_issues": [
+        143
+      ]
+    },
+    "cross-realm-weak-gc": {
+      "description": "Cross-realm weak registries during concurrent pruning",
+      "owner_issues": [
+        145
+      ]
+    },
+    "jit-artifact-lifetime": {
+      "description": "Optimized code, call-link records, retirement epochs, and jettison",
+      "owner_issues": [
+        146
+      ]
+    },
+    "jit-trap-polling": {
+      "description": "Optimized-tier trap polling, invalidation, and resume",
+      "owner_issues": [
+        146
+      ]
+    },
+    "jsc-butterfly-verifier": {
+      "description": "JSC-private butterfly verification and indexing-mode invariants",
+      "owner_issues": [
+        143,
+        146
+      ]
+    },
+    "jsc-heap-snapshot": {
+      "description": "JSC-private heap snapshot and preventCollection controls",
+      "owner_issues": [
+        143,
+        144
+      ]
+    },
+    "jsc-mark-list": {
+      "description": "JSC-private shared-GC mark-list storage and shell controls",
+      "owner_issues": [
+        143,
+        144
+      ]
+    },
+    "jsc-shared-heap-shell": {
+      "description": "JSC $vm sharedHeapTest and shared-heap diagnostic controls",
+      "owner_issues": [
+        143,
+        145
+      ]
+    },
+    "jsc-spawned-thread-wasm-refusal": {
+      "description": "JSC-specific refusal of WebAssembly on spawned shared-realm threads",
+      "owner_issues": [
+        143
+      ],
+      "resolution": "explicitly-incompatible: zig-js supports WebAssembly in shared-realm threads"
+    },
+    "optimizing-jit": {
+      "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
+      "owner_issues": [
+        146
+      ]
+    },
+    "shared-concurrent-gc": {
+      "description": "Concurrent shared-heap collection, stop coordination, and diagnostics",
+      "owner_issues": [
+        145
+      ]
+    },
+    "typed-array-race-semantics": {
+      "description": "TypedArray copy and detached-view race semantics",
+      "owner_issues": [
+        143
+      ]
+    },
+    "wasm-shared-memory-lifetime": {
+      "description": "WebAssembly memory growth and backing-store lifetime during concurrent access",
+      "owner_issues": [
+        265,
+        287
+      ]
+    }
+  },
+  "files": [
+    {
+      "bytes": 5589,
+      "kind": "documentation",
+      "path": "README.md",
+      "sha256": "0debc0911dce90f861766ca62890a7c07fddb634a4a4c75e1e29d85eec43b699"
+    },
+    {
+      "bytes": 82550,
+      "kind": "documentation",
+      "path": "THREAD.md",
+      "sha256": "03196f71ede8799bbf68529afa47d7904401dc4bba3e16b1f60bd9236663100e"
+    },
+    {
+      "bytes": 6739,
+      "kind": "documentation",
+      "path": "docs/AMPLIFIER.md",
+      "sha256": "8233ab41190b00c14bfefc858b7031ec18e3127d03ea4db6dc4c733b70194d57"
+    },
+    {
+      "bytes": 5203,
+      "kind": "documentation",
+      "path": "docs/BENCH.md",
+      "sha256": "84bafd816774284e5dc0238420216b30d71c138ca702483ba74423fb4edcb7e5"
+    },
+    {
+      "bytes": 239715,
+      "kind": "documentation",
+      "path": "docs/CONGC-HANDOUT.md",
+      "sha256": "194a64086a6ab96b38d4659b943a6f3e2a730b30e3a13a096285b0808c5c61aa"
+    },
+    {
+      "bytes": 8637,
+      "kind": "documentation",
+      "path": "docs/CORPUS2-INTEGRATE.md",
+      "sha256": "3806d5462c086b597680b4a6a5490f38b92beb1567466f6b4850dea1ce6158fb"
+    },
+    {
+      "bytes": 37019,
+      "kind": "documentation",
+      "path": "docs/CVE-AUDIT-STATUS.md",
+      "sha256": "31e5090851108c4630f970eea809cfd9edcea0733b11f7da1942a6ab7d2114bb"
+    },
+    {
+      "bytes": 19772,
+      "kind": "documentation",
+      "path": "docs/CVE-AUDIT.md",
+      "sha256": "9c8217ed04b81d32fad5cd7e264af451e7611ab7fac6c031ab8f7d27e48e6e8e"
+    },
+    {
+      "bytes": 9670,
+      "kind": "documentation",
+      "path": "docs/FUZZ.md",
+      "sha256": "0e5af28068cf247bbfe1c99105ed9f7979711a950bb817eb6e6d520893b7f0da"
+    },
+    {
+      "bytes": 3627,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-amplifier.md",
+      "sha256": "df0fdefa10de8d5cae8145331362b9f1bf7630aa265e89979d5f46ab92574a8f"
+    },
+    {
+      "bytes": 109078,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-api.md",
+      "sha256": "8c54e52b95134dc19f8f6a6d7c187806e1f82da780e0c3109ca9d964361bf95d"
+    },
+    {
+      "bytes": 2560,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-ftljitcode-buildfix.md",
+      "sha256": "b786c3f1f0564e13372d04a5de49491297b6d6402a1435abcf07b81f6a8868ca"
+    },
+    {
+      "bytes": 57064,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-heap.md",
+      "sha256": "fa8a46a66a5b979cada621a635e947023714a27a9c5696974b8028b8de47cff6"
+    },
+    {
+      "bytes": 209539,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-jit.md",
+      "sha256": "9c5b3a6c8fb179b9711d29f8c3d223fb0e641c1e9c2332ff61a84245a345df8e"
+    },
+    {
+      "bytes": 134072,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-objectmodel.md",
+      "sha256": "732b5e93ea8ac35f88a2c89c2669f81eb9594a243f87db0fbec66aa96bc3f5e7"
+    },
+    {
+      "bytes": 142663,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-ungil.md",
+      "sha256": "3d8f170868cf06fa092c46c6d637a9af74f04001641a15b61097f7db4a622a81"
+    },
+    {
+      "bytes": 132793,
+      "kind": "documentation",
+      "path": "docs/INTEGRATE-vmstate.md",
+      "sha256": "f5c97c0696c53deb2303ed820289d275175c59b93589a385e2aae225f2d64acd"
+    },
+    {
+      "bytes": 22867,
+      "kind": "documentation",
+      "path": "docs/SCALEBENCH.md",
+      "sha256": "c057c133c81bf6dcab0ed2ffee0fc0fd86aca58ad959605f57b31a132d112804"
+    },
+    {
+      "bytes": 1754,
+      "kind": "documentation",
+      "path": "docs/SPEC-api-annex.md",
+      "sha256": "d91d29dc33069a3991e261fc3b46ff92ed71c3847947897b47147e9e74df7e13"
+    },
+    {
+      "bytes": 173078,
+      "kind": "documentation",
+      "path": "docs/SPEC-api-history.md",
+      "sha256": "c40e6436e0065119d53589fe612c21989669ce1be9f097e99474049df6ba4cfc"
+    },
+    {
+      "bytes": 39951,
+      "kind": "documentation",
+      "path": "docs/SPEC-api.md",
+      "sha256": "ce0b95e6e3284ee462e0db759f80a7ae9274265e07180a66bbc96bd59d417318"
+    },
+    {
+      "bytes": 165443,
+      "kind": "documentation",
+      "path": "docs/SPEC-congc-history.md",
+      "sha256": "9277928ace88d4fab45405485859bc5525e2553ac11c12b771836f82f5228377"
+    },
+    {
+      "bytes": 49998,
+      "kind": "documentation",
+      "path": "docs/SPEC-congc.md",
+      "sha256": "4f911b97adbf20a314f33923b12abdc237ba094f65954580807a94e57764885f"
+    },
+    {
+      "bytes": 3245,
+      "kind": "documentation",
+      "path": "docs/SPEC-heap-annex.md",
+      "sha256": "31c2cf6db80428e3980fd9e199245b0af26bddb3be1843d8546b033feb8e1745"
+    },
+    {
+      "bytes": 86464,
+      "kind": "documentation",
+      "path": "docs/SPEC-heap-history.md",
+      "sha256": "6d019a8b711b8376104fe3833827f58ef1eaf44fad90cca2d2078bf0da4b725c"
+    },
+    {
+      "bytes": 41122,
+      "kind": "documentation",
+      "path": "docs/SPEC-heap.md",
+      "sha256": "e51efb8e682673b8027184f3a567d895e678ffcff9906bd23626f8a8719aa7a1"
+    },
+    {
+      "bytes": 11944,
+      "kind": "documentation",
+      "path": "docs/SPEC-jit-annex.md",
+      "sha256": "53d5e42d3e0e65343adf067e48d3888ad03ec372526b5b42da508476305891d9"
+    },
+    {
+      "bytes": 74988,
+      "kind": "documentation",
+      "path": "docs/SPEC-jit-history.md",
+      "sha256": "72a3cc0168e59699c552b160f1930301456e303bea0294c3885e105b540b261d"
+    },
+    {
+      "bytes": 39935,
+      "kind": "documentation",
+      "path": "docs/SPEC-jit.md",
+      "sha256": "9296a48fe6f9f69959b2df137cfc0a4d26ceaee33afbaca1e89e671067f79adc"
+    },
+    {
+      "bytes": 172978,
+      "kind": "documentation",
+      "path": "docs/SPEC-nativeaffinity-history.md",
+      "sha256": "e72e49ea7c68e3f7d3b12831f6c67127c20e5519c3240dffaec7a387e4d8a9b7"
+    },
+    {
+      "bytes": 49979,
+      "kind": "documentation",
+      "path": "docs/SPEC-nativeaffinity.md",
+      "sha256": "0ff5720f3675484d577d42af8eed16dde2574a05ccaaf958cf2f630520efa713"
+    },
+    {
+      "bytes": 39975,
+      "kind": "documentation",
+      "path": "docs/SPEC-objectmodel-annex.md",
+      "sha256": "1ee3be5bd79725d91cc71c92408448deb87cbb1bf14ecdebf4568378bcc9f0df"
+    },
+    {
+      "bytes": 81047,
+      "kind": "documentation",
+      "path": "docs/SPEC-objectmodel-history.md",
+      "sha256": "4235b38e0204e4d143e479eb532b268c1757a0d25ed047fc0e58ee4c66828437"
+    },
+    {
+      "bytes": 39998,
+      "kind": "documentation",
+      "path": "docs/SPEC-objectmodel.md",
+      "sha256": "f309c2ce97ce3686260098030427ac49440fc67000a2d23af215b6ec403d1dc9"
+    },
+    {
+      "bytes": 25408,
+      "kind": "documentation",
+      "path": "docs/SPEC-ungil-audit-K4.md",
+      "sha256": "95316bdc814c2fe8ecfe3efc974c128a6b3b8dacc7e0cc54cfb3d24c03e35ea7"
+    },
+    {
+      "bytes": 20774,
+      "kind": "documentation",
+      "path": "docs/SPEC-ungil-audit-N7.md",
+      "sha256": "f88b0ccdbb8526154fe07de926442047f7dc8c2726caaa91eb906d7d9e2e8997"
+    },
+    {
+      "bytes": 487441,
+      "kind": "documentation",
+      "path": "docs/SPEC-ungil-history.md",
+      "sha256": "2fcf9885b2af0f9ef6528cd165cf3ed52fe1b69fa79c328de86e92f7a066f4fb"
+    },
+    {
+      "bytes": 49999,
+      "kind": "documentation",
+      "path": "docs/SPEC-ungil.md",
+      "sha256": "af629f31c9ea76753afe903be0207e9b4a21a64c479ed4c73f0e7a92d75e3260"
+    },
+    {
+      "bytes": 71876,
+      "kind": "documentation",
+      "path": "docs/SPEC-vmstate-history.md",
+      "sha256": "e866b0e613d19843e3ff2bee70dbd8c4853ff5a65f70098f862d9834e75a8421"
+    },
+    {
+      "bytes": 39997,
+      "kind": "documentation",
+      "path": "docs/SPEC-vmstate.md",
+      "sha256": "041dde4d84b1d3df005f46a12e6273c2846174e9f9b2e733b7f5a439ab239f65"
+    },
+    {
+      "bytes": 28940,
+      "kind": "documentation",
+      "path": "docs/TSAN-RESULTS.md",
+      "sha256": "8b584c6d7146519da3c7167c51f2376c22cbe61531877d594514ef683caa2d3c"
+    },
+    {
+      "bytes": 181077,
+      "kind": "documentation",
+      "path": "docs/TSAN-TRIAGE.md",
+      "sha256": "9bddcc4dff222edc13d85c3a6deac648e948572ea407044914f8a2ab2d876b96"
+    },
+    {
+      "bytes": 6716,
+      "kind": "documentation",
+      "path": "docs/TSAN.md",
+      "sha256": "c9534e4eebb97f8af14c76fa9b4d4378f90e5e49ad7543e7ee481c04f7109b27"
+    },
+    {
+      "bytes": 266032,
+      "kind": "documentation",
+      "path": "docs/UNGIL-HANDOUT.md",
+      "sha256": "ba636bf63224633a02ec59b2ae7894ebd5e3c138ef72aaf5a6d8bb828a7b8070"
+    },
+    {
+      "bytes": 34814,
+      "kind": "documentation",
+      "path": "docs/UNGIL-PLAN.md",
+      "sha256": "795be8de90cef597d89a83634095d35315aede993965b2a7f88e167630466656"
+    },
+    {
+      "bytes": 16566,
+      "kind": "documentation",
+      "path": "docs/cve/jsengine-sab.md",
+      "sha256": "992162f6f70c648e602ce0778f201187d15eec549e4ec8d860f02ddc3fc42e17"
+    },
+    {
+      "bytes": 21351,
+      "kind": "documentation",
+      "path": "docs/cve/jvm.md",
+      "sha256": "53414d7d3e0dd30dfd124946fd2cc9a65abfcea72fda7d53ad2453d991238c86"
+    },
+    {
+      "bytes": 19355,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-AINT.md",
+      "sha256": "3c945dfd7d811ee5066b67430a4eb6565752a540004105851e71fc41c80c9ec6"
+    },
+    {
+      "bytes": 16049,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-CODE.md",
+      "sha256": "23ecd6fc466f04b01780fb2286bc5f569f735d91950640136c0e16acfe9ff460"
+    },
+    {
+      "bytes": 17268,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-DF.md",
+      "sha256": "39a919c4ba861a5fa0776c4b4d6a1be2929e41aabdb292160d0e8e0aaf607db9"
+    },
+    {
+      "bytes": 22646,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-DOS.md",
+      "sha256": "b9ea0771cd84195c6498af141f8ac00ee7dbbb213623d72c5066e43add921c52"
+    },
+    {
+      "bytes": 23833,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-GC.md",
+      "sha256": "02a319fc36220860560e944b96b71b6f0f199373192b31dbe6ccaf8c5a4707e3"
+    },
+    {
+      "bytes": 20858,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-GROW.md",
+      "sha256": "74f7fce38a05e13ed7299b73d80aa7fb90d75a56b7b44688bc788064c365588f"
+    },
+    {
+      "bytes": 21888,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-HAND.md",
+      "sha256": "98f4de8c61c7ae5e472cd663de482c8951144da34182262d9fc97cfd5e8fb740"
+    },
+    {
+      "bytes": 22144,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-INIT.md",
+      "sha256": "848f17898d32772de5988395a12d9f7c7247cbe96ed17eaf55ed83a09c8f1bcd"
+    },
+    {
+      "bytes": 23467,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-INT.md",
+      "sha256": "2fa669f121ed7fd702ab0c32d298e8744ad7ae5bca52947cd7f081bc2a7a7f62"
+    },
+    {
+      "bytes": 22428,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-JIT.md",
+      "sha256": "bae157718259e7c55a8eb4e7b6bf2ea0ee0c1fbc89c616e93f8668136a77db2d"
+    },
+    {
+      "bytes": 16821,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-LIFE.md",
+      "sha256": "d3518db29c758fb8091c84b3a3755a9673ba0f74eafb8c7b034fade347ff12dd"
+    },
+    {
+      "bytes": 19985,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-LOCK.md",
+      "sha256": "b3b1a9697786aea840415c627c9a18c4fc6bdaa56af4802cfe89be91bb528efa"
+    },
+    {
+      "bytes": 19113,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-PRIM.md",
+      "sha256": "50a0d9287ba2cc625467049b3b66f1ef3efe7d482626f193852d174768963060"
+    },
+    {
+      "bytes": 18938,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-REENT.md",
+      "sha256": "726b4e7e59e8987026d63bc0669ed456c2c7452ff0a22be1aca0061498a8216e"
+    },
+    {
+      "bytes": 20883,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-SAFE.md",
+      "sha256": "53ab8df7079e42813aeca6bd0e4ecba71c3ec8f061a9c293b9871f1c2693a8da"
+    },
+    {
+      "bytes": 14957,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-SPEC.md",
+      "sha256": "1fc2010791924bb326bdbcadd34f8a6a721a89bcc7a8a4fd0bc671f0dff5edd1"
+    },
+    {
+      "bytes": 20291,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-TDWN.md",
+      "sha256": "71d3d844e341cdcf06b2008524df4d1c9fb687e2073940216077dc60628c3767"
+    },
+    {
+      "bytes": 19883,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-TEAR.md",
+      "sha256": "afdc67dfca418afb6be16cec9744d1fd5441849081d58220e2210286b2aacbec"
+    },
+    {
+      "bytes": 22309,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-VAL.md",
+      "sha256": "08f9ec13b327f401014269627b15a15d7af6d2694e3efe8cba609b460d1c4ff1"
+    },
+    {
+      "bytes": 22360,
+      "kind": "documentation",
+      "path": "docs/cve/map-MC-WAIT.md",
+      "sha256": "957f222ff2c1d7c150ff1db7eebb79faa6be37695c01fc4364fec720fe97d09f"
+    },
+    {
+      "bytes": 22452,
+      "kind": "documentation",
+      "path": "docs/cve/runtime-general.md",
+      "sha256": "8fdedf131ca79ddd9015eb5c4672c8bf896a0a2027c44842c753d5bc666c9611"
+    },
+    {
+      "bytes": 6527,
+      "case": "api/blocking-gate.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/blocking-gate.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "8837a8a602de8d7861c9fa564c721c1a06edf0bfb7a71055caf6c519e737d0e4"
+    },
+    {
+      "bytes": 6830,
+      "case": "api/condition-async-wait.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/condition-async-wait.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "dbac0e1be3cdd971d512dc52acca0e76bcec5ce9088a01ce7a824f54421b016d"
+    },
+    {
+      "bytes": 4545,
+      "case": "api/condition-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/condition-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a1cde6d21fad71fc9e80d711644989108b456d8e7f15f5f3ac700f0c04bef683"
+    },
+    {
+      "bytes": 1815,
+      "case": "api/condition-wait-termination.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/condition-wait-termination.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--watchdog-exception-ok",
+        "option:--watchdog=500"
+      ],
+      "sha256": "df8c0f60ebbf3e6fe772a821fef3082c93c42bb18b4afd57d19706e0bc4ff1b5"
+    },
+    {
+      "bytes": 8165,
+      "case": "api/lock-async-hold.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/lock-async-hold.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f14c86e5d9669b255103c5ac3eb5a87d1110963239bdd0f461559f60d030554b"
+    },
+    {
+      "bytes": 3368,
+      "case": "api/lock-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/lock-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9e7699d55927d465013780fb4c73b717c938638e374d86cd3c84ab03452839e9"
+    },
+    {
+      "bytes": 1983,
+      "case": "api/lock-hold-termination.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/lock-hold-termination.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--watchdog-exception-ok",
+        "option:--watchdog=500"
+      ],
+      "sha256": "26add172b5afff482a9319ada4c91b64b4b8783bed8bb9a4dd3ba786dad2ce96"
+    },
+    {
+      "bytes": 4044,
+      "case": "api/park-no-microtask-drain.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/park-no-microtask-drain.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ab32ed8fa98ce7799d3f72d3c5004707e7df125b407b2b9c6c344219435b693a"
+    },
+    {
+      "bytes": 3751,
+      "case": "api/thread-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "fbd4e0481dae78a255ff46edaa70207115026959ce663e5c0b120ec7499c2432"
+    },
+    {
+      "bytes": 5175,
+      "case": "api/thread-ctor-errors.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-ctor-errors.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1eaf8a440070b3351a4adc88b8dc7c09b4746c63720cf990aa54260ffc61e6d7"
+    },
+    {
+      "bytes": 2721,
+      "case": "api/thread-exc.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-exc.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ac3a73916b981622bf383fb098ed4879286dba1cce4a8b51bac80646eb45b3be"
+    },
+    {
+      "bytes": 3241,
+      "case": "api/thread-id-bounds.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-id-bounds.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--maxJSThreads=4",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "912c403a3030f7cdf37f0248d63cd46091e8badc3f0b57007f27101f4dff6483"
+    },
+    {
+      "bytes": 2823,
+      "case": "api/thread-lifecycle.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-lifecycle.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "6ba032f13aac40c2f2bdddc322858151ca2f4aab822b2fe43cf3a6e2dc6493de"
+    },
+    {
+      "bytes": 10256,
+      "case": "api/thread-restrict.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/thread-restrict.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f81c4984883742d66840bc4b7e3e8748c162ecd65075ea99f30938b2b511d3f8"
+    },
+    {
+      "bytes": 2800,
+      "case": "api/threadlocal-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/api/threadlocal-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0330427fee3a746fc4a615e616ca27ec76a8dd90a3a11e75b5304b12f1dc25e8"
+    },
+    {
+      "bytes": 2470,
+      "case": "api/wasm-refused-sd7.js",
+      "dependencies": [
+        "jsc-spawned-thread-wasm-refusal"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143
+      ],
+      "path": "threads-tests/api/wasm-refused-sd7.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "4bec416e0ec046172f7a892b8529baedfd1ac1248580474b2a79e2974422a29f"
+    },
+    {
+      "bytes": 4399,
+      "case": "arrays/copy-on-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/arrays/copy-on-write.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "908b8fe7e9cabb61c1cd255dce439625f42d2bcfafa0d66b75fe1019d03322d3"
+    },
+    {
+      "bytes": 4441,
+      "case": "arrays/holes.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/arrays/holes.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "616f96fc5e05c94b6a3d4ad7032d1f829b180d44fa091e5d8ba5b01e9c5d73e5"
+    },
+    {
+      "bytes": 5047,
+      "case": "arrays/push-resize-multithread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/arrays/push-resize-multithread.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "11220f937017cb2556b88647d4db4a19dafc5563f729349a3c9c02d98d6ec1b1"
+    },
+    {
+      "bytes": 4128,
+      "case": "arrays/shared-element-read-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/arrays/shared-element-read-write.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "8e7849b708378600e7e30e73424f01ef1123611755f6a090276f6366a20f00a3"
+    },
+    {
+      "bytes": 5563,
+      "case": "arrays/typed-arrays-sab.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/arrays/typed-arrays-sab.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a6c490eb0e30233f4c2a193b7970d3a9b128a52c586b4f09f183f3077cf045ba"
+    },
+    {
+      "bytes": 3262,
+      "case": "atomics/property-cas-delete-undefined-sentinel-u5.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-cas-delete-undefined-sentinel-u5.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ad34b721d0701f930b49b586aa2df17b09c8da0d7a99bd4cd8ea1be4aa48f7bf"
+    },
+    {
+      "bytes": 3102,
+      "case": "atomics/property-cas-dictionary-delete-u5.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-cas-dictionary-delete-u5.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7ffdbbcd37f600397eb12b4c44d367568d567d350d674382b6383c6162a2daa5"
+    },
+    {
+      "bytes": 3300,
+      "case": "atomics/property-cas-samevaluezero.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-cas-samevaluezero.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "de2ea191f555e453948efabee4bf433145cd2476413242de30b924c8e413f15c"
+    },
+    {
+      "bytes": 3233,
+      "case": "atomics/property-cas-storm-u28-flat.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-cas-storm-u28-flat.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "28136c0d274d796cc81bb1cc6ca5b19c5782430912e1c7efdf8d294cef58feab"
+    },
+    {
+      "bytes": 3272,
+      "case": "atomics/property-cas-storm-u5-as.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-cas-storm-u5-as.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "054c73025caf54df70c040c0cef891e5d79397a9a7584a5608ba4897b9a99fda"
+    },
+    {
+      "bytes": 7674,
+      "case": "atomics/property-errors.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-errors.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9114c279c564bc29e54d1852117c0d6cabf83c3e5d7d0b145c60c3ec0c60320a"
+    },
+    {
+      "bytes": 3807,
+      "case": "atomics/property-load-store.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-load-store.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "8e7084f90a60deefa843e56765aab05667c0395fe9254ed66d967d6d61cce2a9"
+    },
+    {
+      "bytes": 3514,
+      "case": "atomics/property-rmw.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-rmw.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c6ff08c9929755aba8a74b402c74c47064c9c752675e930e6d3b514ccc1b658d"
+    },
+    {
+      "bytes": 2595,
+      "case": "atomics/property-store-missing-define-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-store-missing-define-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "72a0feab98bf035de2e57810672b75d2a2570a9efe4832229ea43dce268e4947"
+    },
+    {
+      "bytes": 4296,
+      "case": "atomics/property-wait-notify.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-wait-notify.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "90b3d10fc667b0218371b9d9eb1f3e253743faf163617cb2e23b2c241b604263"
+    },
+    {
+      "bytes": 1798,
+      "case": "atomics/property-wait-termination.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-wait-termination.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--watchdog-exception-ok",
+        "option:--watchdog=500"
+      ],
+      "sha256": "f86d7a13adbb5686a8620a62f85f66804ef4beea64c9ddb1d3c7201bd029fa30"
+    },
+    {
+      "bytes": 2507,
+      "case": "atomics/property-waitasync-timeout.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-waitasync-timeout.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ad9cc5f2f7d5f14fee837b082586babb76186ac3f52dd4266c194d1edc7b6c73"
+    },
+    {
+      "bytes": 3637,
+      "case": "atomics/property-wtr-isolation.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/property-wtr-isolation.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "afd2a72e8dd10eea9940fb4af70c776ebf409af996248ff05c5c25f2ec0f2b81"
+    },
+    {
+      "bytes": 10156,
+      "case": "atomics/ta-path-unchanged.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/ta-path-unchanged.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:transferArrayBuffer"
+      ],
+      "sha256": "53d451cdf964c9916d97d74ab4173d4ace6e4f41d4a8ca439dc55227dfcb766b"
+    },
+    {
+      "bytes": 2340,
+      "case": "atomics/ta-wait-thread-gate.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/atomics/ta-wait-thread-gate.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "332766c352b47902ac0435ee23ef214a95d7c7fa61424265801533b8cdfc365b"
+    },
+    {
+      "bytes": 889,
+      "case": "bench/array-element-read.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/array-element-read.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "0e7e38edee68757dfb812034d5f7835260845b880c5e99367952e8b5e2a4df30"
+    },
+    {
+      "bytes": 1069,
+      "case": "bench/array-element-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/array-element-write.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "0ea5456a5c53a7212d3f0bf170ae63bdd32fb057a49585b94dfc3189eef3e8c3"
+    },
+    {
+      "bytes": 1575,
+      "case": "bench/flat-butterfly-read.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/flat-butterfly-read.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "d1cd27c9dae9e05fef1a75f195cecd3c4aa7242d7edc006497122d736b146b33"
+    },
+    {
+      "bytes": 1506,
+      "case": "bench/flat-butterfly-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/flat-butterfly-write.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "48841d1df2a7154cafbc1ff0365f79cf095c7026a18eba6f1f2336951e9ea25c"
+    },
+    {
+      "bytes": 2422,
+      "case": "bench/harness.js",
+      "execution_state": "helper/preload",
+      "kind": "javascript",
+      "path": "threads-tests/bench/harness.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:preciseTime",
+        "global:print"
+      ],
+      "sha256": "a8b614c8f0bedc7468a61e2068a525364e5c265707da738149d4e74a4e864ad5"
+    },
+    {
+      "bytes": 755,
+      "case": "bench/inline-property-read.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/inline-property-read.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "06f1b9120394a11bdec6ddeab3a26067fee64c24be1489c98bb98275dc0a353e"
+    },
+    {
+      "bytes": 788,
+      "case": "bench/inline-property-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/inline-property-write.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "7548f2be400849b85a1b8563e35cec9aeef55a40de413bab935c4f0ca2da74e5"
+    },
+    {
+      "bytes": 1155,
+      "case": "bench/megamorphic-access.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/megamorphic-access.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "50a0ee817c1ce8a260c5bbe0b03fa7fd87946473d8c51a00fc0233d4dd7284b8"
+    },
+    {
+      "bytes": 2209,
+      "case": "bench/transition-heavy-constructor.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/bench/transition-heavy-constructor.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "4db28ea11fb1218f508613b4c01d4a4918b09eea7e3b9d4fbef8ecfdd4889553"
+    },
+    {
+      "bytes": 3464,
+      "case": "checktraps-havebadtime-park.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/checktraps-havebadtime-park.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "edea83fc8f7161ba5c4c2418a85dd118d8c5b67bc2373b479cf080c35981488e"
+    },
+    {
+      "bytes": 8705,
+      "case": "checktraps-invalidation.js",
+      "dependencies": [
+        "jit-trap-polling",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        146
+      ],
+      "path": "threads-tests/checktraps-invalidation.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "6abbfea3f4d1aabae8c38ff87425941e5b06906fc83bd0ce905204137dd5e759"
+    },
+    {
+      "bytes": 3046,
+      "case": "congc-t1-window-split.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/congc-t1-window-split.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "f79ba7623ba069472eceefc443f3bf96631a96d09a479ac4b86b8a429c38e3a4"
+    },
+    {
+      "bytes": 5584,
+      "case": "congc-t11-diagnostics.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t11-diagnostics.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "6234b562490d2e0a5eeed226aecc6c0a0ac1a2b50558cb889463b0ba18425f8f"
+    },
+    {
+      "bytes": 2265,
+      "case": "congc-t2-lockorder-lint.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t2-lockorder-lint.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "1d5d503c686a3952e761c06c1f777de8095cf4564b7ca50db9d1b4b8de7d4cb6"
+    },
+    {
+      "bytes": 6206,
+      "case": "congc-t3-barrier-storm.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t3-barrier-storm.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "b14d8b60f509bc220e318ed7562b354f1a0df2a6d0657f07f4c0a45d11fc6ecc"
+    },
+    {
+      "bytes": 5360,
+      "case": "congc-t4-alloc-steal-storm.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t4-alloc-steal-storm.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "4c28cc552f1eec32c19dcca983efca77535e41dbab8bfa00a1ffed640de13cb3"
+    },
+    {
+      "bytes": 8259,
+      "case": "congc-t5-celllock-audit.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t5-celllock-audit.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "27cf95d04ad4a26a3a52f7d97c01c4e4bb453dfc043e94827321dfa0fcdd0056"
+    },
+    {
+      "bytes": 12775,
+      "case": "congc-t8-stop-interleaving.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t8-stop-interleaving.js",
+      "required_shell_hooks": [
+        "$vm.createGlobalObject",
+        "$vm.gc",
+        "$vm.haveABadTime",
+        "$vm.sharedHeapTest",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:print",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "1210134831117551e17212e5ce49584e575b83d9eac4fbd74c7a3d07c85c2e6f"
+    },
+    {
+      "bytes": 7896,
+      "case": "congc-t9-attach-exit-churn.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145
+      ],
+      "path": "threads-tests/congc-t9-attach-exit-churn.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.sharedHeapTest",
+        "global:load",
+        "option:--numberOfGCMarkers=4",
+        "option:--useConcurrentSharedGCMarking=1",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "e16c28ef49bcdc49623f0eddf6dd49fb1137df51c8c19c33012e4de9550ddd91"
+    },
+    {
+      "bytes": 10704,
+      "case": "cve/mc-aint-poll-resume-stale-elided.js",
+      "dependencies": [
+        "jit-trap-polling",
+        "jsc-shared-heap-shell",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145,
+        146
+      ],
+      "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:print",
+        "global:quit",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "6cf1fb09eaea282decec4d687d78b7acdce799c4ed1d64f6a1420128e83e4017"
+    },
+    {
+      "bytes": 3986,
+      "case": "cve/mc-aint-terminate-notify-park-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-aint-terminate-notify-park-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--watchdog-exception-ok",
+        "option:--watchdog=500"
+      ],
+      "sha256": "cf20e55068fad413d17890d13f1aad93a94456438d0923c84d699b8427139914"
+    },
+    {
+      "bytes": 4294,
+      "case": "cve/mc-code-calllink-writer-writer.js",
+      "dependencies": [
+        "jit-artifact-lifetime",
+        "jsc-shared-heap-shell",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145,
+        146
+      ],
+      "path": "threads-tests/cve/mc-code-calllink-writer-writer.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "88dd97787c332b1660dbed4f64fcf6c8f559e5af74ee8f2388983723b81c2c11"
+    },
+    {
+      "bytes": 4495,
+      "case": "cve/mc-code-deferred-fire-stale-window.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-code-deferred-fire-stale-window.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1005a24e69ab4af6ba4286cf75504e52d59914b66c21f1536138d54d80161cce"
+    },
+    {
+      "bytes": 4258,
+      "case": "cve/mc-code-sleep-through-jettison-isb.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-code-sleep-through-jettison-isb.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ae47eb6abe046a9ae5b3fa86ec84a8192847c4f3152fb6d0e82173f6c59fcc08"
+    },
+    {
+      "bytes": 4444,
+      "case": "cve/mc-df-arraycopy-relabel.js",
+      "dependencies": [
+        "jsc-butterfly-verifier",
+        "typed-array-race-semantics"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        146
+      ],
+      "path": "threads-tests/cve/mc-df-arraycopy-relabel.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--verifyConcurrentButterfly=1"
+      ],
+      "sha256": "c567020ed0e1a2e01ba16418229b085344186b82112f5082a84ae8c594d5f8d5"
+    },
+    {
+      "bytes": 3292,
+      "case": "cve/mc-df-delete-reuse.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-df-delete-reuse.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "dfe568b6b1d6f7f17af9b7c457080d184bbae8b535ae8d8d512b04916d1b18fc"
+    },
+    {
+      "bytes": 3012,
+      "case": "cve/mc-df-segmented-length.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-df-segmented-length.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--forceButterflySWBit=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e491e72640f89e487cef7e485e3dcb4a1f7f6f94625e71f67216df79c59d9f92"
+    },
+    {
+      "bytes": 3910,
+      "case": "cve/mc-df-ta-detach-resize.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-df-ta-detach-resize.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:transferArrayBuffer",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b027b06b507817ef8d78668bff6d52e0681e3e8b6b595a080805c72b0bb9a110"
+    },
+    {
+      "bytes": 3113,
+      "case": "cve/mc-df-ta-sort-inplace.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-df-ta-sort-inplace.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "fc84ac5d6f99496c580b3adeb746b03783b09cb510cd2c7601ef7ee55e89f0f2"
+    },
+    {
+      "bytes": 4039,
+      "case": "cve/mc-df-wasm-compile-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-df-wasm-compile-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "global:quit",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7f8237c60cfe7ddb50d640e15ec91b0a32ef4e27ccce832c1e80dd2465280290"
+    },
+    {
+      "bytes": 7974,
+      "case": "cve/mc-dos-retired-artifact-churn.js",
+      "dependencies": [
+        "jit-artifact-lifetime",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        146
+      ],
+      "path": "threads-tests/cve/mc-dos-retired-artifact-churn.js",
+      "required_shell_hooks": [
+        "global:MemoryFootprint",
+        "global:gc",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "86952a506a35797d94f2a5a760d266b521f67519fe46b501e062d3c66621c1ee"
+    },
+    {
+      "bytes": 7986,
+      "case": "cve/mc-dos-waiter-table-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-dos-waiter-table-storm.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "e7179fc4c9893c2703725de27f691813280fd2bece2c773d032c6f2d5d5cad1d"
+    },
+    {
+      "bytes": 4928,
+      "case": "cve/mc-gc-blocked-native-roots.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-gc-blocked-native-roots.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "4a46e115af5e1e5bf9f9b1e924607c4ff3c320d208114c9113a054993b37bc7b"
+    },
+    {
+      "bytes": 4549,
+      "case": "cve/mc-gc-finreg-cross-thread-gc.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-gc-finreg-cross-thread-gc.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "99adf5275a5a552081c55cb5ab0703c79bda8c0d4d012aad2c5116f356e0a21d"
+    },
+    {
+      "bytes": 4419,
+      "case": "cve/mc-gc-thread-shell-finalizer-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-gc-thread-shell-finalizer-storm.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "46808548f37cddea67ab40771176d0012c5e8702c8aea7998b93ec25f67cb036"
+    },
+    {
+      "bytes": 6506,
+      "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "dependencies": [
+        "cross-realm-weak-gc",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        145
+      ],
+      "path": "threads-tests/cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "required_shell_hooks": [
+        "$vm.createGlobalObject",
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "a283caf5e1faee5886a3c6a212fa83a18da427a2121c34ea1262182344ad4249"
+    },
+    {
+      "bytes": 9309,
+      "case": "cve/mc-grow-buffer-storm.js",
+      "dependencies": [
+        "buffer-lifetime",
+        "wasm-shared-memory-lifetime"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        265,
+        287
+      ],
+      "path": "threads-tests/cve/mc-grow-buffer-storm.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useThreadGIL=0"
+      ],
+      "sha256": "17716e5c93cee9ef530de052e3e2f5ee1de1534327d5fa6c2b59346d26e11974"
+    },
+    {
+      "bytes": 3334,
+      "case": "cve/mc-grow-s4-detach-nullvec-repro.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-grow-s4-detach-nullvec-repro.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGIL=0",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "2c1b7a223c340374a84e075ef2593e2995ef35e95b81ea52c09b749d62a7f7b5"
+    },
+    {
+      "bytes": 5145,
+      "case": "cve/mc-grow-wasm-relocating-grow.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-grow-wasm-relocating-grow.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useThreadGIL=0",
+        "option:--useWasmFastMemory=0"
+      ],
+      "sha256": "97699ccfc67a2f46bddc827b476852c831b3a7ae02ac55b7270e6b78eb6b39d3"
+    },
+    {
+      "bytes": 5172,
+      "case": "cve/mc-hand-dead-registrant-settle.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-hand-dead-registrant-settle.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e990fc759a18a7bbab8d5a80699797e9644819310c4ddc5f3791aa0fea3e8cde"
+    },
+    {
+      "bytes": 5292,
+      "case": "cve/mc-hand-restrict-claim.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-hand-restrict-claim.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "67b2cf872e16af4930db643e2d9e9f6a35ea47c8bb3c89867f171d4109284450"
+    },
+    {
+      "bytes": 3851,
+      "case": "cve/mc-init-butterfly-grow-slack.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-init-butterfly-grow-slack.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--forceButterflySWBit=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "930f07fd1a516c2a3a330d856cc374d5918440cd8245d5fe4c71df7f707e3f09"
+    },
+    {
+      "bytes": 3543,
+      "case": "cve/mc-init-cloned-arguments-specials.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-init-cloned-arguments-specials.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7ca3be972de035e1a9b6baf6a6f4798422fe7f1c4b86e6b78e824a2647fd49ff"
+    },
+    {
+      "bytes": 3423,
+      "case": "cve/mc-init-direct-arguments-override.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-init-direct-arguments-override.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1746d96a0ae54ea68d73935dcc5504345c74390ad0ba7af4ca08243d34c3e498"
+    },
+    {
+      "bytes": 4977,
+      "case": "cve/mc-init-lazy-global-first-touch.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-init-lazy-global-first-touch.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d4e970c209fce322acc95f78809d6e78180601f5c728bb54ae2d655e2418b93e"
+    },
+    {
+      "bytes": 4443,
+      "case": "cve/mc-init-rope-resolve-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-init-rope-resolve-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7b19c64c8a8dd9829be4bce093548cdaf7cf00a1050205ce6089b3f33ad902fa"
+    },
+    {
+      "bytes": 12087,
+      "case": "cve/mc-int-resizable-tail-quarantine.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-int-resizable-tail-quarantine.js",
+      "required_shell_hooks": [
+        "global:fullGC",
+        "global:gc",
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--useThreadGIL=0"
+      ],
+      "sha256": "24c551ebfa7c9227556d5b63fe564aff753919ca376e5577f8749d42e7040870"
+    },
+    {
+      "bytes": 5091,
+      "case": "cve/mc-jit-delete-reuse-stale-offset.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-jit-delete-reuse-stale-offset.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "db765d5d7eeb69124b363b3ec040e8db91516499032ccf162dd4873533dca965"
+    },
+    {
+      "bytes": 4739,
+      "case": "cve/mc-jit-double-relabel-stale-shape.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-jit-double-relabel-stale-shape.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "5f9fea98e543e3e0b3494d23ea51ae93bc57afd10df30c9229db62974b8528d2"
+    },
+    {
+      "bytes": 6596,
+      "case": "cve/mc-jit-stale-base-grow-oob.js",
+      "dependencies": [
+        "jsc-butterfly-verifier",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        146
+      ],
+      "path": "threads-tests/cve/mc-jit-stale-base-grow-oob.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b4e8cbad046e3184362ac32404cc811174f28d8b1696665b9865a19fadac85bf"
+    },
+    {
+      "bytes": 5245,
+      "case": "cve/mc-jit-ta-resize-hoisted-base.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-jit-ta-resize-hoisted-base.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7bd305265a95ac3be67fcac79f6712c4a19c734687b35b4374f06bc86b8577fa"
+    },
+    {
+      "bytes": 6166,
+      "case": "cve/mc-life-creator-thread-dies.js",
+      "dependencies": [
+        "buffer-lifetime"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143
+      ],
+      "path": "threads-tests/cve/mc-life-creator-thread-dies.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "07c0e9996c5fd2a666a76d99324aa10c7be62bc1915a290c1c5b8daaf3deba38"
+    },
+    {
+      "bytes": 6199,
+      "case": "cve/mc-life-detach-quarantine-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-life-detach-quarantine-storm.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "60e99eae673ae0a6e313a7b770a1aa4152bd3152d210f3fd540521cfcea1c0fc"
+    },
+    {
+      "bytes": 5108,
+      "case": "cve/mc-life-sab-refchurn.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-life-sab-refchurn.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "aeaa4f8b4ddf0762e82329b9af5b07d1ce87b282f50012ebb57075dd1472d753"
+    },
+    {
+      "bytes": 4090,
+      "case": "cve/mc-life-wasm-grow-relocate.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-life-wasm-grow-relocate.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "global:quit",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a6f0ff7f1a9000306145919dfe88fbf3c4ead386aca7adfc90eae0a8bb51bed0"
+    },
+    {
+      "bytes": 3980,
+      "case": "cve/mc-lock-cow-materialize-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-lock-cow-materialize-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0b9e93e13c4993203ff05e246041d02559446f2005ade9508980a6d8e2f29aa8"
+    },
+    {
+      "bytes": 5137,
+      "case": "cve/mc-lock-n3-install-vs-owner-add.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-lock-n3-install-vs-owner-add.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "37bcb417929a33097439654bbc9978de22dbf933d444d868a56c4917bb55eb3b"
+    },
+    {
+      "bytes": 4478,
+      "case": "cve/mc-lock-stop-vs-park.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-lock-stop-vs-park.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "909776eedf9583db2f6e3123a6dbdf59de525abd4a2c5b5bb5616b60202e4c50"
+    },
+    {
+      "bytes": 4650,
+      "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b7cfc509ddd50b96babe8aed43c3ea0b5f8907780c17c58441649593b97184b5"
+    },
+    {
+      "bytes": 4483,
+      "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "4f5373641547612479d4d9096a340ffa2b7ac86f6a53695b6c240fa61f551e86"
+    },
+    {
+      "bytes": 5911,
+      "case": "cve/mc-prim-async-generator-resume-claim.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-async-generator-resume-claim.js",
+      "required_shell_hooks": [
+        "global:drainMicrotasks",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "8c173008684c8ad053cd80d1e3862b2c786ab1360e146b678e49b2fc460767a6"
+    },
+    {
+      "bytes": 3333,
+      "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-generator-claim-leak-stack-overflow.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--maxPerThreadStackUsage=1000000",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c001aa0a26f44490659451837a1e6d9aaeab5adc431eb9d45d4729f925173c64"
+    },
+    {
+      "bytes": 4506,
+      "case": "cve/mc-prim-generator-resume-claim.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-generator-resume-claim.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0a862384504cfaf8a20fc68eb8c0d5ddee518eb4f052d990cb354afe7256eb79"
+    },
+    {
+      "bytes": 4421,
+      "case": "cve/mc-prim-indexed-missing-define-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-prim-indexed-missing-define-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "943632e466e72a40e42b210e4a6ea95dc51abe1a4dcb70f363bac7fdf0a38041"
+    },
+    {
+      "bytes": 4587,
+      "case": "cve/mc-reent-coercion-order.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-reent-coercion-order.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1cf7a948cbe88e2c378245f55e98e7954ced2ee2170c31ae87a3abf59712c90e"
+    },
+    {
+      "bytes": 4081,
+      "case": "cve/mc-reent-store-missing-indexed-define-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-reent-store-missing-indexed-define-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "89af1f50e01ef522652f86e892f2f5e148c21d01139af0ac736c96fd5bd570fa"
+    },
+    {
+      "bytes": 1777,
+      "case": "cve/mc-safe-gcwait-rope-repro.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-safe-gcwait-rope-repro.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "288939d9a9e69c8e2ee4073c7adbc89295afd48a7311bbfbea34cee89136f387"
+    },
+    {
+      "bytes": 2247,
+      "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+      "dependencies": [
+        "optimizing-jit",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        145,
+        146
+      ],
+      "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "global:preciseTime",
+        "option:--thresholdForJITAfterWarmUp=20",
+        "option:--thresholdForOptimizeAfterWarmUp=100",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "f9bbd0c122edf94ecaef3628c063e52a1040fe8f2ff649e34303d5bc951a105e"
+    },
+    {
+      "bytes": 3421,
+      "case": "cve/mc-safe-gcwait-vs-classa-stop.js",
+      "dependencies": [
+        "optimizing-jit",
+        "shared-concurrent-gc"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        145,
+        146
+      ],
+      "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "global:preciseTime",
+        "option:--thresholdForJITAfterWarmUp=20",
+        "option:--thresholdForOptimizeAfterWarmUp=100",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "5b6bedb0acaeabaa4afbb4c5e58e43e5e40b351efa079b25d242cbd1776bc05b"
+    },
+    {
+      "bytes": 4243,
+      "case": "cve/mc-safe-regexp-tts-watchdog.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-safe-regexp-tts-watchdog.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:preciseTime",
+        "option:--thresholdForJITAfterWarmUp=20",
+        "option:--thresholdForOptimizeAfterWarmUp=100",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1",
+        "option:--watchdog-exception-ok",
+        "option:--watchdog=120000"
+      ],
+      "sha256": "1e7cbf1cfb18c42e633e57d37d7e1141c6e79c021220a4cb86a719fbad552198"
+    },
+    {
+      "bytes": 4208,
+      "case": "cve/mc-safe-spin-vs-classa-stop.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-safe-spin-vs-classa-stop.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:preciseTime",
+        "option:--thresholdForJITAfterWarmUp=20",
+        "option:--thresholdForOptimizeAfterWarmUp=100",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "5dd5d8a3812cc3c6343ad0243be2b2a22d088db4afd917a145d88268b524a865"
+    },
+    {
+      "bytes": 4240,
+      "case": "cve/mc-spec-timer-capability.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-spec-timer-capability.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--useSharedArrayBuffer=0"
+      ],
+      "sha256": "93fe3c7d5dace0aa78c99128df6a1e57c92a04fca6f8be0f44b6703a79d3fba1"
+    },
+    {
+      "bytes": 5091,
+      "case": "cve/mc-tdwn-exit-vs-settle.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tdwn-exit-vs-settle.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1316967426035058523b1c0375b354d0af2b58d578d6838b892895affa7f4404"
+    },
+    {
+      "bytes": 5395,
+      "case": "cve/mc-tdwn-tid-recycle-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tdwn-tid-recycle-storm.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "938d4cc8727b2c127c164482ae0d7965e2ec68991ad01160cbbbc9be498b01ca"
+    },
+    {
+      "bytes": 2652,
+      "case": "cve/mc-tdwn-vm-teardown-unjoined.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tdwn-vm-teardown-unjoined.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3dc6f566f690562a58eedf3a0379275c7355a32c82375153022c13cc8b86e397"
+    },
+    {
+      "bytes": 3394,
+      "case": "cve/mc-tear-date-cache.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tear-date-cache.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9e0ffdf0bd7ddb9c5a14ae45dad817bec111513a68ef6fcca4bb43db52b797b3"
+    },
+    {
+      "bytes": 4546,
+      "case": "cve/mc-tear-generator-resume.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tear-generator-resume.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a58b420c96dd9d061a61461442e5eb991cc7af14f1ffc0de7e350ef6392a2378"
+    },
+    {
+      "bytes": 6409,
+      "case": "cve/mc-tear-rope-resolve-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tear-rope-resolve-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "73cb069eb26ae20a79e8a7ef57e5ef51301a901b68293161f5a9f4647850ac00"
+    },
+    {
+      "bytes": 5702,
+      "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-tear-typedarray-detach-grow-shrink.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "06f51202cfd537c91013411f7ebc13e3e2eba0cdf85a8608b74bbde6c0fd108e"
+    },
+    {
+      "bytes": 3260,
+      "case": "cve/mc-val-atom-identity.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-val-atom-identity.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0461b4cec1c5c991e616a5b0043340f3804e9c50d23bc4f56ac7fb2cd705a02e"
+    },
+    {
+      "bytes": 4062,
+      "case": "cve/mc-val-fire-vs-link.js",
+      "dependencies": [
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        146
+      ],
+      "path": "threads-tests/cve/mc-val-fire-vs-link.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3186501c0ea9809298fba1d27542409ce6d2c34c175a0551fee784c6454e375e"
+    },
+    {
+      "bytes": 5070,
+      "case": "cve/mc-val-llint-cache-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-val-llint-cache-storm.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJIT=0",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "890231913f75f1c731a5bf91542449cc65bcb738d011caf3d0ee49d65e4074b7"
+    },
+    {
+      "bytes": 5525,
+      "case": "cve/mc-val-multislot-clone.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-val-multislot-clone.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:preciseTime",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0ebf717057cf8d1f335aaefc36a79d091f5e27740e058d2ddf61d8585c57994d"
+    },
+    {
+      "bytes": 8106,
+      "case": "cve/mc-val-tid-reissue-false-owner.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-val-tid-reissue-false-owner.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "89bb69477a6682dcb284b7b151f84f2589b44c8ee268a79b34553cb2c7f7331f"
+    },
+    {
+      "bytes": 5708,
+      "case": "cve/mc-wait-property-wait-lost-wakeup.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/cve/mc-wait-property-wait-lost-wakeup.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--useSharedAtomStringTable=1",
+        "option:--useSharedGCHeap=1",
+        "option:--useThreadGILOffUnsafe=1",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "9cb2e5911b315440394dc1c5b21ea3fe1c7488a3cf0832b3ede7ca152e037fe4"
+    },
+    {
+      "bytes": 3331,
+      "case": "dw1-sort-comparator-callsite-shapes.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/dw1-sort-comparator-callsite-shapes.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "4924e51c00df665eab219d5645878189d77aed31d0597f4a1b1f2c22cff48fa2"
+    },
+    {
+      "bytes": 1668,
+      "case": "dw1-sort-comparator-iterator-host.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/dw1-sort-comparator-iterator-host.js",
+      "required_shell_hooks": [
+        "global:noInline",
+        "global:print"
+      ],
+      "sha256": "236fe41b462d4f1e4aef7a21787c7f36e7ba3d79f72f63d3fce99ea00c82a880"
+    },
+    {
+      "bytes": 5602,
+      "case": "dw1-sort-comparator-osr.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/dw1-sort-comparator-osr.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e4edd0ff83a3e0d35e02cc2659001f50102c25e9ed3c2965e5a2db920feec673"
+    },
+    {
+      "bytes": 4834,
+      "case": "dw2-marklistset-storm.js",
+      "dependencies": [
+        "jsc-mark-list"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        144
+      ],
+      "path": "threads-tests/dw2-marklistset-storm.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "6d7566588bbe0e9d2c51b0b6108c373602c513a51158e34b969c6986463dd46a"
+    },
+    {
+      "bytes": 7739,
+      "case": "gc-stress/conservative-scan-register.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/gc-stress/conservative-scan-register.js",
+      "required_shell_hooks": [
+        "$vm.edenGC",
+        "$vm.gc",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3c998e3bf59b67a7dca8d7a45763dc5a29f83f9604bfb1d1a73ecb3aa7d7e5b0"
+    },
+    {
+      "bytes": 10175,
+      "case": "gc-stress/havebadtime-vs-indexed-fastpath.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/gc-stress/havebadtime-vs-indexed-fastpath.js",
+      "required_shell_hooks": [
+        "$vm.isHavingABadTime",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "25e4a63bf776d24620653a0783ecdeb177712bdb6579ddce2c27cac16b9c753f"
+    },
+    {
+      "bytes": 8797,
+      "case": "gc-stress/watchpoint-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/gc-stress/watchpoint-storm.js",
+      "required_shell_hooks": [
+        "$vm.flattenDictionaryObject",
+        "$vm.gc",
+        "$vm.toCacheableDictionary",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "64164986336d03186083bbcf8cc518e326465382bcb3b6c2e1b909f705d435a7"
+    },
+    {
+      "bytes": 15145,
+      "case": "gc-stress/zombie-uaf-canary.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/gc-stress/zombie-uaf-canary.js",
+      "required_shell_hooks": [
+        "$vm.edenGC",
+        "$vm.gc",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d8c8adff0ac4413663477168392121e4a9d8eff671f98ddd29c0aa1ac08c205f"
+    },
+    {
+      "bytes": 3376,
+      "case": "harness.js",
+      "execution_state": "helper/preload",
+      "kind": "javascript",
+      "path": "threads-tests/harness.js",
+      "required_shell_hooks": [
+        "global:load"
+      ],
+      "sha256": "edb3de1ed87d6f899eeb9d80e7612ef8d00b18b8b6d2c15d0ba25d86b80c2962"
+    },
+    {
+      "bytes": 1290,
+      "case": "heap-access-blocking.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-access-blocking.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "83a20d96700a5a23f1cba2580c2310fe4c85afd526300d7484bc34c0a8485dc1"
+    },
+    {
+      "bytes": 1599,
+      "case": "heap-allocation-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-allocation-storm.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "4a0746bb9d30620d20c739ced514d93cdd8fe2cff718fa672d8cf24dab9edf83"
+    },
+    {
+      "bytes": 2563,
+      "case": "heap-bench-allocation.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-bench-allocation.js",
+      "required_shell_hooks": [
+        "global:load"
+      ],
+      "sha256": "adc726b3525ecdc4a2d15c92bd125dd21172e2e1a5e15677bb28e17e4fd3386a"
+    },
+    {
+      "bytes": 1414,
+      "case": "heap-client-churn.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-client-churn.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "e0e08956a4d5735081b8d44f8baba7685349c04668d89f4bada0ac60fee065b1"
+    },
+    {
+      "bytes": 1255,
+      "case": "heap-deferral-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-deferral-storm.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "e0e94a897f0c333dcc738e9128135fd478d5a3d8635711746de1b8f52628af56"
+    },
+    {
+      "bytes": 1897,
+      "case": "heap-epoch-reclaim.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-epoch-reclaim.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=0"
+      ],
+      "sha256": "03dccd86be6e85226f1660613164eed362cf60344534cefadb4fd746ee1e3379"
+    },
+    {
+      "bytes": 1656,
+      "case": "heap-iss-revert.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-iss-revert.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "ce4a75e081940b254824b7eb2ebd2f8c0065fbe1ebab5b4423bc549f31e8ffe9"
+    },
+    {
+      "bytes": 4007,
+      "case": "heap-option-off.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-option-off.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:gc",
+        "global:jscOptions",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1"
+      ],
+      "sha256": "f8bb70c89053827150109546d131f268b6bb382bb64bb918a5f9a9394f427877"
+    },
+    {
+      "bytes": 1228,
+      "case": "heap-precise-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-precise-storm.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "0bf67a8d19715c824e170262b7bc726d00ed9b3576afc7e9a5f4a8f9edc4c747"
+    },
+    {
+      "bytes": 1731,
+      "case": "heap-stop-interleavings.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/heap-stop-interleavings.js",
+      "required_shell_hooks": [
+        "$vm.sharedHeapTest",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useSharedGCHeap=1"
+      ],
+      "sha256": "a57a519d64b4667d1af6ac82203038c07e525296dea2eaec0fd66286023cced2"
+    },
+    {
+      "bytes": 3541,
+      "case": "invariants/delete-quarantine-dictionary.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/delete-quarantine-dictionary.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d019c34b4bfb12a63aae914159362af08c9e8afb967a4ec0a7279831cd865f49"
+    },
+    {
+      "bytes": 4319,
+      "case": "invariants/delete-quarantine.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/delete-quarantine.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "908c6362722423d9b3935fe6b591933d8a7f9a8602688d828e114b17d1d374df"
+    },
+    {
+      "bytes": 3354,
+      "case": "invariants/no-lost-elements.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/no-lost-elements.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ab80a7d95bf8be488eaa38cf0718ca715ad38cc894135e4780c4af789be8db54"
+    },
+    {
+      "bytes": 3128,
+      "case": "invariants/no-lost-properties-same-name.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/no-lost-properties-same-name.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7141e6ebc8a72f542adbc055746a95c7402f5dd01df2d9dc188b3b1971778267"
+    },
+    {
+      "bytes": 2421,
+      "case": "invariants/no-lost-properties.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/no-lost-properties.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "85e26c622ea397ce59fa149b331336d9e11d0d8c53fb1de582ecf8f3730d221c"
+    },
+    {
+      "bytes": 3669,
+      "case": "invariants/no-time-travel.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/no-time-travel.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "682c19687de14511854ba26b6d5ea093992739679d84745d661b649870959b05"
+    },
+    {
+      "bytes": 3058,
+      "case": "invariants/no-torn-shapes.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/invariants/no-torn-shapes.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b54bb553fd70d984ad29479c4c5f671afb65dcb8f9a26683e86a4e3267661bfc"
+    },
+    {
+      "bytes": 2221,
+      "kind": "documentation",
+      "path": "threads-tests/jit/README.md",
+      "sha256": "7ced083a04b01fc7d5592101fc9a15978abf149ed5e7fd9884ec409de9b3ece8"
+    },
+    {
+      "bytes": 8698,
+      "kind": "shell",
+      "path": "threads-tests/jit/bench-gates.sh",
+      "sha256": "05cabac611eedafe9acae3e61379a089c37c1ca9646ea904f449eaafe66ac68a"
+    },
+    {
+      "bytes": 3234,
+      "case": "jit/construction-shared-constructor.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/construction-shared-constructor.js",
+      "required_shell_hooks": [
+        "global:noInline"
+      ],
+      "sha256": "65356883fa05ae3146d9bfc55ef69beae129e250efe90a7dfef118948f1bdf17"
+    },
+    {
+      "bytes": 2166,
+      "case": "jit/fires-per-sec.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/fires-per-sec.js",
+      "required_shell_hooks": [],
+      "sha256": "991ee5aee2f863e1cf32be1a02604727d95a8b2d0a8b63a246df5a841440e7f7"
+    },
+    {
+      "bytes": 6225,
+      "case": "jit/foreign-reify-getbyid-converges.js",
+      "dependencies": [
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        146
+      ],
+      "path": "threads-tests/jit/foreign-reify-getbyid-converges.js",
+      "required_shell_hooks": [
+        "global:noInline",
+        "global:numberOfDFGCompiles",
+        "global:print",
+        "global:quit",
+        "option:--thresholdForFTLOptimizeAfterWarmUp=1000",
+        "option:--thresholdForJITAfterWarmUp=50",
+        "option:--thresholdForOptimizeAfterWarmUp=200",
+        "option:--useConcurrentJIT=0",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0fb5153f184076cecd03dec8f845e55436cf66095f2f5e9a1d1155768849468f"
+    },
+    {
+      "bytes": 2758,
+      "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "option:--thresholdForFTLOptimizeAfterWarmUp=100",
+        "option:--thresholdForOptimizeAfterWarmUp=20",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "71b9cb63682d1f5dd3a0de300dd59f6f008229d436c88926f997ee72f370e770"
+    },
+    {
+      "bytes": 4036,
+      "case": "jit/ftl-osr-entry-catch-loop-amplifier.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/ftl-osr-entry-catch-loop-amplifier.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--thresholdForFTLOptimizeAfterWarmUp=200",
+        "option:--thresholdForJITAfterWarmUp=20",
+        "option:--thresholdForOptimizeAfterWarmUp=100",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "eed086e6bebd857ea95ef4f9c91584f5ecd1c16ffbb7ffa39ed018da71c3a7a1"
+    },
+    {
+      "bytes": 2533,
+      "case": "jit/golden-disasm-corpus.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/golden-disasm-corpus.js",
+      "required_shell_hooks": [
+        "$vm.ensureArrayStorage",
+        "$vm.useThreadGIL",
+        "global:noInline",
+        "global:print"
+      ],
+      "sha256": "04ab46d3326d913079d6a09dde197e2adee70d8012f5d5559544ccbf3b8b5772"
+    },
+    {
+      "bytes": 4100,
+      "kind": "shell",
+      "path": "threads-tests/jit/golden-disasm.sh",
+      "sha256": "68172b038570a2849a01e50b21b67b47969f8adbf4e561ab17fa21efa4084583"
+    },
+    {
+      "bytes": 4336,
+      "case": "jit/ic-publish-reset-loops.js",
+      "dependencies": [
+        "jsc-shared-heap-shell",
+        "optimizing-jit"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        145,
+        146
+      ],
+      "path": "threads-tests/jit/ic-publish-reset-loops.js",
+      "required_shell_hooks": [
+        "$vm.flattenDictionaryObject",
+        "$vm.gc",
+        "$vm.toCacheableDictionary",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b0a34f223aff98a692e6e55ebc84c5e2a97b723b4b7cc8962d7ea6805fe1a089"
+    },
+    {
+      "bytes": 4620,
+      "case": "jit/int-gate-direct-call-relink.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/int-gate-direct-call-relink.js",
+      "required_shell_hooks": [
+        "$vm.gc",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d561f53574b3a34d41d9e4c74c4a7c28e7568bdf7ddfb70b097515ce24b115e6"
+    },
+    {
+      "bytes": 4586,
+      "case": "jit/int-gate-epoch-reclaim.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/int-gate-epoch-reclaim.js",
+      "required_shell_hooks": [
+        "$vm.edenGC",
+        "$vm.flattenDictionaryObject",
+        "$vm.gc",
+        "$vm.toCacheableDictionary",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "04f673f488a1881528479aefffd9776ce4198ef8b47aacb2445a99f36cd79aa2"
+    },
+    {
+      "bytes": 5237,
+      "case": "jit/int-gate-fire-vs-execute.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/int-gate-fire-vs-execute.js",
+      "required_shell_hooks": [
+        "$vm.createGlobalObject",
+        "$vm.flattenDictionaryObject",
+        "$vm.haveABadTime",
+        "$vm.toCacheableDictionary",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "25d209e31cdf0ecb856d939740ca0b6f9f33d01ea1e53f7268d83bd91bc83018"
+    },
+    {
+      "bytes": 3866,
+      "case": "jit/int-gate-jettison-vs-execute.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/int-gate-jettison-vs-execute.js",
+      "required_shell_hooks": [
+        "$vm.createGlobalObject",
+        "$vm.deleteAllCodeWhenIdle",
+        "$vm.gc",
+        "$vm.haveABadTime",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "25652b3a716901151fd782b76ee538e3081899e4f8c784cd58f11359f3a580c9"
+    },
+    {
+      "bytes": 3784,
+      "case": "jit/int-gate-stop-budget.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/int-gate-stop-budget.js",
+      "required_shell_hooks": [
+        "$vm.jsThreadsStopCount",
+        "$vm.jsThreadsStoppedMillis",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:preciseTime",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9f6449623b042a4d0fc7da6f3f55870b950d866e292e8ae970574438eb57ad4f"
+    },
+    {
+      "bytes": 11705,
+      "kind": "shell",
+      "path": "threads-tests/jit/lint.sh",
+      "sha256": "5511c4139e4ec98069ccacc1e0fe6a21139457e1335a2d68626d7444b3d4a398"
+    },
+    {
+      "bytes": 4687,
+      "kind": "shell",
+      "path": "threads-tests/jit/run-jit-tests.sh",
+      "sha256": "10c36b1675fc91a725202fba4533d742a41a9e061f5ea418169d54797b494dc1"
+    },
+    {
+      "bytes": 6331,
+      "case": "jit/shared-arraystorage-stress.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/shared-arraystorage-stress.js",
+      "required_shell_hooks": [
+        "$vm.ensureArrayStorage",
+        "$vm.indexingMode",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "579428bfb020d564476bfeeccec628fdc2f07832902046d5424247652ae24658"
+    },
+    {
+      "bytes": 4789,
+      "case": "jit/spawned-thread-butterfly-stress.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/spawned-thread-butterfly-stress.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "bad97e0653af1c94d117981e1bb701d93dd9e815b14ec1f5ab0083e2aa0b02db"
+    },
+    {
+      "bytes": 3184,
+      "case": "jit/tag-discipline.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/tag-discipline.js",
+      "required_shell_hooks": [
+        "$vm.dfgTrue",
+        "$vm.ensureArrayStorage",
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "2028f3a95b551167778d566fb5f24ae5d3181be1ebe6da5642eda8bd98736b94"
+    },
+    {
+      "bytes": 6555,
+      "case": "jit/tid-tag-3-threads.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/jit/tid-tag-3-threads.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:noInline",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9dd1805b2f2dfd948cc30013859b5373cc518e02afa1f870a687e0dc1edffb1a"
+    },
+    {
+      "bytes": 2363,
+      "case": "lifecycle/async-join.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/async-join.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c4ac146b04072cf855973850b38c67c1b5d6332423c4d906fbc9323fa21cc288"
+    },
+    {
+      "bytes": 3168,
+      "case": "lifecycle/create-basics.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/create-basics.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "74fb14ee1418d4eae6643bbf42f64b7d9f0464db5af48ecc6eaec81e1cc44fbe"
+    },
+    {
+      "bytes": 3185,
+      "case": "lifecycle/current-and-id.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/current-and-id.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "73bb748c6ff3f0c75e237879fdb599f4f138b242d06a18cbdfca4d42823af6f4"
+    },
+    {
+      "bytes": 3962,
+      "case": "lifecycle/exceptions-cross-join.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/exceptions-cross-join.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f9c183cb4d79c0bcc09d3a3513890768d7ce07524cbb05f4eb08b8cf7c80b4c4"
+    },
+    {
+      "bytes": 2286,
+      "case": "lifecycle/join-semantics.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/join-semantics.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "60e685a222e2f0a5965960f98dc79ebb71243a8f97a7c001ccb0b5384b52c28f"
+    },
+    {
+      "bytes": 3063,
+      "case": "lifecycle/nested-threads.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/nested-threads.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e3f89632b5f27b837f26e98210ef33f93a216cc909e5a2b94e002773286d2a5c"
+    },
+    {
+      "bytes": 1662,
+      "case": "lifecycle/restrict-foreign-access.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/restrict-foreign-access.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "639ca752a6dc09e75e5b1693856cd7dbee29cc403d8407468ce094136e7427fd"
+    },
+    {
+      "bytes": 3776,
+      "case": "lifecycle/restrict.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/restrict.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f3d18723bbe091acc4979a31a25970c48342acaad487ca952f6f6f9c9b414d44"
+    },
+    {
+      "bytes": 3363,
+      "case": "lifecycle/return-values.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/lifecycle/return-values.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e90dd361ff074ceb69d56c9457aeeb7d67386ee6f115235dd4cef1d4e70ec73c"
+    },
+    {
+      "bytes": 5049,
+      "case": "objectmodel/array-storage-property-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/array-storage-property-transition.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1d26fef3d6071ef699c8baf9915778ddf39600be5a236f587d4dcc898ac5da74"
+    },
+    {
+      "bytes": 3517,
+      "case": "objectmodel/cow-named-property-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/cow-named-property-transition.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f3c00a47841812474e43ef39a8f346a56754efd20037e995dd372148f6ad3e4a"
+    },
+    {
+      "bytes": 4060,
+      "case": "objectmodel/i03-array-resize-cas.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-array-resize-cas.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "356c046153f02fb269361525832c8e6212df0b6c5ccbebfd3b67b1d4c60f8bae"
+    },
+    {
+      "bytes": 3176,
+      "case": "objectmodel/i03-as-shift-unshift.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-as-shift-unshift.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d1b225951e869df046168acbc6f09fc3116b3638e1fd15c2d3ee100bc32a7b39"
+    },
+    {
+      "bytes": 3279,
+      "case": "objectmodel/i03-as-sparse-holes.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-as-sparse-holes.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b43d133379396caa70832e568af6abcd40c918315f65b0a11c7d5acf93799b71"
+    },
+    {
+      "bytes": 3158,
+      "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "5e236623a063590441cc774f9a8c3f20c53b768eeb81f2d726c5356c5c666dfc"
+    },
+    {
+      "bytes": 4262,
+      "case": "objectmodel/i03-convert-grow-gc-read.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-convert-grow-gc-read.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "14f18ab7c633df35624ab70192c10409765b2d85303272a6623f54e51f9e4a7a"
+    },
+    {
+      "bytes": 3278,
+      "case": "objectmodel/i03-cow-materialize-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-cow-materialize-race.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "4f685c785d609827cd8afcd5143a062cd421d1816caf4b6166f592c67085775d"
+    },
+    {
+      "bytes": 4248,
+      "case": "objectmodel/i03-i37-same-shape-add-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-i37-same-shape-add-storm.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ff9b895e88978c0539c7a9342782ee2fa2952dfd712439ed3561cd1440963921"
+    },
+    {
+      "bytes": 2949,
+      "case": "objectmodel/i03-n2-inline-add-races.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-n2-inline-add-races.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c7a9ddb6f3842af7d37e220ad65987242bab51f7274c6222c82a35f2c525cf41"
+    },
+    {
+      "bytes": 2130,
+      "case": "objectmodel/i03-n3-first-install-races.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-n3-first-install-races.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "6acd3a09ff9a733ab16adfd477d642b999f188ba837ae1d307c61ff7e273dd94"
+    },
+    {
+      "bytes": 3788,
+      "case": "objectmodel/i03-pa-global-races.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-pa-global-races.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "24751b231063f524ba383187d069c164ff80cf8e639206dfff49507312e08a08"
+    },
+    {
+      "bytes": 4952,
+      "case": "objectmodel/i03-quarantine-readd-across-gc.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-quarantine-readd-across-gc.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "5a10a4041b24670a19667bdaef638f760100c1f196461bbfe5a0aa32733f04c7"
+    },
+    {
+      "bytes": 3342,
+      "case": "objectmodel/i03-restart-locked-vs-conversion.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-restart-locked-vs-conversion.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "5c83670b7ed2f004dfe78e5f119918c658adff98d0f2d03ec418920858b81a47"
+    },
+    {
+      "bytes": 3501,
+      "case": "objectmodel/i03-selftest.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-selftest.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1",
+        "option:--verifyConcurrentButterfly=1"
+      ],
+      "sha256": "40db3e94c9c6b8f3332ddd6b26161103e9e604c3a7bd60ecaff2d4a469d8839b"
+    },
+    {
+      "bytes": 5224,
+      "case": "objectmodel/i03-shared-double.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-shared-double.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7f0e527e9ec35fd0b38b789fac6d33ca897b2722531d12f967d81e2693a92cfc"
+    },
+    {
+      "bytes": 3056,
+      "case": "objectmodel/i03-single-threaded-flag-on.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-single-threaded-flag-on.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0fe1e9fcd15cebbbf9a3597a6d72760a06b73933679767c7a3f043f5880a050d"
+    },
+    {
+      "bytes": 5150,
+      "case": "objectmodel/i03-single-threaded-no-change.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-single-threaded-no-change.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:jscOptions",
+        "global:load",
+        "global:print",
+        "global:quit"
+      ],
+      "sha256": "ddb51fdcec8ff913bb1a571769232260d3184237640621d76a8b29757df7a0cd"
+    },
+    {
+      "bytes": 4103,
+      "case": "objectmodel/i03-stale-spine-reader-vs-grow.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-stale-spine-reader-vs-grow.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d02e695de8a84caa58da51988074466cf11bf06def6293e4bcad75a1164a5f11"
+    },
+    {
+      "bytes": 3191,
+      "case": "objectmodel/i03-stress-force-segmented.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-stress-force-segmented.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:gc",
+        "global:load",
+        "option:--forceSegmentedButterflies=1",
+        "option:--useJSThreads=1",
+        "option:--verifyConcurrentButterfly=1"
+      ],
+      "sha256": "85dee983159fb0cee2362ec04cc45b6da34f00ad742867d0611a1dbba412f26f"
+    },
+    {
+      "bytes": 3179,
+      "case": "objectmodel/i03-stress-force-sw.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-stress-force-sw.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:gc",
+        "global:load",
+        "option:--forceButterflySWBit=1",
+        "option:--useJSThreads=1",
+        "option:--verifyConcurrentButterfly=1"
+      ],
+      "sha256": "dba60a527aeff4d128c96fed9b2b7cf445430ae85248c7602821164306715c1e"
+    },
+    {
+      "bytes": 3237,
+      "case": "objectmodel/i03-t1-vs-sw-flip.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-t1-vs-sw-flip.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "94b539fe0562a19066fa55c40f4db23746cdf52d0c0b9019214ca0162e5815a1"
+    },
+    {
+      "bytes": 3498,
+      "case": "objectmodel/i03-t5-racing-growers.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-t5-racing-growers.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9e2d767ec7f73caf0e4ed328168dedb61a6f6b981464320b9b3989f891548997"
+    },
+    {
+      "bytes": 4075,
+      "case": "objectmodel/i03-visit-range-outofline.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i03-visit-range-outofline.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:gc",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "56a0fec0615652fe0dc0dbc15ef8f70d92450c11696b33be3d1b2d81811978f7"
+    },
+    {
+      "bytes": 3577,
+      "case": "objectmodel/i08-named-vs-indexed-first-install.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/i08-named-vs-indexed-first-install.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d7800f0e7c2763c481d2befbb0095bc827dfe373822234d589629ff96b3ddc72"
+    },
+    {
+      "bytes": 4996,
+      "case": "objectmodel/r47-foreign-dictionary-flatten.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/r47-foreign-dictionary-flatten.js",
+      "required_shell_hooks": [
+        "$vm.flattenDictionaryObject",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d24acdfb0c736b5494f0ee5e6a01d9df0f04348a8673c76b160d8c1afd1271c6"
+    },
+    {
+      "bytes": 4879,
+      "case": "objectmodel/r47-typedarray-slowdown-wastememory.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/r47-typedarray-slowdown-wastememory.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "bb75f811e5ed1e2f28825cf3e43752df750d55dae8e6b96496329cb221dec4c3"
+    },
+    {
+      "bytes": 3267,
+      "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/objectmodel/r48-typedarray-segmented-arraybuffer.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "01f43c9370650484d1475c2d3047e5e232524bdefaa6f0a2833994f2bcf1b157"
+    },
+    {
+      "bytes": 2032,
+      "case": "races/counter-atomics.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/counter-atomics.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d26bdfbe4c4ffbd39822054e2f0f9239ad15b36a4197439d37c7bbebb479a40d"
+    },
+    {
+      "bytes": 2146,
+      "case": "races/counter-lock.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/counter-lock.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "2949939967d091cd3c6a01b192be948b06f2e07bf08d67f388dba9fc67ba282e"
+    },
+    {
+      "bytes": 3503,
+      "case": "races/forin-enumerator-cache.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/forin-enumerator-cache.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "aad7c9066d0e4f6b51df2022d28cf5ede778c9a903b18d08de3420d7a617b901"
+    },
+    {
+      "bytes": 2256,
+      "case": "races/join-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/join-storm.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a714b4043622588796dc3f38dd54b451ba87d6939bbee89ba194d67384d6fbbb"
+    },
+    {
+      "bytes": 3264,
+      "case": "races/transition-vs-read.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/transition-vs-read.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3cc0d1e8ae3e7fb85ae39b5020d76c0326c6fd8788c2de2845a2080302d66b44"
+    },
+    {
+      "bytes": 5349,
+      "case": "races/transition-vs-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/transition-vs-write.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "4f870fb13cb7fbced42cab1de0f987ed238226e20fb07dfd4e2d15bf071248e0"
+    },
+    {
+      "bytes": 1787,
+      "case": "races/wait-notify-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/races/wait-notify-storm.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b81d0a8cd412a770b9ac9fef7283f58aa6406cf165ef055f5090ca0d01a2c465"
+    },
+    {
+      "bytes": 3858,
+      "case": "resources/assert.js",
+      "execution_state": "helper/preload",
+      "kind": "javascript",
+      "path": "threads-tests/resources/assert.js",
+      "required_shell_hooks": [],
+      "sha256": "f832b48a2112338f850ea2d506d6dfca085c30c749b6f4a1deb03d079942beac"
+    },
+    {
+      "bytes": 11057,
+      "case": "scaling/harness.js",
+      "execution_state": "helper/preload",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/harness.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:preciseTime",
+        "global:print"
+      ],
+      "sha256": "52c47d2a93d268b62d72ce95549311b296424713977ad198cf3b495cb793dc36"
+    },
+    {
+      "bytes": 21882,
+      "case": "scaling/lock-fairness.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/lock-fairness.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e73c0f86969f7f2d49de16b311bf622f6ff879fea49ab396726f7298fd9653a6"
+    },
+    {
+      "bytes": 4529,
+      "case": "scaling/map-heavy.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/map-heavy.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3d395ce170fc46587899fc8787430c110dc300a790000af26737eddd7a4584bd"
+    },
+    {
+      "bytes": 6925,
+      "case": "scaling/raytrace-like.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/raytrace-like.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "fa151798a9016c002f71c49ea2c61bdef3e2b1f0754a033a054246cd8a01067c"
+    },
+    {
+      "bytes": 7067,
+      "case": "scaling/richards-like.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/richards-like.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0e2ca7a88e07bc605f6f74367f60b61caeebc0d4d3b21aea6b0f7d2cab9b602d"
+    },
+    {
+      "bytes": 6882,
+      "case": "scaling/splay-like.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/splay-like.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "70ea404bd7bd5bbeb16b7bd56ee3c76c1aa400308efad9f1a26c5dd477698de6"
+    },
+    {
+      "bytes": 4548,
+      "case": "scaling/string-heavy.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/scaling/string-heavy.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9022b565b2cdd91f075382a3f9fa60f3a7b143266bec870082b325ddf18d83b1"
+    },
+    {
+      "bytes": 7402,
+      "case": "semantics/atom-rope-torture.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/atom-rope-torture.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "f9b264179df4558dc6231a4a44bd9d6fb79956afd7b25754ce42d9a4a4f3c751"
+    },
+    {
+      "bytes": 6527,
+      "case": "semantics/date-cache-churn.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/date-cache-churn.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "199c6a078abdc85be55a26db191ed5f5a3c6e97cf6bae6a5402a79ce02a3f952"
+    },
+    {
+      "bytes": 7089,
+      "case": "semantics/frozen-seal-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/frozen-seal-race.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "edb1b1d42d5bc45b8f63f3fc1577249c5e7246b0576e8acf251592668e5ec776"
+    },
+    {
+      "bytes": 8233,
+      "case": "semantics/ic-delete_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-delete_by_id-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d04b0d46bf28a9b569a5fa9f6f76d893b127b4428ef9ec01888f4c92bf9a30f4"
+    },
+    {
+      "bytes": 9283,
+      "case": "semantics/ic-get_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-get_by_id-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "2ca444b0ff685845da7cd1b766c53a05208cd429c3f5d63366f47935753fd762"
+    },
+    {
+      "bytes": 9200,
+      "case": "semantics/ic-get_by_val-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-get_by_val-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "2582f58054f6f277fe9cf6635aaa3595befad13e32450c0ccd447ea58812e02f"
+    },
+    {
+      "bytes": 7808,
+      "case": "semantics/ic-in_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-in_by_id-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "460139922ca14b9b0b16a841bea47f0a808893f1512437436ac99a35897870f9"
+    },
+    {
+      "bytes": 12470,
+      "case": "semantics/ic-instanceof-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-instanceof-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "002bd183f9368609aa74003bb69a47f6046d542941008d2134d0666ed4c64ea2"
+    },
+    {
+      "bytes": 7948,
+      "case": "semantics/ic-put_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-put_by_id-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7b3e7821204cc8f0679821736b3c9d92af870cc5b9e66f7d8ddd6604bdf0bc43"
+    },
+    {
+      "bytes": 7524,
+      "case": "semantics/ic-put_by_val-vs-transition.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/ic-put_by_val-vs-transition.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "global:noInline",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "6fe232fa9a7ba1bffe060c51f56e1fc76cc9ddb64ee4cb8c428be41a725cdf57"
+    },
+    {
+      "bytes": 9112,
+      "case": "semantics/oom-one-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/oom-one-thread.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--forceRAMSize=67108864",
+        "option:--maxHeapSizeAsRAMSizeMultiple=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a89ef7302dcbe356e528c128966d01b4fde871b0c11e8a590c7ef08b2d22415a"
+    },
+    {
+      "bytes": 6623,
+      "case": "semantics/private-fields-shared.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/private-fields-shared.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "0d80624c8ffc3fa270385e13cafed9216f24f6bde80d650835e368a6616d2f4d"
+    },
+    {
+      "bytes": 4725,
+      "case": "semantics/proto-cycle-race.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/proto-cycle-race.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "3a982ba10b4934df6c38fcc3324f15e653fe0e43f42eb76266d12430ab44ada7"
+    },
+    {
+      "bytes": 8001,
+      "case": "semantics/regexp-lastindex-shared.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/regexp-lastindex-shared.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "97c3963c6386581654672200dc6cbd05e0f410d8cc072b8235b0c3199a1898e7"
+    },
+    {
+      "bytes": 5360,
+      "case": "semantics/stack-overflow-per-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/stack-overflow-per-thread.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "cc426b1f16b4c147502c043a06bd94644db42241234a749ce2744c2a28a2d6a4"
+    },
+    {
+      "bytes": 5858,
+      "case": "semantics/symbol-registry-cross-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/symbol-registry-cross-thread.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "15a169439d1490796821fd7eaa847f6046a0ad5c1ca51d866b1145dccb246098"
+    },
+    {
+      "bytes": 1915,
+      "case": "semantics/termination-storm.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/semantics/termination-storm.js",
+      "required_shell_hooks": [],
+      "sha256": "4c11f924692793f1a821d22d25e1e3d49862c5224ccdb6c26714dafcc80f3bbc"
+    },
+    {
+      "bytes": 5713,
+      "case": "shared-objects/dictionary-mode.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/dictionary-mode.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "9756aa8bf4267fdff3edcd4a256808b409a24ca8656b9af0c681716893612bcb"
+    },
+    {
+      "bytes": 6843,
+      "case": "shared-objects/frozen-sealed.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/frozen-sealed.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b44d5a4d06028ae53bf2ca9f5a50790eb346d9a8b9d3675a2763f5b540fbe828"
+    },
+    {
+      "bytes": 5483,
+      "case": "shared-objects/getters-setters.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/getters-setters.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1a1ae838f06c3796ea57d83b28976a98250bc975cea1619722f713e4bb17f06f"
+    },
+    {
+      "bytes": 5635,
+      "case": "shared-objects/property-add.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/property-add.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "da1a7c42d23232aa7875bff5426bb7093c4d3bf3a3d33a188682e927b47dd760"
+    },
+    {
+      "bytes": 5112,
+      "case": "shared-objects/property-delete.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/property-delete.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "87d58bda48b7bb477745a23d6bc43b6723f2ba47dee887ad754c863c4b5d40bf"
+    },
+    {
+      "bytes": 4897,
+      "case": "shared-objects/property-read-write.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/property-read-write.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "bb50927bb7965c4b92d70c508b8130cd5d7055eb9b45fa0cd5e9cb2599c0d270"
+    },
+    {
+      "bytes": 5957,
+      "case": "shared-objects/prototype-chain.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/shared-objects/prototype-chain.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "91319c1af6b2be75294a8e54482a28c73a1912d7d17394318078f897ccaa9632"
+    },
+    {
+      "bytes": 4440,
+      "case": "smoke.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/smoke.js",
+      "required_shell_hooks": [
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "e17885f87a8c999c57fed5810395b26c824a1bca93dd312415b5124ecfb202bd"
+    },
+    {
+      "bytes": 6048,
+      "case": "sync/atomics-futex-lock.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/atomics-futex-lock.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "a23402939295e67ee7e0e54a42e14519cd4256499289e2ce2713d3231901e4d5"
+    },
+    {
+      "bytes": 6097,
+      "case": "sync/atomics-object-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/atomics-object-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "8707143fde7c429c0606484edd220e3c2b0e51f6b7fa096c60af4e24d2abfbb6"
+    },
+    {
+      "bytes": 4204,
+      "case": "sync/condition-notify-all-multi-waiter.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/condition-notify-all-multi-waiter.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "241e6c58ee32fc27af66236eecad284d9291b85774fe2fe8bd7bcf0a3f352a11"
+    },
+    {
+      "bytes": 2018,
+      "case": "sync/condition-notify-all-shared-lock.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/condition-notify-all-shared-lock.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b40174c4a0371987a1fba988c74434c24186f4aaa89d9c0fc611419f9a6a67a1"
+    },
+    {
+      "bytes": 3084,
+      "case": "sync/condition-notify-all.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/condition-notify-all.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "080c428e2f5f9f3b58927b6820a1822863ab4e0bb926aef8b81e2687b1937fce"
+    },
+    {
+      "bytes": 9139,
+      "case": "sync/condition-wait-notify.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/condition-wait-notify.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "b6f1fc75cfd9dbf4267db5a189053102caab8e1a90eb9a65aed0d6c2c8f6c8dc"
+    },
+    {
+      "bytes": 2218,
+      "case": "sync/condition-worker-waiter.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/condition-worker-waiter.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7ad2a7577561e531fe78fe62f98683fa2b778a4d8e4dfd99634e7218d0dd642b"
+    },
+    {
+      "bytes": 3783,
+      "case": "sync/lock-async-hold.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/lock-async-hold.js",
+      "required_shell_hooks": [
+        "global:drainMicrotasks",
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "1a6be32ace8b3b295e288fcb2c333e20f6a515e46d5c22abe4aa6e2681aad794"
+    },
+    {
+      "bytes": 2717,
+      "case": "sync/lock-hold-basic.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/lock-hold-basic.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "736effc8f066a9ea7b48dd16420bfba107c350c404b12de7231cfaa0b1460ca2"
+    },
+    {
+      "bytes": 3443,
+      "case": "sync/lock-hold-mutual-exclusion.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/lock-hold-mutual-exclusion.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "ce189f06ac07c3fe44c9ffccba4bf67858c04c0ef68077403ac22f6786cd8ce9"
+    },
+    {
+      "bytes": 3610,
+      "case": "sync/thread-local-isolation.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/sync/thread-local-isolation.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "da05782cbe34d86cc236cae14acb2cc689fe42caa26b959e35ca0060a53e5f41"
+    },
+    {
+      "bytes": 2127,
+      "kind": "manifest",
+      "path": "threads-tests/threads.yaml",
+      "sha256": "b0a1ad14c2f5d5a39ce6e75f210b1e61c5b39a0e7ac25464615f2440c8926da0"
+    },
+    {
+      "bytes": 4650,
+      "kind": "documentation",
+      "path": "threads-tests/vmstate/README.md",
+      "sha256": "f96079d1737ee7f19a63ae6569fc46501696e042edb6f7e1ab3e7ede9c863e24"
+    },
+    {
+      "bytes": 1482,
+      "case": "vmstate/all-flags-identity.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/all-flags-identity.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c755c866e09370b6577ebeab75eeda5cb7bab44359919dd2bcb106151bb9f180"
+    },
+    {
+      "bytes": 2670,
+      "case": "vmstate/exception-state-per-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/exception-state-per-thread.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "7b7ad2422fc880b7897f66a547e35ff2cc031162472282f23aa8f03f46dee79e"
+    },
+    {
+      "bytes": 921,
+      "case": "vmstate/flags-off-baseline.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/flags-off-baseline.js",
+      "required_shell_hooks": [
+        "global:load"
+      ],
+      "sha256": "3162d66f1803ca8432975b7459c3788071671d9529871d310b62589f64158292"
+    },
+    {
+      "bytes": 4294,
+      "case": "vmstate/globalthis-postpublication-negative.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/globalthis-postpublication-negative.js",
+      "required_shell_hooks": [
+        "$vm.assertEnabled",
+        "$vm.createGlobalObject",
+        "$vm.resetPrototypeOfGlobalObject",
+        "$vm.useThreadGIL",
+        "global:print",
+        "option:--useDollarVM=1",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d9551edb6bc7e468ab490653a101fcae578b77d11bf8a466e5bb1dadb30ec099"
+    },
+    {
+      "bytes": 2180,
+      "case": "vmstate/microtask-ordering.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/microtask-ordering.js",
+      "required_shell_hooks": [
+        "global:drainMicrotasks",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "59553d31abba8ce24cdc52633f2e1b1099b5b3b5c3cdd5096a8f86aa9341c0b3"
+    },
+    {
+      "bytes": 2994,
+      "case": "vmstate/regexp-churn-threads.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/regexp-churn-threads.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "d8c27deda1b2a4d3d53bf6ff90133ffde7eba5af4466a4b7f7ac64ca1a86927b"
+    },
+    {
+      "bytes": 3856,
+      "case": "vmstate/resources/workload.js",
+      "execution_state": "helper/preload",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/resources/workload.js",
+      "required_shell_hooks": [
+        "global:drainMicrotasks"
+      ],
+      "sha256": "a5a6b2b1d802dcaf3a8ac6350bc81d77d1049d16f472e643cc63ca644ca226ae"
+    },
+    {
+      "bytes": 1884,
+      "case": "vmstate/stack-limits-per-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/stack-limits-per-thread.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "5c111bdb8a9815c2cb500602bbc5d7b8666e7e1ff1de944e545c8a2a76bbfb85"
+    },
+    {
+      "bytes": 3826,
+      "case": "vmstate/structure-churn-dictionary.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/structure-churn-dictionary.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "c907da6f2c3ee3948d78742ffc54f3ab1e5033da7aede361f4807728630f8b52"
+    },
+    {
+      "bytes": 2610,
+      "case": "vmstate/structure-churn-threads.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/structure-churn-threads.js",
+      "required_shell_hooks": [
+        "$vm.useThreadGIL",
+        "global:load",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "420fbe92af04ce2dc74886c71d4a3e2d0c44dfa2015aa23ebbdc064953e77c86"
+    },
+    {
+      "bytes": 1983,
+      "case": "vmstate/structure-lock-single-thread.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/structure-lock-single-thread.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useStructureAllocationLock=1"
+      ],
+      "sha256": "d3e599c05cef4f023b0d9ad7911c55fefc599ab882ecd420b2737d35e2e4f342"
+    },
+    {
+      "bytes": 1107,
+      "case": "vmstate/vmlite-single-thread-identity.js",
+      "execution_state": "promoted",
+      "kind": "javascript",
+      "path": "threads-tests/vmstate/vmlite-single-thread-identity.js",
+      "required_shell_hooks": [
+        "global:load",
+        "option:--useVMLite=1"
+      ],
+      "sha256": "6c861703fa41cf967f8544b52d73b0b6715a93701816e690e78f6c8322cdaa2e"
+    },
+    {
+      "bytes": 6296,
+      "case": "w16-c1-prevent-collection.js",
+      "dependencies": [
+        "jsc-heap-snapshot"
+      ],
+      "execution_state": "reference-only",
+      "kind": "javascript",
+      "owner_issues": [
+        143,
+        144
+      ],
+      "path": "threads-tests/w16-c1-prevent-collection.js",
+      "required_shell_hooks": [
+        "global:gc",
+        "global:generateHeapSnapshot",
+        "global:generateHeapSnapshotForGCDebugging",
+        "global:load",
+        "global:print",
+        "option:--useJSThreads=1"
+      ],
+      "sha256": "27644c1cd6a0141cd37d9e195ecfae073c0a33ae98778a799b27e6ea5e8b3fa7"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "head": "3a14f2a821ac56fcb01d1c765200be7e9dfdb458",
+    "pull_request": 249,
+    "repository": "https://github.com/oven-sh/WebKit"
+  },
+  "summary": {
+    "artifact_kinds": {
+      "documentation": 70,
+      "javascript": 264,
+      "manifest": 1,
+      "shell": 4
+    },
+    "executable": 259,
+    "files": 339,
+    "helper_preload": 5,
+    "javascript": 264,
+    "promoted": 235,
+    "reference_only": 24
+  }
+}

@@ -523,10 +523,12 @@ GIL-free parallel contexts. The full corpus is too slow for every PR, so CI
 uses a curated representative slice and asserts no new failures versus the
 baseline arena engine.
 
-`zig build threads-reference-audit` scans the vendored PR-249 corpus and fails
-if any non-allowlisted executable file lacks an explicit reference-only blocker
-classification. This keeps shell-hook, WebAssembly, JIT, and heap-cap gaps
-visible without inflating the green allowlist with no-op passes.
+`zig build threads-reference-audit` verifies the checked-in [PR-249
+inventory](../.data/pr249-reference-inventory.json): all 339 vendored files are
+checksummed, all 259 executable cases have an explicit state, and every one of
+the 24 reference-only executables names stable dependencies, required hooks,
+and owner issues. The gate rejects file, checksum, allowlist, hook, and
+disposition drift without inflating the green allowlist with no-op passes.
 
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the
@@ -924,6 +926,7 @@ Run the reference audit after promotion attempts:
 
 ```sh
 zig build threads-reference-audit
+python3 tools/threads-reference-audit.py --print-inventory
 python3 tools/threads-reference-audit.py --format markdown
 python3 tools/threads-reference-audit.py --format json
 python3 tools/threads-reference-audit.py --probe-candidates
