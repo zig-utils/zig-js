@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (291 implemented, 140 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (304 implemented, 127 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 291 private entries are implemented; the other 140 remain pending
+The first 304 private entries are implemented; the other 127 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 294/294 compiled fixture additionally
+sibling realms, GC, and reentry; the 307/307 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -668,6 +668,28 @@ stable borrowed ZigString view, recovering the owner realm from the handle
 because Bun's signature carries no global object. All three exports tolerate
 null handles, and the full WHATWG URL parser surface (`URL__*`, `DOMURL__*`,
 `BunString__toURL`/`toJSDOMURL`) stays deferred with the URL.zig cluster.
+
+The URL native-record boundary (#308, first URL-cluster sub-slice) maps Bun's
+context-free `WTF::URL*` exactly: because `URL__fromString` carries no global
+object, the parsed URL is a native heap record (c_allocator, magic-validated
+like the StringBuilder boundary) owning its component bytes in one backing
+allocation — never a JS object. The engine's WHATWG parse layer
+(`urlParse`/`urlSerialize` and helpers) was refactored from
+interpreter-first to allocator-first with zero behavior change — those
+functions only ever used the interpreter for its arena — so the JS `URL`
+builtin, fetch Request/Response/redirect paths, and the new exports share
+one parser. `URL__fromString` parses with no base and returns null for
+invalid input (WTF validity: a scheme is required); `URL__deinit` frees the
+record and clears its magic. The eleven component getters follow Bun/WTF
+semantics rather than the JS getters wherever the two diverge: protocol is
+the scheme without a colon, search keeps the leading `?` for a
+present-but-empty query, host excludes the port while hostname includes it
+(the inversion Home documents explicitly), port is `maxInt(u32)` when unset,
+and hash keeps `#` only for a non-empty fragment. Every returned BunString is
+an independently owned wtf-impl string, so results outlive the record and
+any later parse. The remaining URL-cluster symbols (`URL__fromJS`,
+`URL__getHref*`, the file-URL helpers, `BunString__toURL`/`toJSDOMURL`,
+`DOMURL__*`, and `URL__originLength`) stay pending as follow-up sub-slices.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -824,7 +846,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 294-symbol
+the same frame/script identity and own every returned string. The 307-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -869,7 +891,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (284 implemented, 137 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (297 implemented, 124 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
