@@ -1967,6 +1967,49 @@ fn splatLaneBits(value: u64, width: u8, count: u8) u128 {
     return vector;
 }
 
+// Native vector lowering: the value stack keeps the u128 representation, but
+// lane math runs through @Vector so LLVM emits NEON/SSE instead of scalar
+// shift/mask loops. Behavior is bit-identical to the scalar helpers above.
+
+fn ULane(comptime width: u8) type {
+    return @Int(.unsigned, width);
+}
+
+fn SLane(comptime width: u8) type {
+    return @Int(.signed, width);
+}
+
+fn UVec(comptime width: u8) type {
+    return @Vector(128 / width, ULane(width));
+}
+
+fn SVec(comptime width: u8) type {
+    return @Vector(128 / width, SLane(width));
+}
+
+inline fn uvec(comptime width: u8, bits: u128) UVec(width) {
+    return @bitCast(bits);
+}
+
+inline fn svec(comptime width: u8, bits: u128) SVec(width) {
+    return @bitCast(bits);
+}
+
+inline fn fromVec(vector: anytype) u128 {
+    return @bitCast(vector);
+}
+
+/// All-ones mask per lane where the predicate holds.
+inline fn maskVec(comptime width: u8, pred: @Vector(128 / width, bool)) u128 {
+    const ones: UVec(width) = @splat(std.math.maxInt(ULane(width)));
+    const zero: UVec(width) = @splat(0);
+    return @bitCast(@select(ULane(width), pred, ones, zero));
+}
+
+inline fn shiftVec(comptime width: u8, amount: u32) @Vector(128 / width, std.math.Log2Int(ULane(width))) {
+    return @splat(@intCast(amount & (width - 1)));
+}
+
 fn readLittle(bytes: []const u8) u64 {
     var value: u64 = 0;
     for (bytes, 0..) |byte, index| value |= @as(u64, byte) << @intCast(index * 8);
@@ -2083,56 +2126,73 @@ fn simdComparison(op: simd.Op) ?SimdComparison {
     };
 }
 
-fn laneRelation(left: u64, right: u64, signed: bool, relation: SimdRelation) bool {
-    if (relation == .eq) return left == right;
-    if (relation == .ne) return left != right;
-    if (signed) {
-        const a: i64 = @bitCast(left);
-        const b: i64 = @bitCast(right);
-        return switch (relation) {
+fn compareLanes(comptime width: u8, left: u128, right: u128, comparison: SimdComparison) u128 {
+    const pred = if (comparison.signed) blk: {
+        const a = svec(width, left);
+        const b = svec(width, right);
+        break :blk switch (comparison.relation) {
+            .eq => a == b,
+            .ne => a != b,
             .lt => a < b,
             .gt => a > b,
             .le => a <= b,
             .ge => a >= b,
-            else => unreachable,
         };
-    }
-    return switch (relation) {
-        .lt => left < right,
-        .gt => left > right,
-        .le => left <= right,
-        .ge => left >= right,
+    } else blk: {
+        const a = uvec(width, left);
+        const b = uvec(width, right);
+        break :blk switch (comparison.relation) {
+            .eq => a == b,
+            .ne => a != b,
+            .lt => a < b,
+            .gt => a > b,
+            .le => a <= b,
+            .ge => a >= b,
+        };
+    };
+    return maskVec(width, pred);
+}
+
+fn compareSimdLanes(left: u128, right: u128, comparison: SimdComparison) u128 {
+    return switch (comparison.width) {
+        8 => compareLanes(8, left, right, comparison),
+        16 => compareLanes(16, left, right, comparison),
+        32 => compareLanes(32, left, right, comparison),
+        64 => compareLanes(64, left, right, comparison),
         else => unreachable,
     };
 }
 
-fn compareSimdLanes(left: u128, right: u128, comparison: SimdComparison) u128 {
-    var result: u128 = 0;
-    const lanes = 128 / comparison.width;
-    for (0..lanes) |lane| {
-        var a = laneBits(left, @intCast(lane), comparison.width);
-        var b = laneBits(right, @intCast(lane), comparison.width);
-        if (comparison.signed) {
-            a = signExtendLane(a, comparison.width);
-            b = signExtendLane(b, comparison.width);
-        }
-        if (laneRelation(a, b, comparison.signed, comparison.relation))
-            result = replaceLaneBits(result, @intCast(lane), comparison.width, std.math.maxInt(u64));
-    }
-    return result;
+fn allLanesTrue(comptime width: u8, vector: u128) bool {
+    const zero: UVec(width) = @splat(0);
+    return @reduce(.And, uvec(width, vector) != zero);
 }
 
 fn allSimdLanesTrue(vector: u128, width: u8) bool {
-    for (0..128 / width) |lane|
-        if (laneBits(vector, @intCast(lane), width) == 0) return false;
-    return true;
+    return switch (width) {
+        8 => allLanesTrue(8, vector),
+        16 => allLanesTrue(16, vector),
+        32 => allLanesTrue(32, vector),
+        64 => allLanesTrue(64, vector),
+        else => unreachable,
+    };
+}
+
+fn laneBitmask(comptime width: u8, vector: u128) u32 {
+    const lanes = 128 / width;
+    const signs: @Vector(lanes, u32) = @intCast(uvec(width, vector) >> shiftVec(width, width - 1));
+    const indices: @Vector(lanes, u5) = @intCast(std.simd.iota(u32, lanes));
+    return @reduce(.Or, signs << indices);
 }
 
 fn simdLaneBitmask(vector: u128, width: u8) u32 {
-    var result: u32 = 0;
-    for (0..128 / width) |lane|
-        result |= @as(u32, @truncate(laneBits(vector, @intCast(lane), width) >> @intCast(width - 1))) << @intCast(lane);
-    return result;
+    return switch (width) {
+        8 => laneBitmask(8, vector),
+        16 => laneBitmask(16, vector),
+        32 => laneBitmask(32, vector),
+        64 => laneBitmask(64, vector),
+        else => unreachable,
+    };
 }
 
 fn executeSimdIntegerComparison(s: *State, op: simd.Op) ExecError!bool {
@@ -2180,18 +2240,26 @@ fn simdUnaryInteger(op: simd.Op) ?SimdUnaryIntegerOp {
     };
 }
 
-fn mapSimdUnaryInteger(vector: u128, descriptor: SimdUnaryIntegerOp) u128 {
-    var result: u128 = 0;
-    for (0..128 / descriptor.width) |lane| {
-        const value = laneBits(vector, @intCast(lane), descriptor.width);
-        const mapped = switch (descriptor.operation) {
-            .abs => if (value >> @intCast(descriptor.width - 1) != 0) 0 -% value else value,
-            .neg => 0 -% value,
-            .popcnt => @popCount(value),
-        };
-        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
+fn unaryIntegerLanes(comptime width: u8, vector: u128, operation: SimdUnaryInteger) u128 {
+    switch (operation) {
+        .abs => {
+            const a = svec(width, vector);
+            const zero: SVec(width) = @splat(0);
+            return fromVec(@select(SLane(width), a < zero, zero -% a, a));
+        },
+        .neg => return fromVec(@as(UVec(width), @splat(0)) -% uvec(width, vector)),
+        .popcnt => return fromVec(@as(UVec(width), @intCast(@popCount(uvec(width, vector))))),
     }
-    return result;
+}
+
+fn mapSimdUnaryInteger(vector: u128, descriptor: SimdUnaryIntegerOp) u128 {
+    return switch (descriptor.width) {
+        8 => unaryIntegerLanes(8, vector, descriptor.operation),
+        16 => unaryIntegerLanes(16, vector, descriptor.operation),
+        32 => unaryIntegerLanes(32, vector, descriptor.operation),
+        64 => unaryIntegerLanes(64, vector, descriptor.operation),
+        else => unreachable,
+    };
 }
 
 const SimdShift = enum { left, right_signed, right_unsigned };
@@ -2219,19 +2287,23 @@ fn simdShift(op: simd.Op) ?SimdShiftOp {
     };
 }
 
+fn shiftLanes(comptime width: u8, vector: u128, shift: u32, operation: SimdShift) u128 {
+    const amount = shiftVec(width, shift);
+    return switch (operation) {
+        .left => fromVec(uvec(width, vector) << amount),
+        .right_unsigned => fromVec(uvec(width, vector) >> amount),
+        .right_signed => fromVec(svec(width, vector) >> amount),
+    };
+}
+
 fn shiftSimdLanes(vector: u128, shift: u32, descriptor: SimdShiftOp) u128 {
-    const amount: u6 = @intCast(shift & (descriptor.width - 1));
-    var result: u128 = 0;
-    for (0..128 / descriptor.width) |lane| {
-        const value = laneBits(vector, @intCast(lane), descriptor.width);
-        const shifted = switch (descriptor.operation) {
-            .left => value << amount,
-            .right_unsigned => value >> amount,
-            .right_signed => @as(u64, @bitCast(@as(i64, @bitCast(signExtendLane(value, descriptor.width))) >> amount)),
-        };
-        result = replaceLaneBits(result, @intCast(lane), descriptor.width, shifted);
-    }
-    return result;
+    return switch (descriptor.width) {
+        8 => shiftLanes(8, vector, shift, descriptor.operation),
+        16 => shiftLanes(16, vector, shift, descriptor.operation),
+        32 => shiftLanes(32, vector, shift, descriptor.operation),
+        64 => shiftLanes(64, vector, shift, descriptor.operation),
+        else => unreachable,
+    };
 }
 
 const SimdWrappingBinary = enum { add, sub, mul };
@@ -2258,19 +2330,24 @@ fn simdWrappingBinary(op: simd.Op) ?SimdWrappingBinaryOp {
     };
 }
 
+fn wrappingLanes(comptime width: u8, left: u128, right: u128, operation: SimdWrappingBinary) u128 {
+    const a = uvec(width, left);
+    const b = uvec(width, right);
+    return fromVec(switch (operation) {
+        .add => a +% b,
+        .sub => a -% b,
+        .mul => a *% b,
+    });
+}
+
 fn mapSimdWrappingBinary(left: u128, right: u128, descriptor: SimdWrappingBinaryOp) u128 {
-    var result: u128 = 0;
-    for (0..128 / descriptor.width) |lane| {
-        const a = laneBits(left, @intCast(lane), descriptor.width);
-        const b = laneBits(right, @intCast(lane), descriptor.width);
-        const mapped = switch (descriptor.operation) {
-            .add => a +% b,
-            .sub => a -% b,
-            .mul => a *% b,
-        };
-        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
-    }
-    return result;
+    return switch (descriptor.width) {
+        8 => wrappingLanes(8, left, right, descriptor.operation),
+        16 => wrappingLanes(16, left, right, descriptor.operation),
+        32 => wrappingLanes(32, left, right, descriptor.operation),
+        64 => wrappingLanes(64, left, right, descriptor.operation),
+        else => unreachable,
+    };
 }
 
 fn executeSimdIntegerBasic(s: *State, op: simd.Op) ExecError!bool {
@@ -2344,36 +2421,32 @@ fn signedLaneBits(value: i64) u64 {
     return @bitCast(value);
 }
 
-fn boundedSimdLane(a: u64, b: u64, descriptor: SimdBoundedBinaryOp) u64 {
-    const unsigned_max = (@as(u64, 1) << @intCast(descriptor.width)) - 1;
-    const signed_min = -(@as(i64, 1) << @intCast(descriptor.width - 1));
-    const signed_max = (@as(i64, 1) << @intCast(descriptor.width - 1)) - 1;
-    const signed_a = signedSimdLane(a, descriptor.width);
-    const signed_b = signedSimdLane(b, descriptor.width);
-    return switch (descriptor.operation) {
-        .add_sat_signed => signedLaneBits(std.math.clamp(signed_a + signed_b, signed_min, signed_max)),
-        .add_sat_unsigned => @min(a + b, unsigned_max),
-        .sub_sat_signed => signedLaneBits(std.math.clamp(signed_a - signed_b, signed_min, signed_max)),
-        .sub_sat_unsigned => if (a < b) 0 else a - b,
-        .min_signed => signedLaneBits(@min(signed_a, signed_b)),
-        .min_unsigned => @min(a, b),
-        .max_signed => signedLaneBits(@max(signed_a, signed_b)),
-        .max_unsigned => @max(a, b),
-        .average_unsigned => (a + b + 1) >> 1,
-    };
+fn boundedLanes(comptime width: u8, left: u128, right: u128, operation: SimdBoundedBinary) u128 {
+    switch (operation) {
+        .add_sat_signed => return fromVec(svec(width, left) +| svec(width, right)),
+        .add_sat_unsigned => return fromVec(uvec(width, left) +| uvec(width, right)),
+        .sub_sat_signed => return fromVec(svec(width, left) -| svec(width, right)),
+        .sub_sat_unsigned => return fromVec(uvec(width, left) -| uvec(width, right)),
+        .min_signed => return fromVec(@min(svec(width, left), svec(width, right))),
+        .min_unsigned => return fromVec(@min(uvec(width, left), uvec(width, right))),
+        .max_signed => return fromVec(@max(svec(width, left), svec(width, right))),
+        .max_unsigned => return fromVec(@max(uvec(width, left), uvec(width, right))),
+        .average_unsigned => {
+            const a = uvec(width, left);
+            const b = uvec(width, right);
+            // Rounding average without overflow: (a | b) - ((a ^ b) >> 1).
+            return fromVec((a | b) -% ((a ^ b) >> shiftVec(width, 1)));
+        },
+    }
 }
 
 fn mapSimdBoundedBinary(left: u128, right: u128, descriptor: SimdBoundedBinaryOp) u128 {
-    var result: u128 = 0;
-    for (0..128 / descriptor.width) |lane| {
-        const mapped = boundedSimdLane(
-            laneBits(left, @intCast(lane), descriptor.width),
-            laneBits(right, @intCast(lane), descriptor.width),
-            descriptor,
-        );
-        result = replaceLaneBits(result, @intCast(lane), descriptor.width, mapped);
-    }
-    return result;
+    return switch (descriptor.width) {
+        8 => boundedLanes(8, left, right, descriptor.operation),
+        16 => boundedLanes(16, left, right, descriptor.operation),
+        32 => boundedLanes(32, left, right, descriptor.operation),
+        else => unreachable,
+    };
 }
 
 fn executeSimdIntegerBounded(s: *State, op: simd.Op) ExecError!bool {
