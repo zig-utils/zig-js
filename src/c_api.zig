@@ -718,7 +718,7 @@ const PrivateAbortListener = struct {
 /// this record through a deferred C-API owner finalizer; native refs and
 /// pending activity add one precise root only while they are non-zero.
 const PrivateAbortSignal = struct {
-    native: value.AbortSignalNativeState = .{},
+    native: *value.AbortSignalNativeState,
     context: *Context,
     group: *CContextGroup,
     object: *Object,
@@ -11437,10 +11437,8 @@ fn privateAbortMaybeRemoveRoot(signal: *PrivateAbortSignal) void {
         privateAbortRemoveRoot(signal);
 }
 
-fn finishPrivateAbortSignal(owner: *value.CApiObjectOwner) void {
-    const raw = owner.payload orelse return;
-    const signal: *PrivateAbortSignal = @ptrCast(@alignCast(raw));
-    owner.payload = null;
+fn finishPrivateAbortSignal(raw: ?*anyopaque) void {
+    const signal: *PrivateAbortSignal = @ptrCast(@alignCast(raw orelse return));
     signal.alive = false;
     privateAbortRemoveRoot(signal);
     signal.listeners.deinit(signal.context.gpa);
@@ -11453,45 +11451,36 @@ fn privateAbortRunNativeSteps(raw: ?*anyopaque, reason: Value) void {
     const encoded = privateEncodedFromValue(signal.context, reason);
     var callbacks = signal.listeners;
     signal.listeners = .empty;
+    if (signal.native.set_native_observed) |update| _ = update(signal.native, false);
     defer callbacks.deinit(signal.context.gpa);
     for (callbacks.items) |listener| listener.callback(listener.context, encoded);
 }
 
 fn privateAbortFromObject(context: *Context, object: *Object, initial_refs: u32) ?*PrivateAbortSignal {
     if (!object.behavior.is_abort_signal) return null;
-    if (object.private_data_tag == .abort_signal) {
-        const native: *value.AbortSignalNativeState = @ptrCast(@alignCast(object.private_data orelse return null));
-        const signal: *PrivateAbortSignal = @ptrCast(@alignCast(native.owner orelse return null));
+    const native = context.ensureAbortSignalNativeState(object) catch return null;
+    if (native.owner) |raw| {
+        const signal: *PrivateAbortSignal = @ptrCast(@alignCast(raw));
         return if (signal.alive) signal else null;
     }
-    if (object.private_data_tag != .none or object.private_data != null or object.cApiObjectOwner() != null) return null;
     const opaque_group = context.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     const signal = context.gpa.create(PrivateAbortSignal) catch return null;
     signal.* = .{
+        .native = native,
         .context = context,
         .group = group,
         .object = object,
         .root = .{ .value = Value.obj(object) },
         .external_refs = initial_refs,
     };
-    signal.native = .{ .owner = @ptrCast(signal), .run_abort_steps = privateAbortRunNativeSteps };
     if (initial_refs > 0 and !privateAbortEnsureRoot(signal)) {
         context.gpa.destroy(signal);
         return null;
     }
-    const owner = context.createCApiObjectOwner(@ptrCast(signal), finishPrivateAbortSignal) catch {
-        privateAbortRemoveRoot(signal);
-        context.gpa.destroy(signal);
-        return null;
-    };
-    owner.payload = @ptrCast(signal);
-    object.setCApiObjectOwner(context.arena(), owner) catch {
-        owner.finishOnce();
-        return null;
-    };
-    object.private_data = @ptrCast(&signal.native);
-    object.private_data_tag = .abort_signal;
+    native.owner = @ptrCast(signal);
+    native.run_abort_steps = privateAbortRunNativeSteps;
+    native.finish_owner = finishPrivateAbortSignal;
     return signal;
 }
 
@@ -11614,6 +11603,18 @@ export fn WebCore__AbortSignal__abortReason(signal_: ?*PrivateAbortSignal) callc
     return privateEncodedFromValue(signal.context, interp.abortSignalReason(signal.object));
 }
 
+/// Borrow Bun's four-field timeout record while it is active. The pointer is
+/// invalidated before abort callbacks run and must never be retained by the
+/// caller after cancellation or an event-loop checkpoint.
+export fn WebCore__AbortSignal__getTimeout(signal_: ?*PrivateAbortSignal) callconv(.c) ?*Context.AbortSignalTimeout {
+    const signal = privateAbortValid(signal_) orelse return null;
+    const raw = signal.native.timeout_handle orelse return null;
+    const timeout: *Context.AbortSignalTimeout = @ptrCast(@alignCast(raw));
+    if (timeout.event_loop_timer.state != .active) return null;
+    timeout.signal = @ptrCast(signal);
+    return timeout;
+}
+
 export fn WebCore__AbortSignal__reasonIfAborted(
     signal_: ?*PrivateAbortSignal,
     global: JSContextRef,
@@ -11682,6 +11683,12 @@ export fn WebCore__AbortSignal__addListener(
         return signal;
     }
     signal.listeners.append(signal.context.gpa, .{ .context = listener_context, .callback = function }) catch return null;
+    if (signal.native.set_native_observed) |update| {
+        if (!update(signal.native, true)) {
+            _ = signal.listeners.pop();
+            return null;
+        }
+    }
     return signal;
 }
 
@@ -11693,6 +11700,7 @@ export fn WebCore__AbortSignal__cleanNativeBindings(signal_: ?*PrivateAbortSigna
             _ = signal.listeners.orderedRemove(index);
         } else index += 1;
     }
+    if (signal.native.set_native_observed) |update| _ = update(signal.native, signal.listeners.items.len != 0);
 }
 
 export fn JSC__JSMap__create(global: JSContextRef) callconv(.c) ?*anyopaque {
@@ -24786,4 +24794,74 @@ test "private AbortSignal boundary shares identity callbacks reasons and roots" 
     const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
     defer JSGlobalContextRelease(foreign);
     try std.testing.expectEqual(EncodedValue.empty, WebCore__AbortSignal__toJS(signal, foreign));
+}
+
+test "AbortSignal timeout owns observable signals and invalidates borrowed Bun handles" {
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global) orelse return error.ContextCreateFailed;
+    const roots_before = context.private_strong_roots.items.len;
+
+    try std.testing.expect((try context.evaluate(
+        \\(() => {
+        \\  let rejected = 0;
+        \\  for (const delay of [-1, Infinity, 18446744073709551616]) {
+        \\    try { AbortSignal.timeout(delay); } catch (error) {
+        \\      if (error.name === "RangeError") rejected++;
+        \\    }
+        \\  }
+        \\  let missing = false;
+        \\  try { AbortSignal.timeout(); } catch (error) { missing = error.name === "TypeError"; }
+        \\  return rejected === 3 && missing;
+        \\})()
+    )).asBool());
+    try std.testing.expect(!(try context.evaluate(
+        "(() => { const signal = AbortSignal.timeout(0); return signal.aborted; })()",
+    )).asBool());
+
+    const encoded = privateEncodedFromValue(context, try context.evaluate(
+        "globalThis.__timeout_signal_330 = AbortSignal.timeout(60000); __timeout_signal_330",
+    ));
+    const signal = WebCore__AbortSignal__fromJS(encoded) orelse return error.ValueCreateFailed;
+    const timeout = WebCore__AbortSignal__getTimeout(signal) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(Context.BunTimerState.active, timeout.event_loop_timer.state);
+    try std.testing.expectEqual(Context.BunTimerTag.abort_signal_timeout, timeout.event_loop_timer.tag);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(signal)), timeout.signal);
+    try std.testing.expectEqual(@as(u32, 1 << 30), timeout.flags);
+    try std.testing.expect(timeout.generation != 0);
+
+    _ = try context.evaluate(
+        "globalThis.__timeout_listener_330 = () => {}; __timeout_signal_330.addEventListener('abort', __timeout_listener_330)",
+    );
+    try std.testing.expectEqual(roots_before + 1, context.private_strong_roots.items.len);
+    _ = try context.evaluate("__timeout_signal_330.removeEventListener('abort', __timeout_listener_330)");
+    try std.testing.expectEqual(roots_before, context.private_strong_roots.items.len);
+
+    var native_callback_calls: usize = 0;
+    const NativeCallback = struct {
+        fn run(raw: ?*anyopaque, _: EncodedValue) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw orelse return));
+            calls.* += 1;
+        }
+    };
+    _ = WebCore__AbortSignal__addListener(signal, &native_callback_calls, NativeCallback.run) orelse
+        return error.ValueCreateFailed;
+    try std.testing.expectEqual(roots_before + 1, context.private_strong_roots.items.len);
+    WebCore__AbortSignal__cleanNativeBindings(signal, &native_callback_calls);
+    try std.testing.expectEqual(roots_before, context.private_strong_roots.items.len);
+
+    _ = try context.evaluate("__timeout_signal_330.addEventListener('abort', __timeout_listener_330)");
+    try std.testing.expectEqual(roots_before + 1, context.private_strong_roots.items.len);
+    context.advanceAbortSignalTimeoutGeneration();
+    try std.testing.expect(!(try context.evaluate("__timeout_signal_330.aborted")).asBool());
+    try std.testing.expectEqual(@as(?*Context.AbortSignalTimeout, null), WebCore__AbortSignal__getTimeout(signal));
+    try std.testing.expectEqual(roots_before, context.private_strong_roots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), native_callback_calls);
+
+    _ = try context.evaluate(
+        "globalThis.__natural_timeout_330 = AbortSignal.timeout(0); __natural_timeout_330",
+    );
+    try std.testing.expect((try context.evaluate(
+        "__natural_timeout_330.aborted && __natural_timeout_330.reason.name === 'TimeoutError'",
+    )).asBool());
 }

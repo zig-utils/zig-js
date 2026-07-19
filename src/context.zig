@@ -2488,6 +2488,7 @@ pub const Context = struct {
     /// may finish a record early; teardown finishes arena-mode survivors and
     /// destroys every record after all object cells are gone.
     c_api_object_owners: std.ArrayListUnmanaged(*value.CApiObjectOwner) = .empty,
+    c_api_object_owner_lock: std.atomic.Mutex = .unlocked,
     /// Class callbacks are arbitrary embedder code. Sweep only publishes their
     /// stable Context-owned owner records here; the post-sweep hook invokes the
     /// callbacks after collector locks are released and publication is restored.
@@ -2513,6 +2514,13 @@ pub const Context = struct {
     /// the list's address is the realm's waiter-table owner token). Settled by
     /// the drain tail in `evaluate`/`evaluateModule`.
     async_waiters: std.ArrayListUnmanaged(interp.AsyncWaiterEntry) = .empty,
+    /// Unrefed AbortSignal timeouts are owned by their signal finalizer and
+    /// polled by normal host checkpoints. The list stores no GC edge to the JS
+    /// object; observer-driven roots below decide whether a timer signal stays
+    /// observable, so an otherwise unreachable signal can be reclaimed early.
+    abort_signal_timeout_owners: std.ArrayListUnmanaged(*AbortSignalOwner) = .empty,
+    abort_signal_timeout_lock: std.atomic.Mutex = .unlocked,
+    abort_signal_timeout_generation: std.atomic.Value(u32) = .init(1),
     /// FinalizationRegistry cleanup jobs made ready by a quiescent GC cycle.
     /// The collector only enqueues registries; callbacks run later from the
     /// normal interpreter checkpoint, outside the collector.
@@ -2862,6 +2870,75 @@ pub const Context = struct {
     /// owns the wrapper; the Context owns only this root-list entry.
     pub const PrivateStrongRoot = struct {
         value: value.Value,
+    };
+    pub const BunTimerTimespec = extern struct {
+        sec: i64,
+        nsec: i64,
+    };
+    pub const BunTimerState = enum(u8) {
+        pending = 0,
+        active = 1,
+        cancelled = 2,
+        fired = 3,
+    };
+    pub const BunTimerTag = enum(u8) {
+        abort_signal_timeout = 17,
+        _,
+    };
+    pub const BunTimerInHeap = enum(u8) {
+        none = 0,
+        regular = 1,
+        fake = 2,
+    };
+    pub const BunTimerIntrusiveField = extern struct {
+        child: ?*BunEventLoopTimer = null,
+        prev: ?*BunEventLoopTimer = null,
+        next: ?*BunEventLoopTimer = null,
+    };
+    /// Prefix-compatible with the pinned Bun EventLoopTimer. Bun treats the
+    /// surrounding Timeout as private Rust/Zig layout but directly reads this
+    /// `next`/`state` prefix in spawnSync's best-effort deadline path.
+    pub const BunEventLoopTimer = extern struct {
+        next: BunTimerTimespec,
+        heap: BunTimerIntrusiveField = .{},
+        state: BunTimerState,
+        tag: BunTimerTag,
+        in_heap: BunTimerInHeap = .none,
+    };
+    /// Exact four-field Timeout contract declared by the pinned Bun profile.
+    /// Scheduler-only metadata lives in AbortSignalOwner so these offsets do
+    /// not drift when zig-js adds lifecycle bookkeeping.
+    pub const AbortSignalTimeout = extern struct {
+        event_loop_timer: BunEventLoopTimer,
+        signal: ?*anyopaque,
+        flags: u32 = 1 << 30,
+        generation: u32,
+    };
+    comptime {
+        if (@sizeOf(usize) == 8) {
+            std.debug.assert(@sizeOf(BunEventLoopTimer) == 48);
+            std.debug.assert(@offsetOf(BunEventLoopTimer, "next") == 0);
+            std.debug.assert(@offsetOf(BunEventLoopTimer, "heap") == 16);
+            std.debug.assert(@offsetOf(BunEventLoopTimer, "state") == 40);
+            std.debug.assert(@offsetOf(BunEventLoopTimer, "tag") == 41);
+            std.debug.assert(@offsetOf(BunEventLoopTimer, "in_heap") == 42);
+            std.debug.assert(@sizeOf(AbortSignalTimeout) == 64);
+            std.debug.assert(@offsetOf(AbortSignalTimeout, "event_loop_timer") == 0);
+            std.debug.assert(@offsetOf(AbortSignalTimeout, "signal") == 48);
+            std.debug.assert(@offsetOf(AbortSignalTimeout, "flags") == 56);
+            std.debug.assert(@offsetOf(AbortSignalTimeout, "generation") == 60);
+        }
+    }
+    pub const AbortSignalOwner = struct {
+        context: *Context,
+        object: *value.Object,
+        native: value.AbortSignalNativeState = .{},
+        root: PrivateStrongRoot,
+        timeout: ?*AbortSignalTimeout = null,
+        deadline_ns: u64 = 0,
+        js_observed: bool = false,
+        native_observed: bool = false,
+        rooted: bool = false,
     };
     pub const PrivateWeakFinalizeFn = *const fn (?*anyopaque) callconv(.c) void;
     /// Stable storage embedded in a private weak-reference handle. Atomic
@@ -3287,6 +3364,9 @@ pub const Context = struct {
             .tdz_marker = self.tdz_marker,
             .sab_retains = &self.sab_retains,
             .async_waiters = &self.async_waiters,
+            .abort_timeout_ctx = self,
+            .abort_timeout_schedule = scheduleAbortSignalTimeout,
+            .abort_timeout_poll = pollAbortSignalTimeouts,
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .watchdog_check_flag = self.watchdog_check_flag,
@@ -3518,6 +3598,8 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.c_api_object_owners.deinit(self.gpa);
+        std.debug.assert(self.abort_signal_timeout_owners.items.len == 0);
+        self.abort_signal_timeout_owners.deinit(self.gpa);
         for (self.c_api_class_prototypes.items) |owner| {
             owner.finish();
             self.gpa.destroy(owner);
@@ -3583,6 +3665,8 @@ pub const Context = struct {
             self.gpa.destroy(owner);
         }
         self.c_api_object_owners.deinit(self.gpa);
+        std.debug.assert(self.abort_signal_timeout_owners.items.len == 0);
+        self.abort_signal_timeout_owners.deinit(self.gpa);
         for (self.c_api_class_prototypes.items) |owner| {
             owner.finish();
             self.gpa.destroy(owner);
@@ -3767,8 +3851,241 @@ pub const Context = struct {
         const owner = try self.gpa.create(value.CApiObjectOwner);
         errdefer self.gpa.destroy(owner);
         owner.* = .{ .allocator = self.gpa, .class_ref = class_ref, .finish_fn = finish_fn };
+        spinLockMutex(&self.c_api_object_owner_lock);
+        defer self.c_api_object_owner_lock.unlock();
         try self.c_api_object_owners.append(self.gpa, owner);
         return owner;
+    }
+
+    fn abortSignalOwnerFromNative(native: *value.AbortSignalNativeState) *AbortSignalOwner {
+        return @fieldParentPtr("native", native);
+    }
+
+    fn abortSignalTimeoutNowNs() u64 {
+        return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+    }
+
+    fn removeAbortSignalTimeoutOwnerLocked(self: *Context, target: *AbortSignalOwner) void {
+        for (self.abort_signal_timeout_owners.items, 0..) |owner, index| {
+            if (owner == target) {
+                _ = self.abort_signal_timeout_owners.swapRemove(index);
+                return;
+            }
+        }
+    }
+
+    fn refreshAbortSignalTimeoutRoot(owner: *AbortSignalOwner) bool {
+        const self = owner.context;
+        spinLockMutex(&self.abort_signal_timeout_lock);
+        defer self.abort_signal_timeout_lock.unlock();
+        const should_root = owner.timeout != null and (owner.js_observed or owner.native_observed);
+        if (should_root == owner.rooted) return true;
+        self.realmLock();
+        defer self.realmUnlock();
+        if (should_root) {
+            self.private_strong_roots.append(self.gpa, &owner.root) catch return false;
+            owner.rooted = true;
+            return true;
+        }
+        for (self.private_strong_roots.items, 0..) |root, index| {
+            if (root == &owner.root) {
+                _ = self.private_strong_roots.swapRemove(index);
+                break;
+            }
+        }
+        owner.rooted = false;
+        return true;
+    }
+
+    fn setAbortSignalJsObserved(native: *value.AbortSignalNativeState, observed: bool) bool {
+        const owner = abortSignalOwnerFromNative(native);
+        owner.js_observed = observed;
+        return refreshAbortSignalTimeoutRoot(owner);
+    }
+
+    fn setAbortSignalNativeObserved(native: *value.AbortSignalNativeState, observed: bool) bool {
+        const owner = abortSignalOwnerFromNative(native);
+        owner.native_observed = observed;
+        return refreshAbortSignalTimeoutRoot(owner);
+    }
+
+    fn cancelAbortSignalTimeout(owner: *AbortSignalOwner) void {
+        const self = owner.context;
+        var timeout: ?*AbortSignalTimeout = null;
+        spinLockMutex(&self.abort_signal_timeout_lock);
+        if (owner.timeout) |active| {
+            active.event_loop_timer.state = .cancelled;
+            timeout = active;
+            owner.timeout = null;
+            owner.deadline_ns = 0;
+            owner.native.timeout_handle = null;
+            self.removeAbortSignalTimeoutOwnerLocked(owner);
+        }
+        self.abort_signal_timeout_lock.unlock();
+        _ = refreshAbortSignalTimeoutRoot(owner);
+        if (timeout) |active| self.gpa.destroy(active);
+    }
+
+    fn cancelAbortSignalTimeoutFromNative(native: *value.AbortSignalNativeState) void {
+        cancelAbortSignalTimeout(abortSignalOwnerFromNative(native));
+    }
+
+    fn finishAbortSignalObject(object_owner: *value.CApiObjectOwner) void {
+        const raw = object_owner.payload orelse return;
+        const owner: *AbortSignalOwner = @ptrCast(@alignCast(raw));
+        object_owner.payload = null;
+        cancelAbortSignalTimeout(owner);
+        if (owner.native.finish_owner) |finish| finish(owner.native.owner);
+        owner.native.owner = null;
+        owner.native.run_abort_steps = null;
+        owner.native.finish_owner = null;
+        owner.context.gpa.destroy(owner);
+    }
+
+    pub fn ensureAbortSignalNativeState(
+        self: *Context,
+        object: *value.Object,
+    ) error{OutOfMemory}!*value.AbortSignalNativeState {
+        if (!object.behavior.is_abort_signal) return error.OutOfMemory;
+        if (object.private_data_tag == .abort_signal) {
+            return @ptrCast(@alignCast(object.private_data orelse return error.OutOfMemory));
+        }
+        if (object.private_data_tag != .none or object.private_data != null or object.cApiObjectOwner() != null)
+            return error.OutOfMemory;
+
+        const owner = self.gpa.create(AbortSignalOwner) catch return error.OutOfMemory;
+        owner.* = .{
+            .context = self,
+            .object = object,
+            .root = .{ .value = value.Value.obj(object) },
+        };
+        owner.native = .{
+            .cancel_timeout = cancelAbortSignalTimeoutFromNative,
+            .set_js_observed = setAbortSignalJsObserved,
+            .set_native_observed = setAbortSignalNativeObserved,
+        };
+        const object_owner = self.createCApiObjectOwner(@ptrCast(owner), finishAbortSignalObject) catch {
+            self.gpa.destroy(owner);
+            return error.OutOfMemory;
+        };
+        object_owner.payload = @ptrCast(owner);
+        object.setCApiObjectOwner(self.arena(), object_owner) catch {
+            object_owner.finishOnce();
+            return error.OutOfMemory;
+        };
+        object.private_data = @ptrCast(&owner.native);
+        object.private_data_tag = .abort_signal;
+        return &owner.native;
+    }
+
+    fn scheduleAbortSignalTimeout(
+        raw_context: ?*anyopaque,
+        machine: *interp.Interpreter,
+        signal: *value.Object,
+        milliseconds: u64,
+    ) interp.EvalError!void {
+        _ = machine;
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return error.OutOfMemory));
+        const native = self.ensureAbortSignalNativeState(signal) catch return error.OutOfMemory;
+        const owner = abortSignalOwnerFromNative(native);
+        if (owner.timeout != null) cancelAbortSignalTimeout(owner);
+
+        const now = abortSignalTimeoutNowNs();
+        const delta = std.math.mul(u64, milliseconds, std.time.ns_per_ms) catch std.math.maxInt(u64);
+        const deadline = std.math.add(u64, now, delta) catch std.math.maxInt(u64);
+        const generation = self.abort_signal_timeout_generation.load(.acquire);
+        const timeout = self.gpa.create(AbortSignalTimeout) catch return error.OutOfMemory;
+        timeout.* = .{
+            .event_loop_timer = .{
+                .next = .{
+                    .sec = @intCast(deadline / std.time.ns_per_s),
+                    .nsec = @intCast(deadline % std.time.ns_per_s),
+                },
+                .state = .active,
+                .tag = .abort_signal_timeout,
+            },
+            .signal = @ptrCast(signal),
+            .generation = generation,
+        };
+        spinLockMutex(&self.abort_signal_timeout_lock);
+        self.abort_signal_timeout_owners.append(self.gpa, owner) catch {
+            self.abort_signal_timeout_lock.unlock();
+            self.gpa.destroy(timeout);
+            return error.OutOfMemory;
+        };
+        owner.timeout = timeout;
+        owner.deadline_ns = deadline;
+        native.timeout_handle = @ptrCast(timeout);
+        self.abort_signal_timeout_lock.unlock();
+    }
+
+    fn pollAbortSignalTimeouts(
+        raw_context: ?*anyopaque,
+        machine: *interp.Interpreter,
+    ) interp.EvalError!void {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
+        while (true) {
+            const now = abortSignalTimeoutNowNs();
+            const generation = self.abort_signal_timeout_generation.load(.acquire);
+            var selected: ?*AbortSignalOwner = null;
+            var selected_timeout: ?*AbortSignalTimeout = null;
+            var stale = false;
+
+            spinLockMutex(&self.abort_signal_timeout_lock);
+            for (self.abort_signal_timeout_owners.items) |owner| {
+                const timeout = owner.timeout orelse continue;
+                if (timeout.generation != generation or owner.deadline_ns <= now) {
+                    selected = owner;
+                    selected_timeout = timeout;
+                    stale = timeout.generation != generation;
+                    break;
+                }
+            }
+            self.abort_signal_timeout_lock.unlock();
+            const owner = selected orelse return;
+            const timeout = selected_timeout.?;
+
+            // Scope both defers to this timer. Multiple due timers may be
+            // drained by one checkpoint, so their temporary roots and native
+            // records must not accumulate until the outer function returns.
+            {
+                var root_mark: ?usize = null;
+                if (!stale) root_mark = try machine.pushTempRoot(value.Value.obj(owner.object));
+                defer if (root_mark) |mark| machine.restoreTempRoots(mark);
+
+                spinLockMutex(&self.abort_signal_timeout_lock);
+                if (owner.timeout != timeout) {
+                    self.abort_signal_timeout_lock.unlock();
+                    continue;
+                }
+                timeout.event_loop_timer.state = if (stale) .cancelled else .fired;
+                owner.timeout = null;
+                owner.deadline_ns = 0;
+                owner.native.timeout_handle = null;
+                self.removeAbortSignalTimeoutOwnerLocked(owner);
+                self.abort_signal_timeout_lock.unlock();
+
+                _ = refreshAbortSignalTimeoutRoot(owner);
+                defer self.gpa.destroy(timeout);
+                if (!stale) {
+                    const reason = try machine.makeDOMException("TimeoutError", "The operation timed out.");
+                    try interp.signalAbort(machine, owner.object, reason);
+                }
+            }
+        }
+    }
+
+    pub fn advanceAbortSignalTimeoutGeneration(self: *Context) void {
+        var current = self.abort_signal_timeout_generation.load(.monotonic);
+        while (true) {
+            var next = current +% 1;
+            if (next == 0) next = 1;
+            if (self.abort_signal_timeout_generation.cmpxchgWeak(current, next, .acq_rel, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return;
+        }
     }
 
     pub fn findCApiClassPrototype(self: *Context, class_ref: *anyopaque) ?*value.Object {
@@ -4840,6 +5157,9 @@ pub const Context = struct {
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        // A later host entry is a timer checkpoint. Poll before executing the
+        // new script so elapsed unrefed timeouts are already observable to it.
+        try machine.pollAbortSignalTimeouts();
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
@@ -5100,6 +5420,7 @@ pub const Context = struct {
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        try machine.pollAbortSignalTimeouts();
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
         const previous_host = self.mod_host;
@@ -5218,6 +5539,7 @@ pub const Context = struct {
         defer self.popActiveInterpreter(&machine);
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
+        try machine.pollAbortSignalTimeouts();
         machine.strict = true;
 
         var path: []const u8 = "";

@@ -1438,6 +1438,11 @@ pub const ObjectPrivateDataTag = enum(u8) {
 pub const AbortSignalNativeState = struct {
     owner: ?*anyopaque = null,
     run_abort_steps: ?*const fn (?*anyopaque, Value) void = null,
+    finish_owner: ?*const fn (?*anyopaque) void = null,
+    timeout_handle: ?*anyopaque = null,
+    cancel_timeout: ?*const fn (*AbortSignalNativeState) void = null,
+    set_js_observed: ?*const fn (*AbortSignalNativeState, bool) bool = null,
+    set_native_observed: ?*const fn (*AbortSignalNativeState, bool) bool = null,
 };
 
 pub const PreparedInlineLiteralShape = struct {

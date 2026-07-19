@@ -1136,6 +1136,13 @@ pub const Interpreter = struct {
     /// token in the waiter table; `settleAsyncWaiters` resolves entries as
     /// their tickets settle.
     async_waiters: ?*std.ArrayListUnmanaged(AsyncWaiterEntry) = null,
+    /// Context-owned, unrefed AbortSignal timer lane. The core interpreter
+    /// requests scheduling and polls at host checkpoints; only the owning
+    /// Context knows native allocation, finalization, and generation state.
+    abort_timeout_ctx: ?*anyopaque = null,
+    abort_timeout_schedule: ?*const fn (?*anyopaque, *Interpreter, *value.Object, u64) EvalError!void = null,
+    abort_timeout_poll: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
+    polling_abort_timeouts: bool = false,
     /// Context-owned FinalizationRegistry cleanup job queue. GC marks records
     /// ready and enqueues registries; this interpreter drains callbacks at host
     /// checkpoints, outside collection.
@@ -7205,9 +7212,19 @@ pub const Interpreter = struct {
         return proto;
     }
 
-    /// Run one complete host checkpoint: process next ticks first, then Promise
-    /// jobs, looping when the Promise phase scheduled more next-tick work.
+    pub fn pollAbortSignalTimeouts(self: *Interpreter) EvalError!void {
+        const poll = self.abort_timeout_poll orelse return;
+        if (self.polling_abort_timeouts) return;
+        self.polling_abort_timeouts = true;
+        defer self.polling_abort_timeouts = false;
+        try poll(self.abort_timeout_ctx, self);
+    }
+
+    /// Run one complete host checkpoint: process due unrefed AbortSignal
+    /// timers, then next ticks and Promise jobs, looping when the Promise phase
+    /// schedules more next-tick work.
     pub fn drainMicrotasks(self: *Interpreter) EvalError!void {
+        try self.pollAbortSignalTimeouts();
         if (self.microtasks == null and self.next_ticks == null) return;
         var batch: std.ArrayListUnmanaged(promise.Microtask) = .empty;
         defer batch.deinit(self.arena);
@@ -41844,6 +41861,8 @@ fn etAddListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     try rec.setOwn(self.arena, self.root_shape, "\x00Lcap", Value.boolVal(capture));
     try rec.setOwn(self.arena, self.root_shape, "\x00Lonce", Value.boolVal(once));
     try list.appendElement(self.arena, Value.obj(rec));
+    if (this.asObj().behavior.is_abort_signal and std.mem.eql(u8, ty, "abort"))
+        try refreshAbortSignalJsObservation(self, this.asObj());
     // When a live AbortSignal is supplied, aborting it removes this listener.
     // Recorded on the signal's removal list and processed by signalAbort (a
     // JS-listener would receive the signal as `this`, losing the target/record).
@@ -41871,6 +41890,7 @@ fn etRemoveRecord(self: *Interpreter, target: *value.Object, rec: *value.Object)
         try fresh.appendElement(self.arena, r);
     }
     try target.setOwn(self.arena, self.root_shape, "\x00etl", Value.obj(fresh));
+    if (target.behavior.is_abort_signal) try refreshAbortSignalJsObservation(self, target);
 }
 fn etRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -41900,6 +41920,7 @@ fn etRemoveListenerFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
         if (!drop) try fresh.appendElement(self.arena, rec);
     }
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00etl", Value.obj(fresh));
+    if (this.asObj().behavior.is_abort_signal) try refreshAbortSignalJsObservation(self, this.asObj());
     return Value.undef();
 }
 fn etDispatchFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -42037,6 +42058,37 @@ fn installEventTarget(env: *Environment, rs: *Shape, object_proto: *value.Object
 fn abortIsSignal(v: Value) bool {
     return v.isObject() and v.asObj().behavior.is_abort_signal;
 }
+
+fn abortSignalNativeState(sig: *value.Object) ?*value.AbortSignalNativeState {
+    if (sig.private_data_tag != .abort_signal) return null;
+    return @ptrCast(@alignCast(sig.private_data orelse return null));
+}
+
+fn abortSignalHasJsObservation(self: *Interpreter, sig: *value.Object) EvalError!bool {
+    if (sig.getOwn("\x00onabort")) |handler| {
+        if (handler.isObject() and handler.asObj().isCallableObject()) return true;
+    }
+    const listeners = sig.getOwn("\x00etl") orelse return false;
+    if (!listeners.isObject()) return false;
+    for (try listeners.asObj().internalElementsSnapshot(self.arena)) |record| {
+        if (!record.isObject()) continue;
+        const item = record.asObj();
+        const event_type = item.getOwn("\x00Lt") orelse continue;
+        if (!event_type.isString() or !std.mem.eql(u8, event_type.asStr(), "abort")) continue;
+        const callback = item.getOwn("\x00Lc") orelse continue;
+        if (!callback.isObject()) continue;
+        if (callback.asObj().native == abortOnabortDispatchFn) continue;
+        return true;
+    }
+    return false;
+}
+
+fn refreshAbortSignalJsObservation(self: *Interpreter, sig: *value.Object) EvalError!void {
+    const native = abortSignalNativeState(sig) orelse return;
+    const update = native.set_js_observed orelse return;
+    if (!update(native, try abortSignalHasJsObservation(self, sig))) return error.OutOfMemory;
+}
+
 pub fn makeAbortSignal(self: *Interpreter) EvalError!*value.Object {
     const sig = try gc_mod.allocObj(self.arena);
     sig.* = .{};
@@ -42080,10 +42132,10 @@ fn markAbortSignal(self: *Interpreter, sig: *value.Object, reason: Value, ordere
 }
 
 fn runAbortSignalSteps(self: *Interpreter, sig: *value.Object, reason: Value) EvalError!void {
-    if (sig.private_data_tag == .abort_signal) if (sig.private_data) |raw| {
-        const native: *value.AbortSignalNativeState = @ptrCast(@alignCast(raw));
+    if (abortSignalNativeState(sig)) |native| {
+        if (native.cancel_timeout) |cancel| cancel(native);
         if (native.run_abort_steps) |run| run(native.owner, reason);
-    };
+    }
     // Remove listeners that were added with this signal (addEventListener signal
     // option) before firing, so they do not run for the abort event.
     if (sig.getOwn("\x00ASremovals")) |rv| if (rv.isObject()) {
@@ -42164,6 +42216,7 @@ fn abortOnabortSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
         // run with the signal as `this`; etDispatch already passes the target as
         // `this` for function listeners, so no extra wiring is needed.
     }
+    try refreshAbortSignalJsObservation(self, o);
     return Value.undef();
 }
 fn abortSignalConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -42179,6 +42232,22 @@ fn abortSignalStaticAbortFn(ctx: *anyopaque, this: Value, args: []const Value) v
     try signalAbort(self, sig, if (args.len > 0) args[0] else Value.undef());
     return Value.obj(sig);
 }
+
+fn abortSignalStaticTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len == 0) return self.throwError("TypeError", "AbortSignal.timeout requires a delay");
+    const numeric = try self.toNumberV(args[0]);
+    const integer = if (std.math.isNan(numeric) or numeric == 0) 0 else @trunc(numeric);
+    if (!std.math.isFinite(integer) or integer < 0 or integer >= 18446744073709551616.0)
+        return self.throwError("RangeError", "AbortSignal.timeout delay is outside the unsigned 64-bit range");
+    const schedule = self.abort_timeout_schedule orelse
+        return self.throwError("NotSupportedError", "AbortSignal.timeout requires a host event loop");
+    const sig = try makeAbortSignal(self);
+    try schedule(self.abort_timeout_ctx, self, sig, @intFromFloat(integer));
+    return Value.obj(sig);
+}
+
 fn abortSignalStaticAnyFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
@@ -42278,6 +42347,7 @@ fn installAbort(env: *Environment, rs: *Shape, object_proto: *value.Object) Eval
     try sig_ctor.setAttr(a, "prototype", .{ .writable = false, .enumerable = false, .configurable = false });
     try setConstructor(a, rs, sig_proto, sig_ctor);
     try setNative(a, rs, sig_ctor, "abort", 1, abortSignalStaticAbortFn);
+    try setNative(a, rs, sig_ctor, "timeout", 1, abortSignalStaticTimeoutFn);
     try setNative(a, rs, sig_ctor, "any", 1, abortSignalStaticAnyFn);
     try env.put("AbortSignal", Value.obj(sig_ctor));
 

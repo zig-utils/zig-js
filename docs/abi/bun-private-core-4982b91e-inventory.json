@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 357,
-      "pending": 126
+      "implemented": 358,
+      "pending": 125
     }
   },
   "home_comparison": {
@@ -4602,10 +4602,10 @@
       "line": 11,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__AbortSignal__getTimeout(arg0: *AbortSignal) ?*Timeout;",
       "declaration_sha256": "68bbcdb28e7aad01a9c2bbcfb4e4cf592fbb0d6742e690f79e3c00f6065f4a8f",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__AbortSignal__incrementPendingActivity",

@@ -903,8 +903,10 @@ The 14 shared AbortSignal exports attach a native owner only to genuine engine
 signals, preserving one identity and reason across JS and native calls. Native
 callbacks are exchanged before invocation for exact-once ordered reentrancy;
 context-selective cleanup, common-reason sentinels, dependent premarking, and
-ref/pending-activity roots share the same lifecycle. Bun's event-loop-owned
-timeout handle remains explicitly pending under #330.
+ref/pending-activity roots share the same lifecycle. `AbortSignal.timeout()`
+uses an unrefed, monotonic, generation-scoped context timer. Bun's additional
+`WebCore__AbortSignal__getTimeout` borrows its exact four-field timeout record
+only while active; cancellation invalidates it before native or JS callbacks.
 The five rooted native-container entry points add callback-scoped marked
 arguments and per-realm CommonJS function registries with precise-GC rooting,
 cross-VM rejection, and exact append/set/swap-remove behavior. The private
@@ -975,7 +977,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (335 implemented, 126 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (336 implemented, 125 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -992,5 +994,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 126
+not claim complete Bun runtime compatibility; #164 remains open for the 125
 pending core entries and later wider/generated profiles.
