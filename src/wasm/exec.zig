@@ -3774,6 +3774,20 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .br_if => {
                 if (popI32(s) != 0) branchTo(s, instr.imm.idx);
             },
+            .br_on_null => {
+                const reference = popSlot(s);
+                if (slotIsNull(reference))
+                    branchTo(s, instr.imm.idx)
+                else
+                    try pushSlot(s, reference);
+            },
+            .br_on_non_null => {
+                const reference = popSlot(s);
+                if (!slotIsNull(reference)) {
+                    try pushSlot(s, reference);
+                    branchTo(s, instr.imm.idx);
+                }
+            },
             .br_table => {
                 const i = popI32(s);
                 const bt = instr.imm.br_table;

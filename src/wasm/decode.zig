@@ -922,6 +922,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .exception_handling);
         if ((op == .gc or op == .ref_eq or op == .ref_as_non_null) and !r.features.gc)
             return r.unsupportedFeature(instr_off, .gc);
+        if ((op == .br_on_null or op == .br_on_non_null) and !r.features.typed_function_references)
+            return r.unsupportedFeature(instr_off, .typed_function_references);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
             op == .table_grow or op == .table_size or op == .table_fill) and
@@ -1012,6 +1014,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             },
             .br,
             .br_if,
+            .br_on_null,
+            .br_on_non_null,
             .call,
             .return_call,
             .throw,
@@ -2036,6 +2040,21 @@ test "wasm.decode explicit reference block result" {
         &.{types.ValType.fromRef(.{ .nullable = false, .heap = .any })},
         block_type.explicit_value,
     );
+}
+
+test "wasm.decode branch on reference nullability" {
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode("\xD5\x00\xD6\x01\x0B"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{
+        .reference_types = true,
+        .typed_function_references = true,
+    }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    try std.testing.expectEqual(types.Op.br_on_null, mod.code[0].instrs[0].op);
+    try std.testing.expectEqual(@as(u32, 0), mod.code[0].instrs[0].imm.idx);
+    try std.testing.expectEqual(types.Op.br_on_non_null, mod.code[0].instrs[1].op);
+    try std.testing.expectEqual(@as(u32, 1), mod.code[0].instrs[1].imm.idx);
 }
 
 test "wasm.decode reference instructions tables and constant expressions" {

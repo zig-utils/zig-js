@@ -1237,6 +1237,36 @@ const FuncValidator = struct {
         self.push(stackVal(types.ValType.fromRef(.{ .nullable = false, .heap = reference.heap })));
     }
 
+    fn validateBrOnNull(self: *FuncValidator, depth: u32) Error!void {
+        const target_frame = try self.target(depth);
+        const branch_types = target_frame.branchTypes();
+        const reference = try self.popReference() orelse {
+            try self.popTypes(branch_types);
+            self.pushTypes(branch_types);
+            self.push(.unknown);
+            return;
+        };
+        try self.popTypes(branch_types);
+        self.pushTypes(branch_types);
+        self.push(stackVal(types.ValType.fromRef(.{ .nullable = false, .heap = reference.heap })));
+    }
+
+    fn validateBrOnNonNull(self: *FuncValidator, depth: u32) Error!void {
+        const target_frame = try self.target(depth);
+        const branch_types = target_frame.branchTypes();
+        if (branch_types.len == 0) return self.fail("type mismatch");
+        const label_reference = branch_types[branch_types.len - 1].refType() orelse
+            return self.fail("type mismatch");
+        if (label_reference.nullable) return self.fail("type mismatch");
+        try self.popExpect(types.ValType.fromRef(.{
+            .nullable = true,
+            .heap = label_reference.heap,
+        }));
+        const prefix = branch_types[0 .. branch_types.len - 1];
+        try self.popTypes(prefix);
+        self.pushTypes(prefix);
+    }
+
     fn validateGc(self: *FuncValidator, instr: types.Instr) Error!void {
         const op: gc.Op = switch (instr.imm) {
             .gc => |value| value,
@@ -1433,7 +1463,9 @@ const FuncValidator = struct {
                     return self.fail("type mismatch");
 
                 try self.popExpect(types.ValType.fromRef(source_ref));
-                try self.checkTypes(branch_types[0 .. branch_types.len - 1]);
+                const prefix = branch_types[0 .. branch_types.len - 1];
+                try self.popTypes(prefix);
+                self.pushTypes(prefix);
                 const fallthrough = if (op == .br_on_cast) difference_ref else target_ref;
                 self.push(stackVal(types.ValType.fromRef(fallthrough)));
             },
@@ -1691,6 +1723,8 @@ const FuncValidator = struct {
                     try self.popTypes(branch_types);
                     self.pushTypes(branch_types);
                 },
+                .br_on_null => try self.validateBrOnNull(instr.imm.idx),
+                .br_on_non_null => try self.validateBrOnNonNull(instr.imm.idx),
                 .br_table => {
                     const bt = instr.imm.br_table;
                     try self.popExpect(.i32);
@@ -3172,4 +3206,31 @@ test "wasm.validate GC cast branches refine fallthrough types" {
         "\xFB\x19\x01\x00\x6C\x6C" ++
         "\x0B\x1A\x0B"));
     try expectValidWithFeatures(br_on_cast_fail, gc_validation_features);
+
+    const br_on_null = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x02\x40\xD0\x6E\xD5\x00\x1A\x0B\x0B"));
+    try expectValidWithFeatures(br_on_null, gc_validation_features);
+
+    const br_on_non_null = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x02\x64\x6E\xD0\x6E\xD6\x00\x41\x00\xFB\x1C\x0B\x1A\x0B"));
+    try expectValidWithFeatures(br_on_non_null, gc_validation_features);
+
+    const nullable_label = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x02\x63\x6E\xD0\x6E\xD6\x00\x41\x00\xFB\x1C\x0B\x1A\x0B"));
+    try expectInvalidAtWithFeatures(nullable_label, gc_validation_features, 0, 2, "type mismatch");
+
+    // A conditional branch join retypes its preserved prefix to the label
+    // signature. The concrete struct reference therefore becomes `anyref`
+    // and cannot be consumed by struct.get on the fallthrough path.
+    const joined_prefix = comptime (hdr ++
+        sec(1, "\x02\x5F\x01\x7F\x00\x60\x00\x02\x6E\x6E") ++
+        sec(3, "\x01\x01") ++
+        code1("\x41\x00\xFB\x00\x00\xD0\x6E\xFB\x18\x01\x00\x6E\x6C" ++
+            "\x1A\xFB\x02\x00\x00\x1A\x00\x0B"));
+    try expectInvalidAtWithFeatures(joined_prefix, .{
+        .multi_value = true,
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    }, 0, 5, "type mismatch");
 }
