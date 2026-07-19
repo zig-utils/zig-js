@@ -11,24 +11,19 @@ defer ctx.destroy();
 const value = try ctx.evaluate("let x = 40; x + 2");
 ```
 
-The engine combines a semantic tree-walker with a suspendable stack bytecode VM over one object model. It includes modules, async execution, generators, precise opt-in GC, isolated workers, shared-realm threads, and WebAssembly proposal profiles.
-
 ## Status
 
-The configured test262 runner is green for everything it scores: **48,506 / 48,506 valid** and **4,669 / 4,669 negative**, with no parse, runtime, host, skipped, or excluded failures. This is scoped evidence, not a claim that every JavaScript or JSC surface exists.
+All numbers below are scoped, reproducible results—not claims that every JavaScript or JSC surface exists.
 
 | profile | result | evidence |
 | --- | ---: | --- |
-| test262 valid | **48,506 / 48,506** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
-| test262 negative | **4,669 / 4,669** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
-| WebAssembly MVP | **18,840 / 18,840 applicable commands** | [inventory](docs/.data/wasm-spec-inventory.json) |
-| WebAssembly Core 2 structural | **27,437 / 27,437 applicable commands** | [inventory](docs/.data/wasm-core-2-structural-inventory.json) |
-| WebAssembly SIMD | **25,466 / 25,466 applicable commands** | [inventory](docs/.data/wasm-simd-inventory.json) |
-| WebAssembly Threads | **551 / 551 commands** | [inventory](docs/.data/wasm-threads-inventory.json) |
-| WebAssembly tail calls | **108 / 108 applicable commands** | [inventory](docs/.data/wasm-tail-call-inventory.json) |
-| WebAssembly exceptions | **84 / 84 applicable commands** | [inventory](docs/.data/wasm-exception-handling-inventory.json) |
+| configured test262 | **53,175 / 53,175** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
+| Wasm MVP + Core 2 | **46,277 / 46,277 applicable** | [MVP](docs/.data/wasm-spec-inventory.json) · [Core 2](docs/.data/wasm-core-2-structural-inventory.json) |
+| Wasm SIMD + Threads | **26,017 / 26,017** | [SIMD](docs/.data/wasm-simd-inventory.json) · [Threads](docs/.data/wasm-threads-inventory.json) |
+| Wasm tail calls + exceptions | **192 / 192 applicable** | [tail calls](docs/.data/wasm-tail-call-inventory.json) · [exceptions](docs/.data/wasm-exception-handling-inventory.json) |
+| Wasm GC terminal corpus | **542 / 698** | [inventory](docs/.data/wasm-gc-runtime-inventory.json) · [#300](https://github.com/zig-utils/zig-js/issues/300) |
 
-Memory64 passes **22 / 22** focused normal and ThreadSanitizer tests. The pinned Wasm GC runtime executes all 33 instructions with canonical cross-instance identity, weak wrappers, precise cyclic collection, deep-graph coverage, failure injection, and a clean concurrent-publication TSan witness. Terminal upstream GC and Memory64 scoring is tracked in [#300](https://github.com/zig-utils/zig-js/issues/300). See [WebAssembly status](docs/wasm.md) for exact scope and reproduction.
+Memory64 also passes **22 / 22** focused normal/TSan tests. Exact feature scope and reproduction live in [WebAssembly status](docs/wasm.md).
 
 ## Performance
 
@@ -51,7 +46,7 @@ A throughput ratio above 1.00x favors zig-js. Shared-realm threads share one obj
 
 ### WebAssembly
 
-The latest SIMD comparison uses identical Wasm bytes in zig-js and macOS JSC. These are warmed independent contexts; zig-js currently uses portable SIMD rather than architecture-specific vector lowering. [Report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [224 samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)
+[SIMD report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [224 samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv), identical Wasm bytes, warmed independent contexts.
 
 | SIMD kernel | zig-js 1 lane | zig-js 8 lanes | scaling | JSC 8 lanes | zig-js / JSC |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -60,7 +55,7 @@ The latest SIMD comparison uses identical Wasm bytes in zig-js and macOS JSC. Th
 | shuffle | 6.74 M/s | 29.00 M/s | 4.30x | 286.75 M/s | 0.10x |
 | memory | 8.98 M/s | 41.13 M/s | 4.58x | 291.96 M/s | 0.14x |
 
-The latest shared-memory Threads run uses one module and memory. Public macOS JSC has no equivalent shared-realm worker embedding, so its score is N/A. [Report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [105 samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)
+[Threads report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [105 samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv). Public macOS JSC has no equivalent shared-realm worker embedding.
 
 | workers | contended add | CAS increment | disjoint add | wait/notify handoffs |
 | ---: | ---: | ---: | ---: | ---: |
@@ -69,19 +64,11 @@ The latest shared-memory Threads run uses one module and memory. Public macOS JS
 | 4 | 18.88 M/s | 6.18 M/s | 19.87 M/s | 1,067,241/s |
 | 8 | 17.23 M/s | 4.74 M/s | 17.28 M/s | 287,444/s |
 
-Full methodology, per-workload results, dispersion, and historical A/B evidence live in [Performance benchmarks](docs/benchmarks.md).
+Methodology and raw results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
 
-`zig build` installs `libzig-js.a` and JavaScriptCore-compatible headers under `zig-out/`. The public audit covers **117 / 117 public C functions** plus 19 zig-js extensions; private consumer ABI coverage is reported separately.
-
-```c
-JSGlobalContextRef ctx = JSGlobalContextCreate(NULL);
-JSStringRef script = JSStringCreateWithUTF8CString("1 + 1");
-JSValueRef result = JSEvaluateScript(ctx, script, NULL, NULL, 0, NULL);
-```
-
-Start with [Architecture](docs/architecture.md), [Zig API](src/root.zig), [C API support](docs/api.md), [WebAssembly](docs/wasm.md), or [Threads and GC](docs/threads/index.md).
+`zig build` installs `libzig-js.a` and JavaScriptCore-compatible headers under `zig-out/`. Start with [Zig API](src/root.zig), [C API](docs/api.md), [architecture](docs/architecture.md), [WebAssembly](docs/wasm.md), or [threads/GC](docs/threads/index.md).
 
 ## Build And Test
 
@@ -93,27 +80,18 @@ zig build test                  # main test root
 zig build test262               # configured tc39/test262 corpus
 zig build test-c-api            # C and C++ embedding fixtures
 zig build benchmark-comparison  # zig-js single/multithread vs JSC
-zig build wasm-feature-profiles-check
 ```
 
-Specialized proposal, sanitizer, fuzzing, ABI, and profiling commands are listed by `zig build --help` and in the linked docs. Use `tools/zig-cache-tool.sh report` and `tools/zig-cache-tool.sh prune` to inspect or remove local build artifacts.
-
-## Threads And GC
-
-`Context.createWith(.{ .enable_threads = true })` enables shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, and atomics; threads run in parallel unless `.gil = true`. Isolated `Worker`s own separate precise-GC heaps. The memory model and sanitizer gates are documented in [Threads and GC](docs/threads/index.md) and tracked in [#1](https://github.com/zig-utils/zig-js/issues/1).
+See `zig build --help` for proposal, sanitizer, fuzzing, ABI, profiling, and cache commands.
 
 ## What Is Not Implemented
 
 - remaining JavaScriptCore framework/private internals and Bun/Home private ABI;
-- terminal Wasm GC/Memory64 corpus scoring, shell-only Wasm/JIT hooks, and final host-wide Threads stress evidence;
+- remaining Wasm GC/Memory64 corpus failures, shell-only Wasm/JIT hooks, and final host-wide Threads stress evidence;
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
 The roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134); evidence-backed removal of this section is tracked in [#246](https://github.com/zig-utils/zig-js/issues/246).
 
-## Used By
-
-- [home-lang/craft](https://github.com/home-lang/craft)
-
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Used by [home-lang/craft](https://github.com/home-lang/craft).

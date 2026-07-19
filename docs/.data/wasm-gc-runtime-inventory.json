@@ -1,0 +1,6039 @@
+{
+  "command_shards": 1,
+  "converter": {
+    "commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+    "kind": "wasm-tools",
+    "repository": "https://github.com/bytecodealliance/wasm-tools.git",
+    "version": "1.253.0"
+  },
+  "engine_commit": "c1d01eb9ec622264944e54615d782c52845a7efc",
+  "features": [
+    "typed_function_references",
+    "gc"
+  ],
+  "files": [
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 60,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 100,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 142,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 143,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 144,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 194,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 195,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 196,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 197,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 198,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 199,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 201,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 202,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 254,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 255,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 256,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 257,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 258,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 37,
+          "line": 259,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 262,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 265,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 41,
+          "line": 275,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 288,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 43,
+          "line": 304,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 314,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 45,
+          "line": 315,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 46,
+        "runner_error": 0,
+        "total": 46
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 30,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "CompileError: type is not defaultable",
+          "feature_area": "gc",
+          "index": 4,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 5,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 6,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 7,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 8,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 11,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 12,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 13,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 14,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 15,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 16,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 17,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 18,
+          "line": 120,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 19,
+          "line": 121,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 22,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 23,
+          "line": 127,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 24,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 25,
+          "line": 129,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 26,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 27,
+          "line": 131,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 28,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 29,
+          "line": 134,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 30,
+          "line": 135,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 31,
+          "line": 136,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 32,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 33,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 34,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 31,
+        "not_applicable": 0,
+        "pass": 4,
+        "runner_error": 0,
+        "total": 35
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_copy.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 17,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 28,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 62,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 65,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 17,
+        "runner_error": 0,
+        "total": 17
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_fill.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 76,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 88,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 33,
+        "runner_error": 0,
+        "total": 33
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_init_data.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 6,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+55",
+          "feature_area": "gc",
+          "index": 3,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 4,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 5,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 6,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 7,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 8,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 11,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 12,
+          "line": 94,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 13,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 14,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 15,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 16,
+          "line": 100,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 17,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 18,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 19,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 22,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        }
+      ],
+      "counts": {
+        "fail": 20,
+        "not_applicable": 0,
+        "pass": 3,
+        "runner_error": 0,
+        "total": 23
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_init_elem.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 13,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 14,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "CompileError: type is not defaultable",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 55,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 2,
+        "not_applicable": 0,
+        "pass": 13,
+        "runner_error": 0,
+        "total": 15
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_new_data.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 18,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 19,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 20,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 21,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 26,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 27,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "CompileError: type is not defaultable",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 67,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 69,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "CompileError: type is not defaultable",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 4,
+        "not_applicable": 0,
+        "pass": 18,
+        "runner_error": 0,
+        "total": 22
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/array_new_elem.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_malformed"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 1,
+        "runner_error": 0,
+        "total": 1
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/binary-gc.wast"
+    },
+    {
+      "commands": [
+        {
+          "detail": "CompileError: WebAssembly.Module(): invalid opcode 0xd5 @+204",
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 1,
+          "line": 69,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "action"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 2,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 3,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 4,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 5,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 6,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 7,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 8,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 11,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 12,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 13,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 14,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 15,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 16,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 17,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 18,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 19,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 22,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 23,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 24,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 25,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 26,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): invalid block type @+44",
+          "feature_area": "gc",
+          "index": 30,
+          "line": 211,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 235,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 244,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 253,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 261,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "expected WebAssembly.CompileError",
+          "feature_area": "gc",
+          "index": 36,
+          "line": 272,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 29,
+        "not_applicable": 0,
+        "pass": 8,
+        "runner_error": 0,
+        "total": 37
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/br_on_cast.wast"
+    },
+    {
+      "commands": [
+        {
+          "detail": "CompileError: WebAssembly.Module(): invalid block type @+215",
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 1,
+          "line": 69,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "action"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 2,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 3,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 4,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 5,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 6,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 7,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 8,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 10,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 11,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 12,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 13,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 14,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 15,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 16,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 17,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 18,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 19,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 22,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 23,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 24,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 25,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: cannot read property of null or undefined",
+          "feature_area": "gc",
+          "index": 26,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): invalid block type @+37",
+          "feature_area": "gc",
+          "index": 30,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 241,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 250,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 259,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 268,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 276,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "expected WebAssembly.CompileError",
+          "feature_area": "gc",
+          "index": 36,
+          "line": 287,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 29,
+        "not_applicable": 0,
+        "pass": 8,
+        "runner_error": 0,
+        "total": 37
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/br_on_cast_fail.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 45,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 46,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 18,
+        "runner_error": 0,
+        "total": 18
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/extern.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 40,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 45,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 46,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 50,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 56,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 61,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 37,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 120,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 41,
+          "line": 121,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 123,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 43,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 45,
+          "line": 136,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 46,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 47,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 48,
+          "line": 140,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 49,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 50,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 51,
+          "line": 164,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 52,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 53,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 54,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 55,
+          "line": 203,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 56,
+          "line": 204,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 57,
+          "line": 205,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 58,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 59,
+          "line": 209,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 60,
+          "line": 210,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 61,
+          "line": 211,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 62,
+          "line": 212,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 63,
+          "line": 215,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 64,
+          "line": 216,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 65,
+          "line": 217,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 66,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 67,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 68,
+          "line": 222,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 69,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 70,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 71,
+          "line": 227,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 72,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 73,
+        "runner_error": 0,
+        "total": 73
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/i31.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 55,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 56,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 57,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 60,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 61,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 62,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 64,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 65,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 67,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 69,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 70,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 76,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 80,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 88,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 37,
+          "line": 90,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 41,
+          "line": 94,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 43,
+          "line": 185,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 186,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 45,
+        "runner_error": 0,
+        "total": 45
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/ref_cast.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 1,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 29,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 32,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 33,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 34,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 35,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 36,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 38,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 39,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 42,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 44,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 45,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 46,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 47,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 49,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 51,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 52,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 54,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 55,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 56,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 57,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 58,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 61,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 62,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 63,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 64,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 65,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 66,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 67,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 37,
+          "line": 69,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 71,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 72,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 73,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 41,
+          "line": 74,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 75,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 43,
+          "line": 76,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 77,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 45,
+          "line": 78,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 46,
+          "line": 79,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 47,
+          "line": 81,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 48,
+          "line": 82,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 49,
+          "line": 83,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 50,
+          "line": 84,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 51,
+          "line": 85,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 52,
+          "line": 86,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 53,
+          "line": 87,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 54,
+          "line": 88,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 55,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 56,
+          "line": 91,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 57,
+          "line": 92,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 58,
+          "line": 93,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 59,
+          "line": 94,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 60,
+          "line": 95,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 61,
+          "line": 96,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 62,
+          "line": 97,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 63,
+          "line": 98,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 64,
+          "line": 99,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 65,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 66,
+          "line": 102,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 67,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 68,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 69,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 70,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 71,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 72,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 73,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 74,
+          "line": 111,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 75,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 76,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 77,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 78,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 79,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 80,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 81,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 82,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 83,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 84,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 85,
+          "line": 138,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 86,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 87,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 88,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 89,
+        "runner_error": 0,
+        "total": 89
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/ref_eq.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 101,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "action"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 103,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 104,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 105,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 106,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 107,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 108,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 109,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 110,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 112,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 113,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 114,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 116,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 117,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 118,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 119,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 121,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 123,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 127,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 128,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 131,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 132,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 30,
+          "line": 134,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 31,
+          "line": 135,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 32,
+          "line": 136,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 33,
+          "line": 137,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 139,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 35,
+          "line": 140,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 141,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 37,
+          "line": 142,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 143,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 144,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 41,
+          "line": 146,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 148,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 43,
+          "line": 149,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 150,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 45,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 46,
+          "line": 152,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 47,
+          "line": 153,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 48,
+          "line": 154,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 49,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 50,
+          "line": 157,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 51,
+          "line": 158,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 52,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 53,
+          "line": 161,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 54,
+          "line": 162,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 55,
+          "line": 163,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 56,
+          "line": 165,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 57,
+          "line": 166,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 58,
+          "line": 167,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 59,
+          "line": 168,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 60,
+          "line": 169,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 61,
+          "line": 170,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 62,
+          "line": 172,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 63,
+          "line": 173,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 64,
+          "line": 174,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 65,
+          "line": 175,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 66,
+          "line": 176,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 67,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+200",
+          "feature_area": "gc",
+          "index": 68,
+          "line": 182,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 69,
+          "line": 329,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 70,
+          "line": 330,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 7,
+        "not_applicable": 0,
+        "pass": 64,
+        "runner_error": 0,
+        "total": 71
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/ref_test.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "text-format syntax is not exposed by the JavaScript binary API",
+          "feature_area": "gc",
+          "index": 1,
+          "line": 16,
+          "mode": "not_applicable",
+          "status": "not_applicable",
+          "type": "assert_malformed"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 25,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 41,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 48,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 59,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 70,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 8,
+          "line": 122,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 9,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 125,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 11,
+          "line": 126,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 12,
+          "line": 127,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 13,
+          "line": 129,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 14,
+          "line": 130,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 133,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 145,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 17,
+          "line": 155,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 18,
+          "line": 156,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 19,
+          "line": 160,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 20,
+          "line": 219,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 21,
+          "line": 220,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 22,
+          "line": 221,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 23,
+          "line": 222,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 24,
+          "line": 223,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 224,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 26,
+          "line": 225,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 27,
+          "line": 226,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 228,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 229,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 1,
+        "pass": 29,
+        "runner_error": 0,
+        "total": 30
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/struct.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 2,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 12,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 22,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 31,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 4,
+        "runner_error": 0,
+        "total": 4
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/type-subtyping-invalid.wast"
+    },
+    {
+      "commands": [
+        {
+          "feature_area": "gc",
+          "index": 0,
+          "line": 3,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 1,
+          "line": 15,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 2,
+          "line": 24,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 3,
+          "line": 37,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 4,
+          "line": 43,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 5,
+          "line": 53,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 6,
+          "line": 68,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 7,
+          "line": 89,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+67",
+          "feature_area": "gc",
+          "index": 8,
+          "line": 115,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+107",
+          "feature_area": "gc",
+          "index": 9,
+          "line": 124,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 10,
+          "line": 140,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+57",
+          "feature_area": "gc",
+          "index": 11,
+          "line": 151,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+117",
+          "feature_area": "gc",
+          "index": 12,
+          "line": 159,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+58",
+          "feature_area": "gc",
+          "index": 13,
+          "line": 177,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+94",
+          "feature_area": "gc",
+          "index": 14,
+          "line": 188,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 15,
+          "line": 206,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 16,
+          "line": 216,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): invalid block type @+176",
+          "feature_area": "gc",
+          "index": 17,
+          "line": 229,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 18,
+          "line": 282,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 19,
+          "line": 283,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 20,
+          "line": 284,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 21,
+          "line": 285,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 22,
+          "line": 286,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 23,
+          "line": 287,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 24,
+          "line": 288,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 25,
+          "line": 290,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError",
+          "feature_area": "gc",
+          "index": 26,
+          "line": 314,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError",
+          "feature_area": "gc",
+          "index": 27,
+          "line": 315,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 28,
+          "line": 316,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 29,
+          "line": 317,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "CompileError: WebAssembly.Module(): type mismatch @+85",
+          "feature_area": "gc",
+          "index": 30,
+          "line": 319,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "detail": "TypeError: value is not a function",
+          "feature_area": "gc",
+          "index": 31,
+          "line": 344,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError",
+          "feature_area": "gc",
+          "index": 32,
+          "line": 345,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "detail": "expected WebAssembly.RuntimeError",
+          "feature_area": "gc",
+          "index": 33,
+          "line": 346,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_trap"
+        },
+        {
+          "feature_area": "gc",
+          "index": 34,
+          "line": 348,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 35,
+          "line": 358,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 36,
+          "line": 360,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 37,
+          "line": 376,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 38,
+          "line": 378,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 39,
+          "line": 388,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 40,
+          "line": 390,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 41,
+          "line": 399,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 42,
+          "line": 401,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 43,
+          "line": 419,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 44,
+          "line": 422,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 45,
+          "line": 434,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 46,
+          "line": 438,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "detail": "result mismatch",
+          "feature_area": "gc",
+          "index": 47,
+          "line": 456,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 48,
+          "line": 461,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 49,
+          "line": 469,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 50,
+          "line": 471,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 51,
+          "line": 480,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_return"
+        },
+        {
+          "feature_area": "gc",
+          "index": 52,
+          "line": 486,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 53,
+          "line": 495,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "LinkError: incompatible WebAssembly function import type",
+          "feature_area": "gc",
+          "index": 54,
+          "line": 497,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 55,
+          "line": 511,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 56,
+          "line": 521,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 57,
+          "line": 531,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 58,
+          "line": 540,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 59,
+          "line": 546,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "expected WebAssembly.LinkError",
+          "feature_area": "gc",
+          "index": 60,
+          "line": 549,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_unlinkable"
+        },
+        {
+          "detail": "expected WebAssembly.LinkError",
+          "feature_area": "gc",
+          "index": 61,
+          "line": 557,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 62,
+          "line": 566,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 63,
+          "line": 571,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 64,
+          "line": 572,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 65,
+          "line": 578,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 66,
+          "line": 587,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 67,
+          "line": 588,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 68,
+          "line": 598,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 69,
+          "line": 604,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "expected WebAssembly.LinkError",
+          "feature_area": "gc",
+          "index": 70,
+          "line": 606,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 71,
+          "line": 614,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 72,
+          "line": 620,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 73,
+          "line": 621,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 74,
+          "line": 628,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 75,
+          "line": 638,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 76,
+          "line": 639,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 77,
+          "line": 652,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 78,
+          "line": 658,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "feature_area": "gc",
+          "index": 79,
+          "line": 659,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 80,
+          "line": 668,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 81,
+          "line": 676,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "LinkError: incompatible WebAssembly function import type",
+          "feature_area": "gc",
+          "index": 82,
+          "line": 677,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 83,
+          "line": 692,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 84,
+          "line": 697,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "expected WebAssembly.LinkError",
+          "feature_area": "gc",
+          "index": 85,
+          "line": 699,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 86,
+          "line": 706,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "module"
+        },
+        {
+          "feature_area": "gc",
+          "index": 87,
+          "line": 712,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "register"
+        },
+        {
+          "detail": "expected WebAssembly.LinkError",
+          "feature_area": "gc",
+          "index": 88,
+          "line": 714,
+          "mode": "javascript_api",
+          "status": "fail",
+          "type": "assert_unlinkable"
+        },
+        {
+          "feature_area": "gc",
+          "index": 89,
+          "line": 727,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 90,
+          "line": 735,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 91,
+          "line": 743,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 92,
+          "line": 751,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 93,
+          "line": 764,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 94,
+          "line": 772,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 95,
+          "line": 780,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 96,
+          "line": 788,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 97,
+          "line": 796,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 98,
+          "line": 804,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 99,
+          "line": 812,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 100,
+          "line": 820,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        },
+        {
+          "feature_area": "gc",
+          "index": 101,
+          "line": 828,
+          "mode": "javascript_api",
+          "status": "pass",
+          "type": "assert_invalid"
+        }
+      ],
+      "counts": {
+        "fail": 33,
+        "not_applicable": 0,
+        "pass": 69,
+        "runner_error": 0,
+        "total": 102
+      },
+      "feature_area": "gc",
+      "path": "test/core/gc/type-subtyping.wast"
+    }
+  ],
+  "kind": "webassembly_gc_runtime_inventory",
+  "profile": "gc",
+  "schema_version": 2,
+  "spec": {
+    "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+    "declared_files": [
+      "array.wast",
+      "array_copy.wast",
+      "array_fill.wast",
+      "array_init_data.wast",
+      "array_init_elem.wast",
+      "array_new_data.wast",
+      "array_new_elem.wast",
+      "binary-gc.wast",
+      "br_on_cast.wast",
+      "br_on_cast_fail.wast",
+      "extern.wast",
+      "i31.wast",
+      "ref_cast.wast",
+      "ref_eq.wast",
+      "ref_test.wast",
+      "struct.wast",
+      "type-subtyping-invalid.wast",
+      "type-subtyping.wast"
+    ],
+    "files_available": 18,
+    "files_declared": 18,
+    "files_scored": 18,
+    "license": "Apache-2.0",
+    "repository": "https://github.com/WebAssembly/gc.git",
+    "suite": "test/core/gc/*.wast",
+    "tag": "proposal-revision"
+  },
+  "totals": {
+    "fail": 155,
+    "not_applicable": 1,
+    "pass": 542,
+    "runner_error": 0,
+    "total": 698
+  },
+  "totals_by_feature_area": {
+    "gc": {
+      "fail": 155,
+      "not_applicable": 1,
+      "pass": 542,
+      "runner_error": 0,
+      "total": 698
+    }
+  }
+}
