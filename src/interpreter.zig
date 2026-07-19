@@ -42238,9 +42238,13 @@ fn abortSignalStaticTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value)
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return self.throwError("TypeError", "AbortSignal.timeout requires a delay");
     const numeric = try self.toNumberV(args[0]);
-    const integer = if (std.math.isNan(numeric) or numeric == 0) 0 else @trunc(numeric);
-    if (!std.math.isFinite(integer) or integer < 0 or integer >= 18446744073709551616.0)
-        return self.throwError("RangeError", "AbortSignal.timeout delay is outside the unsigned 64-bit range");
+    if (!std.math.isFinite(numeric))
+        return self.throwError("TypeError", "AbortSignal.timeout delay must be a finite number");
+    const integer = if (numeric == 0) 0 else @trunc(numeric);
+    // Web IDL narrows [EnforceRange] 64-bit integers to the unambiguous Number
+    // range, rather than accepting imprecise values up to 2^64 - 1.
+    if (integer < 0 or integer > 9007199254740991.0)
+        return self.throwError("TypeError", "AbortSignal.timeout delay is outside the safe integer range");
     const schedule = self.abort_timeout_schedule orelse
         return self.throwError("NotSupportedError", "AbortSignal.timeout requires a host event loop");
     const sig = try makeAbortSignal(self);

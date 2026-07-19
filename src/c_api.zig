@@ -24805,14 +24805,15 @@ test "AbortSignal timeout owns observable signals and invalidates borrowed Bun h
     try std.testing.expect((try context.evaluate(
         \\(() => {
         \\  let rejected = 0;
-        \\  for (const delay of [-1, Infinity, 18446744073709551616]) {
+        \\  for (const delay of [-1, NaN, Infinity, 9007199254740992]) {
         \\    try { AbortSignal.timeout(delay); } catch (error) {
-        \\      if (error.name === "RangeError") rejected++;
+        \\      if (error.name === "TypeError") rejected++;
         \\    }
         \\  }
         \\  let missing = false;
         \\  try { AbortSignal.timeout(); } catch (error) { missing = error.name === "TypeError"; }
-        \\  return rejected === 3 && missing;
+        \\  const maximum = AbortSignal.timeout(9007199254740991) instanceof AbortSignal;
+        \\  return rejected === 4 && missing && maximum;
         \\})()
     )).asBool());
     try std.testing.expect(!(try context.evaluate(
