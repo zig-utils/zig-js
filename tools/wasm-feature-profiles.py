@@ -30,6 +30,10 @@ def verify_terminal_inventory(
     features: list[str],
     files: list[tuple[str, int, int]],
     pass_modes: tuple[str, ...] = ("javascript_api",),
+    converter_kind: str | None = None,
+    converter_version: str = "1.0.39",
+    converter_commit: str = "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+    not_applicable_types: tuple[str, ...] = ("assert_malformed",),
 ) -> None:
     document = json.loads(path.read_text())
     require(document.get("schema_version") == 2, f"{profile}: unsupported terminal inventory schema")
@@ -45,8 +49,10 @@ def verify_terminal_inventory(
     require(spec.get("files_declared") == len(files), f"{profile}: declared file count drift")
     require(spec.get("files_scored") == len(files), f"{profile}: hidden file filtering")
     converter = document.get("converter", {})
-    require(converter.get("version") == "1.0.39", f"{profile}: converter version drift")
-    require(converter.get("commit") == "ad75c5edcdff96d73c245b57fbc07607aaca9f95", f"{profile}: converter pin drift")
+    if converter_kind is not None:
+        require(converter.get("kind") == converter_kind, f"{profile}: converter kind drift")
+    require(converter.get("version") == converter_version, f"{profile}: converter version drift")
+    require(converter.get("commit") == converter_commit, f"{profile}: converter pin drift")
     entries = document.get("files", [])
     require([Path(entry.get("path", "")).name for entry in entries] == declared, f"{profile}: scored file drift")
     expected_pass = sum(passed for _, passed, _ in files)
@@ -87,7 +93,7 @@ def verify_terminal_inventory(
         )
         require(
             all(
-                command.get("type") == "assert_malformed"
+                command.get("type") in not_applicable_types
                 and command.get("detail") == "text-format syntax is not exposed by the JavaScript binary API"
                 for command in commands
                 if command.get("status") == "not_applicable"
@@ -163,6 +169,11 @@ def main() -> int:
         "--memory64-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-memory64-binary-inventory.json",
+    )
+    parser.add_argument(
+        "--memory64-terminal-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-memory64-runtime-inventory.json",
     )
     parser.add_argument(
         "--gc-inventory",
@@ -527,6 +538,45 @@ def main() -> int:
         "multi-memory: bit-exact assertion count drift",
     )
     memory64_feature = next(feature for feature in features if feature["id"] == "memory64")
+    verify_terminal_inventory(
+        args.memory64_terminal_inventory,
+        kind="webassembly_memory64_runtime_inventory",
+        profile="memory64",
+        repository=memory64_feature["repository"],
+        commit=memory64_feature["commit"],
+        features=[
+            "memory64", "multi_memory", "typed_function_references",
+            "tail_calls", "exception_handling",
+        ],
+        files=[
+            ("address64.wast", 242, 0), ("align64.wast", 110, 46),
+            ("call_indirect.wast", 160, 11), ("endianness64.wast", 69, 0),
+            ("float_memory64.wast", 90, 0), ("imports.wast", 243, 16),
+            ("load64.wast", 84, 13), ("memory64.wast", 69, 0),
+            ("memory_copy.wast", 8900, 0), ("memory_fill.wast", 200, 0),
+            ("memory_grow64.wast", 49, 0), ("memory_init.wast", 480, 0),
+            ("memory_redundancy64.wast", 8, 0), ("memory_trap64.wast", 172, 0),
+            ("table.wast", 54, 6), ("table_copy.wast", 1772, 0),
+            ("table_copy_mixed.wast", 4, 0), ("table_fill.wast", 80, 0),
+            ("table_get.wast", 17, 0), ("table_grow.wast", 79, 0),
+            ("table_init.wast", 876, 0), ("table_set.wast", 28, 0),
+            ("table_size.wast", 40, 0),
+        ],
+        pass_modes=("javascript_api", "bit_exact"),
+        converter_kind="wasm-tools",
+        converter_version="1.253.0",
+        converter_commit="c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        not_applicable_types=("assert_malformed", "assert_invalid"),
+    )
+    memory64_terminal = json.loads(args.memory64_terminal_inventory.read_text())
+    require(
+        sum(
+            command.get("mode") == "bit_exact"
+            for entry in memory64_terminal.get("files", [])
+            for command in entry.get("commands", [])
+        ) == 20,
+        "memory64: bit-exact assertion count drift",
+    )
     memory64 = json.loads(args.memory64_inventory.read_text())
     require(memory64.get("schema_version") == 1, "memory64 inventory: unsupported schema version")
     require(memory64.get("kind") == "webassembly_memory64_binary_inventory", "memory64 inventory: invalid kind")

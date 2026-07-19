@@ -412,6 +412,12 @@ forced 32-bit/64-bit host-policy witnesses, 4 GiB+ addresses, integer overflow,
 concurrent shared growth, repeated JavaScript growth, historical buffer aliases,
 cross-instance sharing, and allocation failure.
 
+The [terminal runtime inventory](.data/wasm-memory64-runtime-inventory.json)
+uses pinned `wasm-tools 1.253.0` at
+`c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38` and scores all 23 declared files.
+All **13,826/13,826 applicable commands pass**; 92 text-only assertions are
+explicit N/A, with zero semantic failures or runner errors.
+
 Reproduce the checked-in facts and focused boundary with:
 
 ```sh
@@ -420,14 +426,19 @@ zig build test -Dtest-filter=memory64
 zig build test -Dtsan=true -Dtest-filter=memory64
 zig build test -Dtest-filter=wasm.decode
 zig build test -Dtest-filter=wasm.validate
+python3 tools/wasm-spec.py --profile memory64 \
+  --spec-root /path/to/memory64 \
+  --converter /path/to/wasm-tools \
+  --engine zig-out/bin/wasm-spec-eval --command-shards 8
 ```
 
 The binary and validation boundary is complete in
 [#296](https://github.com/zig-utils/zig-js/issues/296), and runtime/JavaScript
 API/lifecycle coverage is complete in
 [#297](https://github.com/zig-utils/zig-js/issues/297). The 13,918-command
-inventory above is not yet a pass score; terminal upstream corpus scoring is
-tracked by [#300](https://github.com/zig-utils/zig-js/issues/300).
+terminal corpus score now satisfies the upstream semantic portion of
+[#300](https://github.com/zig-utils/zig-js/issues/300), which remains open for
+the final supported-host evidence matrix.
 
 ### Wasm GC pinned binary and corpus contract
 
@@ -774,8 +785,8 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
-execution are separate scored profiles. Remaining Memory64 terminal coverage
-and shell-only hooks stay tracked separately.
+execution are covered by separately scored profiles. Shell-only hooks stay
+tracked separately.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

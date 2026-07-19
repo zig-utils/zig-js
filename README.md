@@ -21,9 +21,10 @@ All numbers below are scoped, reproducible results—not claims that every JavaS
 | Wasm MVP + Core 2 | **46,277 / 46,277 applicable** | [MVP](docs/.data/wasm-spec-inventory.json) · [Core 2](docs/.data/wasm-core-2-structural-inventory.json) |
 | Wasm SIMD + Threads | **26,017 / 26,017** | [SIMD](docs/.data/wasm-simd-inventory.json) · [Threads](docs/.data/wasm-threads-inventory.json) |
 | Wasm tail calls + exceptions | **192 / 192 applicable** | [tail calls](docs/.data/wasm-tail-call-inventory.json) · [exceptions](docs/.data/wasm-exception-handling-inventory.json) |
-| Wasm GC + multi-memory | **1,526 / 1,526 applicable** | [GC](docs/.data/wasm-gc-runtime-inventory.json) · [multi-memory](docs/.data/wasm-multi-memory-runtime-inventory.json) |
+| Wasm GC | **697 / 697 applicable** | [inventory](docs/.data/wasm-gc-runtime-inventory.json) |
+| Wasm Memory64 + multi-memory | **14,655 / 14,655 applicable** | [Memory64](docs/.data/wasm-memory64-runtime-inventory.json) · [multi-memory](docs/.data/wasm-multi-memory-runtime-inventory.json) |
 
-Memory64 also passes **22 / 22** focused normal/TSan tests. Exact feature scope and reproduction live in [WebAssembly status](docs/wasm.md).
+Exact feature scope and reproduction live in [WebAssembly status](docs/wasm.md).
 
 ## Performance
 
@@ -87,7 +88,7 @@ See `zig build --help` for proposal, sanitizer, fuzzing, ABI, profiling, and cac
 ## What Is Not Implemented
 
 - remaining JavaScriptCore framework/private internals and Bun/Home private ABI;
-- remaining Memory64 terminal profile coverage, shell-only Wasm/JIT hooks, and final host-wide Threads stress evidence;
+- shell-only Wasm/JIT hooks and final host-wide Threads stress evidence;
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
 The roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134); evidence-backed removal of this section is tracked in [#246](https://github.com/zig-utils/zig-js/issues/246).
