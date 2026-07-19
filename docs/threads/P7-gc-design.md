@@ -187,9 +187,13 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   published bitmap slots in global address order at collection/teardown
   boundaries; private reservations, holes, and reused slots remain invisible
   until publication. `zig-gc` can use that iterator instead of its intrusive
-  all-cells list, but the first zig-js activation was rejected after its exact
-  A/B improved four lanes and failed to improve eight. The dormant backing hook
-  remains for the next publication-sharding experiment.
+  all-cells list and can publish aggregate deltas through per-thread shards, but
+  both exact zig-js activations were rejected after improving four lanes and
+  failing to improve eight. The dormant backing hook remains. A follow-up that
+  moved cooperative-GC allocation-byte accounting under the six size-class
+  locks was also rejected: exact all-bucket threshold reads regressed every
+  measured lane. The global atomic remains until a non-blocking read/reset
+  design passes the same exact-parent gate.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron
