@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "kind": "zig_js_release_compatibility_matrix",
+  "roadmap_issue": 134,
+  "release_issue": 147,
+  "readme_removal_issue": 246,
+  "all_green": false,
+  "platform_scope": {
+    "correctness": [
+      { "os": "linux", "architecture": "x86_64", "evidence": ".github/workflows/ci.yml" },
+      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.md" }
+    ],
+    "performance": [
+      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv" }
+    ]
+  },
+  "summaries": {
+    "test262": {
+      "artifact": "docs/.data/test262.json",
+      "pass": 53175,
+      "total": 53175,
+      "skipped": 0
+    },
+    "webassembly": {
+      "artifact": "docs/.data/wasm-conformance-matrix.json",
+      "profiles": 9,
+      "pass": 87838,
+      "not_applicable": 1627,
+      "fail": 0,
+      "runner_error": 0
+    }
+  },
+  "gates": [
+    {
+      "id": "platform_matrix",
+      "issue": 147,
+      "status": "open",
+      "evidence": [".github/workflows/ci.yml", "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv"],
+      "blockers": ["publish the final supported OS/architecture correctness, sanitizer, and performance matrix"]
+    },
+    {
+      "id": "public_jsc_c_api",
+      "issue": 135,
+      "status": "green",
+      "evidence": ["docs/c-api/jsc-public-api-macos-27.0.json"],
+      "blockers": []
+    },
+    {
+      "id": "objective_c_bridge",
+      "issue": 138,
+      "status": "green",
+      "evidence": ["docs/objc-api/jsc-objc-api-macos-27.0.json"],
+      "blockers": []
+    },
+    {
+      "id": "inspector",
+      "issue": 139,
+      "status": "green",
+      "evidence": ["docs/inspector-protocol-0.1.json"],
+      "blockers": []
+    },
+    {
+      "id": "private_abi_profiles",
+      "issue": 140,
+      "status": "open",
+      "evidence": ["docs/abi/home-private-7ed99c02-inventory.json", "docs/abi/bun-private-core-4982b91e-inventory.json"],
+      "blockers": ["remove every pending Home and Bun private-JSC declaration"]
+    },
+    {
+      "id": "webassembly_mvp",
+      "issue": 141,
+      "status": "green",
+      "evidence": ["docs/.data/wasm-spec-inventory.json"],
+      "blockers": []
+    },
+    {
+      "id": "webassembly_profiles",
+      "issue": 142,
+      "status": "open",
+      "evidence": ["docs/.data/wasm-conformance-matrix.json"],
+      "blockers": ["complete the remaining profile-wide CI and supported-host gates"]
+    },
+    {
+      "id": "shell_and_reference_hooks",
+      "issue": 143,
+      "status": "open",
+      "evidence": ["docs/threads/testing.md"],
+      "blockers": ["promote the remaining reference-only shell, Wasm, and JIT hooks"]
+    },
+    {
+      "id": "moving_gc",
+      "issue": 144,
+      "status": "open",
+      "evidence": ["docs/threads/P7-gc-design.md"],
+      "blockers": ["implement moving and compacting collection"]
+    },
+    {
+      "id": "generational_gc",
+      "issue": 145,
+      "status": "open",
+      "evidence": ["docs/threads/P7-gc-design.md"],
+      "blockers": ["implement multi-age generations and parallel mid-script minor collection"]
+    },
+    {
+      "id": "optimizing_jit",
+      "issue": 146,
+      "status": "open",
+      "evidence": ["docs/.data/baseline-jit-profile-2026-07-16.md", "docs/baseline-jit.md"],
+      "blockers": ["implement the optimizing tier, deoptimization, and precise-GC integration"]
+    },
+    {
+      "id": "readme_generation",
+      "issue": 147,
+      "status": "open",
+      "evidence": ["README.md", "tools/benchmark-publication.py", "docs/.data/wasm-conformance-matrix.json"],
+      "blockers": ["generate every capability and benchmark claim from the unified release matrix"]
+    }
+  ],
+  "readme_policy": {
+    "path": "README.md",
+    "not_implemented_heading": "## What Is Not Implemented",
+    "remove_only_when_all_green": true
+  }
+}

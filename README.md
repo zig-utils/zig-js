@@ -91,7 +91,7 @@ See `zig build --help` for proposal, sanitizer, fuzzing, ABI, profiling, and cac
 - shell-only Wasm/JIT hooks and final host-wide Threads stress evidence;
 - moving or multi-age generational GC, parallel mid-script minor collection, and an optimizing JIT.
 
-The roadmap is [#134](https://github.com/zig-utils/zig-js/issues/134); evidence-backed removal of this section is tracked in [#246](https://github.com/zig-utils/zig-js/issues/246).
+The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 
 ## License
 

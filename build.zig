@@ -567,6 +567,27 @@ pub fn build(b: *std.Build) void {
     wasm_feature_profiles_step.dependOn(&wasm_feature_profiles_cmd.step);
     wasm_feature_profiles_step.dependOn(&wasm_conformance_matrix_cmd.step);
 
+    const release_compatibility_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/release-compatibility.py",
+    });
+    const release_compatibility_step = b.step(
+        "release-compatibility-check",
+        "Validate the #134 compatibility matrix and README removal gate",
+    );
+    release_compatibility_step.dependOn(&release_compatibility_cmd.step);
+
+    const release_ready_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/release-compatibility.py",
+        "--release",
+    });
+    const release_ready_step = b.step(
+        "release-ready",
+        "Require every #134 compatibility gate to be green",
+    );
+    release_ready_step.dependOn(&release_ready_cmd.step);
+
     // Threads corpus: `zig build threads-test` runs the vendored WebKit
     // PR-249 thread tests (the green allowlist) against the Phase-6 API.
     // `-Dtsan` builds the corpus *and the engine it links* under
