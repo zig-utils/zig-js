@@ -181,11 +181,15 @@ treats those as non-cells. This keeps the trace surface to runtime values only.
   Fixed-shape shared-realm allocation keeps the exact 1,024-step safepoint
   cadence but may reserve up to 272 default-initialized objects while multiple
   workers contend. The unused suffix is an explicit interpreter root. For an
-  all-owned batch of at least 64 cells, zig-gc initializes and chains headers
-  privately, O(1)-splices the chain under its allocation-metadata lock, then
-  releases that lock before the binding publishes its size-class ownership
-  bitmap. Short batches and marking transitions retain the original per-cell
-  publication path.
+  all-owned batch of at least 64 cells, zig-gc initializes headers privately,
+  updates aggregate metadata once, then publishes the size-class ownership
+  bitmap. The backing merges its six sorted chunk indexes and enumerates only
+  published bitmap slots in global address order at collection/teardown
+  boundaries; private reservations, holes, and reused slots remain invisible
+  until publication. `zig-gc` can use that iterator instead of its intrusive
+  all-cells list, but the first zig-js activation was rejected after its exact
+  A/B improved four lanes and failed to improve eight. The dormant backing hook
+  remains for the next publication-sharding experiment.
 - **Mark:** explicit mark stack (no recursion — JS graphs are deep). Tri-color:
   white = unmarked, grey = on stack, black = traced.
 - **Weak processing:** after the strong mark stack drains, an ephemeron
