@@ -35,13 +35,18 @@ fn validateValType(mod: *const types.Module, value_type: types.ValType, diag: *t
     if ((explicit_reference or value_type == .nofuncref or value_type == .noexternref) and
         !mod.features.typed_function_references)
         return unsupportedFeature(mod, diag, .typed_function_references);
-    if (value_type.isGcReference()) {
+    const concrete_index = ref_type.heap.concreteIndex();
+    if (concrete_index) |index|
+        if (index >= mod.types.len) return failMod(diag, "unknown type");
+    const requires_gc = if (concrete_index) |index|
+        compositeKind(mod.types[index]) != .func
+    else
+        value_type.isAbstractGcReference();
+    if (requires_gc) {
         if (!mod.features.gc) return unsupportedFeature(mod, diag, .gc);
     } else if (!mod.features.reference_types) {
         return unsupportedFeature(mod, diag, .reference_types);
     }
-    if (ref_type.heap.concreteIndex()) |index|
-        if (index >= mod.types.len) return failMod(diag, "unknown type");
 }
 
 fn compositeKind(definition: types.DefType) enum { func, struct_, array } {
@@ -625,9 +630,13 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
         const elem_type = mod.tableType(@intCast(tableidx)).elem;
         if (elem_type != .funcref) try validateValType(mod, elem_type, diag);
     }
-    for (mod.tables) |table|
-        if (table.init) |init|
+    for (mod.tables) |table| {
+        if (table.init) |init| {
             try checkConstExpr(mod, init, table.elem, mod.imported_globals, diag, allocator);
+        } else if (!valTypeDefaultable(table.elem)) {
+            return failMod(diag, "type mismatch");
+        }
+    }
     for (0..mod.totalMems()) |memidx| {
         const memory = mod.memoryType(@intCast(memidx));
         if (memory.shared and memory.limits.max == null)
@@ -2592,6 +2601,17 @@ test "wasm.validate reference values instructions and typed tables" {
         sec(6, "\x02\x70\x00\xD2\x00\x0B\x6F\x00\xD0\x6F\x0B") ++
         sec(10, "\x01" ++ codeBody("\x01\x01\x6F", body));
     try expectValidWithFeatures(bytes, .{ .reference_types = true });
+}
+
+test "wasm.validate non-nullable defined tables require initializers" {
+    const bytes = comptime (hdr ++
+        sec(1, "\x01\x60\x00\x00") ++
+        sec(4, "\x01\x64\x00\x00\x00"));
+    try expectInvalidWithFeatures(
+        bytes,
+        .{ .reference_types = true, .typed_function_references = true },
+        "type mismatch",
+    );
 }
 
 test "wasm.validate reference instruction types and indices" {

@@ -261,6 +261,12 @@ pub const ValType = enum(u64) {
             else => true,
         };
     }
+
+    pub fn isAbstractGcReference(self: ValType) bool {
+        const ref_type = self.refType() orelse return false;
+        if (ref_type.heap.concreteIndex() != null) return false;
+        return self.isGcReference();
+    }
 };
 
 /// A block signature is either one of the compact inline forms or a function

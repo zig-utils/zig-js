@@ -309,7 +309,7 @@ const Reader = struct {
                 .heap = try self.readHeapType(),
             };
             const value_type = types.ValType.fromRef(ref_type);
-            if (value_type.isGcReference() and !self.features.gc)
+            if (value_type.isAbstractGcReference() and !self.features.gc)
                 return self.unsupportedFeature(off, .gc);
             return value_type;
         }
@@ -321,7 +321,7 @@ const Reader = struct {
             return self.unsupportedFeature(off, .fixed_width_simd);
         if ((value_type == .nofuncref or value_type == .noexternref) and !self.features.typed_function_references)
             return self.unsupportedFeature(off, .typed_function_references);
-        if (value_type.isGcReference() and !self.features.gc)
+        if (value_type.isAbstractGcReference() and !self.features.gc)
             return self.unsupportedFeature(off, .gc);
         return value_type;
     }
@@ -388,7 +388,7 @@ const Reader = struct {
                     return self.failAt(off, "invalid block type", .{});
                 const decoded = types.ValType.fromByte(@intCast(byte_signed)) orelse
                     return self.failAt(off, "invalid block type", .{});
-                if (decoded.isGcReference() and !self.features.gc)
+                if (decoded.isAbstractGcReference() and !self.features.gc)
                     return self.unsupportedFeature(off, .gc);
                 break :blk .{ .value = decoded };
             },
@@ -492,7 +492,7 @@ const Reader = struct {
                     return self.unsupportedFeature(op_off, .reference_types);
                 const type_off = self.offset();
                 const ref_type = types.ValType.fromRef(.{ .nullable = true, .heap = try self.readHeapType() });
-                if (ref_type.isGcReference() and !self.features.gc)
+                if (ref_type.isAbstractGcReference() and !self.features.gc)
                     return self.unsupportedFeature(type_off, .gc);
                 break :blk .{ .ref_null = ref_type };
             },
@@ -1100,7 +1100,7 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 } else {
                     const heap = try r.readHeapType();
                     const ref_type = types.ValType.fromRef(.{ .nullable = true, .heap = heap });
-                    if (ref_type.isGcReference() and !r.features.gc)
+                    if (ref_type.isAbstractGcReference() and !r.features.gc)
                         return r.unsupportedFeature(type_off, .gc);
                     instr.imm = .{ .type = ref_type };
                 }
@@ -1648,6 +1648,28 @@ test "wasm.decode multi-memory indices and feature gate" {
     );
     try std.testing.expectEqual(@as(u32, 1), mod.code[0].instrs[2].imm.idx);
     try std.testing.expectEqual(@as(u32, 1), mod.code[0].instrs[3].imm.idx);
+}
+
+test "wasm.decode concrete function references do not require GC" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+    };
+    const concrete = comptime (hdr ++
+        testSection(1, "\x01\x60\x00\x00") ++
+        testSection(4, "\x01\x63\x00\x00\x01"));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, concrete, features, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(types.HeapType.concrete(0), mod.tables[0].elem.refType().?.heap);
+
+    const abstract_gc = comptime (hdr ++ testSection(4, "\x01\x63\x6B\x00\x01"));
+    try expectMalformedWithFeatures(
+        abstract_gc,
+        features,
+        11,
+        "WebAssembly feature gc is disabled",
+    );
 }
 
 fn decodeMemory64WithFailingAllocator(gpa: Allocator) !void {
