@@ -4845,6 +4845,10 @@ fn dataEntry0(comptime offset: i32, comptime bytes: []const u8) []const u8 {
     comptime return "\x00" ++ i32c(offset) ++ "\x0B" ++ leb(bytes.len) ++ bytes;
 }
 
+fn dataEntryMem(comptime memory_index: u32, comptime offset_expr: []const u8, comptime bytes: []const u8) []const u8 {
+    comptime return "\x02" ++ leb(memory_index) ++ offset_expr ++ "\x0B" ++ leb(bytes.len) ++ bytes;
+}
+
 fn dataSec(comptime entries: []const []const u8) []const u8 {
     comptime {
         var payload: []const u8 = leb(entries.len);
@@ -5216,6 +5220,67 @@ test "wasm.exec multi-memory isolates scalar SIMD atomic size and grow" {
         &.{},
         &.{42},
     );
+}
+
+fn exerciseMixedMultiMemoryWithAllocator(gpa: Allocator) !void {
+    const bytes = comptime (hdr ++
+        typesSec(&.{ft("", "")}) ++
+        importSec(&.{impMem("host", "memory", 1, 2)}) ++
+        funcSec(&.{0}) ++
+        sec(5, "\x02\x00\x01\x04\x01") ++ // memory32 1 and memory64 1
+        codeSec(&.{
+            // Copy one byte from memory64 2 into memory32 1.
+            "\x41\x00\x42\x00\x41\x01\xFC\x0A\x01\x02",
+        }) ++ dataSec(&.{
+        dataEntry0(0, "A"),
+        dataEntryMem(1, i32c(0), "B"),
+        dataEntryMem(2, i64c(0), "C"),
+    }));
+    const features: types.Features = .{
+        .bulk_memory = true,
+        .memory64 = true,
+        .multi_memory = true,
+    };
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const imported = try createMemory(talloc, 1, 2);
+    defer destroyMemory(talloc, imported);
+    imported.bytes()[97] = 0xA5;
+
+    const inst = try instantiate(gpa, mod, .{ .mems = &.{imported} }, &diag);
+    var instance_live = true;
+    defer if (instance_live) destroyInstance(gpa, inst);
+    try std.testing.expectEqual(@as(usize, 3), inst.mems.len);
+    try std.testing.expectEqual(imported, inst.mems[0]);
+    try std.testing.expectEqual(types.AddressType.i32, inst.mems[1].address);
+    try std.testing.expectEqual(types.AddressType.i64, inst.mems[2].address);
+    try std.testing.expectEqualSlices(u8, "ABC", &.{
+        inst.mems[0].bytes()[0],
+        inst.mems[1].bytes()[0],
+        inst.mems[2].bytes()[0],
+    });
+    try run0(inst, 0, &.{});
+    try std.testing.expectEqual(@as(u8, 'C'), inst.mems[1].bytes()[0]);
+
+    destroyInstance(gpa, inst);
+    instance_live = false;
+    // Imported stores are borrowed: failed or successful instance teardown must
+    // never free them or disturb bytes outside the module's active segments.
+    try std.testing.expectEqual(@as(u8, 'A'), imported.bytes()[0]);
+    try std.testing.expectEqual(@as(u8, 0xA5), imported.bytes()[97]);
+}
+
+test "wasm.exec mixed multi-memory allocation failures roll back without owning imports" {
+    try std.testing.checkAllAllocationFailures(
+        talloc,
+        exerciseMixedMultiMemoryWithAllocator,
+        .{},
+    );
+}
+
+test "wasm.exec mixed multi-memory lifecycle stress keeps stores independent" {
+    for (0..32) |_| try exerciseMixedMultiMemoryWithAllocator(talloc);
 }
 
 test "wasm.exec memory64 table64 size grow and overflow traps" {
