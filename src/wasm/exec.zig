@@ -1961,10 +1961,8 @@ fn replaceLaneBits(vector: u128, lane: u8, width: u8, value: u64) u128 {
     return (vector & ~mask) | ((@as(u128, value) & low_mask) << shift);
 }
 
-fn splatLaneBits(value: u64, width: u8, count: u8) u128 {
-    var vector: u128 = 0;
-    for (0..count) |lane| vector = replaceLaneBits(vector, @intCast(lane), width, value);
-    return vector;
+fn splatLanes(comptime width: u8, value: u64) u128 {
+    return fromVec(@as(UVec(width), @splat(@as(ULane(width), @truncate(value)))));
 }
 
 // Native vector lowering: the value stack keeps the u128 representation, but
@@ -2146,71 +2144,179 @@ fn loadExtendedLanes(comptime sw: u8, comptime signed: bool, range: SimdMemoryRa
     return fromVec(@as(@Vector(lanes, ULane(sw * 2)), @intCast(source)));
 }
 
-fn loadExtendedMemory(range: SimdMemoryRange, source_width: u8, target_width: u8, signed: bool) u128 {
-    _ = target_width;
-    return switch (source_width) {
-        8 => if (signed) loadExtendedLanes(8, true, range) else loadExtendedLanes(8, false, range),
-        16 => if (signed) loadExtendedLanes(16, true, range) else loadExtendedLanes(16, false, range),
-        32 => if (signed) loadExtendedLanes(32, true, range) else loadExtendedLanes(32, false, range),
-        else => unreachable,
-    };
-}
-
 const SimdRelation = enum { eq, ne, lt, gt, le, ge };
 
-const SimdComparison = struct {
-    width: u8,
-    signed: bool,
-    relation: SimdRelation,
+/// Comptime classification driving the flat executeSimd jump table: each
+/// SIMD op decodes once into comptime lane parameters, so the interpreter
+/// lands on type-specialized native vector code from a single switch.
+const SimdClass = union(enum) {
+    int_cmp: struct { width: u8, signed: bool, relation: SimdRelation },
+    int_unary: struct { width: u8, operation: SimdUnaryInteger },
+    shift: struct { width: u8, operation: SimdShift },
+    wrapping: struct { width: u8, operation: SimdWrappingBinary },
+    bounded: struct { width: u8, operation: SimdBoundedBinary },
+    extend: struct { source_width: u8, signed: bool, high: bool },
+    extmul: struct { source_width: u8, signed: bool, high: bool },
+    narrow: struct { source_width: u8, signed: bool },
+    extadd: struct { source_width: u8, signed: bool },
+    dot,
+    q15mulr,
+    float_cmp: struct { width: u8, relation: SimdRelation },
+    float_unary: u8,
+    float_binary: u8,
 };
 
-fn simdComparison(op: simd.Op) ?SimdComparison {
+fn classifySimd(comptime op: simd.Op) ?SimdClass {
     return switch (op) {
-        .i8x16_eq => .{ .width = 8, .signed = false, .relation = .eq },
-        .i8x16_ne => .{ .width = 8, .signed = false, .relation = .ne },
-        .i8x16_lt_s => .{ .width = 8, .signed = true, .relation = .lt },
-        .i8x16_lt_u => .{ .width = 8, .signed = false, .relation = .lt },
-        .i8x16_gt_s => .{ .width = 8, .signed = true, .relation = .gt },
-        .i8x16_gt_u => .{ .width = 8, .signed = false, .relation = .gt },
-        .i8x16_le_s => .{ .width = 8, .signed = true, .relation = .le },
-        .i8x16_le_u => .{ .width = 8, .signed = false, .relation = .le },
-        .i8x16_ge_s => .{ .width = 8, .signed = true, .relation = .ge },
-        .i8x16_ge_u => .{ .width = 8, .signed = false, .relation = .ge },
-        .i16x8_eq => .{ .width = 16, .signed = false, .relation = .eq },
-        .i16x8_ne => .{ .width = 16, .signed = false, .relation = .ne },
-        .i16x8_lt_s => .{ .width = 16, .signed = true, .relation = .lt },
-        .i16x8_lt_u => .{ .width = 16, .signed = false, .relation = .lt },
-        .i16x8_gt_s => .{ .width = 16, .signed = true, .relation = .gt },
-        .i16x8_gt_u => .{ .width = 16, .signed = false, .relation = .gt },
-        .i16x8_le_s => .{ .width = 16, .signed = true, .relation = .le },
-        .i16x8_le_u => .{ .width = 16, .signed = false, .relation = .le },
-        .i16x8_ge_s => .{ .width = 16, .signed = true, .relation = .ge },
-        .i16x8_ge_u => .{ .width = 16, .signed = false, .relation = .ge },
-        .i32x4_eq => .{ .width = 32, .signed = false, .relation = .eq },
-        .i32x4_ne => .{ .width = 32, .signed = false, .relation = .ne },
-        .i32x4_lt_s => .{ .width = 32, .signed = true, .relation = .lt },
-        .i32x4_lt_u => .{ .width = 32, .signed = false, .relation = .lt },
-        .i32x4_gt_s => .{ .width = 32, .signed = true, .relation = .gt },
-        .i32x4_gt_u => .{ .width = 32, .signed = false, .relation = .gt },
-        .i32x4_le_s => .{ .width = 32, .signed = true, .relation = .le },
-        .i32x4_le_u => .{ .width = 32, .signed = false, .relation = .le },
-        .i32x4_ge_s => .{ .width = 32, .signed = true, .relation = .ge },
-        .i32x4_ge_u => .{ .width = 32, .signed = false, .relation = .ge },
-        .i64x2_eq => .{ .width = 64, .signed = false, .relation = .eq },
-        .i64x2_ne => .{ .width = 64, .signed = false, .relation = .ne },
-        .i64x2_lt_s => .{ .width = 64, .signed = true, .relation = .lt },
-        .i64x2_gt_s => .{ .width = 64, .signed = true, .relation = .gt },
-        .i64x2_le_s => .{ .width = 64, .signed = true, .relation = .le },
-        .i64x2_ge_s => .{ .width = 64, .signed = true, .relation = .ge },
+        .i8x16_eq => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .eq } },
+        .i8x16_ne => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .ne } },
+        .i8x16_lt_s => .{ .int_cmp = .{ .width = 8, .signed = true, .relation = .lt } },
+        .i8x16_lt_u => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .lt } },
+        .i8x16_gt_s => .{ .int_cmp = .{ .width = 8, .signed = true, .relation = .gt } },
+        .i8x16_gt_u => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .gt } },
+        .i8x16_le_s => .{ .int_cmp = .{ .width = 8, .signed = true, .relation = .le } },
+        .i8x16_le_u => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .le } },
+        .i8x16_ge_s => .{ .int_cmp = .{ .width = 8, .signed = true, .relation = .ge } },
+        .i8x16_ge_u => .{ .int_cmp = .{ .width = 8, .signed = false, .relation = .ge } },
+        .i16x8_eq => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .eq } },
+        .i16x8_ne => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .ne } },
+        .i16x8_lt_s => .{ .int_cmp = .{ .width = 16, .signed = true, .relation = .lt } },
+        .i16x8_lt_u => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .lt } },
+        .i16x8_gt_s => .{ .int_cmp = .{ .width = 16, .signed = true, .relation = .gt } },
+        .i16x8_gt_u => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .gt } },
+        .i16x8_le_s => .{ .int_cmp = .{ .width = 16, .signed = true, .relation = .le } },
+        .i16x8_le_u => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .le } },
+        .i16x8_ge_s => .{ .int_cmp = .{ .width = 16, .signed = true, .relation = .ge } },
+        .i16x8_ge_u => .{ .int_cmp = .{ .width = 16, .signed = false, .relation = .ge } },
+        .i32x4_eq => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .eq } },
+        .i32x4_ne => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .ne } },
+        .i32x4_lt_s => .{ .int_cmp = .{ .width = 32, .signed = true, .relation = .lt } },
+        .i32x4_lt_u => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .lt } },
+        .i32x4_gt_s => .{ .int_cmp = .{ .width = 32, .signed = true, .relation = .gt } },
+        .i32x4_gt_u => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .gt } },
+        .i32x4_le_s => .{ .int_cmp = .{ .width = 32, .signed = true, .relation = .le } },
+        .i32x4_le_u => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .le } },
+        .i32x4_ge_s => .{ .int_cmp = .{ .width = 32, .signed = true, .relation = .ge } },
+        .i32x4_ge_u => .{ .int_cmp = .{ .width = 32, .signed = false, .relation = .ge } },
+        .i64x2_eq => .{ .int_cmp = .{ .width = 64, .signed = false, .relation = .eq } },
+        .i64x2_ne => .{ .int_cmp = .{ .width = 64, .signed = false, .relation = .ne } },
+        .i64x2_lt_s => .{ .int_cmp = .{ .width = 64, .signed = true, .relation = .lt } },
+        .i64x2_gt_s => .{ .int_cmp = .{ .width = 64, .signed = true, .relation = .gt } },
+        .i64x2_le_s => .{ .int_cmp = .{ .width = 64, .signed = true, .relation = .le } },
+        .i64x2_ge_s => .{ .int_cmp = .{ .width = 64, .signed = true, .relation = .ge } },
+        .i8x16_abs => .{ .int_unary = .{ .width = 8, .operation = .abs } },
+        .i8x16_neg => .{ .int_unary = .{ .width = 8, .operation = .neg } },
+        .i8x16_popcnt => .{ .int_unary = .{ .width = 8, .operation = .popcnt } },
+        .i16x8_abs => .{ .int_unary = .{ .width = 16, .operation = .abs } },
+        .i16x8_neg => .{ .int_unary = .{ .width = 16, .operation = .neg } },
+        .i32x4_abs => .{ .int_unary = .{ .width = 32, .operation = .abs } },
+        .i32x4_neg => .{ .int_unary = .{ .width = 32, .operation = .neg } },
+        .i64x2_abs => .{ .int_unary = .{ .width = 64, .operation = .abs } },
+        .i64x2_neg => .{ .int_unary = .{ .width = 64, .operation = .neg } },
+        .i8x16_shl => .{ .shift = .{ .width = 8, .operation = .left } },
+        .i8x16_shr_s => .{ .shift = .{ .width = 8, .operation = .right_signed } },
+        .i8x16_shr_u => .{ .shift = .{ .width = 8, .operation = .right_unsigned } },
+        .i16x8_shl => .{ .shift = .{ .width = 16, .operation = .left } },
+        .i16x8_shr_s => .{ .shift = .{ .width = 16, .operation = .right_signed } },
+        .i16x8_shr_u => .{ .shift = .{ .width = 16, .operation = .right_unsigned } },
+        .i32x4_shl => .{ .shift = .{ .width = 32, .operation = .left } },
+        .i32x4_shr_s => .{ .shift = .{ .width = 32, .operation = .right_signed } },
+        .i32x4_shr_u => .{ .shift = .{ .width = 32, .operation = .right_unsigned } },
+        .i64x2_shl => .{ .shift = .{ .width = 64, .operation = .left } },
+        .i64x2_shr_s => .{ .shift = .{ .width = 64, .operation = .right_signed } },
+        .i64x2_shr_u => .{ .shift = .{ .width = 64, .operation = .right_unsigned } },
+        .i8x16_add => .{ .wrapping = .{ .width = 8, .operation = .add } },
+        .i8x16_sub => .{ .wrapping = .{ .width = 8, .operation = .sub } },
+        .i16x8_add => .{ .wrapping = .{ .width = 16, .operation = .add } },
+        .i16x8_sub => .{ .wrapping = .{ .width = 16, .operation = .sub } },
+        .i16x8_mul => .{ .wrapping = .{ .width = 16, .operation = .mul } },
+        .i32x4_add => .{ .wrapping = .{ .width = 32, .operation = .add } },
+        .i32x4_sub => .{ .wrapping = .{ .width = 32, .operation = .sub } },
+        .i32x4_mul => .{ .wrapping = .{ .width = 32, .operation = .mul } },
+        .i64x2_add => .{ .wrapping = .{ .width = 64, .operation = .add } },
+        .i64x2_sub => .{ .wrapping = .{ .width = 64, .operation = .sub } },
+        .i64x2_mul => .{ .wrapping = .{ .width = 64, .operation = .mul } },
+        .i8x16_add_sat_s => .{ .bounded = .{ .width = 8, .operation = .add_sat_signed } },
+        .i8x16_add_sat_u => .{ .bounded = .{ .width = 8, .operation = .add_sat_unsigned } },
+        .i8x16_sub_sat_s => .{ .bounded = .{ .width = 8, .operation = .sub_sat_signed } },
+        .i8x16_sub_sat_u => .{ .bounded = .{ .width = 8, .operation = .sub_sat_unsigned } },
+        .i8x16_min_s => .{ .bounded = .{ .width = 8, .operation = .min_signed } },
+        .i8x16_min_u => .{ .bounded = .{ .width = 8, .operation = .min_unsigned } },
+        .i8x16_max_s => .{ .bounded = .{ .width = 8, .operation = .max_signed } },
+        .i8x16_max_u => .{ .bounded = .{ .width = 8, .operation = .max_unsigned } },
+        .i8x16_avgr_u => .{ .bounded = .{ .width = 8, .operation = .average_unsigned } },
+        .i16x8_add_sat_s => .{ .bounded = .{ .width = 16, .operation = .add_sat_signed } },
+        .i16x8_add_sat_u => .{ .bounded = .{ .width = 16, .operation = .add_sat_unsigned } },
+        .i16x8_sub_sat_s => .{ .bounded = .{ .width = 16, .operation = .sub_sat_signed } },
+        .i16x8_sub_sat_u => .{ .bounded = .{ .width = 16, .operation = .sub_sat_unsigned } },
+        .i16x8_min_s => .{ .bounded = .{ .width = 16, .operation = .min_signed } },
+        .i16x8_min_u => .{ .bounded = .{ .width = 16, .operation = .min_unsigned } },
+        .i16x8_max_s => .{ .bounded = .{ .width = 16, .operation = .max_signed } },
+        .i16x8_max_u => .{ .bounded = .{ .width = 16, .operation = .max_unsigned } },
+        .i16x8_avgr_u => .{ .bounded = .{ .width = 16, .operation = .average_unsigned } },
+        .i32x4_min_s => .{ .bounded = .{ .width = 32, .operation = .min_signed } },
+        .i32x4_min_u => .{ .bounded = .{ .width = 32, .operation = .min_unsigned } },
+        .i32x4_max_s => .{ .bounded = .{ .width = 32, .operation = .max_signed } },
+        .i32x4_max_u => .{ .bounded = .{ .width = 32, .operation = .max_unsigned } },
+        .i16x8_extend_low_i8x16_s => .{ .extend = .{ .source_width = 8, .signed = true, .high = false } },
+        .i16x8_extend_high_i8x16_s => .{ .extend = .{ .source_width = 8, .signed = true, .high = true } },
+        .i16x8_extend_low_i8x16_u => .{ .extend = .{ .source_width = 8, .signed = false, .high = false } },
+        .i16x8_extend_high_i8x16_u => .{ .extend = .{ .source_width = 8, .signed = false, .high = true } },
+        .i32x4_extend_low_i16x8_s => .{ .extend = .{ .source_width = 16, .signed = true, .high = false } },
+        .i32x4_extend_high_i16x8_s => .{ .extend = .{ .source_width = 16, .signed = true, .high = true } },
+        .i32x4_extend_low_i16x8_u => .{ .extend = .{ .source_width = 16, .signed = false, .high = false } },
+        .i32x4_extend_high_i16x8_u => .{ .extend = .{ .source_width = 16, .signed = false, .high = true } },
+        .i64x2_extend_low_i32x4_s => .{ .extend = .{ .source_width = 32, .signed = true, .high = false } },
+        .i64x2_extend_high_i32x4_s => .{ .extend = .{ .source_width = 32, .signed = true, .high = true } },
+        .i64x2_extend_low_i32x4_u => .{ .extend = .{ .source_width = 32, .signed = false, .high = false } },
+        .i64x2_extend_high_i32x4_u => .{ .extend = .{ .source_width = 32, .signed = false, .high = true } },
+        .i16x8_extmul_low_i8x16_s => .{ .extmul = .{ .source_width = 8, .signed = true, .high = false } },
+        .i16x8_extmul_high_i8x16_s => .{ .extmul = .{ .source_width = 8, .signed = true, .high = true } },
+        .i16x8_extmul_low_i8x16_u => .{ .extmul = .{ .source_width = 8, .signed = false, .high = false } },
+        .i16x8_extmul_high_i8x16_u => .{ .extmul = .{ .source_width = 8, .signed = false, .high = true } },
+        .i32x4_extmul_low_i16x8_s => .{ .extmul = .{ .source_width = 16, .signed = true, .high = false } },
+        .i32x4_extmul_high_i16x8_s => .{ .extmul = .{ .source_width = 16, .signed = true, .high = true } },
+        .i32x4_extmul_low_i16x8_u => .{ .extmul = .{ .source_width = 16, .signed = false, .high = false } },
+        .i32x4_extmul_high_i16x8_u => .{ .extmul = .{ .source_width = 16, .signed = false, .high = true } },
+        .i64x2_extmul_low_i32x4_s => .{ .extmul = .{ .source_width = 32, .signed = true, .high = false } },
+        .i64x2_extmul_high_i32x4_s => .{ .extmul = .{ .source_width = 32, .signed = true, .high = true } },
+        .i64x2_extmul_low_i32x4_u => .{ .extmul = .{ .source_width = 32, .signed = false, .high = false } },
+        .i64x2_extmul_high_i32x4_u => .{ .extmul = .{ .source_width = 32, .signed = false, .high = true } },
+        .i8x16_narrow_i16x8_s => .{ .narrow = .{ .source_width = 16, .signed = true } },
+        .i8x16_narrow_i16x8_u => .{ .narrow = .{ .source_width = 16, .signed = false } },
+        .i16x8_narrow_i32x4_s => .{ .narrow = .{ .source_width = 32, .signed = true } },
+        .i16x8_narrow_i32x4_u => .{ .narrow = .{ .source_width = 32, .signed = false } },
+        .i16x8_extadd_pairwise_i8x16_s => .{ .extadd = .{ .source_width = 8, .signed = true } },
+        .i16x8_extadd_pairwise_i8x16_u => .{ .extadd = .{ .source_width = 8, .signed = false } },
+        .i32x4_extadd_pairwise_i16x8_s => .{ .extadd = .{ .source_width = 16, .signed = true } },
+        .i32x4_extadd_pairwise_i16x8_u => .{ .extadd = .{ .source_width = 16, .signed = false } },
+        .i32x4_dot_i16x8_s => .dot,
+        .i16x8_q15mulr_sat_s => .q15mulr,
+        .f32x4_eq => .{ .float_cmp = .{ .width = 32, .relation = .eq } },
+        .f32x4_ne => .{ .float_cmp = .{ .width = 32, .relation = .ne } },
+        .f32x4_lt => .{ .float_cmp = .{ .width = 32, .relation = .lt } },
+        .f32x4_gt => .{ .float_cmp = .{ .width = 32, .relation = .gt } },
+        .f32x4_le => .{ .float_cmp = .{ .width = 32, .relation = .le } },
+        .f32x4_ge => .{ .float_cmp = .{ .width = 32, .relation = .ge } },
+        .f64x2_eq => .{ .float_cmp = .{ .width = 64, .relation = .eq } },
+        .f64x2_ne => .{ .float_cmp = .{ .width = 64, .relation = .ne } },
+        .f64x2_lt => .{ .float_cmp = .{ .width = 64, .relation = .lt } },
+        .f64x2_gt => .{ .float_cmp = .{ .width = 64, .relation = .gt } },
+        .f64x2_le => .{ .float_cmp = .{ .width = 64, .relation = .le } },
+        .f64x2_ge => .{ .float_cmp = .{ .width = 64, .relation = .ge } },
+        .f32x4_abs, .f32x4_neg, .f32x4_sqrt, .f32x4_ceil, .f32x4_floor, .f32x4_trunc, .f32x4_nearest => .{ .float_unary = 32 },
+        .f64x2_abs, .f64x2_neg, .f64x2_sqrt, .f64x2_ceil, .f64x2_floor, .f64x2_trunc, .f64x2_nearest => .{ .float_unary = 64 },
+        .f32x4_add, .f32x4_sub, .f32x4_mul, .f32x4_div, .f32x4_min, .f32x4_max, .f32x4_pmin, .f32x4_pmax => .{ .float_binary = 32 },
+        .f64x2_add, .f64x2_sub, .f64x2_mul, .f64x2_div, .f64x2_min, .f64x2_max, .f64x2_pmin, .f64x2_pmax => .{ .float_binary = 64 },
         else => null,
     };
 }
 
-fn compareLanes(comptime width: u8, left: u128, right: u128, comparison: SimdComparison) u128 {
-    const pred = if (comparison.signed) blk: {
+fn compareLanes(comptime width: u8, comptime signed: bool, comptime relation: SimdRelation, left: u128, right: u128) u128 {
+    const pred = if (signed) blk: {
         const a = svec(width, left);
         const b = svec(width, right);
-        break :blk switch (comparison.relation) {
+        break :blk switch (relation) {
             .eq => a == b,
             .ne => a != b,
             .lt => a < b,
@@ -2221,7 +2327,7 @@ fn compareLanes(comptime width: u8, left: u128, right: u128, comparison: SimdCom
     } else blk: {
         const a = uvec(width, left);
         const b = uvec(width, right);
-        break :blk switch (comparison.relation) {
+        break :blk switch (relation) {
             .eq => a == b,
             .ne => a != b,
             .lt => a < b,
@@ -2233,29 +2339,9 @@ fn compareLanes(comptime width: u8, left: u128, right: u128, comparison: SimdCom
     return maskVec(width, pred);
 }
 
-fn compareSimdLanes(left: u128, right: u128, comparison: SimdComparison) u128 {
-    return switch (comparison.width) {
-        8 => compareLanes(8, left, right, comparison),
-        16 => compareLanes(16, left, right, comparison),
-        32 => compareLanes(32, left, right, comparison),
-        64 => compareLanes(64, left, right, comparison),
-        else => unreachable,
-    };
-}
-
 fn allLanesTrue(comptime width: u8, vector: u128) bool {
     const zero: UVec(width) = @splat(0);
     return @reduce(.And, uvec(width, vector) != zero);
-}
-
-fn allSimdLanesTrue(vector: u128, width: u8) bool {
-    return switch (width) {
-        8 => allLanesTrue(8, vector),
-        16 => allLanesTrue(16, vector),
-        32 => allLanesTrue(32, vector),
-        64 => allLanesTrue(64, vector),
-        else => unreachable,
-    };
 }
 
 fn laneBitmask(comptime width: u8, vector: u128) u32 {
@@ -2265,62 +2351,9 @@ fn laneBitmask(comptime width: u8, vector: u128) u32 {
     return @reduce(.Or, signs << indices);
 }
 
-fn simdLaneBitmask(vector: u128, width: u8) u32 {
-    return switch (width) {
-        8 => laneBitmask(8, vector),
-        16 => laneBitmask(16, vector),
-        32 => laneBitmask(32, vector),
-        64 => laneBitmask(64, vector),
-        else => unreachable,
-    };
-}
-
-fn executeSimdIntegerComparison(s: *State, op: simd.Op) ExecError!bool {
-    if (simdComparison(op)) |comparison| {
-        const right = popVector(s);
-        try pushVector(s, compareSimdLanes(popVector(s), right, comparison));
-        return true;
-    }
-    const reduction_width: ?u8 = switch (op) {
-        .i8x16_all_true, .i8x16_bitmask => 8,
-        .i16x8_all_true, .i16x8_bitmask => 16,
-        .i32x4_all_true, .i32x4_bitmask => 32,
-        .i64x2_all_true, .i64x2_bitmask => 64,
-        else => null,
-    };
-    const width = reduction_width orelse return false;
-    const vector = popVector(s);
-    switch (op) {
-        .i8x16_all_true, .i16x8_all_true, .i32x4_all_true, .i64x2_all_true => try pushBool(s, allSimdLanesTrue(vector, width)),
-        .i8x16_bitmask, .i16x8_bitmask, .i32x4_bitmask, .i64x2_bitmask => try pushI32(s, simdLaneBitmask(vector, width)),
-        else => unreachable,
-    }
-    return true;
-}
-
 const SimdUnaryInteger = enum { abs, neg, popcnt };
 
-const SimdUnaryIntegerOp = struct {
-    width: u8,
-    operation: SimdUnaryInteger,
-};
-
-fn simdUnaryInteger(op: simd.Op) ?SimdUnaryIntegerOp {
-    return switch (op) {
-        .i8x16_abs => .{ .width = 8, .operation = .abs },
-        .i8x16_neg => .{ .width = 8, .operation = .neg },
-        .i8x16_popcnt => .{ .width = 8, .operation = .popcnt },
-        .i16x8_abs => .{ .width = 16, .operation = .abs },
-        .i16x8_neg => .{ .width = 16, .operation = .neg },
-        .i32x4_abs => .{ .width = 32, .operation = .abs },
-        .i32x4_neg => .{ .width = 32, .operation = .neg },
-        .i64x2_abs => .{ .width = 64, .operation = .abs },
-        .i64x2_neg => .{ .width = 64, .operation = .neg },
-        else => null,
-    };
-}
-
-fn unaryIntegerLanes(comptime width: u8, vector: u128, operation: SimdUnaryInteger) u128 {
+fn unaryIntegerLanes(comptime width: u8, vector: u128, comptime operation: SimdUnaryInteger) u128 {
     switch (operation) {
         .abs => {
             const a = svec(width, vector);
@@ -2332,42 +2365,9 @@ fn unaryIntegerLanes(comptime width: u8, vector: u128, operation: SimdUnaryInteg
     }
 }
 
-fn mapSimdUnaryInteger(vector: u128, descriptor: SimdUnaryIntegerOp) u128 {
-    return switch (descriptor.width) {
-        8 => unaryIntegerLanes(8, vector, descriptor.operation),
-        16 => unaryIntegerLanes(16, vector, descriptor.operation),
-        32 => unaryIntegerLanes(32, vector, descriptor.operation),
-        64 => unaryIntegerLanes(64, vector, descriptor.operation),
-        else => unreachable,
-    };
-}
-
 const SimdShift = enum { left, right_signed, right_unsigned };
 
-const SimdShiftOp = struct {
-    width: u8,
-    operation: SimdShift,
-};
-
-fn simdShift(op: simd.Op) ?SimdShiftOp {
-    return switch (op) {
-        .i8x16_shl => .{ .width = 8, .operation = .left },
-        .i8x16_shr_s => .{ .width = 8, .operation = .right_signed },
-        .i8x16_shr_u => .{ .width = 8, .operation = .right_unsigned },
-        .i16x8_shl => .{ .width = 16, .operation = .left },
-        .i16x8_shr_s => .{ .width = 16, .operation = .right_signed },
-        .i16x8_shr_u => .{ .width = 16, .operation = .right_unsigned },
-        .i32x4_shl => .{ .width = 32, .operation = .left },
-        .i32x4_shr_s => .{ .width = 32, .operation = .right_signed },
-        .i32x4_shr_u => .{ .width = 32, .operation = .right_unsigned },
-        .i64x2_shl => .{ .width = 64, .operation = .left },
-        .i64x2_shr_s => .{ .width = 64, .operation = .right_signed },
-        .i64x2_shr_u => .{ .width = 64, .operation = .right_unsigned },
-        else => null,
-    };
-}
-
-fn shiftLanes(comptime width: u8, vector: u128, shift: u32, operation: SimdShift) u128 {
+fn shiftLanes(comptime width: u8, vector: u128, shift: u32, comptime operation: SimdShift) u128 {
     const amount = shiftVec(width, shift);
     return switch (operation) {
         .left => fromVec(uvec(width, vector) << amount),
@@ -2376,41 +2376,9 @@ fn shiftLanes(comptime width: u8, vector: u128, shift: u32, operation: SimdShift
     };
 }
 
-fn shiftSimdLanes(vector: u128, shift: u32, descriptor: SimdShiftOp) u128 {
-    return switch (descriptor.width) {
-        8 => shiftLanes(8, vector, shift, descriptor.operation),
-        16 => shiftLanes(16, vector, shift, descriptor.operation),
-        32 => shiftLanes(32, vector, shift, descriptor.operation),
-        64 => shiftLanes(64, vector, shift, descriptor.operation),
-        else => unreachable,
-    };
-}
-
 const SimdWrappingBinary = enum { add, sub, mul };
 
-const SimdWrappingBinaryOp = struct {
-    width: u8,
-    operation: SimdWrappingBinary,
-};
-
-fn simdWrappingBinary(op: simd.Op) ?SimdWrappingBinaryOp {
-    return switch (op) {
-        .i8x16_add => .{ .width = 8, .operation = .add },
-        .i8x16_sub => .{ .width = 8, .operation = .sub },
-        .i16x8_add => .{ .width = 16, .operation = .add },
-        .i16x8_sub => .{ .width = 16, .operation = .sub },
-        .i16x8_mul => .{ .width = 16, .operation = .mul },
-        .i32x4_add => .{ .width = 32, .operation = .add },
-        .i32x4_sub => .{ .width = 32, .operation = .sub },
-        .i32x4_mul => .{ .width = 32, .operation = .mul },
-        .i64x2_add => .{ .width = 64, .operation = .add },
-        .i64x2_sub => .{ .width = 64, .operation = .sub },
-        .i64x2_mul => .{ .width = 64, .operation = .mul },
-        else => null,
-    };
-}
-
-fn wrappingLanes(comptime width: u8, left: u128, right: u128, operation: SimdWrappingBinary) u128 {
+fn wrappingLanes(comptime width: u8, left: u128, right: u128, comptime operation: SimdWrappingBinary) u128 {
     const a = uvec(width, left);
     const b = uvec(width, right);
     return fromVec(switch (operation) {
@@ -2418,34 +2386,6 @@ fn wrappingLanes(comptime width: u8, left: u128, right: u128, operation: SimdWra
         .sub => a -% b,
         .mul => a *% b,
     });
-}
-
-fn mapSimdWrappingBinary(left: u128, right: u128, descriptor: SimdWrappingBinaryOp) u128 {
-    return switch (descriptor.width) {
-        8 => wrappingLanes(8, left, right, descriptor.operation),
-        16 => wrappingLanes(16, left, right, descriptor.operation),
-        32 => wrappingLanes(32, left, right, descriptor.operation),
-        64 => wrappingLanes(64, left, right, descriptor.operation),
-        else => unreachable,
-    };
-}
-
-fn executeSimdIntegerBasic(s: *State, op: simd.Op) ExecError!bool {
-    if (simdUnaryInteger(op)) |descriptor| {
-        try pushVector(s, mapSimdUnaryInteger(popVector(s), descriptor));
-        return true;
-    }
-    if (simdShift(op)) |descriptor| {
-        const amount = popI32(s);
-        try pushVector(s, shiftSimdLanes(popVector(s), amount, descriptor));
-        return true;
-    }
-    if (simdWrappingBinary(op)) |descriptor| {
-        const right = popVector(s);
-        try pushVector(s, mapSimdWrappingBinary(popVector(s), right, descriptor));
-        return true;
-    }
-    return false;
 }
 
 const SimdBoundedBinary = enum {
@@ -2460,48 +2400,7 @@ const SimdBoundedBinary = enum {
     average_unsigned,
 };
 
-const SimdBoundedBinaryOp = struct {
-    width: u8,
-    operation: SimdBoundedBinary,
-};
-
-fn simdBoundedBinary(op: simd.Op) ?SimdBoundedBinaryOp {
-    return switch (op) {
-        .i8x16_add_sat_s => .{ .width = 8, .operation = .add_sat_signed },
-        .i8x16_add_sat_u => .{ .width = 8, .operation = .add_sat_unsigned },
-        .i8x16_sub_sat_s => .{ .width = 8, .operation = .sub_sat_signed },
-        .i8x16_sub_sat_u => .{ .width = 8, .operation = .sub_sat_unsigned },
-        .i8x16_min_s => .{ .width = 8, .operation = .min_signed },
-        .i8x16_min_u => .{ .width = 8, .operation = .min_unsigned },
-        .i8x16_max_s => .{ .width = 8, .operation = .max_signed },
-        .i8x16_max_u => .{ .width = 8, .operation = .max_unsigned },
-        .i8x16_avgr_u => .{ .width = 8, .operation = .average_unsigned },
-        .i16x8_add_sat_s => .{ .width = 16, .operation = .add_sat_signed },
-        .i16x8_add_sat_u => .{ .width = 16, .operation = .add_sat_unsigned },
-        .i16x8_sub_sat_s => .{ .width = 16, .operation = .sub_sat_signed },
-        .i16x8_sub_sat_u => .{ .width = 16, .operation = .sub_sat_unsigned },
-        .i16x8_min_s => .{ .width = 16, .operation = .min_signed },
-        .i16x8_min_u => .{ .width = 16, .operation = .min_unsigned },
-        .i16x8_max_s => .{ .width = 16, .operation = .max_signed },
-        .i16x8_max_u => .{ .width = 16, .operation = .max_unsigned },
-        .i16x8_avgr_u => .{ .width = 16, .operation = .average_unsigned },
-        .i32x4_min_s => .{ .width = 32, .operation = .min_signed },
-        .i32x4_min_u => .{ .width = 32, .operation = .min_unsigned },
-        .i32x4_max_s => .{ .width = 32, .operation = .max_signed },
-        .i32x4_max_u => .{ .width = 32, .operation = .max_unsigned },
-        else => null,
-    };
-}
-
-fn signedSimdLane(value: u64, width: u8) i64 {
-    return @bitCast(signExtendLane(value, width));
-}
-
-fn signedLaneBits(value: i64) u64 {
-    return @bitCast(value);
-}
-
-fn boundedLanes(comptime width: u8, left: u128, right: u128, operation: SimdBoundedBinary) u128 {
+fn boundedLanes(comptime width: u8, left: u128, right: u128, comptime operation: SimdBoundedBinary) u128 {
     switch (operation) {
         .add_sat_signed => return fromVec(svec(width, left) +| svec(width, right)),
         .add_sat_unsigned => return fromVec(uvec(width, left) +| uvec(width, right)),
@@ -2518,22 +2417,6 @@ fn boundedLanes(comptime width: u8, left: u128, right: u128, operation: SimdBoun
             return fromVec((a | b) -% ((a ^ b) >> shiftVec(width, 1)));
         },
     }
-}
-
-fn mapSimdBoundedBinary(left: u128, right: u128, descriptor: SimdBoundedBinaryOp) u128 {
-    return switch (descriptor.width) {
-        8 => boundedLanes(8, left, right, descriptor.operation),
-        16 => boundedLanes(16, left, right, descriptor.operation),
-        32 => boundedLanes(32, left, right, descriptor.operation),
-        else => unreachable,
-    };
-}
-
-fn executeSimdIntegerBounded(s: *State, op: simd.Op) ExecError!bool {
-    const descriptor = simdBoundedBinary(op) orelse return false;
-    const right = popVector(s);
-    try pushVector(s, mapSimdBoundedBinary(popVector(s), right, descriptor));
-    return true;
 }
 
 fn f32Lane(vector: u128, lane: u8) f32 {
@@ -2558,7 +2441,7 @@ fn replaceF64Lane(vector: u128, lane: u8, value: f64) u128 {
     return replaceLaneBits(vector, lane, 64, bits);
 }
 
-fn compareFloatLanes(comptime width: u8, left: u128, right: u128, relation: SimdRelation) u128 {
+fn compareFloatLanes(comptime width: u8, left: u128, right: u128, comptime relation: SimdRelation) u128 {
     const a = fvec(width, left);
     const b = fvec(width, right);
     return maskVec(width, switch (relation) {
@@ -2571,31 +2454,7 @@ fn compareFloatLanes(comptime width: u8, left: u128, right: u128, relation: Simd
     });
 }
 
-fn executeSimdFloatComparison(s: *State, op: simd.Op) ExecError!bool {
-    const relation: SimdRelation = switch (op) {
-        .f32x4_eq, .f64x2_eq => .eq,
-        .f32x4_ne, .f64x2_ne => .ne,
-        .f32x4_lt, .f64x2_lt => .lt,
-        .f32x4_gt, .f64x2_gt => .gt,
-        .f32x4_le, .f64x2_le => .le,
-        .f32x4_ge, .f64x2_ge => .ge,
-        else => return false,
-    };
-    const width: u8 = switch (op) {
-        .f32x4_eq, .f32x4_ne, .f32x4_lt, .f32x4_gt, .f32x4_le, .f32x4_ge => 32,
-        .f64x2_eq, .f64x2_ne, .f64x2_lt, .f64x2_gt, .f64x2_le, .f64x2_ge => 64,
-        else => unreachable,
-    };
-    const right = popVector(s);
-    const left = popVector(s);
-    try pushVector(s, if (width == 32)
-        compareFloatLanes(32, left, right, relation)
-    else
-        compareFloatLanes(64, left, right, relation));
-    return true;
-}
-
-fn unaryFloatLanes(comptime width: u8, source: u128, op: simd.Op) u128 {
+fn unaryFloatLanes(comptime width: u8, source: u128, comptime op: simd.Op) u128 {
     const bits = uvec(width, source);
     switch (op) {
         .f32x4_abs, .f64x2_abs => {
@@ -2619,21 +2478,7 @@ fn unaryFloatLanes(comptime width: u8, source: u128, op: simd.Op) u128 {
     }));
 }
 
-fn executeSimdFloatUnary(s: *State, op: simd.Op) ExecError!bool {
-    const width: u8 = switch (op) {
-        .f32x4_abs, .f32x4_neg, .f32x4_sqrt, .f32x4_ceil, .f32x4_floor, .f32x4_trunc, .f32x4_nearest => 32,
-        .f64x2_abs, .f64x2_neg, .f64x2_sqrt, .f64x2_ceil, .f64x2_floor, .f64x2_trunc, .f64x2_nearest => 64,
-        else => return false,
-    };
-    const source = popVector(s);
-    try pushVector(s, if (width == 32)
-        unaryFloatLanes(32, source, op)
-    else
-        unaryFloatLanes(64, source, op));
-    return true;
-}
-
-fn binaryFloatLanes(comptime width: u8, left: u128, right: u128, op: simd.Op) u128 {
+fn binaryFloatLanes(comptime width: u8, left: u128, right: u128, comptime op: simd.Op) u128 {
     const a = fvec(width, left);
     const b = fvec(width, right);
     switch (op) {
@@ -2653,22 +2498,7 @@ fn binaryFloatLanes(comptime width: u8, left: u128, right: u128, op: simd.Op) u1
     return fromVec(canonFloat(width, computed));
 }
 
-fn executeSimdFloatBinary(s: *State, op: simd.Op) ExecError!bool {
-    const width: u8 = switch (op) {
-        .f32x4_add, .f32x4_sub, .f32x4_mul, .f32x4_div, .f32x4_min, .f32x4_max, .f32x4_pmin, .f32x4_pmax => 32,
-        .f64x2_add, .f64x2_sub, .f64x2_mul, .f64x2_div, .f64x2_min, .f64x2_max, .f64x2_pmin, .f64x2_pmax => 64,
-        else => return false,
-    };
-    const right = popVector(s);
-    const left = popVector(s);
-    try pushVector(s, if (width == 32)
-        binaryFloatLanes(32, left, right, op)
-    else
-        binaryFloatLanes(64, left, right, op));
-    return true;
-}
-
-fn executeSimdFloatConversion(s: *State, op: simd.Op) ExecError!bool {
+fn executeSimdConversion(s: *State, op: simd.Op) ExecError!void {
     switch (op) {
         .i32x4_trunc_sat_f32x4_s, .i32x4_trunc_sat_f32x4_u => {
             const source = popVector(s);
@@ -2736,34 +2566,8 @@ fn executeSimdFloatConversion(s: *State, op: simd.Op) ExecError!bool {
             }
             try pushVector(s, result);
         },
-        else => return false,
+        else => unreachable,
     }
-    return true;
-}
-
-const SimdIntegerTransform = struct {
-    source_width: u8,
-    target_width: u8,
-    signed: bool,
-    high: bool = false,
-};
-
-fn simdExtend(op: simd.Op) ?SimdIntegerTransform {
-    return switch (op) {
-        .i16x8_extend_low_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true },
-        .i16x8_extend_high_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true, .high = true },
-        .i16x8_extend_low_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false },
-        .i16x8_extend_high_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false, .high = true },
-        .i32x4_extend_low_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true },
-        .i32x4_extend_high_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true, .high = true },
-        .i32x4_extend_low_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false },
-        .i32x4_extend_high_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false, .high = true },
-        .i64x2_extend_low_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true },
-        .i64x2_extend_high_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true, .high = true },
-        .i64x2_extend_low_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false },
-        .i64x2_extend_high_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false, .high = true },
-        else => null,
-    };
 }
 
 fn halfMask(comptime lanes: usize, comptime first: usize) [lanes]i32 {
@@ -2783,42 +2587,6 @@ fn extendHalf(comptime sw: u8, comptime signed: bool, comptime high: bool, vecto
     return fromVec(@as(@Vector(lanes, ULane(sw * 2)), @intCast(half)));
 }
 
-fn extendSimdHalf(vector: u128, descriptor: SimdIntegerTransform) u128 {
-    return switch (descriptor.source_width) {
-        8 => if (descriptor.signed)
-            (if (descriptor.high) extendHalf(8, true, true, vector) else extendHalf(8, true, false, vector))
-        else
-            (if (descriptor.high) extendHalf(8, false, true, vector) else extendHalf(8, false, false, vector)),
-        16 => if (descriptor.signed)
-            (if (descriptor.high) extendHalf(16, true, true, vector) else extendHalf(16, true, false, vector))
-        else
-            (if (descriptor.high) extendHalf(16, false, true, vector) else extendHalf(16, false, false, vector)),
-        32 => if (descriptor.signed)
-            (if (descriptor.high) extendHalf(32, true, true, vector) else extendHalf(32, true, false, vector))
-        else
-            (if (descriptor.high) extendHalf(32, false, true, vector) else extendHalf(32, false, false, vector)),
-        else => unreachable,
-    };
-}
-
-fn simdExtMul(op: simd.Op) ?SimdIntegerTransform {
-    return switch (op) {
-        .i16x8_extmul_low_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true },
-        .i16x8_extmul_high_i8x16_s => .{ .source_width = 8, .target_width = 16, .signed = true, .high = true },
-        .i16x8_extmul_low_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false },
-        .i16x8_extmul_high_i8x16_u => .{ .source_width = 8, .target_width = 16, .signed = false, .high = true },
-        .i32x4_extmul_low_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true },
-        .i32x4_extmul_high_i16x8_s => .{ .source_width = 16, .target_width = 32, .signed = true, .high = true },
-        .i32x4_extmul_low_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false },
-        .i32x4_extmul_high_i16x8_u => .{ .source_width = 16, .target_width = 32, .signed = false, .high = true },
-        .i64x2_extmul_low_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true },
-        .i64x2_extmul_high_i32x4_s => .{ .source_width = 32, .target_width = 64, .signed = true, .high = true },
-        .i64x2_extmul_low_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false },
-        .i64x2_extmul_high_i32x4_u => .{ .source_width = 32, .target_width = 64, .signed = false, .high = true },
-        else => null,
-    };
-}
-
 fn extMulHalf(comptime sw: u8, comptime signed: bool, comptime high: bool, left: u128, right: u128) u128 {
     const lanes = 128 / (sw * 2);
     const mask = comptime halfMask(lanes, if (high) lanes else 0);
@@ -2834,34 +2602,6 @@ fn extMulHalf(comptime sw: u8, comptime signed: bool, comptime high: bool, left:
     return fromVec(wa *% wb);
 }
 
-fn extMulSimdHalf(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
-    return switch (descriptor.source_width) {
-        8 => if (descriptor.signed)
-            (if (descriptor.high) extMulHalf(8, true, true, left, right) else extMulHalf(8, true, false, left, right))
-        else
-            (if (descriptor.high) extMulHalf(8, false, true, left, right) else extMulHalf(8, false, false, left, right)),
-        16 => if (descriptor.signed)
-            (if (descriptor.high) extMulHalf(16, true, true, left, right) else extMulHalf(16, true, false, left, right))
-        else
-            (if (descriptor.high) extMulHalf(16, false, true, left, right) else extMulHalf(16, false, false, left, right)),
-        32 => if (descriptor.signed)
-            (if (descriptor.high) extMulHalf(32, true, true, left, right) else extMulHalf(32, true, false, left, right))
-        else
-            (if (descriptor.high) extMulHalf(32, false, true, left, right) else extMulHalf(32, false, false, left, right)),
-        else => unreachable,
-    };
-}
-
-fn simdNarrow(op: simd.Op) ?SimdIntegerTransform {
-    return switch (op) {
-        .i8x16_narrow_i16x8_s => .{ .source_width = 16, .target_width = 8, .signed = true },
-        .i8x16_narrow_i16x8_u => .{ .source_width = 16, .target_width = 8, .signed = false },
-        .i16x8_narrow_i32x4_s => .{ .source_width = 32, .target_width = 16, .signed = true },
-        .i16x8_narrow_i32x4_u => .{ .source_width = 32, .target_width = 16, .signed = false },
-        else => null,
-    };
-}
-
 fn narrowLanes(comptime sw: u8, comptime signed: bool, left: u128, right: u128) u128 {
     const lanes = 128 / sw;
     const a: @Vector(lanes, SLane(sw)) = @bitCast(left);
@@ -2873,14 +2613,6 @@ fn narrowLanes(comptime sw: u8, comptime signed: bool, left: u128, right: u128) 
     const ta: @Vector(lanes, ULane(sw / 2)) = @truncate(@as(@Vector(lanes, ULane(sw)), @bitCast(ca)));
     const tb: @Vector(lanes, ULane(sw / 2)) = @truncate(@as(@Vector(lanes, ULane(sw)), @bitCast(cb)));
     return fromVec(std.simd.join(ta, tb));
-}
-
-fn narrowSimdLanes(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
-    return switch (descriptor.source_width) {
-        16 => if (descriptor.signed) narrowLanes(16, true, left, right) else narrowLanes(16, false, left, right),
-        32 => if (descriptor.signed) narrowLanes(32, true, left, right) else narrowLanes(32, false, left, right),
-        else => unreachable,
-    };
 }
 
 fn pairwiseMask(comptime lanes: usize, comptime odd: bool) [lanes]i32 {
@@ -2924,40 +2656,7 @@ fn q15MulRoundSaturate(left: u128, right: u128) u128 {
     return fromVec(@as(@Vector(8, u16), @truncate(@as(@Vector(8, u32), @bitCast(clamped)))));
 }
 
-fn executeSimdIntegerTransform(s: *State, op: simd.Op) ExecError!bool {
-    if (simdExtend(op)) |descriptor| {
-        try pushVector(s, extendSimdHalf(popVector(s), descriptor));
-        return true;
-    }
-    if (simdExtMul(op)) |descriptor| {
-        const right = popVector(s);
-        try pushVector(s, extMulSimdHalf(popVector(s), right, descriptor));
-        return true;
-    }
-    if (simdNarrow(op)) |descriptor| {
-        const right = popVector(s);
-        try pushVector(s, narrowSimdLanes(popVector(s), right, descriptor));
-        return true;
-    }
-    switch (op) {
-        .i16x8_extadd_pairwise_i8x16_s => try pushVector(s, extAddPairwise(8, true, popVector(s))),
-        .i16x8_extadd_pairwise_i8x16_u => try pushVector(s, extAddPairwise(8, false, popVector(s))),
-        .i32x4_extadd_pairwise_i16x8_s => try pushVector(s, extAddPairwise(16, true, popVector(s))),
-        .i32x4_extadd_pairwise_i16x8_u => try pushVector(s, extAddPairwise(16, false, popVector(s))),
-        .i32x4_dot_i16x8_s => {
-            const right = popVector(s);
-            try pushVector(s, dotI16x8(popVector(s), right));
-        },
-        .i16x8_q15mulr_sat_s => {
-            const right = popVector(s);
-            try pushVector(s, q15MulRoundSaturate(popVector(s), right));
-        },
-        else => return false,
-    }
-    return true;
-}
-
-fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!bool {
+fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     const op = simdOp(instr);
     switch (op) {
         .v128_load => {
@@ -2965,40 +2664,35 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
             try pushVector(s, @as(u128, range.readLittle(0, 8)) |
                 (@as(u128, range.readLittle(8, 8)) << 64));
         },
-        .v128_load8x8_s, .v128_load8x8_u => try pushVector(s, loadExtendedMemory(
-            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
-            8,
-            16,
-            op == .v128_load8x8_s,
-        )),
-        .v128_load16x4_s, .v128_load16x4_u => try pushVector(s, loadExtendedMemory(
-            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
-            16,
-            32,
-            op == .v128_load16x4_s,
-        )),
-        .v128_load32x2_s, .v128_load32x2_u => try pushVector(s, loadExtendedMemory(
-            try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8),
-            32,
-            64,
-            op == .v128_load32x2_s,
-        )),
-        .v128_load8_splat, .v128_load16_splat, .v128_load32_splat, .v128_load64_splat => {
-            const width: u8 = switch (op) {
-                .v128_load8_splat => 8,
-                .v128_load16_splat => 16,
-                .v128_load32_splat => 32,
-                .v128_load64_splat => 64,
-                else => unreachable,
-            };
-            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, width / 8);
-            const value = range.readLittle(0, width / 8);
-            try pushVector(s, splatLaneBits(value, width, @intCast(128 / width)));
+        .v128_load8x8_s => try pushVector(s, loadExtendedLanes(8, true, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load8x8_u => try pushVector(s, loadExtendedLanes(8, false, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load16x4_s => try pushVector(s, loadExtendedLanes(16, true, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load16x4_u => try pushVector(s, loadExtendedLanes(16, false, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load32x2_s => try pushVector(s, loadExtendedLanes(32, true, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load32x2_u => try pushVector(s, loadExtendedLanes(32, false, try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8))),
+        .v128_load8_splat => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 1);
+            try pushVector(s, splatLanes(8, range.readLittle(0, 1)));
         },
-        .v128_load32_zero, .v128_load64_zero => {
-            const size: usize = if (op == .v128_load32_zero) 4 else 8;
-            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, size);
-            try pushVector(s, range.readLittle(0, size));
+        .v128_load16_splat => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 2);
+            try pushVector(s, splatLanes(16, range.readLittle(0, 2)));
+        },
+        .v128_load32_splat => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 4);
+            try pushVector(s, splatLanes(32, range.readLittle(0, 4)));
+        },
+        .v128_load64_splat => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8);
+            try pushVector(s, splatLanes(64, range.readLittle(0, 8)));
+        },
+        .v128_load32_zero => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 4);
+            try pushVector(s, range.readLittle(0, 4));
+        },
+        .v128_load64_zero => {
+            const range = try simdMemoryRange(s, inst, instr.imm.simd_memarg.memarg, 8);
+            try pushVector(s, range.readLittle(0, 8));
         },
         .v128_store => {
             const vector = popVector(s);
@@ -3033,28 +2727,11 @@ fn executeSimdMemory(s: *State, inst: *Instance, instr: types.Instr) ExecError!b
             const range = try simdMemoryRange(s, inst, immediate.memarg, width / 8);
             range.writeLittle(0, width / 8, laneBits(vector, immediate.lane, width));
         },
-        else => return false,
-    }
-    return true;
-}
-
-fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
-    if (try executeSimdMemory(s, inst, instr)) return;
-    const op = simdOp(instr);
-    if (try executeSimdIntegerComparison(s, op)) return;
-    if (try executeSimdIntegerBasic(s, op)) return;
-    if (try executeSimdIntegerBounded(s, op)) return;
-    if (try executeSimdIntegerTransform(s, op)) return;
-    if (try executeSimdFloatComparison(s, op)) return;
-    if (try executeSimdFloatUnary(s, op)) return;
-    if (try executeSimdFloatBinary(s, op)) return;
-    if (try executeSimdFloatConversion(s, op)) return;
-    switch (op) {
         .v128_const => try pushVector(s, instr.imm.simd_v128.bits),
-        .i8x16_splat => try pushVector(s, splatLaneBits(popI32(s), 8, 16)),
-        .i16x8_splat => try pushVector(s, splatLaneBits(popI32(s), 16, 8)),
-        .i32x4_splat, .f32x4_splat => try pushVector(s, splatLaneBits(popI32(s), 32, 4)),
-        .i64x2_splat, .f64x2_splat => try pushVector(s, splatLaneBits(pop(s), 64, 2)),
+        .i8x16_splat => try pushVector(s, splatLanes(8, popI32(s))),
+        .i16x8_splat => try pushVector(s, splatLanes(16, popI32(s))),
+        .i32x4_splat, .f32x4_splat => try pushVector(s, splatLanes(32, popI32(s))),
+        .i64x2_splat, .f64x2_splat => try pushVector(s, splatLanes(64, pop(s))),
         .i8x16_extract_lane_s => try pushI32(s, @bitCast(@as(i32, @as(i8, @bitCast(@as(u8, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 8)))))))),
         .i8x16_extract_lane_u => try pushI32(s, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 8))),
         .i16x8_extract_lane_s => try pushI32(s, @bitCast(@as(i32, @as(i16, @bitCast(@as(u16, @truncate(laneBits(popVector(s), instr.imm.simd_lane.lane, 16)))))))),
@@ -3080,23 +2757,21 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
         .i8x16_shuffle => {
             const right = popVector(s);
             const left = popVector(s);
-            var result: u128 = 0;
-            for (instr.imm.simd_shuffle.lanes, 0..) |source, lane| {
-                const vector = if (source < 16) left else right;
-                result = replaceLaneBits(result, @intCast(lane), 8, laneBits(vector, source & 15, 8));
-            }
-            try pushVector(s, result);
+            var bytes: [32]u8 = undefined;
+            bytes[0..16].* = @as([16]u8, @bitCast(left));
+            bytes[16..32].* = @as([16]u8, @bitCast(right));
+            var result: [16]u8 = undefined;
+            for (instr.imm.simd_shuffle.lanes, 0..) |source, lane| result[lane] = bytes[source];
+            try pushVector(s, @as(u128, @bitCast(result)));
         },
         .i8x16_swizzle => {
             const indices = popVector(s);
             const source = popVector(s);
-            var result: u128 = 0;
-            for (0..16) |lane| {
-                const index: u8 = @truncate(laneBits(indices, @intCast(lane), 8));
-                const byte = if (index < 16) laneBits(source, index, 8) else 0;
-                result = replaceLaneBits(result, @intCast(lane), 8, byte);
-            }
-            try pushVector(s, result);
+            const table: [16]u8 = @bitCast(source);
+            const index_bytes: [16]u8 = @bitCast(indices);
+            var result: [16]u8 = undefined;
+            for (index_bytes, 0..) |index, lane| result[lane] = if (index < 16) table[index] else 0;
+            try pushVector(s, @as(u128, @bitCast(result)));
         },
         .v128_not => try pushVector(s, ~popVector(s)),
         .v128_and => {
@@ -3122,7 +2797,85 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             try pushVector(s, (left & mask) | (right & ~mask));
         },
         .v128_any_true => try pushBool(s, popVector(s) != 0),
-        else => return s.trap("SIMD instruction execution not implemented"),
+        .i8x16_all_true => try pushBool(s, allLanesTrue(8, popVector(s))),
+        .i16x8_all_true => try pushBool(s, allLanesTrue(16, popVector(s))),
+        .i32x4_all_true => try pushBool(s, allLanesTrue(32, popVector(s))),
+        .i64x2_all_true => try pushBool(s, allLanesTrue(64, popVector(s))),
+        .i8x16_bitmask => try pushI32(s, laneBitmask(8, popVector(s))),
+        .i16x8_bitmask => try pushI32(s, laneBitmask(16, popVector(s))),
+        .i32x4_bitmask => try pushI32(s, laneBitmask(32, popVector(s))),
+        .i64x2_bitmask => try pushI32(s, laneBitmask(64, popVector(s))),
+        .i32x4_trunc_sat_f32x4_s,
+        .i32x4_trunc_sat_f32x4_u,
+        .f32x4_convert_i32x4_s,
+        .f32x4_convert_i32x4_u,
+        .f32x4_demote_f64x2_zero,
+        .f64x2_promote_low_f32x4,
+        .i32x4_trunc_sat_f64x2_s_zero,
+        .i32x4_trunc_sat_f64x2_u_zero,
+        .f64x2_convert_low_i32x4_s,
+        .f64x2_convert_low_i32x4_u,
+        => try executeSimdConversion(s, op),
+        inline else => |tag| switch (comptime classifySimd(tag).?) {
+            .int_cmp => |d| {
+                const right = popVector(s);
+                try pushVector(s, compareLanes(d.width, d.signed, d.relation, popVector(s), right));
+            },
+            .int_unary => |d| try pushVector(s, unaryIntegerLanes(d.width, popVector(s), d.operation)),
+            .shift => |d| {
+                const amount = popI32(s);
+                try pushVector(s, shiftLanes(d.width, popVector(s), amount, d.operation));
+            },
+            .wrapping => |d| {
+                const right = popVector(s);
+                try pushVector(s, wrappingLanes(d.width, popVector(s), right, d.operation));
+            },
+            .bounded => |d| {
+                const right = popVector(s);
+                try pushVector(s, boundedLanes(d.width, popVector(s), right, d.operation));
+            },
+            .extend => |d| try pushVector(s, extendHalf(d.source_width, d.signed, d.high, popVector(s))),
+            .extmul => |d| {
+                const right = popVector(s);
+                try pushVector(s, extMulHalf(d.source_width, d.signed, d.high, popVector(s), right));
+            },
+            .narrow => |d| {
+                const right = popVector(s);
+                try pushVector(s, narrowLanes(d.source_width, d.signed, popVector(s), right));
+            },
+            .extadd => |d| try pushVector(s, extAddPairwise(d.source_width, d.signed, popVector(s))),
+            .dot => {
+                const right = popVector(s);
+                try pushVector(s, dotI16x8(popVector(s), right));
+            },
+            .q15mulr => {
+                const right = popVector(s);
+                try pushVector(s, q15MulRoundSaturate(popVector(s), right));
+            },
+            .float_cmp => |d| {
+                const right = popVector(s);
+                const left = popVector(s);
+                try pushVector(s, switch (d.width) {
+                    32 => compareFloatLanes(32, left, right, d.relation),
+                    else => compareFloatLanes(64, left, right, d.relation),
+                });
+            },
+            .float_unary => |w| {
+                const source = popVector(s);
+                try pushVector(s, switch (w) {
+                    32 => unaryFloatLanes(32, source, tag),
+                    else => unaryFloatLanes(64, source, tag),
+                });
+            },
+            .float_binary => |w| {
+                const right = popVector(s);
+                const left = popVector(s);
+                try pushVector(s, switch (w) {
+                    32 => binaryFloatLanes(32, left, right, tag),
+                    else => binaryFloatLanes(64, left, right, tag),
+                });
+            },
+        },
     }
 }
 
