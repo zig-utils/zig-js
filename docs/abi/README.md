@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (310 implemented, 121 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (311 implemented, 120 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 310 private entries are implemented; the other 121 remain pending
+The first 311 private entries are implemented; the other 120 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 313/313 compiled fixture additionally
+sibling realms, GC, and reentry; the 314/314 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -711,6 +711,17 @@ mirrors the form decoder without the `+` rule. Remaining URL-cluster symbols
 after this slice: `BunString__toURL`/`toJSDOMURL` + `DOMURL__*` (JS DOMURL
 object creation) and `URL__originLength` (Home declares it un-wrapped).
 
+`URL__originLength` (#312, third URL-cluster sub-slice) closes the standalone
+URL helpers: the latin-1 slice is widened to WTF-8 and parsed with no base,
+and the returned `pathStart` mirrors `urlSerialize`'s prefix emission exactly
+— `scheme:` plus, when a host component is present, `//` + userinfo
+(`user[:pw]@`, only when non-empty) + host + (`:port` when set), plus the
+`/.` sentinel for a non-opaque path that begins with `//`. Empty/invalid
+input and a null slice yield 0 where Bun dereferences unconditionally. Only
+the DOMURL object-creation group (`BunString__toURL`/`toJSDOMURL` +
+`WebCore__DOMURL__cast_`/`href_`/`pathname_`/`fileSystemPath`) remains in
+the cluster.
+
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
 rejected-promise notification, exact ZigString module-entry deletion, and
@@ -866,7 +877,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 313-symbol
+the same frame/script identity and own every returned string. The 314-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -911,7 +922,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (303 implemented, 118 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (304 implemented, 117 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
