@@ -1934,9 +1934,13 @@ fn instantiateModuleObject(
     state.import_vals = resolved.values;
     const global_refs = try self.arena.alloc(*std.atomic.Value(u64), inst.globals.len);
     for (inst.globals, 0..) |global, i| global_refs[i] = &global.ref_root;
-    state.global_refs = global_refs;
-    state.gc_trace_context = @ptrCast(inst);
-    state.gc_trace = exec.traceInstanceGcRoots;
+    const gc_state = try self.arena.create(value.WasmInstanceGcState);
+    gc_state.* = .{
+        .global_refs = global_refs,
+        .context = @ptrCast(inst),
+        .trace = exec.traceInstanceGcRoots,
+    };
+    state.gc_state = gc_state;
     for (inst.globals[module.imported_globals..]) |global| {
         global.barrier_ctx = @ptrCast(object);
         global.barrier = barrierGlobalReference;

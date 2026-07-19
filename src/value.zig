@@ -1226,7 +1226,7 @@ pub const ObjectRareState = union(ObjectRareTag) {
     // registry owns their memory, so these slots are weak views — only the
     // Object edges below participate in GC tracing.
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
-    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, global_refs: []const *std.atomic.Value(u64) = &.{}, exports_obj: ?*Object = null, gc_trace_context: ?*anyopaque = null, gc_trace: ?WasmGcTraceRootsFn = null },
+    wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null, gc_state: ?*WasmInstanceGcState = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
     wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
     wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
@@ -1359,6 +1359,14 @@ pub const ObjectRegexState = struct {
     source: []const u8 = "",
     flags: []const u8 = "",
     compiled: ?*anyopaque = null,
+};
+
+/// Instance-only tracing metadata lives behind one arena-owned pointer so the
+/// largest WebAssembly rare state does not widen every Object cold sidecar.
+pub const WasmInstanceGcState = struct {
+    global_refs: []const *std.atomic.Value(u64) = &.{},
+    context: ?*anyopaque = null,
+    trace: ?WasmGcTraceRootsFn = null,
 };
 
 pub const ObjectBackingFlags = packed struct {
@@ -1958,13 +1966,17 @@ pub const Object = struct {
     /// Called under the backing lock (concurrent mark) or in a quiescent world.
     fn wasmTraceSnapshot(cold: *ObjectColdState) WasmTraceSnapshot {
         return switch (cold.rare_tag.load(.acquire)) {
-            .wasm_instance => .{
-                .module_obj = cold.rare.wasm_instance.module_obj,
-                .import_vals = cold.rare.wasm_instance.import_vals,
-                .global_refs = cold.rare.wasm_instance.global_refs,
-                .exports_obj = cold.rare.wasm_instance.exports_obj,
-                .gc_trace_context = cold.rare.wasm_instance.gc_trace_context,
-                .gc_trace = cold.rare.wasm_instance.gc_trace,
+            .wasm_instance => instance: {
+                const state = cold.rare.wasm_instance;
+                const gc_state = state.gc_state;
+                break :instance .{
+                    .module_obj = state.module_obj,
+                    .import_vals = state.import_vals,
+                    .global_refs = if (gc_state) |trace| trace.global_refs else &.{},
+                    .exports_obj = state.exports_obj,
+                    .gc_trace_context = if (gc_state) |trace| trace.context else null,
+                    .gc_trace = if (gc_state) |trace| trace.trace else null,
+                };
             },
             .wasm_memory => .{
                 .buffer_obj = cold.rare.wasm_memory.buffer_obj,

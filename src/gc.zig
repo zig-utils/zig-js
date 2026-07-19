@@ -1147,11 +1147,13 @@ pub const Binding = struct {
 pub const Heap = gc.Heap(Binding);
 
 test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Object));
+    // The raw payload can differ across target ABIs even when the allocator
+    // selects the same slab. Keep the production invariant target-independent.
+    try std.testing.expect(@sizeOf(Object) <= 128);
     // Auto-layout may reorder the cold fields as unrelated test imports make
     // more code reachable. The invariant is its GC allocation class, not one
     // compiler-specific raw byte count.
-    try std.testing.expect(@sizeOf(value.ObjectColdState) <= 256);
+    try std.testing.expect(@sizeOf(value.ObjectColdState) <= 224);
     try std.testing.expectEqual(@as(usize, 128), Heap.cellAllocationBytes(Object));
     try std.testing.expect(Heap.cellAllocationBytes(value.ObjectColdState) <= 256);
 }
