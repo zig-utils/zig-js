@@ -3414,11 +3414,18 @@ fn indirectCallable(
         s.diag.set(types.Diagnostic.no_offset, "uninitialized element {d}", .{i});
         return error.Trap;
     };
-    const actual: types.FuncType = switch (callable.*) {
-        .defined => |d| d.inst.module.funcType(d.inst.module.imported_funcs + d.idx),
-        .imported => |im| im.type,
+    const compatible = switch (callable.*) {
+        .defined => |defined| validate.heapTypeMatchesAcross(
+            defined.inst.module,
+            types.HeapType.concrete(defined.inst.module.funcTypeIndex(
+                defined.inst.module.imported_funcs + defined.idx,
+            )),
+            inst.module,
+            types.HeapType.concrete(immediate.type_index),
+        ),
+        .imported => |imported| types.funcTypeEql(expected, imported.type),
     };
-    if (!types.funcTypeEql(expected, actual)) return s.trap("indirect call type mismatch");
+    if (!compatible) return s.trap("indirect call type mismatch");
     return callable;
 }
 

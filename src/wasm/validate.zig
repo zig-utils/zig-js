@@ -1791,7 +1791,9 @@ const FuncValidator = struct {
                     if (tidx >= self.mod.types.len) return self.fail("unknown type");
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
+                    const table_reference = self.mod.tableType(tableidx).elem.refType() orelse
+                        return self.fail("type mismatch");
+                    if (!heapTypeMatches(self.mod, table_reference.heap, .func)) return self.fail("type mismatch");
                     try self.popExpect(self.mod.tableType(tableidx).address.valType());
                     try self.callFunc(self.mod.funcTypeAt(tidx) orelse return self.fail("type mismatch"));
                 },
@@ -1800,7 +1802,9 @@ const FuncValidator = struct {
                     const tableidx = instr.imm.call_indirect.table_index;
                     if (tableidx >= self.mod.totalTables())
                         return if (tableidx == 0) self.fail("unknown table 0") else self.fail("unknown table");
-                    if (self.mod.tableType(tableidx).elem != .funcref) return self.fail("type mismatch");
+                    const table_reference = self.mod.tableType(tableidx).elem.refType() orelse
+                        return self.fail("type mismatch");
+                    if (!heapTypeMatches(self.mod, table_reference.heap, .func)) return self.fail("type mismatch");
                     if (tidx >= self.mod.types.len) return self.fail("unknown type");
                     try self.popExpect(self.mod.tableType(tableidx).address.valType());
                     try self.tailCallFunc(self.mod.funcTypeAt(tidx) orelse return self.fail("type mismatch"));
