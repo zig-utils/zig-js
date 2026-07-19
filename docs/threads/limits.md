@@ -57,14 +57,19 @@ tests as the matching engine features land.
   `ctx.heapBudgetStats()` reports
   `limit_bytes`, `used_bytes`, lifetime `peak_bytes`, and `remaining_bytes` for
   capped contexts.
-- Test-shell helpers such as `print`, `setTimeout`, `drainMicrotasks`, `gc`,
+- Test-shell helpers such as `print`, `drainMicrotasks`, `gc`,
   and supported `$vm` compatibility hooks for conformance coverage.
+- Context-owned `setTimeout` / `setInterval` event-loop timers, including
+  cancellation, callback roots, and refed shell keepalive. See
+  [Timers](../timers.md).
 
 ## Explicit Non-Goals / Not Stable
 
 - Sharing ordinary JS values between isolated agents or workers without
   structured clone.
-- Treating test-shell helpers or `$vm` as an embedder event-loop/API surface.
+- Treating test-shell helpers or `$vm` as an embedder API surface. The timer
+  globals are supported, but embedders still drive their checkpoints through
+  Context entry points rather than a separate native event-loop API.
 - Treating `Context.TestingOptions.parallel_js`,
   `Context.TestingOptions.parallel_midscript_gc`, or other testing knobs as
   public API.
