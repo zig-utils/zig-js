@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
             .typed_function_references = wasm_gc or memory64,
             .gc = wasm_gc,
             .memory64 = memory64,
+            .multi_memory = memory64,
         } else .{},
     });
     defer ctx.destroy();
