@@ -9,7 +9,7 @@
   "base_profile": "home-private-7ed99c02",
   "base_revision": "7ed99c02e50034f869d0db6d487115bb44332fe4",
   "source_root": "packages/runtime/src/jsc",
-  "source_manifest_sha256": "d9f63fd8bb33b6fa54fa7a1aa9d5b8e1bf70d98a1fea303afbcb4cdb598cf825",
+  "source_manifest_sha256": "889b708c1b5bdccbdbadd43570b7e31ed392a287c24d1758bb602bcb6c3d4026",
   "comparison": {
     "changed_source_files": 0,
     "added_declarations": 0,

@@ -127,11 +127,7 @@ def generate(bun_root: Path) -> dict[str, object]:
         relative = path.relative_to(bun_root).as_posix()
         source_hashes[relative] = sha256(path)
         entries.extend(found)
-    entries.sort(key=lambda entry: (str(entry["name"]), str(entry["source"]), int(entry["line"])))
-    names = [str(entry["name"]) for entry in entries]
-    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
-    if duplicates:
-        fail(f"duplicate core symbols: {duplicates}")
+    entries = scanner.unique_symbol_declarations(entries)
     for entry in entries:
         classification = expected_classification(str(entry["name"]), public_names)
         entry["classification"] = classification
@@ -151,12 +147,12 @@ def generate(bun_root: Path) -> dict[str, object]:
             "source_files": source_hashes,
         },
         "boundary": {
-            "included": "legacy/private extern fn declarations under Bun src/jsc",
-            "excluded": "explicit public extern-c profile, bundled C libraries, runtime/webcore, N-API, and generated bindings; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
+            "included": "unique legacy/private symbols from extern fn and extern \"c\"/\"C\" fn declarations under Bun src/jsc; repeated imports retain alternate declaration provenance",
+            "excluded": "non-C named-library declarations, bundled C libraries, runtime/webcore, N-API, and generated bindings; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
             "implementation_issue": 164,
         },
         "calling_conventions": {
-            "C": "extern default C calling convention",
+            "C": "extern default C calling convention, with optional explicit c/C library linkage",
             ".c": "explicit C calling convention",
             "jsc.conv": "x86_64 SysV on Windows x64; C on every other Bun target",
         },
@@ -186,6 +182,17 @@ def validate(data: dict[str, object]) -> None:
         declaration = str(entry.get("declaration", ""))
         if not name or entry.get("declaration_sha256") != hashlib.sha256(declaration.encode()).hexdigest():
             fail(f"invalid declaration or digest for {name!r}")
+        alternates = entry.get("alternate_declarations", [])
+        if not isinstance(alternates, list):
+            fail(f"malformed alternate declarations for {name}")
+        for alternate in alternates:
+            alternate_declaration = alternate.get("declaration")
+            if (
+                not isinstance(alternate_declaration, str)
+                or alternate.get("declaration_sha256")
+                != hashlib.sha256(alternate_declaration.encode()).hexdigest()
+            ):
+                fail(f"invalid alternate declaration or digest for {name}")
         classification = expected_classification(name, public_names)
         if entry.get("classification") != classification:
             fail(f"classification drift for {name}")

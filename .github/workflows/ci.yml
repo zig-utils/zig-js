@@ -126,6 +126,13 @@ jobs:
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
             cmd: zig build test-jit test-vm test-concurrency
+          # The inventories are executable contracts: parser regressions,
+          # exported-but-uninventoried shims, stale statuses, and broken Home
+          # runtime linkage all fail this bounded leg.
+          - name: private-abi-boundary
+            cmd: |
+              python3 -m unittest tools/test_home_private_abi.py
+              zig build c-api-audit home-private-abi-audit bun-private-abi-audit test-home-private-abi
           - name: tsan-unit (shard 0/4)
             cmd: zig build test -Dtsan=true -Dunit-shard-index=0 -Dunit-shard-count=4
           - name: tsan-unit (shard 1/4)

@@ -24,8 +24,21 @@ ALIAS_PROFILES = {
     "home-private-4389ddee": ROOT / "docs/abi/home-private-4389ddee.json",
 }
 SOURCE_ROOT = Path("packages/runtime/src/jsc")
+# String literals are masked to spaces before this expression runs, so the
+# whitespace between `extern` and `fn` covers both the default spelling and an
+# explicit link name. declarations() inspects the original slice and keeps only
+# the default linkage or the C library name.
 EXTERN_RE = re.compile(r"\b(?:pub\s+)?extern\s+fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
-PLATFORM_IMPORTS = {"gnu_get_libc_version"}
+EXTERN_LINK_RE = re.compile(r'^\s*"([^"]+)"\s*$')
+PLATFORM_IMPORTS = {
+    "connect",
+    "gnu_get_libc_version",
+    "kill",
+    "poll",
+    "recvfrom",
+    "sendto",
+    "socket",
+}
 # Symbols declared in the pinned Zig sources but defined by the consumer rather
 # than imported from JavaScriptCore. Keep them in the revision-pinned inventory
 # for provenance, but never require zig-js to export a duplicate definition.
@@ -147,6 +160,45 @@ def expected_classification(name: str, public_names: set[str]) -> str:
     return "private_jsc"
 
 
+def unique_symbol_declarations(
+    entries: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Collapse repeated imports into one deterministic symbol contract.
+
+    Consumer modules legitimately redeclare the same C symbol with local type
+    aliases. Prefer the longstanding default-linkage spelling when present and
+    retain every other declaration so revision/signature provenance is not
+    discarded.
+    """
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for entry in entries:
+        grouped.setdefault(str(entry["name"]), []).append(entry)
+
+    result: list[dict[str, object]] = []
+    for name in sorted(grouped):
+        candidates = sorted(
+            grouped[name],
+            key=lambda entry: (
+                'extern "' in str(entry["declaration"]),
+                str(entry["source"]),
+                int(entry["line"]),
+            ),
+        )
+        canonical = candidates[0]
+        if len(candidates) > 1:
+            canonical["alternate_declarations"] = [
+                {
+                    "source": entry["source"],
+                    "line": entry["line"],
+                    "declaration": entry["declaration"],
+                    "declaration_sha256": entry["declaration_sha256"],
+                }
+                for entry in candidates[1:]
+            ]
+        result.append(canonical)
+    return result
+
+
 def declarations(path: Path, source_root: Path, public_names: set[str]) -> list[dict[str, object]]:
     source = path.read_text()
     masked = mask_non_code(source)
@@ -154,8 +206,17 @@ def declarations(path: Path, source_root: Path, public_names: set[str]) -> list[
     for match in EXTERN_RE.finditer(masked):
         name = match.group(1)
         open_paren = masked.find("(", match.start())
-        if re.search(r'extern\s+"c"\s+fn', source[match.start():open_paren]):
-            continue
+        if open_paren < 0:
+            fail(f"missing parameter list for {name} in {path}")
+        extern_start = masked.find("extern", match.start(), open_paren)
+        fn_start = masked.find("fn", extern_start + len("extern"), open_paren)
+        if extern_start < 0 or fn_start < 0:
+            fail(f"cannot parse extern declaration for {name} in {path}")
+        link_source = source[extern_start + len("extern"):fn_start]
+        if link_source.strip():
+            link_match = EXTERN_LINK_RE.fullmatch(link_source)
+            if link_match is None or link_match.group(1).lower() != "c":
+                continue
         depth = 0
         close_paren = -1
         for index in range(open_paren, len(masked)):
@@ -226,12 +287,7 @@ def generate(home_root: Path) -> dict[str, object]:
         relative = path.relative_to(home_root).as_posix()
         source_hashes[relative] = sha256(path)
         entries.extend(found)
-    entries.sort(key=lambda entry: (str(entry["name"]), str(entry["source"]), int(entry["line"])))
-
-    names = [str(entry["name"]) for entry in entries]
-    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
-    if duplicates:
-        fail(f"conflicting duplicate symbol declarations: {duplicates}")
+    entries = unique_symbol_declarations(entries)
     classifications = Counter(str(entry["classification"]) for entry in entries)
     return {
         "schema_version": 1,
@@ -244,12 +300,12 @@ def generate(home_root: Path) -> dict[str, object]:
             "source_files": source_hashes,
         },
         "boundary": {
-            "included": "Zig extern fn declarations under packages/runtime/src/jsc",
-            "excluded": "explicit extern \"c\" public profile declarations tracked by home-public-c-7ed99c02; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
+            "included": "unique symbols from Zig extern fn and extern \"c\"/\"C\" fn declarations under packages/runtime/src/jsc; repeated imports retain alternate declaration provenance",
+            "excluded": "non-C named-library declarations; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
             "implementation_issue": 163,
         },
         "calling_conventions": {
-            "C": "extern default C calling convention",
+            "C": "extern default C calling convention, with optional explicit c/C library linkage",
             ".c": "explicit C calling convention",
             "jsc.conv": "x86_64 SysV on Windows x64; C on every other Home target"
         },
@@ -320,15 +376,27 @@ def verify_alias(home_root: Path, stored: dict[str, object], profile_id: str) ->
         if found:
             current.extend(found)
             current_source_files.add(path.relative_to(home_root).as_posix())
-    current.sort(key=lambda entry: (str(entry["name"]), str(entry["source"]), int(entry["line"])))
+    current = unique_symbol_declarations(current)
     if current_source_files != set(source_files):
         fail("alias extern source-file set differs from the base profile")
     contract_keys = (
         "name", "source", "line", "calling_convention", "classification",
         "declaration", "declaration_sha256",
     )
-    base_contract = [{key: entry[key] for key in contract_keys} for entry in stored["declarations"]]
-    current_contract = [{key: entry[key] for key in contract_keys} for entry in current]
+    base_contract = [
+        {
+            **{key: entry[key] for key in contract_keys},
+            "alternate_declarations": entry.get("alternate_declarations", []),
+        }
+        for entry in stored["declarations"]
+    ]
+    current_contract = [
+        {
+            **{key: entry[key] for key in contract_keys},
+            "alternate_declarations": entry.get("alternate_declarations", []),
+        }
+        for entry in current
+    ]
     if current_contract != base_contract:
         fail("alias declaration/signature/calling-convention contract differs from the base profile")
     if any(value != 0 for value in alias.get("comparison", {}).values()):
@@ -359,6 +427,17 @@ def validate_stored(data: dict[str, object]) -> None:
             fail(f"{name} is unclassified")
         if entry.get("declaration_sha256") != sha256_bytes(declaration.encode()):
             fail(f"{name} declaration digest drift")
+        alternates = entry.get("alternate_declarations", [])
+        if not isinstance(alternates, list):
+            fail(f"{name} alternate declarations are malformed")
+        for alternate in alternates:
+            alternate_declaration = alternate.get("declaration")
+            if (
+                not isinstance(alternate_declaration, str)
+                or alternate.get("declaration_sha256")
+                != sha256_bytes(alternate_declaration.encode())
+            ):
+                fail(f"{name} alternate declaration digest drift")
         if classification == "private_jsc":
             expected_status = "implemented" if name in zig_js_exports else "pending"
             if entry.get("status") != expected_status:

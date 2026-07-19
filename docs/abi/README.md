@@ -37,23 +37,23 @@ profiles tracked by GitHub issues #140, #163, and #164.
 ## Home private inventory
 
 `home-private-7ed99c02` uses a comment/string-aware scanner over the pinned
-Home `packages/runtime/src/jsc` tree. It records every legacy/private-style
-`extern fn` declaration with its normalized signature and digest, source file
-and line, source-file digest, classification, status, and effective calling
-convention. The exact current denominator is:
+Home `packages/runtime/src/jsc` tree. It records each unique symbol declared as
+`extern fn` or `extern "c"`/`"C" fn`, including alternate declaration sites,
+normalized signatures and digests, classification, status, and effective
+calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (343 implemented, 88 pending) |
-| Overlap with zig-js's completed public C target | 15 |
-| Platform libc import | 1 |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (344 implemented, 127 pending) |
+| Overlap with zig-js's completed public C target | 59 |
+| Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
-| **Total** | **448** |
+| **Total** | **538** |
 
-The 448 declarations come from 58 pinned source files, with zero duplicate or
-unclassified symbols. Calling conventions are also explicit: 443 use the
-`extern` C default, four spell `.c`, and one uses Home's `jsc.conv` (x86_64
-SysV on Windows x64, C elsewhere).
+The 538 symbols come from 66 pinned source files; 15 repeated imports retain
+alternate declaration provenance and none is unclassified. Of the canonical
+contracts, 442 use default C linkage, 91 explicitly link `c`/`C`, four spell
+`.c`, and one uses Home's `jsc.conv`.
 
 ```sh
 zig build home-private-abi-audit
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 343 private entries are implemented; the other 88 remain pending
+Of the private entries, 344 are implemented and 127 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -73,9 +73,9 @@ Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167`,
 `home-private-5e829ad4`, `home-private-38702f9e`, and
 `home-private-4389ddee` aliases. None is a silent
 repin: the full `packages/runtime/src/jsc` diff against `7ed99c02` has zero
-changed files, and each audit rechecks all 58 source hashes plus all 448
-normalized declarations, locations, classifications, and calling conventions
-against the immutable base inventory. All three alias manifests report zero
+changed files, and each audit rechecks all 66 source hashes plus all 538
+normalized symbol contracts, alternate declarations, classifications, and
+calling conventions against the immutable base inventory. All three alias manifests report zero
 additions, removals, signature changes, and calling-convention changes.
 
 ```sh
@@ -930,7 +930,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 343-symbol
+the same frame/script identity and own every returned string. The 344-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -971,18 +971,18 @@ boxed string.
 `4982b91e3702094330f3be3883354c52b8c01323` and scopes the first Bun profile to
 `src/jsc`. Bundled C libraries, N-API, wider runtime/WebCore code, and generated
 bindings are deliberately excluded until separately inventoried. The core
-profile contains 437 unique declarations from 54 hashed files:
+profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (334 implemented, 87 pending) |
-| Public-C overlap | 15 |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (335 implemented, 126 pending) |
+| Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
-| **Total** | **437** |
+| **Total** | **484** |
 
-The checked-in comparison proves that Home cannot stand in for Bun: 434 symbol
-names are shared, Bun has 3 core-only symbols, Home has 14 core-only symbols,
-and 28 shared names have different normalized signatures. The inventory lists
+The checked-in comparison proves that Home cannot stand in for Bun: 481 symbol
+names are shared, Bun has 3 core-only symbols, Home has 57 core-only symbols,
+and 37 shared names have different normalized signatures. The inventory lists
 every name in each category rather than reducing that result to counts.
 
 ```sh
@@ -992,5 +992,5 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 87
+not claim complete Bun runtime compatibility; #164 remains open for the 126
 pending core entries and later wider/generated profiles.

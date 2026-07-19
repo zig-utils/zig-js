@@ -9,11 +9,13 @@
     "source_files": {
       "packages/runtime/src/jsc/AbortSignal.zig": "6a710b7f85f1162a26d96d615a2afe9e1c8c5cc47ae2e2710be7df8a91f5e29f",
       "packages/runtime/src/jsc/AnyPromise.zig": "36d1298b2f79b68155d2251276f7e7b4dffd97b29ba99f873c777c17951898f3",
+      "packages/runtime/src/jsc/AsyncModule.zig": "5ce7ae24987103c11deaa4b32a65a8bc24d933c51b6ff55d4a42229a2dd01c1a",
       "packages/runtime/src/jsc/BunCPUProfiler.zig": "431ca5bc96b11f15a0c1153017230bc56ecd3f7727d6addd0a6f09c80bbc5061",
       "packages/runtime/src/jsc/BunHeapProfiler.zig": "c29c22a19125ba72c5a3d428bee38bd9c117e6e8f8dea61a1909cc7b424a7b60",
       "packages/runtime/src/jsc/CachedBytecode.zig": "c7efbf5c83f1797f1769ad76c4225e2f78025f6314da1672213d2089de5f3b45",
       "packages/runtime/src/jsc/CallFrame.zig": "9d9d545c100e14610092859a3c29108d923964a42aadc5f15da9118488d1188d",
       "packages/runtime/src/jsc/CommonAbortReason.zig": "4149c10730742b2f27c1e3dc2e55c07ddb12ff3c3621a2a2c220ef0358ad2df7",
+      "packages/runtime/src/jsc/CommonStrings.zig": "7c10a57530f8d413998e8a1c0e8a2c8e8722ffb4564a23c038d55c05ef0b6f84",
       "packages/runtime/src/jsc/ConsoleObject.zig": "1e28339ef86f7576c83a466b5690e8ee588ad5804a6d8a883c59c244fa509b80",
       "packages/runtime/src/jsc/CppTask.zig": "33004a09d53a8659b44d2fdeba7350ba6507fff90f2d5b72b01fc1e13086bc73",
       "packages/runtime/src/jsc/CustomGetterSetter.zig": "53deff790c4550cbcb3bb521074a6278baca356140953aa24751ec352dd1ca9e",
@@ -36,12 +38,14 @@
       "packages/runtime/src/jsc/JSModuleLoader.zig": "0fe128c18fb120962f62d728bc5453e9c20215f9f2b0f0bad93fcc138c6b2001",
       "packages/runtime/src/jsc/JSObject.zig": "0ff0b3a1ba9e61cb14416751d0fcd2f4a9a9f669b5a2a91ec9e9ded61b0ba48e",
       "packages/runtime/src/jsc/JSPromise.zig": "84b6f6f2f57e729369a23cbd95c4f0c2f15e2aa0deb2be8bd2a1667a42be1919",
+      "packages/runtime/src/jsc/JSPropertyIterator.zig": "f36c3f96bdfd37c7596e0b87f153e78ece578bf3ead7a8a8727b6fd35864f7c3",
       "packages/runtime/src/jsc/JSSecrets.zig": "37c26e5e75edd3c232f9e2fa5cb28dcec532a8045632e7453d7d0088f32b1711",
       "packages/runtime/src/jsc/JSString.zig": "d3f47f1e8621a8634ee5a16da50d05ae1e85829a803fdaeb0bd8e73c5ab66578",
       "packages/runtime/src/jsc/JSUint8Array.zig": "546ee46f21dfae8c824cd7ac063ddfb46a3f122afd8dcc89e9d0d6878a281aa7",
       "packages/runtime/src/jsc/JSValue.zig": "b2ece9006bd90f8c2807900c48a41b4b4f0fb07f4c0d6d69da1b6c8cc7a382bb",
       "packages/runtime/src/jsc/MarkedArgumentBuffer.zig": "cb069dd66d4763bce2e7e4ec7b83dcd10fcd69ea23c932699e003dbeff095cb5",
       "packages/runtime/src/jsc/NodeModuleModule.zig": "7cd37505d206a7cb0240cda1ec3eaef9f29e39f9f36bd7bcbe7e3814d728f6cc",
+      "packages/runtime/src/jsc/PosixSignalHandle.zig": "63a52ece67ae242342a0a54fad43c9bdc6c20c07229f2450f0c0d4725db4c53e",
       "packages/runtime/src/jsc/RegularExpression.zig": "1a7a85d8c899b943104617cdbfe14a415c167f29c2fa5cd79445d6d2059f91a7",
       "packages/runtime/src/jsc/SourceProvider.zig": "e10507b75f2c03300f5414d5a9d62d92bdf7ad59f5946befa4ff7016a1506ffc",
       "packages/runtime/src/jsc/StringBuilder.zig": "164735b835e2239c83ab70e43732d79c3acc8ead7b8c038596c605e8eeb36629",
@@ -60,36 +64,40 @@
       "packages/runtime/src/jsc/array_buffer.zig": "b7c088d691e36fe53b6702727fc74517087dc390809593fad316e82172d98010",
       "packages/runtime/src/jsc/bun_string_jsc.zig": "2c0e7ef20bc6f4866b68f7808922e8c81cbf596b6adddc5c03d99b2ecd3ba695",
       "packages/runtime/src/jsc/event_loop.zig": "561a946f502dd9b1101a1bfd6ad0d9fb1882aa8519ce0e977f6273e65865227d",
+      "packages/runtime/src/jsc/extern_fns.zig": "f024528d71401cec78892e397443c39461cbddbbf4b27708624b95b4dee35203",
       "packages/runtime/src/jsc/host_fn.zig": "ba314092f4c0dd9bdc1d9cbe3d843d7e34ce786e070f3c0a984225ec287039aa",
       "packages/runtime/src/jsc/hot_reloader.zig": "4256c8dc61eb9136d2d51168c2dd1a0fb8a8e7c374f282859e6f7940bf5738cf",
       "packages/runtime/src/jsc/javascript_core_c_api.zig": "6d9ce78d04015a9ba93d1bc73954fac41714effac79d05c7d4bc8be5132d55d0",
+      "packages/runtime/src/jsc/jsc.zig": "945808647bf400a3077b6995d9753ccb89866cb1f9b640c6228b97df37455ba0",
       "packages/runtime/src/jsc/process.zig": "14d9b581e35443862e8f27ad28af57166de23d20c55d66121657564c355950a4",
+      "packages/runtime/src/jsc/serve_global.zig": "be62b090b6087ee4067255fd1f1b3d73cbb6b395f186f68ab3cfbec56059d489",
+      "packages/runtime/src/jsc/socket_global.zig": "6a2dc0d723e32e8b50eb20f76c897f953029b8320cb50c26d895bd1abe01597e",
       "packages/runtime/src/jsc/web_worker.zig": "c444d88095890c79bce162f1aca1130f721af3065768999e87409e648c051079"
     }
   },
   "boundary": {
-    "included": "Zig extern fn declarations under packages/runtime/src/jsc",
-    "excluded": "explicit extern \"c\" public profile declarations tracked by home-public-c-7ed99c02",
+    "included": "unique symbols from Zig extern fn and extern \"c\"/\"C\" fn declarations under packages/runtime/src/jsc; repeated imports retain alternate declaration provenance",
+    "excluded": "non-C named-library declarations; consumer-generated definitions such as JSFunctionCall remain inventoried as consumer_provided",
     "implementation_issue": 163
   },
   "calling_conventions": {
-    "C": "extern default C calling convention",
+    "C": "extern default C calling convention, with optional explicit c/C library linkage",
     ".c": "explicit C calling convention",
     "jsc.conv": "x86_64 SysV on Windows x64; C on every other Home target"
   },
   "totals": {
-    "symbols": 448,
-    "source_files": 58,
+    "symbols": 538,
+    "source_files": 66,
     "by_classification": {
       "consumer_provided": 1,
-      "platform_import": 1,
-      "private_jsc": 431,
-      "public_c_api": 15
+      "platform_import": 7,
+      "private_jsc": 471,
+      "public_c_api": 59
     },
     "by_status": {
-      "external": 2,
-      "implemented": 358,
-      "pending": 88
+      "external": 8,
+      "implemented": 403,
+      "pending": 127
     }
   },
   "declarations": [
@@ -103,6 +111,17 @@
       "declaration": "extern fn ArrayBuffer__fromSharedMemfd(fd: i64, globalObject: *jsc.JSGlobalObject, byte_offset: usize, byte_length: usize, total_size: usize, jsc.JSValue.JSType) jsc.JSValue;",
       "declaration_sha256": "96ec0e978f863c5de9e955be94951e893b665f0e7266f7bf0f0e2455dbb1bf21",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "AsyncContextFrame__withAsyncContextIfNeeded",
+      "source": "JSValue.zig",
+      "line": 2486,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn AsyncContextFrame__withAsyncContextIfNeeded(global: *JSGlobalObject, callback: JSValue) JSValue;",
+      "declaration_sha256": "13c5002126612500a7109797e55e3bacbecb0d5c6549afc55e0a40febaa10368",
+      "issue": 163
     },
     {
       "name": "BakeCreateProdGlobal",
@@ -237,6 +256,17 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "Bun__CommonStringsForZig__toJS",
+      "source": "CommonStrings.zig",
+      "line": 41,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__CommonStringsForZig__toJS(commonString: CommonStringsForZig, globalObject: *jsc.JSGlobalObject) jsc.JSValue;",
+      "declaration_sha256": "26cf066092c6c1c3c9e1d7bfe0048581fce62f7579b57ba5cc33078751cebf1a",
+      "issue": 163
+    },
+    {
       "name": "Bun__CreateFFIFunctionValue",
       "source": "host_fn.zig",
       "line": 277,
@@ -257,6 +287,17 @@
       "declaration": "pub extern fn Bun__CreateFFIFunctionWithDataValue( *JSGlobalObject, ?*const ZigString, argCount: u32, function: *const JSHostFn, data: *anyopaque, ) JSValue;",
       "declaration_sha256": "a2ec3de18e377cf4780c6f8350a6182d93bcdf2ff463f47e20bff385d546a292",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "Bun__ErrorCode__determineSpecificType",
+      "source": "JSGlobalObject.zig",
+      "line": 153,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__ErrorCode__determineSpecificType(*JSGlobalObject, JSValue) String;",
+      "declaration_sha256": "7807be8fc00d2b3bb86dbb41315615f09b6f2ff15c8e86135764a649c0743b6e",
+      "issue": 163
     },
     {
       "name": "Bun__EventLoopTaskNoContext__createdInBunVm",
@@ -380,6 +421,127 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "Bun__JSC__operationMathPow",
+      "source": "jsc.zig",
+      "line": 276,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSC__operationMathPow(f64, f64) f64;",
+      "declaration_sha256": "f4df188aa360f2fb4a9fef2674d2308d11efa40341d494eddc688bbb284f018b",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__create",
+      "source": "JSPropertyIterator.zig",
+      "line": 193,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__create(globalObject: *JSGlobalObject, encodedValue: JSValue, count: *usize, own_properties_only: bool, only_non_index_properties: bool) ?*JSPropertyIteratorImpl;",
+      "declaration_sha256": "90951999beb0aac450d76084bf5a67e4400006f50d2d30a4df5938f0c414f220",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__deinit",
+      "source": "JSPropertyIterator.zig",
+      "line": 197,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__deinit(iter: *JSPropertyIteratorImpl) void;",
+      "declaration_sha256": "8a634025efa54d0ecbd5af503b348fb52d692dd5dd5d220d2c113db05284e6c2",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__getLongestPropertyName",
+      "source": "JSPropertyIterator.zig",
+      "line": 198,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getLongestPropertyName(iter: *JSPropertyIteratorImpl, globalObject: *JSGlobalObject, object: *JSObject) usize;",
+      "declaration_sha256": "6d506142a47d67a8da1219b477ddd06bda2fa56d4cf3a259412abd4fd9b0cfdd",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__getName",
+      "source": "JSPropertyIterator.zig",
+      "line": 196,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getName(iter: *JSPropertyIteratorImpl, propertyName: *String, i: usize) void;",
+      "declaration_sha256": "0e9bfc0bc177319fd6b913e45a44fa527ad7db55acae581ebf429683b8c622f1",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__getNameAndValue",
+      "source": "JSPropertyIterator.zig",
+      "line": 194,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getNameAndValue(iter: *JSPropertyIteratorImpl, globalObject: *JSGlobalObject, object: *JSObject, propertyName: *String, i: usize) JSValue;",
+      "declaration_sha256": "08701ccde0fe754fcd0fd8ce81af3ff7f6a5231cfc0e40afe4a95ca22180057f",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSPropertyIterator__getNameAndValueNonObservable",
+      "source": "JSPropertyIterator.zig",
+      "line": 195,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getNameAndValueNonObservable(iter: *JSPropertyIteratorImpl, globalObject: *JSGlobalObject, object: *JSObject, propertyName: *String, i: usize) JSValue;",
+      "declaration_sha256": "ff09d18fe0080e366dbbec17bee9a12c2e50c82246f4e9c76841a51f4e4911c5",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSValue__call",
+      "source": "JSValue.zig",
+      "line": 241,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSValue__call( ctx: *JSGlobalObject, object: JSValue, thisObject: JSValue, argumentCount: usize, arguments: [*]const JSValue, ) JSValue;",
+      "declaration_sha256": "6df51caa15a232be8571ac7a44ea81cab6aa11e4d5deac21b77be1f607233a7c",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSValue__deserialize",
+      "source": "JSValue.zig",
+      "line": 2278,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "implemented",
+      "declaration": "extern \"c\" fn Bun__JSValue__deserialize(global: *JSGlobalObject, data: [*]const u8, len: usize) JSValue;",
+      "declaration_sha256": "f01b21e9ceac9ff06bee7573e5786c88a5a4df6d5767a06353ef19701f4fca45",
+      "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "Bun__JSValue__isAsyncContextFrame",
+      "source": "JSValue.zig",
+      "line": 2487,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSValue__isAsyncContextFrame(value: JSValue) bool;",
+      "declaration_sha256": "6bda1f3f48b02ffbcdfb5575e8b2acd0045df9a9c7c71bda5dfc8309697c6f19",
+      "issue": 163
+    },
+    {
+      "name": "Bun__JSValue__protect",
+      "source": "JSValue.zig",
+      "line": 507,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSValue__protect(value: JSValue) void;",
+      "declaration_sha256": "fae15f2e38ad35116c88bb95e959ae85ced7514ed5acf3c833905306187266da",
+      "issue": 163
+    },
+    {
       "name": "Bun__JSValue__toNumber",
       "source": "JSValue.zig",
       "line": 114,
@@ -389,6 +551,61 @@
       "declaration": "extern fn Bun__JSValue__toNumber(value: JSValue, global: *JSGlobalObject) f64;",
       "declaration_sha256": "f696295ea52f2387080c89082714c6228e26a17149109f064af567a61b1ffbfe",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "Bun__JSValue__unprotect",
+      "source": "JSValue.zig",
+      "line": 508,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__JSValue__unprotect(value: JSValue) void;",
+      "declaration_sha256": "86e9b5ca58b1731558c1696f4c7430ed277a69a925e5ba74cdc8fab599571195",
+      "issue": 163
+    },
+    {
+      "name": "Bun__LifecycleAgentPreventExit",
+      "source": "Debugger.zig",
+      "line": 465,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__LifecycleAgentPreventExit(agent: *Handle) void;",
+      "declaration_sha256": "d3c75e18edc8cc1cdf650c1894caa670131c0488c407ff1972d34edafb064f5f",
+      "issue": 163
+    },
+    {
+      "name": "Bun__LifecycleAgentReportError",
+      "source": "Debugger.zig",
+      "line": 464,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__LifecycleAgentReportError(agent: *Handle, exception: *ZigException) void;",
+      "declaration_sha256": "2db65622d12db11ae8126af5d67ee034802ed5444e959faab577218cc6eb367b",
+      "issue": 163
+    },
+    {
+      "name": "Bun__LifecycleAgentReportReload",
+      "source": "Debugger.zig",
+      "line": 463,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__LifecycleAgentReportReload(agent: *Handle) void;",
+      "declaration_sha256": "8736a24165d0d7627d8ad5bcc51a8bd7fe39a688f4d9b806596847f787bc029c",
+      "issue": 163
+    },
+    {
+      "name": "Bun__LifecycleAgentStopPreventingExit",
+      "source": "Debugger.zig",
+      "line": 466,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__LifecycleAgentStopPreventingExit(agent: *Handle) void;",
+      "declaration_sha256": "642fbb6f8fabd95e8cb2cbc5581e42dd2b8445b6113ec454542eb0071f12d886",
+      "issue": 163
     },
     {
       "name": "Bun__Process__emitWarning",
@@ -534,6 +751,50 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "Bun__TestReporterAgentReportTestEnd",
+      "source": "Debugger.zig",
+      "line": 321,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestEnd(agent: *Handle, testId: c_int, bunTestStatus: TestStatus, elapsed: f64) void;",
+      "declaration_sha256": "48ff3c0d41b2daecea2ae8b7c29201e2fa1a4745a71807cb91d0a58f85c5d45d",
+      "issue": 163
+    },
+    {
+      "name": "Bun__TestReporterAgentReportTestFound",
+      "source": "Debugger.zig",
+      "line": 318,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestFound(agent: *Handle, callFrame: *jsc.CallFrame, testId: c_int, name: *bun.String, item_type: TestType, parentId: c_int) void;",
+      "declaration_sha256": "242d695430cafbab6fefd6e627b7d8e59ee3c9f5fec2fbc16b5d8582a2ac1f66",
+      "issue": 163
+    },
+    {
+      "name": "Bun__TestReporterAgentReportTestFoundWithLocation",
+      "source": "Debugger.zig",
+      "line": 319,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestFoundWithLocation(agent: *Handle, testId: c_int, name: *bun.String, item_type: TestType, parentId: c_int, sourceURL: *bun.String, line: c_int) void;",
+      "declaration_sha256": "e3f25ffac3425875bacec2f7824d1d6ecca14149be37c21e7f58ecb513c120c2",
+      "issue": 163
+    },
+    {
+      "name": "Bun__TestReporterAgentReportTestStart",
+      "source": "Debugger.zig",
+      "line": 320,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestStart(agent: *Handle, testId: c_int) void;",
+      "declaration_sha256": "d2ffcb7e1b5431c9c242a36291db1a4669e0c2f82818ed01c7e474f67107fa7c",
+      "issue": 163
+    },
+    {
       "name": "Bun__WeakRef__clear",
       "source": "Weak.zig",
       "line": 45,
@@ -589,6 +850,28 @@
       "issue": 163
     },
     {
+      "name": "Bun__allocArrayBufferForCopy",
+      "source": "array_buffer.zig",
+      "line": 179,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__allocArrayBufferForCopy(*jsc.JSGlobalObject, usize, **anyopaque) jsc.JSValue;",
+      "declaration_sha256": "f8f463560bbb1034c9f80923922d1a557f257a4dc06d9a557203123f131812ad",
+      "issue": 163
+    },
+    {
+      "name": "Bun__allocUint8ArrayForCopy",
+      "source": "array_buffer.zig",
+      "line": 178,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__allocUint8ArrayForCopy(*jsc.JSGlobalObject, usize, **anyopaque) jsc.JSValue;",
+      "declaration_sha256": "03e44e0e48b20a8b7840c0dd3dc834dc19ea5ec4d0ccc865d34e149df1bf60b8",
+      "issue": 163
+    },
+    {
       "name": "Bun__attachAsyncStackFromPromise",
       "source": "JSValue.zig",
       "line": 1028,
@@ -611,6 +894,28 @@
       "issue": 163
     },
     {
+      "name": "Bun__createArrayBufferForCopy",
+      "source": "array_buffer.zig",
+      "line": 192,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__createArrayBufferForCopy(*jsc.JSGlobalObject, ptr: ?*const anyopaque, len: usize) jsc.JSValue;",
+      "declaration_sha256": "01c73d3a5d11e7993febe609b510c8a791d99ef937feab3e453d7e1d3289aad2",
+      "issue": 163
+    },
+    {
+      "name": "Bun__createJSDebugger",
+      "source": "Debugger.zig",
+      "line": 26,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__createJSDebugger(*JSGlobalObject) u32;",
+      "declaration_sha256": "ca3598c446bfd773a5b3b5d1d9f16d433c46b368441352189e07e51602c292da",
+      "issue": 163
+    },
+    {
       "name": "Bun__createTextCodec",
       "source": "TextCodec.zig",
       "line": 10,
@@ -630,6 +935,14 @@
       "status": "implemented",
       "declaration": "extern fn Bun__createUint8ArrayForCopy(*JSGlobalObject, ptr: ?*const anyopaque, len: usize, buffer: bool) JSValue;",
       "declaration_sha256": "420dd91e52aaf5f7b989077d81eda9c1c933d23dfbaa5531bdcd1dfc0e4c8b44",
+      "alternate_declarations": [
+        {
+          "source": "array_buffer.zig",
+          "line": 191,
+          "declaration": "extern \"c\" fn Bun__createUint8ArrayForCopy(*jsc.JSGlobalObject, ptr: ?*const anyopaque, len: usize, buffer: bool) jsc.JSValue;",
+          "declaration_sha256": "1d488d98b1706819bbbbd8db8f5e49838341203477746887cc89799a635cc07e"
+        }
+      ],
       "implementation": "src/c_api.zig"
     },
     {
@@ -664,6 +977,17 @@
       "declaration": "extern fn Bun__emitHandledPromiseEvent(*JSGlobalObject, promise: JSValue) bool;",
       "declaration_sha256": "fe61aa7cc31ece08452cbb1768f6d5c2adcf1f825329fd0d0c520c236e29d6bc",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "Bun__ensureDebugger",
+      "source": "Debugger.zig",
+      "line": 27,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__ensureDebugger(u32, bool) void;",
+      "declaration_sha256": "a5b6df554defac5fefae49cd2173780fdd5e9ed7a261488a4c66d046cc437fba",
+      "issue": 163
     },
     {
       "name": "Bun__generateHeapProfile",
@@ -776,6 +1100,28 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "Bun__onFulfillAsyncModule",
+      "source": "AsyncModule.zig",
+      "line": 747,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__onFulfillAsyncModule( globalObject: *JSGlobalObject, promiseValue: JSValue, res: *jsc.ErrorableResolvedSource, specifier: *bun.String, referrer: *bun.String, ) void;",
+      "declaration_sha256": "f9535ed99d7285588b00999312eed0d1615632c886838504b0931a882b51f68a",
+      "issue": 163
+    },
+    {
+      "name": "Bun__onSignalForJS",
+      "source": "PosixSignalHandle.zig",
+      "line": 110,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__onSignalForJS(number: i32, globalObject: *jsc.JSGlobalObject) void;",
+      "declaration_sha256": "2957563d1e904edf84d931d601a3244b8216ddda576ffe5db433aaf12823ffb4",
+      "issue": 163
+    },
+    {
       "name": "Bun__promises__emitUnhandledRejectionWarning",
       "source": "VirtualMachine.zig",
       "line": 568,
@@ -864,6 +1210,17 @@
       "issue": 163
     },
     {
+      "name": "Bun__startJSDebuggerThread",
+      "source": "Debugger.zig",
+      "line": 28,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn Bun__startJSDebuggerThread(*JSGlobalObject, u32, *bun.String, c_int, bool) void;",
+      "declaration_sha256": "29019ff706672a0f55ba62606d36655204041411ba498ba4d0ec1e7b808800ab",
+      "issue": 163
+    },
+    {
       "name": "Bun__stopCPUProfiler",
       "source": "BunCPUProfiler.zig",
       "line": 34,
@@ -906,6 +1263,17 @@
       "declaration": "extern fn Bun__writeHTTPDate(buffer: *[32]u8, length: usize, timestampMs: u64) c_int;",
       "declaration_sha256": "6f79d1cabad39138eeb7ae0ce67fe5f7d05c2fdf2e308b36a4f88fe73443a8df",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "CachedBytecode__deref",
+      "source": "CachedBytecode.zig",
+      "line": 41,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn CachedBytecode__deref(this: *CachedBytecode) void;",
+      "declaration_sha256": "7f522fa8dec1e32b8dbf2cf7bdd2e9dc0d5ec5328066eefe24a715b58f3508af",
+      "issue": 163
     },
     {
       "name": "DOMFormData__forEach",
@@ -974,6 +1342,17 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSArrayBuffer__fromDefaultAllocator",
+      "source": "array_buffer.zig",
+      "line": 198,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn JSArrayBuffer__fromDefaultAllocator(*jsc.JSGlobalObject, ptr: [*]u8, len: usize) jsc.JSValue;",
+      "declaration_sha256": "5dc3341bf5b9f8e2a913721f5fb4ce3f42d759323bacb9e01eb2c0d731fd4571",
+      "issue": 163
+    },
+    {
       "name": "JSArray__constructArray",
       "source": "JSArray.zig",
       "line": 18,
@@ -1038,6 +1417,17 @@
       "declaration": "extern fn JSBuffer__isBuffer(*JSGlobalObject, JSValue) bool;",
       "declaration_sha256": "6cac43e428e71c4a4e16936f7fa7ed66d4199ef118d68002d370d088f3efd9d2",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "JSCInitialize",
+      "source": "jsc.zig",
+      "line": 255,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn JSCInitialize(env: [*]const [*:0]u8, count: usize, cb: *const fn ([*]const u8, len: usize) callconv(.c) void, eval_mode: bool, one_shot_startup: bool) void;",
+      "declaration_sha256": "bba2eba196b960aa93b3e1f2653ecea4275f3f28e1ec2babd82113d0e82a8091",
+      "issue": 163
     },
     {
       "name": "JSC__AnyPromise__wrap",
@@ -2162,6 +2552,17 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSC__JSValue__hasOwnPropertyValue",
+      "source": "JSValue.zig",
+      "line": 790,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn JSC__JSValue__hasOwnPropertyValue(JSValue, *JSGlobalObject, JSValue) bool;",
+      "declaration_sha256": "31e110e215fe2b18940c13e982dded7e60010fce2ed9395f4b198a94ff5fc0e8",
+      "issue": 163
+    },
+    {
       "name": "JSC__JSValue__isAggregateError",
       "source": "JSValue.zig",
       "line": 2195,
@@ -2371,6 +2772,17 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSC__JSValue__putBunString",
+      "source": "JSValue.zig",
+      "line": 352,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn JSC__JSValue__putBunString(value: JSValue, global: *JSGlobalObject, key: *const bun.String, result: jsc.JSValue) void;",
+      "declaration_sha256": "8f925b09e2837692b26d7bdc77299cb8f384045b0ed89721fd91c50d8f1d580c",
+      "issue": 163
+    },
+    {
       "name": "JSC__JSValue__putIndex",
       "source": "JSValue.zig",
       "line": 398,
@@ -2534,6 +2946,17 @@
       "declaration": "extern fn JSC__JSValue__unwrapBoxedPrimitive(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "cbd2f5e8eeabe3a8bab0b089ce936df3ebafcaf06f4a433ac804805f121eb6a6",
       "implementation": "src/c_api.zig"
+    },
+    {
+      "name": "JSC__JSValue__upsertBunStringArray",
+      "source": "JSValue.zig",
+      "line": 359,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn JSC__JSValue__upsertBunStringArray(value: JSValue, global: *JSGlobalObject, key: *const bun.String, result: jsc.JSValue) JSValue;",
+      "declaration_sha256": "d8f7cdba14bb6a6451998b38a6f7d22c4ba5c0f029170ac6b9b30888fc856909",
+      "issue": 163
     },
     {
       "name": "JSC__JSValue__values",
@@ -2998,6 +3421,26 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSContextGetGlobalObject",
+      "source": "extern_fns.zig",
+      "line": 52,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSContextGetGlobalObject(ctx: ?*JSContextRef) ?*JSObject;",
+      "declaration_sha256": "77d025c1eaec4f83e90847d584a1ec8801b118b336a3aa68e33ae2c7ddbbd4f1"
+    },
+    {
+      "name": "JSEvaluateScript",
+      "source": "extern_fns.zig",
+      "line": 53,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSEvaluateScript(ctx: ?*JSContextRef, script: ?*JSString, this_object: ?*JSObject, source_url: ?*JSString, starting_line_number: c_int, exception: ExceptionRef) ?*JSValue;",
+      "declaration_sha256": "d9bb2c79212154f0c0fc2ccc1ff4fa2057231baf3076e3cad06150e57b0720d6"
+    },
+    {
       "name": "JSFunctionCall",
       "source": "FFI.zig",
       "line": 120,
@@ -3026,7 +3469,45 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSGarbageCollect(ctx: *jsc.JSGlobalObject) void;",
-      "declaration_sha256": "9437f1ecbada6ce45dfd69d44b927bfe6ede15b501cd828eee8e600919dbfedb"
+      "declaration_sha256": "9437f1ecbada6ce45dfd69d44b927bfe6ede15b501cd828eee8e600919dbfedb",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 48,
+          "declaration": "pub extern \"c\" fn JSGarbageCollect(ctx: ?*JSContextRef) void;",
+          "declaration_sha256": "6eace354ed969f677e07565ffaf982776035a8816c6cd6455e9d50dbee7b6660"
+        }
+      ]
+    },
+    {
+      "name": "JSGlobalContextCreate",
+      "source": "extern_fns.zig",
+      "line": 49,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSGlobalContextCreate(global_class: ?*anyopaque) ?*JSContextRef;",
+      "declaration_sha256": "752adc46b9b93ac1141490029d1a5d5c5de0be382f0bca3e33358263e2d5def9"
+    },
+    {
+      "name": "JSGlobalContextRelease",
+      "source": "extern_fns.zig",
+      "line": 50,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSGlobalContextRelease(ctx: ?*JSContextRef) void;",
+      "declaration_sha256": "a8b0a280d1f4c065f63d6c64c171591ce9e18dcf4f3c71ba036c558d6e9fdefa"
+    },
+    {
+      "name": "JSGlobalContextRetain",
+      "source": "extern_fns.zig",
+      "line": 51,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSGlobalContextRetain(ctx: ?*JSContextRef) ?*JSContextRef;",
+      "declaration_sha256": "ab9003843b7ac7796233671bf3e71a6f656f1bdca460954041b527509a0bc932"
     },
     {
       "name": "JSGlobalObject__clearException",
@@ -3150,6 +3631,53 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSObjectCallAsConstructor",
+      "source": "extern_fns.zig",
+      "line": 96,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectCallAsConstructor(ctx: ?*JSContextRef, constructor: ?*JSObject, argc: usize, argv: [*c]const ?*JSValue, exception: ExceptionRef) ?*JSObject;",
+      "declaration_sha256": "c90122935d3f56d66397e226ae63482ab533e8cff86e5dd9cbb62e37331e8f47",
+      "alternate_declarations": [
+        {
+          "source": "javascript_core_c_api.zig",
+          "line": 137,
+          "declaration": "pub extern \"c\" fn JSObjectCallAsConstructor(ctx: *jsc.JSGlobalObject, object: JSObjectRef, argumentCount: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) JSObjectRef;",
+          "declaration_sha256": "ed1d780a81ca58063f9284b18cfbd5afc4c16d80415ebbf254240b3dc43190f4"
+        }
+      ]
+    },
+    {
+      "name": "JSObjectCallAsFunction",
+      "source": "extern_fns.zig",
+      "line": 94,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectCallAsFunction(ctx: ?*JSContextRef, fun: ?*JSObject, this: ?*JSObject, argc: usize, argv: [*c]const ?*JSValue, exception: ExceptionRef) ?*JSValue;",
+      "declaration_sha256": "eeff165cce204579ea6bfd19b49d3d47674183f9e3a28b27aefab58814792311",
+      "alternate_declarations": [
+        {
+          "source": "javascript_core_c_api.zig",
+          "line": 135,
+          "declaration": "pub extern \"c\" fn JSObjectCallAsFunction(ctx: *jsc.JSGlobalObject, object: JSObjectRef, thisObject: JSObjectRef, argumentCount: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) JSValueRef;",
+          "declaration_sha256": "12b4c5eb29706e38c0a1154bcc5b0e61c39b9263738f35b773a4fba7b5307683"
+        }
+      ]
+    },
+    {
+      "name": "JSObjectCallAsFunctionReturnValueHoldingAPILock",
+      "source": "javascript_core_c_api.zig",
+      "line": 157,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "pub extern \"c\" fn JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx: *jsc.JSGlobalObject, object: JSObjectRef, thisObject: JSObjectRef, argumentCount: usize, arguments: [*c]const JSValueRef) jsc.JSValue;",
+      "declaration_sha256": "a957f766d71a03d4224990e52a93d5bb74b8496d9124f2ec6a2f8793427cb365",
+      "issue": 163
+    },
+    {
       "name": "JSObjectGetArrayBufferByteLength",
       "source": "javascript_core_c_api.zig",
       "line": 149,
@@ -3170,6 +3698,55 @@
       "declaration_sha256": "7703f1bfe4d4dc705e88f1731e22c538c7ba6ab5e8b47fee6d7e8c9dd0eb0fe0"
     },
     {
+      "name": "JSObjectGetProperty",
+      "source": "extern_fns.zig",
+      "line": 91,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectGetProperty(ctx: ?*JSContextRef, object: ?*JSObject, name: ?*JSString, exception: ExceptionRef) ?*JSValue;",
+      "declaration_sha256": "ddd1018adb1d5cadbd7c500c8b67b099f942ed6abe95918ab265ef2465e52aac"
+    },
+    {
+      "name": "JSObjectGetPropertyAtIndex",
+      "source": "extern_fns.zig",
+      "line": 93,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectGetPropertyAtIndex(ctx: ?*JSContextRef, object: ?*JSObject, index: c_uint, exception: ExceptionRef) ?*JSValue;",
+      "declaration_sha256": "c476263b8aeb34211b2f6e719a16697f22eac24d299e53dd548fbcbe0c54045b",
+      "alternate_declarations": [
+        {
+          "source": "javascript_core_c_api.zig",
+          "line": 133,
+          "declaration": "pub extern \"c\" fn JSObjectGetPropertyAtIndex(ctx: *jsc.JSGlobalObject, object: JSObjectRef, propertyIndex: c_uint, exception: ExceptionRef) JSValueRef;",
+          "declaration_sha256": "7fcbbe5e523e1ac1ce22ed11c39976234739e5c8aa11d5cf88298d45c70ed640"
+        }
+      ]
+    },
+    {
+      "name": "JSObjectGetPrototype",
+      "source": "javascript_core_c_api.zig",
+      "line": 132,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectGetPrototype(ctx: *jsc.JSGlobalObject, object: JSObjectRef) JSValueRef;",
+      "declaration_sha256": "52c16d89ca5c493a3723fb6a3b7ee3a94db4043124caa4b4c2d9513017222cb6"
+    },
+    {
+      "name": "JSObjectGetProxyTarget",
+      "source": "javascript_core_c_api.zig",
+      "line": 166,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "pub extern \"c\" fn JSObjectGetProxyTarget(JSObjectRef) JSObjectRef;",
+      "declaration_sha256": "955484f3a691136d823041f6de27acff4cfa7fa5840f6bbdc7453a47f5c2652e",
+      "issue": 163
+    },
+    {
       "name": "JSObjectGetTypedArrayBuffer",
       "source": "javascript_core_c_api.zig",
       "line": 147,
@@ -3187,7 +3764,15 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSObjectGetTypedArrayByteLength(ctx: *jsc.JSGlobalObject, object: JSObjectRef, exception: ExceptionRef) usize;",
-      "declaration_sha256": "a6f61fcb321315d5c54671c48d9779746809b8ca54fd0a95ac63fb429129e5aa"
+      "declaration_sha256": "a6f61fcb321315d5c54671c48d9779746809b8ca54fd0a95ac63fb429129e5aa",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 105,
+          "declaration": "pub extern \"c\" fn JSObjectGetTypedArrayByteLength(ctx: ?*JSContextRef, object: ?*JSObject, exception: ExceptionRef) usize;",
+          "declaration_sha256": "60b513bd52d8f0ec21f57e6ab4e469f85f530ea0332e024fa255008f03492f24"
+        }
+      ]
     },
     {
       "name": "JSObjectGetTypedArrayByteOffset",
@@ -3207,7 +3792,15 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSObjectGetTypedArrayBytesPtr(ctx: *jsc.JSGlobalObject, object: JSObjectRef, exception: ExceptionRef) ?*anyopaque;",
-      "declaration_sha256": "491741eac4fbdfd05d0d02bad5f696ed92effafcdf7f06379e83f70616ad260c"
+      "declaration_sha256": "491741eac4fbdfd05d0d02bad5f696ed92effafcdf7f06379e83f70616ad260c",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 103,
+          "declaration": "pub extern \"c\" fn JSObjectGetTypedArrayBytesPtr(ctx: ?*JSContextRef, object: ?*JSObject, exception: ExceptionRef) ?*anyopaque;",
+          "declaration_sha256": "f6f261f64b80c65d8d2dedf962efd03e0072896b88b14f7d73cc89857e9f2b6b"
+        }
+      ]
     },
     {
       "name": "JSObjectGetTypedArrayLength",
@@ -3217,7 +3810,93 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSObjectGetTypedArrayLength(ctx: *jsc.JSGlobalObject, object: JSObjectRef, exception: ExceptionRef) usize;",
-      "declaration_sha256": "499f014ab3650de887df93c276f0f7c713f6eb437450863caca422eddc753dc4"
+      "declaration_sha256": "499f014ab3650de887df93c276f0f7c713f6eb437450863caca422eddc753dc4",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 104,
+          "declaration": "pub extern \"c\" fn JSObjectGetTypedArrayLength(ctx: ?*JSContextRef, object: ?*JSObject, exception: ExceptionRef) usize;",
+          "declaration_sha256": "a62d9e889995c6d11076dbe10b91399a0c44e936eae51488ed9ee4c19f38e729"
+        }
+      ]
+    },
+    {
+      "name": "JSObjectIsConstructor",
+      "source": "extern_fns.zig",
+      "line": 98,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectIsConstructor(ctx: ?*JSContextRef, object: ?*JSObject) bool;",
+      "declaration_sha256": "ee2414411c05c3be9efbaf8c548eb8e1168022acce7edb2ed738c1291fcf2525",
+      "alternate_declarations": [
+        {
+          "source": "javascript_core_c_api.zig",
+          "line": 136,
+          "declaration": "pub extern \"c\" fn JSObjectIsConstructor(ctx: *jsc.JSGlobalObject, object: JSObjectRef) bool;",
+          "declaration_sha256": "ab0396a9a98907873529b4d898d8a044317ee67d4258bd206d8c9d68793e1602"
+        }
+      ]
+    },
+    {
+      "name": "JSObjectIsFunction",
+      "source": "extern_fns.zig",
+      "line": 97,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectIsFunction(ctx: ?*JSContextRef, object: ?*JSObject) bool;",
+      "declaration_sha256": "584ed3d4837c2ab7cf9f1f002ec54c097fd3064307a7c2386a6582718c77da16"
+    },
+    {
+      "name": "JSObjectMake",
+      "source": "extern_fns.zig",
+      "line": 88,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectMake(ctx: ?*JSContextRef, class: ?*anyopaque, data: ?*anyopaque) ?*JSObject;",
+      "declaration_sha256": "913efd0b062b9c744f33b3a13ef9e623ec55294584267382376ac0b3193fab57"
+    },
+    {
+      "name": "JSObjectMakeArray",
+      "source": "extern_fns.zig",
+      "line": 89,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectMakeArray(ctx: ?*JSContextRef, argc: usize, argv: [*c]const ?*JSValue, exception: ExceptionRef) ?*JSObject;",
+      "declaration_sha256": "9436547763f2cfb79d9d113a8f6337efa1d9e4300b67e945a0e87ae89c05bc6f"
+    },
+    {
+      "name": "JSObjectMakeDate",
+      "source": "javascript_core_c_api.zig",
+      "line": 138,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectMakeDate(ctx: *jsc.JSGlobalObject, argumentCount: usize, arguments: [*c]const JSValueRef, exception: ExceptionRef) JSObjectRef;",
+      "declaration_sha256": "35d4a2857b9b878793afd44d6300e8e1ab353377ee5ce29b3c6fd9e1d6c5fafa"
+    },
+    {
+      "name": "JSObjectMakeDeferredPromise",
+      "source": "extern_fns.zig",
+      "line": 90,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectMakeDeferredPromise(ctx: ?*JSContextRef, resolve: [*c]?*JSObject, reject: [*c]?*JSObject, exception: ExceptionRef) ?*JSObject;",
+      "declaration_sha256": "06d3fcbd908ba09c221a3236616858191fff0a302d73e442c3c68d98c071106a"
+    },
+    {
+      "name": "JSObjectMakeFunctionWithCallback",
+      "source": "extern_fns.zig",
+      "line": 95,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectMakeFunctionWithCallback(ctx: ?*JSContextRef, name: ?*JSString, callback: JSObjectCallAsFunctionCallback) ?*JSObject;",
+      "declaration_sha256": "ab0749fe7e33ff81667a85bf4d0426cd98a9d1efe0f39a373fe47748b863f120"
     },
     {
       "name": "JSObjectMakeTypedArray",
@@ -3227,7 +3906,15 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSObjectMakeTypedArray(ctx: *jsc.JSGlobalObject, arrayType: JSTypedArrayType, length: usize, exception: ExceptionRef) JSObjectRef;",
-      "declaration_sha256": "5672eb3d036d73fc6a5ccd33846596cae8b2f2faa719723a48f0855fa52bf957"
+      "declaration_sha256": "5672eb3d036d73fc6a5ccd33846596cae8b2f2faa719723a48f0855fa52bf957",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 102,
+          "declaration": "pub extern \"c\" fn JSObjectMakeTypedArray(ctx: ?*JSContextRef, array_type: JSTypedArrayType, length: usize, exception: ExceptionRef) ?*JSObject;",
+          "declaration_sha256": "8013ac5fc70e1601c8f2bba1686f0a30508c5c4a7c8dddc4d58f7751e83857da"
+        }
+      ]
     },
     {
       "name": "JSObjectMakeTypedArrayWithArrayBuffer",
@@ -3248,6 +3935,26 @@
       "status": "implemented",
       "declaration": "pub extern fn JSObjectMakeTypedArrayWithArrayBufferAndOffset(ctx: *jsc.JSGlobalObject, arrayType: JSTypedArrayType, buffer: JSObjectRef, byteOffset: usize, length: usize, exception: ExceptionRef) JSObjectRef;",
       "declaration_sha256": "cd819e05ec92c3c552dd7d9ecb7a731da3f15b51ede574151398bacc8c076832"
+    },
+    {
+      "name": "JSObjectSetProperty",
+      "source": "extern_fns.zig",
+      "line": 92,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectSetProperty(ctx: ?*JSContextRef, object: ?*JSObject, name: ?*JSString, value: ?*JSValue, attrs: c_uint, exception: ExceptionRef) void;",
+      "declaration_sha256": "0d88cdb8bab14e273a18548132a920fe68b868ac41f905c7f6f8e7980fd0ca6f"
+    },
+    {
+      "name": "JSObjectSetPropertyAtIndex",
+      "source": "javascript_core_c_api.zig",
+      "line": 134,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSObjectSetPropertyAtIndex(ctx: *jsc.JSGlobalObject, object: JSObjectRef, propertyIndex: c_uint, value: JSValueRef, exception: ExceptionRef) void;",
+      "declaration_sha256": "b9cb1c80e3091dc4249bf8dd26faad9970eb967db90ea95451406cf53c5a200c"
     },
     {
       "name": "JSRemoteInspectorDisableAutoStart",
@@ -3305,6 +4012,66 @@
       "implementation": "src/c_api.zig"
     },
     {
+      "name": "JSStringCreateWithUTF8CString",
+      "source": "extern_fns.zig",
+      "line": 110,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringCreateWithUTF8CString(utf8: [*:0]const u8) ?*JSString;",
+      "declaration_sha256": "fb410cc3f6fcb87f042ffe254080c6f1e0fbca181a3cf96e555c6780d0a7bbe9"
+    },
+    {
+      "name": "JSStringGetCharactersPtr",
+      "source": "extern_fns.zig",
+      "line": 118,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringGetCharactersPtr(str: ?*JSString) [*]const u16;",
+      "declaration_sha256": "b04a8fa477f9e517223476c06ab373ac2b07f3a1e207c49e9eee7b65b9ae0a4d"
+    },
+    {
+      "name": "JSStringGetLength",
+      "source": "extern_fns.zig",
+      "line": 113,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringGetLength(str: ?*JSString) usize;",
+      "declaration_sha256": "e782f228b93d2d47cb5a518e302a32e0f4d01bb3fc72effb660a6701b32ce82e"
+    },
+    {
+      "name": "JSStringGetUTF8CString",
+      "source": "extern_fns.zig",
+      "line": 114,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringGetUTF8CString(str: ?*JSString, buf: [*]u8, buf_size: usize) usize;",
+      "declaration_sha256": "d4fb3ff0a5ad7e52906d8f6e3a7417ed4cf011358bf2f4d70c8f625117495751"
+    },
+    {
+      "name": "JSStringRelease",
+      "source": "extern_fns.zig",
+      "line": 112,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringRelease(str: ?*JSString) void;",
+      "declaration_sha256": "8ea99fdd5fca677f2360ac68f2e7ba7ab7a0964fc89eaf3c452fd661d46ff43b"
+    },
+    {
+      "name": "JSStringRetain",
+      "source": "extern_fns.zig",
+      "line": 111,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSStringRetain(str: ?*JSString) ?*JSString;",
+      "declaration_sha256": "59ce897e93fc67612405551cb402e2898c940c8a06b81f753a8f26e19a160287"
+    },
+    {
       "name": "JSUint8Array__fromDefaultAllocator",
       "source": "JSUint8Array.zig",
       "line": 34,
@@ -3345,7 +4112,135 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSValueGetType(ctx: *jsc.JSGlobalObject, value: JSValueRef) JSType;",
-      "declaration_sha256": "c4180b04ea1023cd4b97609f23d8a1ae21eb2527ebb2d82f5f7aae46a493931e"
+      "declaration_sha256": "c4180b04ea1023cd4b97609f23d8a1ae21eb2527ebb2d82f5f7aae46a493931e",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 57,
+          "declaration": "pub extern \"c\" fn JSValueGetType(ctx: ?*JSContextRef, value: ?*JSValue) JSType;",
+          "declaration_sha256": "f887bd4c8791cb852c48e32ca62e5b031c00bf700b6cd629390eb7a04a6a00be"
+        }
+      ]
+    },
+    {
+      "name": "JSValueGetTypedArrayType",
+      "source": "extern_fns.zig",
+      "line": 106,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueGetTypedArrayType(ctx: ?*JSContextRef, value: ?*JSValue, exception: ExceptionRef) JSTypedArrayType;",
+      "declaration_sha256": "0ba43245c81767b37595b38417b63c218919167057c04e497cbdaf6d4d4b635a"
+    },
+    {
+      "name": "JSValueIsArray",
+      "source": "extern_fns.zig",
+      "line": 64,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsArray(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "11adf549fd445613e7b2b9106ebc8e6e2229f604613625a63a08ad7c2641fda0"
+    },
+    {
+      "name": "JSValueIsBoolean",
+      "source": "extern_fns.zig",
+      "line": 60,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsBoolean(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "18c0323241c6fcc313b74e7e9e663927f3e0357a450e1e5cfed13c4e355829c3"
+    },
+    {
+      "name": "JSValueIsDate",
+      "source": "extern_fns.zig",
+      "line": 65,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsDate(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "3ae83d861003b7e13f72f4d77f8726974ea129e2e6e0e46d500e583c4fc7f7e7"
+    },
+    {
+      "name": "JSValueIsEqual",
+      "source": "extern_fns.zig",
+      "line": 66,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsEqual(ctx: ?*JSContextRef, a: ?*JSValue, b: ?*JSValue, exception: ExceptionRef) bool;",
+      "declaration_sha256": "9b696295747644c639793ecb003dd2c61934d4e1d12b557e7e85e5f7bfdabb28"
+    },
+    {
+      "name": "JSValueIsNull",
+      "source": "extern_fns.zig",
+      "line": 59,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsNull(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "ba80ac3b95695189521367e405003dc99d674c80823273c0a5a81d9c4091b2c4"
+    },
+    {
+      "name": "JSValueIsNumber",
+      "source": "extern_fns.zig",
+      "line": 61,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsNumber(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "d7bae22b3f478d1fc3c4c5f08587ade50993fd1fc79ac626a6611748f9feba34"
+    },
+    {
+      "name": "JSValueIsObject",
+      "source": "extern_fns.zig",
+      "line": 63,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsObject(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "071137a43ee630ca885e08bff8ba6a23e3110f627e57ff3afe0fa5286a288c63"
+    },
+    {
+      "name": "JSValueIsStrictEqual",
+      "source": "extern_fns.zig",
+      "line": 67,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsStrictEqual(ctx: ?*JSContextRef, a: ?*JSValue, b: ?*JSValue) bool;",
+      "declaration_sha256": "91634c4a19970c572ef0f2fbddba9e8bddcaf29c9d08f4582093021ba80e3643"
+    },
+    {
+      "name": "JSValueIsString",
+      "source": "extern_fns.zig",
+      "line": 62,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsString(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "70d7295fa9a13424d50fe4f2bb42838be87f57952987f023cacb860e1e1c7fee"
+    },
+    {
+      "name": "JSValueIsUndefined",
+      "source": "extern_fns.zig",
+      "line": 58,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueIsUndefined(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "d55bb71aad87d2f12a3319a8e8a2216759ee8a480f365508e698052123ac6ddd"
+    },
+    {
+      "name": "JSValueMakeBoolean",
+      "source": "extern_fns.zig",
+      "line": 73,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueMakeBoolean(ctx: ?*JSContextRef, b: bool) ?*JSValue;",
+      "declaration_sha256": "9431e597831320160367d2a41b3c379e7ce0b430987c226beea8229c3ab44527"
     },
     {
       "name": "JSValueMakeNull",
@@ -3355,7 +4250,65 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSValueMakeNull(ctx: *jsc.JSGlobalObject) JSValueRef;",
-      "declaration_sha256": "d7029b6bf07224935b9126406b84bd2fadd7d987ef687a4ae0be1b1aeeafcfc9"
+      "declaration_sha256": "d7029b6bf07224935b9126406b84bd2fadd7d987ef687a4ae0be1b1aeeafcfc9",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 72,
+          "declaration": "pub extern \"c\" fn JSValueMakeNull(ctx: ?*JSContextRef) ?*JSValue;",
+          "declaration_sha256": "51b560c6483e4516b8f33d812ca946732b4e71ad0b0093ea0e41b91568d60127"
+        }
+      ]
+    },
+    {
+      "name": "JSValueMakeNumber",
+      "source": "extern_fns.zig",
+      "line": 74,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueMakeNumber(ctx: ?*JSContextRef, n: f64) ?*JSValue;",
+      "declaration_sha256": "2af9219b0746cfe8c971087b8e2a336dd066ba7102cb6448546e5ed6f1947d4b"
+    },
+    {
+      "name": "JSValueMakeString",
+      "source": "extern_fns.zig",
+      "line": 75,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueMakeString(ctx: ?*JSContextRef, str: ?*JSString) ?*JSValue;",
+      "declaration_sha256": "7955deb5b47d7288ee65307caffb800eb719dc71a3930008b4273da0e4c97dc8"
+    },
+    {
+      "name": "JSValueMakeUndefined",
+      "source": "extern_fns.zig",
+      "line": 71,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueMakeUndefined(ctx: ?*JSContextRef) ?*JSValue;",
+      "declaration_sha256": "600c72538240e3e668fe7b0afaed3f5ad476f39e6aa9d4f7b63b410735b6ae3d"
+    },
+    {
+      "name": "JSValueProtect",
+      "source": "extern_fns.zig",
+      "line": 83,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueProtect(ctx: ?*JSContextRef, value: ?*JSValue) void;",
+      "declaration_sha256": "8c13e3b980d54d45c32b1cff42e3ee023bfb58460263c20a52b4d2cbdf3648b8"
+    },
+    {
+      "name": "JSValueToBoolean",
+      "source": "extern_fns.zig",
+      "line": 79,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueToBoolean(ctx: ?*JSContextRef, value: ?*JSValue) bool;",
+      "declaration_sha256": "bf0fa3b27172d74666fd76342c5eb41be96165274d8b3a6db845fc974e434ae6"
     },
     {
       "name": "JSValueToNumber",
@@ -3365,7 +4318,15 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSValueToNumber(ctx: *jsc.JSGlobalObject, value: JSValueRef, exception: ExceptionRef) f64;",
-      "declaration_sha256": "c1d2ccf7741a6a13197404bcdcd3ee5f0cd57059f5a8ec5d7f93e3b5b82b9dba"
+      "declaration_sha256": "c1d2ccf7741a6a13197404bcdcd3ee5f0cd57059f5a8ec5d7f93e3b5b82b9dba",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 80,
+          "declaration": "pub extern \"c\" fn JSValueToNumber(ctx: ?*JSContextRef, value: ?*JSValue, exception: ExceptionRef) f64;",
+          "declaration_sha256": "99d91b04c7b88053aad25eb69ebcaa08bb1fd42a18267f86b677b36d04d453c8"
+        }
+      ]
     },
     {
       "name": "JSValueToObject",
@@ -3375,7 +4336,35 @@
       "classification": "public_c_api",
       "status": "implemented",
       "declaration": "pub extern fn JSValueToObject(ctx: *jsc.JSGlobalObject, value: JSValueRef, exception: ExceptionRef) JSObjectRef;",
-      "declaration_sha256": "9e4ea89c5d359052fe0ea78141b4f58db032b7356d7dae83b62ca810b5a05e25"
+      "declaration_sha256": "9e4ea89c5d359052fe0ea78141b4f58db032b7356d7dae83b62ca810b5a05e25",
+      "alternate_declarations": [
+        {
+          "source": "extern_fns.zig",
+          "line": 82,
+          "declaration": "pub extern \"c\" fn JSValueToObject(ctx: ?*JSContextRef, value: ?*JSValue, exception: ExceptionRef) ?*JSObject;",
+          "declaration_sha256": "f39488f4221fa41f69619aa73a3f1476ee548f08367735c01e5665962dfd6740"
+        }
+      ]
+    },
+    {
+      "name": "JSValueToStringCopy",
+      "source": "extern_fns.zig",
+      "line": 81,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueToStringCopy(ctx: ?*JSContextRef, value: ?*JSValue, exception: ExceptionRef) ?*JSString;",
+      "declaration_sha256": "8fd2fff5610aef03e4bee619a036b1f32a15553738da98097a860574189281e1"
+    },
+    {
+      "name": "JSValueUnprotect",
+      "source": "extern_fns.zig",
+      "line": 84,
+      "calling_convention": "C",
+      "classification": "public_c_api",
+      "status": "implemented",
+      "declaration": "pub extern \"c\" fn JSValueUnprotect(ctx: ?*JSContextRef, value: ?*JSValue) void;",
+      "declaration_sha256": "d3cff50ae69c49f17f17c3a3febc5c3283ce3e00e95f52e7babfa6407c56b0fe"
     },
     {
       "name": "MarkedArgumentBuffer__append",
@@ -4390,6 +5379,17 @@
       "issue": 163
     },
     {
+      "name": "WebCore__FetchHeaders__createFromJS",
+      "source": "FetchHeaders.zig",
+      "line": 42,
+      "calling_convention": "C",
+      "classification": "private_jsc",
+      "status": "pending",
+      "declaration": "extern \"c\" fn WebCore__FetchHeaders__createFromJS(*jsc.JSGlobalObject, JSValue) ?*FetchHeaders;",
+      "declaration_sha256": "b842f0449261b5b83b9c0face5352dc6eb72918f80711c540a7eb76494ad99ea",
+      "issue": 163
+    },
+    {
       "name": "WebCore__FetchHeaders__createFromPicoHeaders_",
       "source": "FetchHeaders.zig",
       "line": 9,
@@ -4973,6 +5973,16 @@
       "issue": 163
     },
     {
+      "name": "connect",
+      "source": "socket_global.zig",
+      "line": 29,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn connect(fd: c_int, addr: *const anyopaque, len: c.socklen_t) c_int;",
+      "declaration_sha256": "b14f1c09f7effcaaf53282986702bbf4cf3d8f9739348ff2dc5db3d4eee4d4ba"
+    },
+    {
       "name": "generateCachedCommonJSProgramByteCodeFromSourceCode",
       "source": "CachedBytecode.zig",
       "line": 16,
@@ -5003,6 +6013,64 @@
       "status": "external",
       "declaration": "extern fn gnu_get_libc_version() callconv(.c) [*:0]const u8;",
       "declaration_sha256": "9e7093c866aa903f8f4798fde8aff6c18cdd5181c315687fd80529615e42aac6"
+    },
+    {
+      "name": "kill",
+      "source": "process.zig",
+      "line": 229,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn kill(pid: std.c.pid_t, sig: c_int) c_int;",
+      "declaration_sha256": "ca04e6336b6dd1c15a3295eedc68fc1c1500ac9228ffe6a544a15345519c8445"
+    },
+    {
+      "name": "poll",
+      "source": "socket_global.zig",
+      "line": 34,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn poll(fds: [*]pollfd, nfds: c_uint, timeout: c_int) c_int;",
+      "declaration_sha256": "568fe9f576e0f276c83c6b34ec501de97736bbb361035d2f6b27a4f3b264d29c"
+    },
+    {
+      "name": "recvfrom",
+      "source": "socket_global.zig",
+      "line": 31,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn recvfrom(fd: c_int, buf: *anyopaque, len: usize, flags: u32, src: ?*anyopaque, addrlen: ?*c.socklen_t) isize;",
+      "declaration_sha256": "6d508f2a573b047f8ffb53cea3f01647e346b5dc0c7d35e267896647aef8cdba"
+    },
+    {
+      "name": "sendto",
+      "source": "socket_global.zig",
+      "line": 30,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn sendto(fd: c_int, buf: *const anyopaque, len: usize, flags: u32, dest: ?*const anyopaque, addrlen: c.socklen_t) isize;",
+      "declaration_sha256": "bc81a51e72d352cfa10feb19a2677aa7fc2986ad4bc9e7106d10fcb5f4b9c265"
+    },
+    {
+      "name": "socket",
+      "source": "serve_global.zig",
+      "line": 33,
+      "calling_convention": "C",
+      "classification": "platform_import",
+      "status": "external",
+      "declaration": "extern \"c\" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;",
+      "declaration_sha256": "7ea90fb0d743d0d607c986c93b6ffbc293a343009a87618ff74343315fe70d66",
+      "alternate_declarations": [
+        {
+          "source": "socket_global.zig",
+          "line": 28,
+          "declaration": "extern \"c\" fn socket(domain: c_uint, sock_type: c_uint, protocol: c_uint) c_int;",
+          "declaration_sha256": "7ea90fb0d743d0d607c986c93b6ffbc293a343009a87618ff74343315fe70d66"
+        }
+      ]
     }
   ]
 }
