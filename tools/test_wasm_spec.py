@@ -159,6 +159,37 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertFalse(sharded)
         self.assertEqual(shards, [document])
 
+    def test_nested_thread_reports_receive_flattened_serial_indexes(self) -> None:
+        document = {"commands": [
+            {"type": "thread", "line": 1, "document": {"commands": []}},
+            {"type": "wait", "line": 4},
+        ]}
+        reported = [
+            {"index": 0, "type": "thread", "line": 1, "status": "pass"},
+            {"index": 0, "type": "module", "line": 2, "status": "pass"},
+            {"index": 1, "type": "action", "line": 3, "status": "pass"},
+            {"index": 1, "type": "wait", "line": 4, "status": "pass"},
+        ]
+        merged = wasm_spec.merge_evaluator_report(document, reported, False)
+        self.assertEqual([command["index"] for command in merged], [0, 1, 2, 3])
+        self.assertEqual([command["type"] for command in merged], [
+            "thread", "module", "action", "wait",
+        ])
+
+    def test_sharded_report_count_mismatch_is_a_runner_error(self) -> None:
+        document = {"commands": [
+            {"type": "module", "line": 7, "_source_index": 12},
+            {"type": "action", "line": 8, "_source_index": 13},
+        ]}
+        merged = wasm_spec.merge_evaluator_report(
+            document,
+            [{"type": "module", "line": 7, "status": "pass"}],
+            True,
+        )
+        self.assertEqual([command["index"] for command in merged], [12, 13])
+        self.assertTrue(all(command["status"] == "runner_error" for command in merged))
+        self.assertTrue(all("count mismatch" in command["detail"] for command in merged))
+
     def test_corpus_filter_cannot_escape_declared_profile(self) -> None:
         paths = [
             pathlib.Path("test/core/table.wast"),

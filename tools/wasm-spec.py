@@ -1076,6 +1076,38 @@ def module_command_shards_or_serial(document: dict, shard_count: int) -> tuple[l
         return [document], False
 
 
+def merge_evaluator_report(document: dict, reported: list[dict], sharded: bool) -> list[dict]:
+    """Map evaluator records back to stable inventory indexes.
+
+    Shards remain strictly one-to-one with their source commands. A serial
+    threads script is intentionally different: `wait` inserts the joined
+    child's command records into the parent report, so its result can be longer
+    than the top-level source document and must be indexed in evaluator order.
+    """
+    source_commands = document["commands"]
+    has_nested_threads = any(command.get("type") == "thread" for command in source_commands)
+    count_mismatch = len(reported) != len(source_commands)
+    if count_mismatch and (sharded or not has_nested_threads):
+        detail = "sharded evaluator command count mismatch" if sharded else "evaluator command count mismatch"
+        return [{
+            "index": command.get("_source_index", local_index),
+            "line": command.get("line", 0),
+            "type": command["type"],
+            "status": "runner_error",
+            "detail": detail,
+        } for local_index, command in enumerate(source_commands)]
+
+    merged: list[dict] = []
+    for local_index, reported_command in enumerate(reported):
+        command = dict(reported_command)
+        if sharded:
+            command["index"] = source_commands[local_index]["_source_index"]
+        else:
+            command["index"] = local_index
+        merged.append(command)
+    return merged
+
+
 def run_file(
     wast: Path,
     converter: Path,
@@ -1180,22 +1212,7 @@ def run_file(
                     "detail": detail,
                 })
             continue
-        reported = report["commands"]
-        if sharded and len(reported) != len(shard_document["commands"]):
-            detail = "sharded evaluator command count mismatch"
-            for command in shard_document["commands"]:
-                merged_commands.append({
-                    "index": command["_source_index"],
-                    "line": command.get("line", 0),
-                    "type": command["type"],
-                    "status": "runner_error",
-                    "detail": detail,
-                })
-            continue
-        for local_index, command in enumerate(reported):
-            source = shard_document["commands"][local_index]
-            command["index"] = source.get("_source_index", local_index)
-            merged_commands.append(command)
+        merged_commands.extend(merge_evaluator_report(shard_document, report["commands"], sharded))
     merged_commands.sort(key=lambda command: command["index"])
     return {"path": wast.relative_to(spec_root).as_posix(), "commands": merged_commands}
 
