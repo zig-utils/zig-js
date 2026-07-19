@@ -200,8 +200,34 @@ def main() -> int:
         type=Path,
         default=ROOT / "docs/.data/wasm-simd-inventory.json",
     )
+    parser.add_argument(
+        "--ci-workflow",
+        type=Path,
+        default=ROOT / ".github/workflows/ci.yml",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
+
+    ci_source = args.ci_workflow.read_text()
+    required_ci_tokens = (
+        "wasm-post-mvp-smoke",
+        "wasm-memory64-gc-smoke",
+        "a6003d06aefef41e20a3e36fe2e500062555c895",
+        "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+        "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+        "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+        "756060f5816c7e2159f4817fbdee76cf52f9c923",
+        "4e2898f7ca3bd0536218ed9b7b36ff7b86954c57ae0e6272fde69728cbe01088",
+        "--profile tail-calls",
+        "--profile exception-handling",
+        "--profile multi-memory",
+        "--profile memory64",
+        "--profile gc",
+    )
+    require(
+        all(token in ci_source for token in required_ci_tokens),
+        "post-MVP CI smoke/pin coverage drift",
+    )
 
     require(document.get("schema_version") == 1, "unsupported schema version")
     tracker = document.get("tracker", {})

@@ -122,6 +122,31 @@ jobs:
               python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simple.wast --inventory "$RUNNER_TEMP/wasm-threads-simple.json"
               python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter deeply_nested.wast --inventory "$RUNNER_TEMP/wasm-threads-nested.json"
               python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter wait_notify.wast --inventory "$RUNNER_TEMP/wasm-threads-wait.json"
+          # Exact proposal pins and bounded runtime witnesses for every WABT
+          # post-MVP terminal profile. Complete inventories remain deliberate
+          # commands; CI covers control, exception, and multi-memory families.
+          - name: wasm-post-mvp-smoke
+            wasm_post_mvp: true
+            cmd: |
+              zig build wasm-spec-eval
+              python3 tools/wasm-spec.py --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call.wast --inventory "$RUNNER_TEMP/wasm-tail-call-direct.json"
+              python3 tools/wasm-spec.py --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call_indirect.wast --inventory "$RUNNER_TEMP/wasm-tail-call-indirect.json"
+              python3 tools/wasm-spec.py --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter throw_ref.wast --inventory "$RUNNER_TEMP/wasm-exception-throw-ref.json"
+              python3 tools/wasm-spec.py --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter try_table.wast --inventory "$RUNNER_TEMP/wasm-exception-try-table.json"
+              python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory-multi.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-core.json"
+              python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter linking3.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-linking.json"
+          # wasm-tools-backed proposals use their exact release binary and
+          # source pin. These files cover 64-bit memory/table execution plus GC
+          # packed aggregates, i31 references, and cast-branch control flow.
+          - name: wasm-memory64-gc-smoke
+            wasm_memory64_gc: true
+            cmd: |
+              zig build wasm-spec-eval
+              python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter address64.wast --inventory "$RUNNER_TEMP/wasm-memory64-address.json"
+              python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter table_copy_mixed.wast --inventory "$RUNNER_TEMP/wasm-memory64-table.json"
+              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter array_copy.wast --inventory "$RUNNER_TEMP/wasm-gc-array.json"
+              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter i31.wast --inventory "$RUNNER_TEMP/wasm-gc-i31.json"
+              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter br_on_cast.wast --inventory "$RUNNER_TEMP/wasm-gc-casts.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
@@ -283,6 +308,44 @@ jobs:
             --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
           echo "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f  $RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" | sha256sum --check
           tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" --directory "$RUNNER_TEMP"
+      - name: Install pinned post-MVP WABT corpora
+        if: matrix.wasm_post_mvp == true
+        working-directory: zig-js
+        run: |
+          git init "$RUNNER_TEMP/wasm-tail-call"
+          git -C "$RUNNER_TEMP/wasm-tail-call" remote add origin https://github.com/WebAssembly/tail-call.git
+          git -C "$RUNNER_TEMP/wasm-tail-call" fetch --depth=1 origin a6003d06aefef41e20a3e36fe2e500062555c895
+          git -C "$RUNNER_TEMP/wasm-tail-call" checkout --detach FETCH_HEAD
+          git init "$RUNNER_TEMP/wasm-exception-handling"
+          git -C "$RUNNER_TEMP/wasm-exception-handling" remote add origin https://github.com/WebAssembly/exception-handling.git
+          git -C "$RUNNER_TEMP/wasm-exception-handling" fetch --depth=1 origin af287a73d8f3bf7ea216c10592f9e350b947c4f2
+          git -C "$RUNNER_TEMP/wasm-exception-handling" checkout --detach FETCH_HEAD
+          git init "$RUNNER_TEMP/wasm-multi-memory"
+          git -C "$RUNNER_TEMP/wasm-multi-memory" remote add origin https://github.com/WebAssembly/multi-memory.git
+          git -C "$RUNNER_TEMP/wasm-multi-memory" fetch --depth=1 origin cf8b5aa27257311b8eac80ae83f4ba22ee308064
+          git -C "$RUNNER_TEMP/wasm-multi-memory" checkout --detach FETCH_HEAD
+          curl --fail --location --silent --show-error \
+            https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
+          echo "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f  $RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" --directory "$RUNNER_TEMP"
+      - name: Install pinned Memory64 and GC corpus tools
+        if: matrix.wasm_memory64_gc == true
+        working-directory: zig-js
+        run: |
+          git init "$RUNNER_TEMP/wasm-memory64"
+          git -C "$RUNNER_TEMP/wasm-memory64" remote add origin https://github.com/WebAssembly/memory64.git
+          git -C "$RUNNER_TEMP/wasm-memory64" fetch --depth=1 origin 9003cd5e24e53b84cd9027ea3dd7ae57159a6db1
+          git -C "$RUNNER_TEMP/wasm-memory64" checkout --detach FETCH_HEAD
+          git init "$RUNNER_TEMP/wasm-gc"
+          git -C "$RUNNER_TEMP/wasm-gc" remote add origin https://github.com/WebAssembly/gc.git
+          git -C "$RUNNER_TEMP/wasm-gc" fetch --depth=1 origin 756060f5816c7e2159f4817fbdee76cf52f9c923
+          git -C "$RUNNER_TEMP/wasm-gc" checkout --detach FETCH_HEAD
+          curl --fail --location --silent --show-error \
+            https://github.com/bytecodealliance/wasm-tools/releases/download/v1.253.0/wasm-tools-1.253.0-x86_64-linux.tar.gz \
+            --output "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz"
+          echo "4e2898f7ca3bd0536218ed9b7b36ff7b86954c57ae0e6272fde69728cbe01088  $RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz" --directory "$RUNNER_TEMP"
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}

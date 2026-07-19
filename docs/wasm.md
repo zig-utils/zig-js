@@ -195,6 +195,13 @@ and architecture-independent interpreter scope. The same CI command above
 rejects matrix drift; regenerate intentional inventory changes with
 `python3 tools/wasm-conformance-matrix.py --write`.
 
+CI also rebuilds exact proposal checkouts and converters for every profile.
+Two bounded post-MVP jobs execute 208 WABT-backed commands across tail calls,
+exception handling, and multi-memory, plus 391 wasm-tools-backed commands
+across Memory64 and GC. The deliberate commands below remain authoritative for
+the complete inventories; the smoke set prevents a checked-in green artifact
+from masking pin, converter, or representative runtime drift.
+
 The tail-call binary, validation, and bounded execution foundation is pinned
 independently to
 `WebAssembly/tail-call@a6003d06aefef41e20a3e36fe2e500062555c895`. Its
@@ -514,6 +521,17 @@ eight-way wrapper-publication ThreadSanitizer witness. Extended constant
 expressions initialize i31, struct, array, and typed-table values, including
 immutable preceding/imported globals. The zero-failure terminal gate is
 recorded in [#300](https://github.com/zig-utils/zig-js/issues/300).
+
+Reproduce the complete GC proposal score with the exact checkout and converter
+named above:
+
+```sh
+zig build wasm-spec-eval
+python3 tools/wasm-spec.py --profile gc \
+  --spec-root /path/to/gc \
+  --converter /path/to/wasm-tools \
+  --engine zig-out/bin/wasm-spec-eval
+```
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
