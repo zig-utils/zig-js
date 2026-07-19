@@ -95,6 +95,7 @@ test {
     _ = @import("gc.zig");
     _ = @import("nanbox.zig");
     _ = @import("strcell.zig");
+    _ = @import("text_codec.zig");
     _ = @import("valuebox.zig");
     _ = @import("value_nb.zig");
     _ = @import("root_handshake.zig");
