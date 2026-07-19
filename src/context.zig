@@ -2521,6 +2521,12 @@ pub const Context = struct {
     abort_signal_timeout_owners: std.ArrayListUnmanaged(*AbortSignalOwner) = .empty,
     abort_signal_timeout_lock: std.atomic.Mutex = .unlocked,
     abort_signal_timeout_generation: std.atomic.Value(u32) = .init(1),
+    /// Public setTimeout/setInterval records. These are distinct from the
+    /// ABI-shaped AbortSignal lane: records are refed by default, own callback
+    /// roots, and are selected only by their originating event-loop queue.
+    timers: std.ArrayListUnmanaged(*TimerRecord) = .empty,
+    next_timer_id: u64 = 1,
+    next_timer_sequence: u64 = 1,
     /// FinalizationRegistry cleanup jobs made ready by a quiescent GC cycle.
     /// The collector only enqueues registries; callbacks run later from the
     /// normal interpreter checkpoint, outside the collector.
@@ -2939,6 +2945,20 @@ pub const Context = struct {
         js_observed: bool = false,
         native_observed: bool = false,
         rooted: bool = false,
+    };
+    pub const TimerRecord = struct {
+        id: u64,
+        owner: *promise.MicrotaskQueue,
+        callback: value.Value,
+        args: []value.Value,
+        delay_ns: u64,
+        deadline_ns: u64,
+        sequence: u64,
+        repeat: bool,
+        refed: bool = true,
+        running: bool = false,
+        cancelled: bool = false,
+        refresh_requested: bool = false,
     };
     pub const PrivateWeakFinalizeFn = *const fn (?*anyopaque) callconv(.c) void;
     /// Stable storage embedded in a private weak-reference handle. Atomic
@@ -3367,6 +3387,14 @@ pub const Context = struct {
             .abort_timeout_ctx = self,
             .abort_timeout_schedule = scheduleAbortSignalTimeout,
             .abort_timeout_poll = pollAbortSignalTimeouts,
+            .timer_ctx = self,
+            .timer_schedule = scheduleTimer,
+            .timer_cancel = cancelTimer,
+            .timer_set_ref = setTimerRef,
+            .timer_refresh = refreshTimer,
+            .timer_poll = pollTimers,
+            .timer_keepalive = keepaliveTimers,
+            .timer_abandon = abandonTimers,
             .finalization_cleanup_jobs = &self.finalization_cleanup_jobs,
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .watchdog_check_flag = self.watchdog_check_flag,
@@ -3551,6 +3579,7 @@ pub const Context = struct {
         }
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
+        self.cancelAllTimers();
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
         self.private_strong_roots.deinit(self.gpa);
@@ -3649,6 +3678,7 @@ pub const Context = struct {
         std.debug.assert(self.c_api_inspector_state == null);
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
+        self.cancelAllTimers();
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
         self.private_strong_roots.deinit(self.gpa);
@@ -4090,6 +4120,242 @@ pub const Context = struct {
                 continue;
             }
             return;
+        }
+    }
+
+    fn timerNowNs() u64 {
+        return @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+    }
+
+    fn timerDeadline(now: u64, delay_ns: u64) u64 {
+        return std.math.add(u64, now, delay_ns) catch std.math.maxInt(u64);
+    }
+
+    fn timerIdLiveLocked(self: *Context, id: u64) bool {
+        for (self.timers.items) |timer| if (timer.id == id) return true;
+        return false;
+    }
+
+    fn mintTimerIdLocked(self: *Context) u64 {
+        while (true) {
+            const id = self.next_timer_id;
+            self.next_timer_id +%= 1;
+            if (self.next_timer_id == 0 or self.next_timer_id > 9007199254740991) self.next_timer_id = 1;
+            if (id != 0 and !self.timerIdLiveLocked(id)) return id;
+        }
+    }
+
+    fn mintTimerSequenceLocked(self: *Context) u64 {
+        const sequence = self.next_timer_sequence;
+        self.next_timer_sequence +%= 1;
+        if (self.next_timer_sequence == 0) self.next_timer_sequence = 1;
+        return sequence;
+    }
+
+    fn removeTimerLocked(self: *Context, target: *TimerRecord) bool {
+        for (self.timers.items, 0..) |timer, index| {
+            if (timer == target) {
+                _ = self.timers.swapRemove(index);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn destroyTimer(self: *Context, timer: *TimerRecord) void {
+        self.gpa.free(timer.args);
+        self.gpa.destroy(timer);
+    }
+
+    fn scheduleTimer(
+        raw_context: ?*anyopaque,
+        machine: *interp.Interpreter,
+        callback: value.Value,
+        args: []const value.Value,
+        delay_ms: u64,
+        repeat: bool,
+    ) interp.EvalError!u64 {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return error.OutOfMemory));
+        const owner = machine.microtasks orelse return error.OutOfMemory;
+        const copied_args = self.gpa.dupe(value.Value, args) catch return error.OutOfMemory;
+        errdefer self.gpa.free(copied_args);
+        const timer = self.gpa.create(TimerRecord) catch return error.OutOfMemory;
+        errdefer self.gpa.destroy(timer);
+        const delay_ns = std.math.mul(u64, delay_ms, std.time.ns_per_ms) catch std.math.maxInt(u64);
+        const now = timerNowNs();
+
+        self.realmLock();
+        defer self.realmUnlock();
+        const id = self.mintTimerIdLocked();
+        timer.* = .{
+            .id = id,
+            .owner = owner,
+            .callback = callback,
+            .args = copied_args,
+            .delay_ns = delay_ns,
+            .deadline_ns = timerDeadline(now, delay_ns),
+            .sequence = self.mintTimerSequenceLocked(),
+            .repeat = repeat,
+        };
+        self.timers.append(self.gpa, timer) catch return error.OutOfMemory;
+        // The parallel marker may already have traced the Context root list.
+        // Shade every newly published edge as part of the insertion barrier.
+        gc_mod.barrierValue(callback);
+        for (copied_args) |arg_value| gc_mod.barrierValue(arg_value);
+        return id;
+    }
+
+    fn cancelTimer(raw_context: ?*anyopaque, machine: *interp.Interpreter, id: u64) void {
+        _ = machine;
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
+        var dead: ?*TimerRecord = null;
+        self.realmLock();
+        for (self.timers.items) |timer| {
+            if (timer.id != id) continue;
+            timer.cancelled = true;
+            if (!timer.running and self.removeTimerLocked(timer)) dead = timer;
+            break;
+        }
+        self.realmUnlock();
+        if (dead) |timer| self.destroyTimer(timer);
+    }
+
+    fn setTimerRef(raw_context: ?*anyopaque, machine: *interp.Interpreter, id: u64, refed: ?bool) bool {
+        _ = machine;
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return false));
+        self.realmLock();
+        defer self.realmUnlock();
+        for (self.timers.items) |timer| {
+            if (timer.id != id or timer.cancelled) continue;
+            if (refed) |new_ref| timer.refed = new_ref;
+            return timer.refed;
+        }
+        return false;
+    }
+
+    fn refreshTimer(raw_context: ?*anyopaque, machine: *interp.Interpreter, id: u64) bool {
+        _ = machine;
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return false));
+        self.realmLock();
+        defer self.realmUnlock();
+        for (self.timers.items) |timer| {
+            if (timer.id != id or timer.cancelled) continue;
+            timer.deadline_ns = timerDeadline(timerNowNs(), timer.delay_ns);
+            timer.sequence = self.mintTimerSequenceLocked();
+            timer.refresh_requested = timer.running;
+            return true;
+        }
+        return false;
+    }
+
+    fn pollTimers(raw_context: ?*anyopaque, machine: *interp.Interpreter) interp.EvalError!void {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
+        const owner = machine.microtasks orelse return;
+        while (true) {
+            const now = timerNowNs();
+            var selected: ?*TimerRecord = null;
+            self.realmLock();
+            for (self.timers.items) |timer| {
+                if (timer.owner != owner or timer.running or timer.cancelled or timer.deadline_ns > now) continue;
+                if (selected == null or timer.deadline_ns < selected.?.deadline_ns or
+                    (timer.deadline_ns == selected.?.deadline_ns and timer.sequence < selected.?.sequence))
+                {
+                    selected = timer;
+                }
+            }
+            if (selected) |timer| timer.running = true;
+            self.realmUnlock();
+            const timer = selected orelse return;
+
+            const call_result = machine.callValueWithThis(timer.callback, timer.args, value.Value.undef());
+
+            var dead = false;
+            self.realmLock();
+            if (!timer.cancelled and (timer.repeat or timer.refresh_requested)) {
+                if (!timer.refresh_requested) timer.deadline_ns = timerDeadline(timerNowNs(), timer.delay_ns);
+                timer.sequence = self.mintTimerSequenceLocked();
+                timer.running = false;
+                timer.refresh_requested = false;
+            } else {
+                dead = self.removeTimerLocked(timer);
+            }
+            self.realmUnlock();
+            if (dead) self.destroyTimer(timer);
+
+            if (call_result) |_| {} else |err| {
+                if (err != error.Throw) return err;
+                const thrown = machine.exception;
+                machine.exception = value.Value.undef();
+                const handled = try interp.handleProcessUncaughtException(machine, thrown, false);
+                if (!handled) {
+                    machine.exception = thrown;
+                    return error.Throw;
+                }
+            }
+            // A timer callback is one task. Drain every job it queued before
+            // selecting another due timer; the interpreter polling guard keeps
+            // this nested checkpoint from recursively selecting timer tasks.
+            try machine.drainMicrotasks();
+        }
+    }
+
+    fn earliestRefedTimerDeadline(self: *Context, owner: *promise.MicrotaskQueue) ?u64 {
+        self.realmLock();
+        defer self.realmUnlock();
+        var earliest: ?u64 = null;
+        for (self.timers.items) |timer| {
+            if (timer.owner != owner or timer.cancelled or !timer.refed) continue;
+            if (earliest == null or timer.deadline_ns < earliest.?) earliest = timer.deadline_ns;
+        }
+        return earliest;
+    }
+
+    fn keepaliveTimers(raw_context: ?*anyopaque, machine: *interp.Interpreter) void {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
+        const owner = machine.microtasks orelse return;
+        while (self.earliestRefedTimerDeadline(owner)) |deadline| {
+            machine.drainMicrotasks() catch return;
+            const next = self.earliestRefedTimerDeadline(owner) orelse return;
+            const now = timerNowNs();
+            if (next <= now) continue;
+            // Bound parks so a peer can cancel/unref a shared-realm timer
+            // without leaving the owner asleep until the old deadline.
+            const park_ns = @min(next - now, 5 * std.time.ns_per_ms);
+            const release_gil = machine.use_thread_gil and machine.gil != null;
+            if (release_gil) machine.gil.?.release();
+            std.Io.sleep(agent.engineIo(), .fromNanoseconds(@intCast(park_ns)), .awake) catch {};
+            if (release_gil) machine.gil.?.acquire();
+            _ = deadline;
+        }
+    }
+
+    fn cancelAllTimers(self: *Context) void {
+        self.realmLock();
+        var owned = self.timers;
+        self.timers = .empty;
+        self.realmUnlock();
+        for (owned.items) |timer| self.destroyTimer(timer);
+        owned.deinit(self.gpa);
+    }
+
+    fn abandonTimers(raw_context: ?*anyopaque, machine: *interp.Interpreter) void {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return));
+        const owner = machine.microtasks orelse return;
+        while (true) {
+            var dead: ?*TimerRecord = null;
+            self.realmLock();
+            for (self.timers.items) |timer| {
+                if (timer.owner != owner) continue;
+                _ = self.removeTimerLocked(timer);
+                dead = timer;
+                break;
+            }
+            self.realmUnlock();
+            if (dead) |timer| {
+                self.destroyTimer(timer);
+            } else {
+                return;
+            }
         }
     }
 
@@ -5165,6 +5431,7 @@ pub const Context = struct {
         // A later host entry is a timer checkpoint. Poll before executing the
         // new script so elapsed unrefed timeouts are already observable to it.
         try machine.pollAbortSignalTimeouts();
+        try machine.pollTimers();
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
@@ -5211,6 +5478,7 @@ pub const Context = struct {
         machine.drainFinalizationCleanupJobs() catch {};
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
+        if (!top_level_failed) machine.keepaliveTimers();
         // Shell keepalive (threads mode): a pending Thread completion is a
         // pending settlement — the realm stays alive until every spawned
         // thread finishes (each drains its own queue and settles its
@@ -5291,6 +5559,7 @@ pub const Context = struct {
             machine.drainFinalizationCleanupJobs() catch {};
             machine.drainMicrotasks() catch {};
             machine.settleAsyncWaiters();
+            if (!top_level_failed) machine.keepaliveTimers();
         }
         if (outcome) |result| {
             // A script-visible `gc()` request is serviced before returning to
@@ -5426,6 +5695,7 @@ pub const Context = struct {
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
         try machine.pollAbortSignalTimeouts();
+        try machine.pollTimers();
         machine.strict = true;
         // Expose the graph to runtime dynamic `import()`.
         const previous_host = self.mod_host;
@@ -5454,6 +5724,7 @@ pub const Context = struct {
         machine.drainFinalizationCleanupJobs() catch {};
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
+        if (outcome) |_| machine.keepaliveTimers() else |_| {}
         outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
             return err;
@@ -5545,6 +5816,7 @@ pub const Context = struct {
         const ai_saved = gc_mod.setActiveInterpreter(&machine);
         defer _ = gc_mod.setActiveInterpreter(ai_saved);
         try machine.pollAbortSignalTimeouts();
+        try machine.pollTimers();
         machine.strict = true;
 
         var path: []const u8 = "";
@@ -7280,6 +7552,110 @@ test "Date.now progresses for host timers" {
         \\}, 1);
     );
     try std.testing.expect((try ctx.evaluate("dateNowProgressed")).asBool());
+}
+
+test "host timers are nonblocking tasks with stable handles and interval cancellation" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\globalThis.timerOrder = [];
+        \\Promise.resolve().then(() => timerOrder.push("promise"));
+        \\const first = setTimeout((label, payload) => {
+        \\  timerOrder.push(label + payload.value);
+        \\  Promise.resolve().then(() => timerOrder.push("timer-microtask"));
+        \\}, 1, "first-", { value: 7 });
+        \\if (typeof first !== "object" || !first.hasRef()) throw new Error("refed handle");
+        \\if (!(+first >= 1)) throw new Error("numeric handle id");
+        \\if (first.unref() !== first || first.hasRef()) throw new Error("unref handle");
+        \\if (first.ref() !== first || !first.hasRef()) throw new Error("ref handle");
+        \\first.refresh();
+        \\setTimeout(() => timerOrder.push("second"), 1);
+        \\const cancelled = setTimeout(() => timerOrder.push("cancelled"), 1);
+        \\clearTimeout(+cancelled);
+        \\let ticks = 0;
+        \\const interval = setInterval(() => {
+        \\  timerOrder.push("interval-" + (++ticks));
+        \\  if (ticks === 2) clearInterval(interval);
+        \\}, 1);
+        \\timerOrder.push("sync");
+        \\"scheduled";
+    );
+    try std.testing.expectEqualStrings("scheduled", result.asStr());
+    try std.testing.expectEqualStrings(
+        "sync,promise,first-7,timer-microtask,second,interval-1,interval-2",
+        (try ctx.evaluate("timerOrder.join(',')")).asStr(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), ctx.timers.items.len);
+}
+
+test "unrefed timers wait for a later host checkpoint and keep precise roots" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    const refed = try ctx.evaluate(
+        \\globalThis.unrefResult = 0;
+        \\let payload = { nested: { answer: 42 } };
+        \\const timer = setTimeout(value => {
+        \\  unrefResult = value.nested.answer;
+        \\}, 500, payload);
+        \\timer.unref();
+        \\payload = null;
+        \\gc();
+        \\timer.hasRef();
+    );
+    try std.testing.expect(!refed.asBool());
+    // Returning with the active record proves unref did not enter keepalive.
+    // Inspect Context state directly so this assertion is not itself a host
+    // checkpoint whose timing changes under TSan.
+    try std.testing.expectEqual(@as(usize, 1), ctx.timers.items.len);
+    agent.sleepMs(525);
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate("unrefResult")).asNum());
+    try std.testing.expectEqual(@as(usize, 0), ctx.timers.items.len);
+}
+
+test "host timers stay on their shared-realm event loop" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    inline for (.{ false, true }) |parallel| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_threads = true,
+            .enable_gc = parallel,
+            .parallel_gc = parallel,
+            .parallel_js = parallel,
+        });
+        defer ctx.destroy();
+
+        const result = try ctx.evaluate(
+            \\globalThis.threadTimerResult = 0;
+            \\const thread = new Thread(() => {
+            \\  setTimeout(() => { threadTimerResult = 42; }, 1);
+            \\  setTimeout(() => { threadTimerResult = -1; }, 500).unref();
+            \\  return 7;
+            \\});
+            \\if (thread.join() !== 7) throw new Error("thread result");
+            \\threadTimerResult;
+        );
+        try std.testing.expectEqual(@as(f64, 42), result.asNum());
+        try std.testing.expectEqual(@as(usize, 0), ctx.timers.items.len);
+    }
+}
+
+test "host timer exceptions use the process uncaught exception policy" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.timerExceptionOrder = [];
+        \\process.on("uncaughtException", error => {
+        \\  timerExceptionOrder.push("caught-" + error.message);
+        \\});
+        \\setTimeout(() => { throw new Error("boom"); }, 1);
+        \\setTimeout(() => timerExceptionOrder.push("after"), 1);
+    );
+    try std.testing.expectEqualStrings(
+        "caught-boom,after",
+        (try ctx.evaluate("timerExceptionOrder.join(',')")).asStr(),
+    );
 }
 
 test "String generics + .constructor + match/search" {

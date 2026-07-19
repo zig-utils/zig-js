@@ -1155,6 +1155,7 @@ fn workerMain(w: *Worker) void {
         _ = machine.callValueWithThis(handler, &.{event}, Value.undef()) catch {};
         machine.drainMicrotasks() catch {};
         machine.settleAsyncWaiters();
+        machine.keepaliveTimers();
     }
 }
 

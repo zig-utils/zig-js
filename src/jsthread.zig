@@ -711,6 +711,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
     machine.microtasks = microtasks;
     machine.async_waiters = &async_waiters;
+    defer machine.abandonTimers();
     var result: Value = Value.undef();
     var threw = false;
     if (machine.callValueWithThis(fn_v, args, Value.undef())) |out| {
@@ -732,6 +733,7 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
         // publishing completion.
         pumpTasks(&machine);
         machine.settleAsyncWaiters();
+        machine.keepaliveTimers();
         result = out;
     } else |err| {
         machine.drainMicrotasks() catch {};

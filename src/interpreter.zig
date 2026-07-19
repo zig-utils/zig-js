@@ -1143,6 +1143,18 @@ pub const Interpreter = struct {
     abort_timeout_schedule: ?*const fn (?*anyopaque, *Interpreter, *value.Object, u64) EvalError!void = null,
     abort_timeout_poll: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
     polling_abort_timeouts: bool = false,
+    /// Context-owned public timer lane. Unlike AbortSignal's deliberately
+    /// unrefed ABI record, these hooks implement refed shell event-loop work
+    /// and key records by this interpreter's microtask queue (its event loop).
+    timer_ctx: ?*anyopaque = null,
+    timer_schedule: ?*const fn (?*anyopaque, *Interpreter, Value, []const Value, u64, bool) EvalError!u64 = null,
+    timer_cancel: ?*const fn (?*anyopaque, *Interpreter, u64) void = null,
+    timer_set_ref: ?*const fn (?*anyopaque, *Interpreter, u64, ?bool) bool = null,
+    timer_refresh: ?*const fn (?*anyopaque, *Interpreter, u64) bool = null,
+    timer_poll: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
+    timer_keepalive: ?*const fn (?*anyopaque, *Interpreter) void = null,
+    timer_abandon: ?*const fn (?*anyopaque, *Interpreter) void = null,
+    polling_timers: bool = false,
     /// Context-owned FinalizationRegistry cleanup job queue. GC marks records
     /// ready and enqueues registries; this interpreter drains callbacks at host
     /// checkpoints, outside collection.
@@ -7220,6 +7232,24 @@ pub const Interpreter = struct {
         try poll(self.abort_timeout_ctx, self);
     }
 
+    pub fn pollTimers(self: *Interpreter) EvalError!void {
+        const poll = self.timer_poll orelse return;
+        if (self.polling_timers) return;
+        self.polling_timers = true;
+        defer self.polling_timers = false;
+        try poll(self.timer_ctx, self);
+    }
+
+    pub fn keepaliveTimers(self: *Interpreter) void {
+        const keepalive = self.timer_keepalive orelse return;
+        keepalive(self.timer_ctx, self);
+    }
+
+    pub fn abandonTimers(self: *Interpreter) void {
+        const abandon = self.timer_abandon orelse return;
+        abandon(self.timer_ctx, self);
+    }
+
     /// Run one complete host checkpoint: finish the current task's next ticks
     /// and Promise jobs before selecting timer tasks. Timer callbacks may queue
     /// another microtask checkpoint, which the Context scheduler drains between
@@ -7236,6 +7266,7 @@ pub const Interpreter = struct {
             }
         }
         try self.pollAbortSignalTimeouts();
+        try self.pollTimers();
     }
 
     /// Move each pending burst out under its queue lock, then execute unlocked.
@@ -16743,24 +16774,122 @@ fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try env.put("$vm", Value.obj(vm_obj));
 }
 
-/// Host timer used by test262's Atomics helper. This intentionally blocks the
-/// current agent for the delay, services finite waitAsync tickets, then queues
-/// the callback; the engine has no browser event loop yet.
+const timer_id_slot = "\x00TimerId";
+
+fn timerDelayMs(self: *Interpreter, delay_arg: ?Value) value.HostError!u64 {
+    const n = if (delay_arg) |v| try self.toNumberV(v) else 1;
+    // Node-compatible host range: invalid, sub-millisecond, and overflowing
+    // delays become one millisecond; finite fractions are truncated.
+    if (!std.math.isFinite(n) or n < 1 or n > std.math.maxInt(i32)) return 1;
+    return @intFromFloat(@trunc(n));
+}
+
+fn timerId(self: *Interpreter, candidate: Value) value.HostError!?u64 {
+    const raw = if (candidate.isObject())
+        candidate.asObj().getOwn(timer_id_slot) orelse return null
+    else
+        candidate;
+    const n = try self.toNumberV(raw);
+    if (!std.math.isFinite(n) or n < 1 or n > 9007199254740991 or @trunc(n) != n) return null;
+    return @intFromFloat(n);
+}
+
+fn timerHandleRefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    if (self.timer_set_ref) |set_ref| _ = set_ref(self.timer_ctx, self, id, true);
+    return this;
+}
+
+fn timerHandleUnrefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    if (self.timer_set_ref) |set_ref| _ = set_ref(self.timer_ctx, self, id, false);
+    return this;
+}
+
+fn timerHandleHasRefFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    const refed = if (self.timer_set_ref) |set_ref| set_ref(self.timer_ctx, self, id, null) else false;
+    return Value.boolVal(refed);
+}
+
+fn timerHandleRefreshFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    if (self.timer_refresh) |refresh| _ = refresh(self.timer_ctx, self, id);
+    return this;
+}
+
+fn timerHandleCloseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    if (self.timer_cancel) |cancel| cancel(self.timer_ctx, self, id);
+    return this;
+}
+
+fn timerHandleToPrimitiveFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const id = (try timerId(self, this)) orelse return self.throwError("TypeError", "incompatible timer handle");
+    return Value.num(@floatFromInt(id));
+}
+
+fn makeTimerHandle(self: *Interpreter, id: u64) value.HostError!Value {
+    const handle = try self.newObject();
+    const mark = try self.pushTempRoot(handle);
+    defer self.restoreTempRoots(mark);
+    const o = handle.asObj();
+    try o.setOwn(self.arena, self.root_shape, timer_id_slot, Value.num(@floatFromInt(id)));
+    try setNative(self.arena, self.root_shape, o, "ref", 0, timerHandleRefFn);
+    try setNative(self.arena, self.root_shape, o, "unref", 0, timerHandleUnrefFn);
+    try setNative(self.arena, self.root_shape, o, "hasRef", 0, timerHandleHasRefFn);
+    try setNative(self.arena, self.root_shape, o, "refresh", 0, timerHandleRefreshFn);
+    try setNative(self.arena, self.root_shape, o, "close", 0, timerHandleCloseFn);
+    if (self.wellKnownSymbolKey("toPrimitive")) |key|
+        try setNative(self.arena, self.root_shape, o, key, 1, timerHandleToPrimitiveFn);
+    return handle;
+}
+
+fn scheduleTimer(self: *Interpreter, args: []const Value, repeat: bool) value.HostError!Value {
+    const cb = if (args.len > 0) args[0] else Value.undef();
+    if (!cb.isCallable()) return self.throwError("TypeError", "timer callback must be a function");
+    const schedule = self.timer_schedule orelse return self.throwError("Error", "host timer scheduler is unavailable");
+    const delay = try timerDelayMs(self, if (args.len > 1) args[1] else null);
+    const callback_args = if (args.len > 2) args[2..] else &.{};
+    const id = try schedule(self.timer_ctx, self, cb, callback_args, delay, repeat);
+    errdefer if (self.timer_cancel) |cancel| cancel(self.timer_ctx, self, id);
+    return makeTimerHandle(self, id);
+}
+
+/// Public host timer scheduling is non-blocking. Context owns the record and
+/// precise callback roots; the shell keepalive tail parks only after this task
+/// and its microtask checkpoint have completed.
 fn setTimeoutFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const cb = if (args.len > 0) args[0] else Value.undef();
-    if (!cb.isCallable()) return Value.num(0);
-    const ms = if (args.len > 1) try self.toNumberV(args[1]) else 0;
-    if (!std.math.isNan(ms) and ms > 0) agent.sleepMs(ms);
-    if (self.async_waiters) |waiters| {
-        if (self.asyncWaiterCount(waiters) > 0) self.settleAsyncWaiters();
-    }
-    const tick = try promise.newPromise(self);
-    const pp: *promise.Promise = @ptrCast(@alignCast(tick.promiseData().?));
-    try promise.resolve(self, pp, Value.undef());
-    _ = try promise.then(self, pp, cb, Value.undef());
-    return Value.num(0);
+    return scheduleTimer(self, args, false);
+}
+
+fn setIntervalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return scheduleTimer(self, args, true);
+}
+
+fn clearTimerFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len == 0) return Value.undef();
+    const id = (try timerId(self, args[0])) orelse return Value.undef();
+    if (self.timer_cancel) |cancel| cancel(self.timer_ctx, self, id);
+    return Value.undef();
 }
 
 /// Test-shell helper used by the PR-249 corpus. This is a microtask checkpoint
@@ -29308,6 +29437,9 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "escape", 1, builtins.escapeFn);
     try defineGlobalFn(env, root_shape, "unescape", 1, builtins.unescapeFn);
     try defineGlobalFn(env, root_shape, "setTimeout", 2, setTimeoutFn);
+    try defineGlobalFn(env, root_shape, "clearTimeout", 1, clearTimerFn);
+    try defineGlobalFn(env, root_shape, "setInterval", 2, setIntervalFn);
+    try defineGlobalFn(env, root_shape, "clearInterval", 1, clearTimerFn);
     try defineGlobalFn(env, root_shape, "drainMicrotasks", 0, drainMicrotasksFn);
     try defineGlobalFn(env, root_shape, "$drainRunLoop", 0, drainRunLoopFn);
     try defineGlobalFn(env, root_shape, "$drainFinalizationCleanup", 0, drainFinalizationCleanupFn);

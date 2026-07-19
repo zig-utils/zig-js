@@ -943,6 +943,10 @@ pub const Binding = struct {
         if (ctx.mod_cache) |cache|
             if (cache != &ctx.module_registry) traceModuleGraph(cache, v);
         for (ctx.async_waiters.items) |aw| markValue(v, aw.promise);
+        for (ctx.timers.items) |timer| {
+            markValue(v, timer.callback);
+            for (timer.args) |arg| markValue(v, arg);
+        }
         for (ctx.finalization_cleanup_jobs.items) |registry| v.mark(registry);
         for (ctx.c_api_class_prototypes.items) |prototype| v.mark(prototype.object);
         for (ctx.c_api_handles.items) |h| {
