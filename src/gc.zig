@@ -934,8 +934,9 @@ pub const Binding = struct {
         for (ctx.next_ticks.pendingItems()) |mt| traceMicrotask(mt, v);
         if (par != null) ctx.next_ticks.release();
 
-        // `async_waiters` + `c_api_handles` + `finalization_cleanup_jobs` share
-        // `realm_lock` (taken by their mutators only under parallel_js).
+        // `async_waiters` + public `timers` + `c_api_handles` +
+        // `finalization_cleanup_jobs` share `realm_lock` (taken by their
+        // mutators only under parallel_js).
         ctx.realmLock();
         for (ctx.unhandled_rejections.items) |rejected| markManaged(v, rejected);
         for (ctx.handled_rejections.items) |handled| markManaged(v, handled);

@@ -26,8 +26,9 @@ is cancelled, or its event loop is torn down.
   next ready timer callback.
 - Cancelling a running interval suppresses its next iteration. `refresh()` from
   a running one-shot callback schedules it again.
-- Callback arguments and `this === undefined` follow Node-style host timers;
-  string callbacks are rejected with `TypeError`.
+- Extra callback arguments and Node-style string-callback rejection are
+  supported. The shell supplies an undefined receiver; ordinary non-strict
+  JavaScript therefore applies its normal global-`this` coercion.
 
 Refed timers keep a shell, module, worker callback, or shared-realm thread alive.
 The host parks only after the current top-level task and microtask checkpoint.

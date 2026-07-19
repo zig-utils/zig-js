@@ -2708,7 +2708,8 @@ pub const Context = struct {
     /// precise-root path. Tests compare deltas; embedders do not observe it.
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
-    /// `async_waiters`, `c_api_handles`, `finalization_cleanup_jobs` — so the
+    /// `async_waiters`, public `timers`, `c_api_handles`, and
+    /// `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
     /// both the writers and the collector **only under `parallel_js`** (a null
     /// `realm_lock_p` in GIL mode keeps those paths byte-identical). A brief mutex.
@@ -4490,8 +4491,8 @@ pub const Context = struct {
 
     /// Lock `realm_lock` only under `parallel_js` (a no-op in GIL mode, so those
     /// realm-list mutations stay byte-identical there). Guards `async_waiters`,
-    /// `c_api_handles`, and `finalization_cleanup_jobs` against the mid-script
-    /// parallel collector's reads.
+    /// public `timers`, `c_api_handles`, and `finalization_cleanup_jobs`
+    /// against the mid-script parallel collector's reads.
     fn spinLockMutex(m: *std.atomic.Mutex) void {
         var spins: usize = 0;
         while (!m.tryLock()) : (spins += 1) {
