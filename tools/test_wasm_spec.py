@@ -188,6 +188,8 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertEqual(gc["converter_version"], "1.253.0")
         self.assertEqual(gc["converter_args"], [])
         self.assertIn("item.type === 'eqref'", wasm_spec.PRELUDE)
+        self.assertIn("item.type === 'refnull'", wasm_spec.PRELUDE)
+        self.assertIn("return typeof actual === 'function'", wasm_spec.PRELUDE)
         self.assertIn("table64: new WebAssembly.Table({ address: 'i64'", wasm_spec.PRELUDE)
 
 

@@ -710,7 +710,11 @@ function __sameOne(actual, item) {
   }
   if (item.type === 'i31ref') return typeof actual === 'number';
   if (item.type === 'eqref' || item.type === 'structref' || item.type === 'arrayref') return actual !== null && typeof actual === 'object';
-  if (item.type === 'funcref' && item.value === 'null') return actual === null;
+  if (item.type === 'refnull') return actual === null;
+  if (item.type === 'funcref') {
+    if (item.value === 'null') return actual === null;
+    return typeof actual === 'function';
+  }
   return false;
 }
 function __same(actual, expected) {
