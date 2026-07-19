@@ -227,6 +227,8 @@ pub const ExternalBufferOwner = struct {
     deallocator: ?ExternalBufferDeallocator,
     deallocator_context: ?*anyopaque,
     released: std.atomic.Value(bool) = .init(false),
+    release_queued: std.atomic.Value(bool) = .init(false),
+    pending_next: ?*ExternalBufferOwner = null,
 
     pub fn release(self: *ExternalBufferOwner) bool {
         if (self.released.swap(true, .acq_rel)) return false;

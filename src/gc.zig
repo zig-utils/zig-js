@@ -1071,6 +1071,12 @@ pub const Binding = struct {
         self.context.runPrivateWeakFinalizers();
     }
 
+    /// Drain embedder-owner callbacks only after zig-gc has completed sweep and
+    /// released its allocation lock. Finalizers themselves merely enqueue.
+    pub fn afterSweep(self: *Binding) void {
+        self.context.runDeferredExternalOwnerReleases();
+    }
+
     /// A cell is being reclaimed. Arena-mode `ArrayBufferData` is released with
     /// the arena, but GC-mode buffers own their metadata and non-shared byte
     /// slabs individually. A SharedArrayBuffer wrapper owns one realm retain
@@ -1104,7 +1110,7 @@ pub const Binding = struct {
                         std.debug.assert(sab_released);
                         if (sab_released) ab.shared = null;
                     } else if (ab.external_owner) |owner| {
-                        _ = owner.release();
+                        self.context.queueExternalOwnerRelease(owner);
                         ab.external_owner = null;
                     } else if (ab.gc_owned and ab.local_data.len > 0) {
                         self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());

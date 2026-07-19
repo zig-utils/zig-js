@@ -2474,6 +2474,10 @@ pub const Context = struct {
     /// object finalizers may release a record early; Context teardown releases
     /// any remaining arena-mode records and destroys every record exactly once.
     external_buffer_owners: std.ArrayListUnmanaged(*value.ExternalBufferOwner) = .empty,
+    /// Lock-free intrusive stack of external owners whose cells died during a
+    /// sweep. Finalizers only publish here; zig-gc's post-sweep hook drains it
+    /// after collector locks are released so callbacks may safely re-enter.
+    external_owner_release_head: std.atomic.Value(?*value.ExternalBufferOwner) = .init(null),
     /// Globally allocated backing handles installed by generated
     /// IDLArrayBufferRef conversion. The tracking reference keeps each list
     /// entry valid until teardown even after JS GC and native drops.
@@ -3488,6 +3492,7 @@ pub const Context = struct {
             }
             self.gc = null;
         }
+        self.runDeferredExternalOwnerReleases();
         if (self.gc_cell_backing) |backing| {
             backing.deinit(); // safe now: heap.deinit() is done using it
             self.gc_cell_backing = null;
@@ -3632,6 +3637,33 @@ pub const Context = struct {
         };
         try self.external_buffer_owners.append(self.gpa, owner);
         return owner;
+    }
+
+    pub fn queueExternalOwnerRelease(self: *Context, owner: *value.ExternalBufferOwner) void {
+        if (owner.released.load(.acquire)) return;
+        if (owner.release_queued.swap(true, .acq_rel)) return;
+        var head = self.external_owner_release_head.load(.acquire);
+        while (true) {
+            owner.pending_next = head;
+            if (self.external_owner_release_head.cmpxchgWeak(head, owner, .release, .acquire)) |observed| {
+                head = observed;
+                continue;
+            }
+            return;
+        }
+    }
+
+    pub fn runDeferredExternalOwnerReleases(self: *Context) void {
+        while (self.external_owner_release_head.swap(null, .acq_rel)) |first| {
+            var current: ?*value.ExternalBufferOwner = first;
+            while (current) |owner| {
+                const next = owner.pending_next;
+                owner.pending_next = null;
+                owner.release_queued.store(false, .release);
+                _ = owner.release();
+                current = next;
+            }
+        }
     }
 
     pub fn trackNativeArrayBufferHandle(self: *Context, handle: *value.NativeArrayBufferHandle) !void {

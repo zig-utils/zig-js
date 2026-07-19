@@ -18856,11 +18856,17 @@ test "C-API: no-copy constructors release transferred bytes immediately on failu
 }
 
 test "C-API: GC finalization releases no-copy bytes before context teardown" {
-    const Deallocator = struct {
+    const DeallocatorState = struct {
+        calls: usize = 0,
+        context: JSContextRef,
+        reentered: bool = false,
+
         fn call(bytes: ?*anyopaque, deallocator_context: ?*anyopaque) callconv(.c) void {
             _ = bytes;
-            const calls: *usize = @ptrCast(@alignCast(deallocator_context.?));
-            calls.* += 1;
+            const self: *@This() = @ptrCast(@alignCast(deallocator_context.?));
+            self.calls += 1;
+            JSGarbageCollect(self.context);
+            self.reentered = true;
         }
     };
 
@@ -18868,16 +18874,34 @@ test "C-API: GC finalization releases no-copy bytes before context teardown" {
     c.initCApiRef();
     const ctx: JSContextRef = @ptrCast(c);
     var bytes = [_]u8{ 1, 2, 3, 4 };
-    var calls: usize = 0;
+    var state = DeallocatorState{ .context = ctx };
     var exception: JSValueRef = null;
-    _ = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, &bytes, bytes.len, Deallocator.call, &calls, &exception) orelse return error.ArrayBufferCreateFailed;
+    _ = JSObjectMakeArrayBufferWithBytesNoCopy(ctx, &bytes, bytes.len, DeallocatorState.call, &state, &exception) orelse return error.ArrayBufferCreateFailed;
     try std.testing.expect(exception == null);
-    try std.testing.expectEqual(@as(usize, 0), calls);
+    try std.testing.expectEqual(@as(usize, 0), state.calls);
 
     JSGarbageCollect(ctx);
-    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+    try std.testing.expect(state.reentered);
     JSGlobalContextRelease(ctx);
-    try std.testing.expectEqual(@as(usize, 1), calls);
+    try std.testing.expectEqual(@as(usize, 1), state.calls);
+
+    const teardown_context = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    teardown_context.initCApiRef();
+    const teardown_ctx: JSContextRef = @ptrCast(teardown_context);
+    var teardown_bytes = [_]u8{ 5, 6, 7, 8 };
+    var teardown_state = DeallocatorState{ .context = teardown_ctx };
+    _ = JSObjectMakeArrayBufferWithBytesNoCopy(
+        teardown_ctx,
+        &teardown_bytes,
+        teardown_bytes.len,
+        DeallocatorState.call,
+        &teardown_state,
+        &exception,
+    ) orelse return error.ArrayBufferCreateFailed;
+    JSGlobalContextRelease(teardown_ctx);
+    try std.testing.expectEqual(@as(usize, 1), teardown_state.calls);
+    try std.testing.expect(teardown_state.reentered);
 }
 
 test "C-API: JSValueIsEqual uses JavaScript abstract equality semantics" {

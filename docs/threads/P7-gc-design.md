@@ -721,8 +721,10 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   kind, trace string-valued roots/edges, and finalize canonical byte storage. Static
   literals, explicit intern-table entries, and property-name strings owned by
   arena-resident Shapes remain permanent and carry `gc_managed = false`.
-  External embedder buffers and exact-once release callbacks build on this
-  lifecycle under #324.
+  External-owner releases are now queued without allocating during finalization
+  and drained through zig-gc's post-sweep hook only after collector locks and
+  publication state are restored. Exact external StringCell adapters build on
+  that lifecycle under #324.
 - **Generational depth?** Measure the landed one-cycle nursery first. Add ages,
   copying/moving storage, or parallel minor collection only with demonstrated
   pause/throughput gains and equivalent weak/no-GIL correctness gates.
