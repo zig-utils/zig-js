@@ -333,8 +333,13 @@ const Reader = struct {
         return .{ .type_index = try self.readU32Leb() };
     }
 
-    fn readBlockType(self: *Reader) DecodeError!types.BlockType {
+    fn readBlockType(self: *Reader, a: Allocator) DecodeError!types.BlockType {
         const off = self.offset();
+        if (self.pos < self.limit and (self.bytes[self.pos] == 0x63 or self.bytes[self.pos] == 0x64)) {
+            const result = try a.alloc(types.ValType, 1);
+            result[0] = try self.readValType();
+            return .{ .explicit_value = result };
+        }
         const v = try self.readS33();
         if (v == -64) return .empty;
         if (v >= 0) {
@@ -925,12 +930,12 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
         var instr: types.Instr = .{ .op = op };
         switch (op) {
             .block, .loop, .if_ => {
-                const bt = try r.readBlockType();
+                const bt = try r.readBlockType(a);
                 instr.imm = .{ .block = .{ .type = bt, .else_pc = 0, .end_pc = 0 } };
                 try ctrl.append(a, .{ .op = op, .pc = @intCast(instrs.items.len) });
             },
             .try_table => {
-                const block_type = try r.readBlockType();
+                const block_type = try r.readBlockType(a);
                 const catch_count = try r.readCount();
                 const catches = try a.alloc(types.Instr.Catch, catch_count);
                 for (catches) |*catch_clause| {
@@ -2012,6 +2017,25 @@ test "wasm.decode multi-value signatures and type-index blocks" {
     defer destroyModule(std.testing.allocator, mod);
     try std.testing.expectEqual(@as(usize, 2), mod.types[0].funcType().?.results.len);
     try std.testing.expectEqual(types.BlockType{ .type_index = 0 }, mod.code[0].instrs[0].imm.block.type);
+}
+
+test "wasm.decode explicit reference block result" {
+    const bytes = hdr ++ func_sec_1 ++
+        "\x0A\x09\x01\x07\x00\x02\x64\x6E\x00\x0B\x0B";
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(std.testing.allocator, bytes, .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    }, &diag);
+    defer destroyModule(std.testing.allocator, mod);
+
+    const block_type = mod.code[0].instrs[0].imm.block.type;
+    try std.testing.expectEqualSlices(
+        types.ValType,
+        &.{types.ValType.fromRef(.{ .nullable = false, .heap = .any })},
+        block_type.explicit_value,
+    );
 }
 
 test "wasm.decode reference instructions tables and constant expressions" {

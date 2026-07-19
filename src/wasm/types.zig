@@ -265,6 +265,9 @@ pub const ValType = enum(u64) {
 pub const BlockType = union(enum) {
     empty,
     value: ValType,
+    /// Explicit `(ref null? ht)` block results need storage for an arbitrary
+    /// heap type; the decoder owns this one-element slice in the module arena.
+    explicit_value: []const ValType,
     type_index: u32,
 
     pub fn funcType(self: BlockType, mod: *const Module) ?FuncType {
@@ -289,6 +292,12 @@ pub const BlockType = union(enum) {
                 .arrayref => &.{.arrayref},
                 else => return null,
             } },
+            .explicit_value => |results| blk: {
+                if (results.len != 1) return null;
+                if (results[0].refType().?.heap.concreteIndex()) |index|
+                    if (index >= mod.types.len) return null;
+                break :blk .{ .params = &.{}, .results = results };
+            },
             .type_index => |index| mod.funcTypeAt(index),
         };
     }
