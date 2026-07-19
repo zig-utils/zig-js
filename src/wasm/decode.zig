@@ -448,6 +448,10 @@ const Reader = struct {
         const et_off = self.offset();
         const elem = try self.readValType();
         if (!elem.isReference()) return self.failAt(et_off, "invalid element type", .{});
+        // MVP tables admit funcref, but externref is introduced by the
+        // reference-types proposal.
+        if (elem == .externref and !self.features.reference_types)
+            return self.unsupportedFeature(et_off, .reference_types);
         const decoded = try self.readLimits(.table);
         return .{ .address = decoded.address, .elem = elem, .limits = decoded.limits };
     }
@@ -857,9 +861,13 @@ fn parseCodeSection(r: *Reader, a: Allocator) DecodeError![]const types.FuncBody
 }
 
 fn decodeOneBody(r: *Reader, a: Allocator) DecodeError!types.FuncBody {
-    // Locals: vec of (count, valtype) groups, expanded in declaration order.
+    // Parse and bound every declaration before expanding any group. A hostile
+    // first count may fit u32 by itself but must not force a multi-gigabyte
+    // allocation before a later group proves the total malformed.
+    const LocalDecl = struct { count: u32, value_type: types.ValType };
     const group_count = try r.readCount();
-    var locals: std.ArrayListUnmanaged(types.ValType) = .empty;
+    var groups: std.ArrayListUnmanaged(LocalDecl) = .empty;
+    defer groups.deinit(a);
     var total: u64 = 0;
     var g: u32 = 0;
     while (g < group_count) : (g += 1) {
@@ -869,11 +877,19 @@ fn decodeOneBody(r: *Reader, a: Allocator) DecodeError!types.FuncBody {
         total += cnt;
         if (total > std.math.maxInt(u32))
             return r.failAt(cnt_off, "too many locals", .{});
-        try locals.appendNTimes(a, t, cnt);
+        try groups.append(a, .{ .count = cnt, .value_type = t });
+    }
+    const locals = try a.alloc(types.ValType, @intCast(total));
+    errdefer a.free(locals);
+    var start: usize = 0;
+    for (groups.items) |group| {
+        const end = start + group.count;
+        @memset(locals[start..end], group.value_type);
+        start = end;
     }
     const code = try decodeInstrs(r, a);
     return .{
-        .locals = try locals.toOwnedSlice(a),
+        .locals = locals,
         .instrs = code.instrs,
         .offsets = code.offsets,
     };
