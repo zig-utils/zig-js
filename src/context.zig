@@ -666,6 +666,21 @@ pub const GcCellBacking = struct {
             for (self.words) |word| if (word != 0) return true;
             return false;
         }
+
+        fn nextSet(self: *const FreeBitmap, start: usize, limit: usize) ?usize {
+            if (start >= limit) return null;
+            var word_idx = start / 64;
+            var word = self.words[word_idx] & (~@as(u64, 0) << @intCast(start % 64));
+            while (true) {
+                if (word != 0) {
+                    const slot = word_idx * 64 + @as(usize, @intCast(@ctz(word)));
+                    return if (slot < limit) slot else null;
+                }
+                word_idx += 1;
+                if (word_idx >= self.words.len or word_idx * 64 >= limit) return null;
+                word = self.words[word_idx];
+            }
+        }
     };
     const ChunkAddr = struct {
         start: usize,
@@ -1040,6 +1055,59 @@ pub const GcCellBacking = struct {
             }
         }
         return .outside;
+    }
+
+    /// Exact published-cell walk for zig-gc at a quiescent heap boundary.
+    /// The k-way chunk merge yields global address order across size classes;
+    /// published bitmaps exclude private reservations and reclaimed holes.
+    pub const OwnedCellIterator = struct {
+        backing: *GcCellBacking,
+        chunk_positions: [bucket_count]usize = @splat(0),
+        current_bucket: usize = bucket_count,
+        current_chunk: usize = 0,
+        current_slot: usize = 0,
+
+        fn selectNextChunk(self: *OwnedCellIterator) bool {
+            var selected_bucket: usize = bucket_count;
+            var selected_start: usize = std.math.maxInt(usize);
+            for (0..bucket_count) |idx| {
+                const position = self.chunk_positions[idx];
+                const entries = self.backing.bucket_addr_index[idx].items;
+                if (position < entries.len and entries[position].start < selected_start) {
+                    selected_bucket = idx;
+                    selected_start = entries[position].start;
+                }
+            }
+            if (selected_bucket == bucket_count) return false;
+            const position = self.chunk_positions[selected_bucket];
+            self.current_bucket = selected_bucket;
+            self.current_chunk = self.backing.bucket_addr_index[selected_bucket].items[position].chunk_idx;
+            self.current_slot = 0;
+            self.chunk_positions[selected_bucket] = position + 1;
+            return true;
+        }
+
+        pub fn next(self: *OwnedCellIterator) ?*anyopaque {
+            while (true) {
+                if (self.current_bucket < bucket_count) {
+                    const idx = self.current_bucket;
+                    const chunk_idx = self.current_chunk;
+                    const slot_size = bucket_sizes[idx];
+                    const issued = self.backing.bucket_next_offsets[idx].items[chunk_idx] / slot_size;
+                    const published = &self.backing.bucket_published_bitmaps[idx].items[chunk_idx];
+                    if (published.nextSet(self.current_slot, issued)) |slot| {
+                        self.current_slot = slot + 1;
+                        return @ptrCast(self.backing.bucket_chunks[idx].items[chunk_idx].ptr + slot * slot_size);
+                    }
+                    self.current_bucket = bucket_count;
+                }
+                if (!self.selectNextChunk()) return null;
+            }
+        }
+    };
+
+    pub fn ownedCellIterator(self: *GcCellBacking) OwnedCellIterator {
+        return .{ .backing = self };
     }
 
     fn setCellPublishedLocked(self: *GcCellBacking, idx: usize, allocation: *anyopaque, published: bool) void {
@@ -1560,6 +1628,54 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
     }
+}
+
+test "GC cell backing enumerates only published slots in global address order" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+
+    const sizes = [_]usize{ 48, 200, 700, 1500 };
+    var cells: [sizes.len][]align(16) u8 = undefined;
+    inline for (sizes, 0..) |size, i| cells[i] = try a.alignedAlloc(u8, .@"16", size);
+
+    // A reserved slot is invisible until its complete header is published.
+    var empty = backing.ownedCellIterator();
+    try std.testing.expectEqual(@as(?*anyopaque, null), empty.next());
+    backing.publishCellAllocation(cells[0].ptr, sizes[0]);
+    backing.publishCellAllocation(cells[2].ptr, sizes[2]);
+    backing.publishCellAllocation(cells[3].ptr, sizes[3]);
+
+    var expected = [_]usize{
+        @intFromPtr(cells[0].ptr),
+        @intFromPtr(cells[2].ptr),
+        @intFromPtr(cells[3].ptr),
+    };
+    std.mem.sort(usize, &expected, {}, std.sort.asc(usize));
+    var iter = backing.ownedCellIterator();
+    for (expected) |address| try std.testing.expectEqual(address, @intFromPtr(iter.next().?));
+    try std.testing.expectEqual(@as(?*anyopaque, null), iter.next());
+
+    // Reclamation creates a hole without perturbing the remaining walk.
+    backing.unpublishCellAllocation(cells[2].ptr, sizes[2]);
+    a.free(cells[2]);
+    backing.publishCellAllocation(cells[1].ptr, sizes[1]);
+    var after_hole = [_]usize{
+        @intFromPtr(cells[0].ptr),
+        @intFromPtr(cells[1].ptr),
+        @intFromPtr(cells[3].ptr),
+    };
+    std.mem.sort(usize, &after_hole, {}, std.sort.asc(usize));
+    iter = backing.ownedCellIterator();
+    for (after_hole) |address| try std.testing.expectEqual(address, @intFromPtr(iter.next().?));
+    try std.testing.expectEqual(@as(?*anyopaque, null), iter.next());
+
+    backing.unpublishCellAllocation(cells[0].ptr, sizes[0]);
+    backing.unpublishCellAllocation(cells[1].ptr, sizes[1]);
+    backing.unpublishCellAllocation(cells[3].ptr, sizes[3]);
+    a.free(cells[0]);
+    a.free(cells[1]);
+    a.free(cells[3]);
 }
 
 test "GC cell backing batches same-size sweep releases under one bucket lock" {
