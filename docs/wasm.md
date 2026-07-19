@@ -431,9 +431,10 @@ top-level commands**: 88 modules, 408 return assertions, 100 trap assertions,
 occurrences for every instruction family are recorded in the inventory. These
 facts and exact file set are locked by `zig build wasm-feature-profiles-check`.
 The [terminal runtime inventory](.data/wasm-gc-runtime-inventory.json), generated
-at engine commit `c1d01eb9` with `wasm-tools 1.253.0` from source commit
-`c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38`, records **542 / 698 passes**, 155
-semantic failures, one malformed-text N/A, and zero converter or runner errors.
+at engine commit `e60432ab` with `wasm-tools 1.253.0` from source commit
+`c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38`, records **697 / 697 applicable
+passes**, zero semantic failures, one malformed-text N/A, and zero converter or
+runner errors.
 Every command retains its source file, line, kind, execution mode, and detail.
 
 The binary and validation boundary is complete. The decoder retains packed
@@ -460,8 +461,8 @@ payloads reclaim exactly. The focused evidence is **10/10 GC runtime tests**
 and **40/40 WebAssembly API tests**, both with zero leaks, plus a clean
 eight-way wrapper-publication ThreadSanitizer witness. Extended constant
 expressions initialize i31, struct, array, and typed-table values, including
-immutable preceding/imported globals. The remaining terminal failures are
-tracked by [#300](https://github.com/zig-utils/zig-js/issues/300).
+immutable preceding/imported globals. The zero-failure terminal gate is
+recorded in [#300](https://github.com/zig-utils/zig-js/issues/300).
 
 The fixed-width-SIMD foundation additionally checks in an exact
 [236-opcode inventory](.data/wasm-simd-opcodes.json) from the already-pinned
@@ -749,8 +750,8 @@ Multi-value exports return ordered JavaScript arrays; imports consume general
 iterables and require the exact result arity. No post-MVP switch is enabled by
 default. Together these switches form the structurally complete, independently
 scored Core 2 profile above; SIMD, Threads, exception handling, and tail-call
-execution are separate scored profiles. Remaining Memory64/Wasm GC corpus
-failures and shell-only hooks stay tracked separately.
+execution are separate scored profiles. Remaining Memory64/multi-memory profile
+coverage and shell-only hooks stay tracked separately.
 
 The reference-types runtime foundation uses explicitly tagged numeric,
 funcref, and externref slots. Active operand stacks, locals, arguments, results,

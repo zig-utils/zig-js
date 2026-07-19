@@ -6,7 +6,7 @@
     "repository": "https://github.com/bytecodealliance/wasm-tools.git",
     "version": "1.253.0"
   },
-  "engine_commit": "c1d01eb9ec622264944e54615d782c52845a7efc",
+  "engine_commit": "e60432ab7a7f626373c3ea5c4211b3d6801250db",
   "features": [
     "typed_function_references",
     "gc"
@@ -428,289 +428,258 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "CompileError: type is not defaultable",
           "feature_area": "gc",
           "index": 4,
           "line": 54,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 5,
           "line": 97,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 6,
           "line": 98,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 7,
           "line": 101,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 8,
           "line": 102,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 9,
           "line": 105,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 10,
           "line": 106,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 11,
           "line": 109,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 12,
           "line": 110,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 13,
           "line": 113,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 14,
           "line": 114,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 15,
           "line": 115,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 16,
           "line": 116,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 17,
           "line": 119,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 18,
           "line": 120,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 19,
           "line": 121,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 20,
           "line": 122,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 21,
           "line": 125,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 22,
           "line": 126,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 23,
           "line": 127,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 24,
           "line": 128,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 25,
           "line": 129,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 26,
           "line": 130,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 27,
           "line": 131,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 28,
           "line": 133,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 29,
           "line": 134,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 30,
           "line": 135,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 31,
           "line": 136,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 32,
           "line": 137,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 33,
           "line": 138,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 34,
           "line": 139,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         }
       ],
       "counts": {
-        "fail": 31,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 4,
+        "pass": 35,
         "runner_error": 0,
         "total": 35
       },
@@ -1170,190 +1139,170 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+55",
           "feature_area": "gc",
           "index": 3,
           "line": 44,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 4,
           "line": 78,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 5,
           "line": 81,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 6,
           "line": 82,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 7,
           "line": 85,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 8,
           "line": 86,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 9,
           "line": 89,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 10,
           "line": 90,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 11,
           "line": 93,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 12,
           "line": 94,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 13,
           "line": 95,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 14,
           "line": 96,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 15,
           "line": 99,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 16,
           "line": 100,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 17,
           "line": 101,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 18,
           "line": 102,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 19,
           "line": 103,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 20,
           "line": 106,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 21,
           "line": 107,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 22,
           "line": 108,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         }
       ],
       "counts": {
-        "fail": 20,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 3,
+        "pass": 23,
         "runner_error": 0,
         "total": 23
       },
@@ -1435,21 +1384,19 @@
           "type": "assert_trap"
         },
         {
-          "detail": "CompileError: type is not defaultable",
           "feature_area": "gc",
           "index": 9,
           "line": 24,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 10,
           "line": 38,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -1486,9 +1433,9 @@
         }
       ],
       "counts": {
-        "fail": 2,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 13,
+        "pass": 15,
         "runner_error": 0,
         "total": 15
       },
@@ -1570,21 +1517,19 @@
           "type": "assert_trap"
         },
         {
-          "detail": "CompileError: type is not defaultable",
           "feature_area": "gc",
           "index": 9,
           "line": 29,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 10,
           "line": 47,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -1660,28 +1605,26 @@
           "type": "assert_trap"
         },
         {
-          "detail": "CompileError: type is not defaultable",
           "feature_area": "gc",
           "index": 20,
           "line": 77,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 21,
           "line": 103,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         }
       ],
       "counts": {
-        "fail": 4,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 18,
+        "pass": 22,
         "runner_error": 0,
         "total": 22
       },
@@ -1712,246 +1655,219 @@
     {
       "commands": [
         {
-          "detail": "CompileError: WebAssembly.Module(): invalid opcode 0xd5 @+204",
           "feature_area": "gc",
           "index": 0,
           "line": 3,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 1,
           "line": 69,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "action"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 2,
           "line": 71,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 3,
           "line": 72,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 4,
           "line": 73,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 5,
           "line": 74,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 6,
           "line": 75,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 7,
           "line": 77,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 8,
           "line": 78,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 9,
           "line": 79,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 10,
           "line": 80,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 11,
           "line": 81,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 12,
           "line": 83,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 13,
           "line": 84,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 14,
           "line": 85,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 15,
           "line": 86,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 16,
           "line": 87,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 17,
           "line": 89,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 18,
           "line": 90,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 19,
           "line": 91,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 20,
           "line": 92,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 21,
           "line": 93,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 22,
           "line": 95,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 23,
           "line": 96,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 24,
           "line": 97,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 25,
           "line": 98,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 26,
           "line": 99,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -1979,12 +1895,11 @@
           "type": "action"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): invalid block type @+44",
           "feature_area": "gc",
           "index": 30,
           "line": 211,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -2028,19 +1943,18 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "expected WebAssembly.CompileError",
           "feature_area": "gc",
           "index": 36,
           "line": 272,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_invalid"
         }
       ],
       "counts": {
-        "fail": 29,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 8,
+        "pass": 37,
         "runner_error": 0,
         "total": 37
       },
@@ -2050,246 +1964,219 @@
     {
       "commands": [
         {
-          "detail": "CompileError: WebAssembly.Module(): invalid block type @+215",
           "feature_area": "gc",
           "index": 0,
           "line": 3,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 1,
           "line": 69,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "action"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 2,
           "line": 71,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 3,
           "line": 72,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 4,
           "line": 73,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 5,
           "line": 74,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 6,
           "line": 75,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 7,
           "line": 77,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 8,
           "line": 78,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 9,
           "line": 79,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 10,
           "line": 80,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 11,
           "line": 81,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 12,
           "line": 83,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 13,
           "line": 84,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 14,
           "line": 85,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 15,
           "line": 86,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 16,
           "line": 87,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 17,
           "line": 89,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 18,
           "line": 90,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 19,
           "line": 91,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 20,
           "line": 92,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 21,
           "line": 93,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 22,
           "line": 95,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 23,
           "line": 96,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 24,
           "line": 97,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 25,
           "line": 98,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: cannot read property of null or undefined",
           "feature_area": "gc",
           "index": 26,
           "line": 99,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -2317,12 +2204,11 @@
           "type": "action"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): invalid block type @+37",
           "feature_area": "gc",
           "index": 30,
           "line": 226,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -2366,19 +2252,18 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "expected WebAssembly.CompileError",
           "feature_area": "gc",
           "index": 36,
           "line": 287,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_invalid"
         }
       ],
       "counts": {
-        "fail": 29,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 8,
+        "pass": 37,
         "runner_error": 0,
         "total": 37
       },
@@ -4680,12 +4565,11 @@
           "type": "assert_return"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 55,
           "line": 163,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -4753,30 +4637,27 @@
           "type": "assert_return"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 64,
           "line": 174,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 65,
           "line": 175,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 66,
           "line": 176,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -4788,37 +4669,34 @@
           "type": "assert_return"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+200",
           "feature_area": "gc",
           "index": 68,
           "line": 182,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 69,
           "line": 329,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 70,
           "line": 330,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         }
       ],
       "counts": {
-        "fail": 7,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 64,
+        "pass": 71,
         "runner_error": 0,
         "total": 71
       },
@@ -5191,21 +5069,19 @@
           "type": "module"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+67",
           "feature_area": "gc",
           "index": 8,
           "line": 115,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+107",
           "feature_area": "gc",
           "index": 9,
           "line": 124,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -5217,39 +5093,35 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+57",
           "feature_area": "gc",
           "index": 11,
           "line": 151,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+117",
           "feature_area": "gc",
           "index": 12,
           "line": 159,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+58",
           "feature_area": "gc",
           "index": 13,
           "line": 177,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+94",
           "feature_area": "gc",
           "index": 14,
           "line": 188,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -5269,75 +5141,67 @@
           "type": "assert_invalid"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): invalid block type @+176",
           "feature_area": "gc",
           "index": 17,
           "line": 229,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 18,
           "line": 282,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 19,
           "line": 283,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 20,
           "line": 284,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 21,
           "line": 285,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 22,
           "line": 286,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 23,
           "line": 287,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError, got TypeError: value is not a function",
           "feature_area": "gc",
           "index": 24,
           "line": 288,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
@@ -5349,21 +5213,19 @@
           "type": "module"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError",
           "feature_area": "gc",
           "index": 26,
           "line": 314,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError",
           "feature_area": "gc",
           "index": 27,
           "line": 315,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
@@ -5383,39 +5245,35 @@
           "type": "assert_trap"
         },
         {
-          "detail": "CompileError: WebAssembly.Module(): type mismatch @+85",
           "feature_area": "gc",
           "index": 30,
           "line": 319,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
-          "detail": "TypeError: value is not a function",
           "feature_area": "gc",
           "index": 31,
           "line": 344,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError",
           "feature_area": "gc",
           "index": 32,
           "line": 345,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
-          "detail": "expected WebAssembly.RuntimeError",
           "feature_area": "gc",
           "index": 33,
           "line": 346,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_trap"
         },
         {
@@ -5427,12 +5285,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 35,
           "line": 358,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5444,12 +5301,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 37,
           "line": 376,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5477,12 +5333,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 41,
           "line": 399,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5494,12 +5349,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 43,
           "line": 419,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5511,12 +5365,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 45,
           "line": 434,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5528,12 +5381,11 @@
           "type": "module"
         },
         {
-          "detail": "result mismatch",
           "feature_area": "gc",
           "index": 47,
           "line": 456,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_return"
         },
         {
@@ -5585,12 +5437,11 @@
           "type": "register"
         },
         {
-          "detail": "LinkError: incompatible WebAssembly function import type",
           "feature_area": "gc",
           "index": 54,
           "line": 497,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -5634,21 +5485,19 @@
           "type": "register"
         },
         {
-          "detail": "expected WebAssembly.LinkError",
           "feature_area": "gc",
           "index": 60,
           "line": 549,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_unlinkable"
         },
         {
-          "detail": "expected WebAssembly.LinkError",
           "feature_area": "gc",
           "index": 61,
           "line": 557,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_unlinkable"
         },
         {
@@ -5716,12 +5565,11 @@
           "type": "register"
         },
         {
-          "detail": "expected WebAssembly.LinkError",
           "feature_area": "gc",
           "index": 70,
           "line": 606,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_unlinkable"
         },
         {
@@ -5813,12 +5661,11 @@
           "type": "register"
         },
         {
-          "detail": "LinkError: incompatible WebAssembly function import type",
           "feature_area": "gc",
           "index": 82,
           "line": 677,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "module"
         },
         {
@@ -5838,12 +5685,11 @@
           "type": "register"
         },
         {
-          "detail": "expected WebAssembly.LinkError",
           "feature_area": "gc",
           "index": 85,
           "line": 699,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_unlinkable"
         },
         {
@@ -5863,12 +5709,11 @@
           "type": "register"
         },
         {
-          "detail": "expected WebAssembly.LinkError",
           "feature_area": "gc",
           "index": 88,
           "line": 714,
           "mode": "javascript_api",
-          "status": "fail",
+          "status": "pass",
           "type": "assert_unlinkable"
         },
         {
@@ -5977,9 +5822,9 @@
         }
       ],
       "counts": {
-        "fail": 33,
+        "fail": 0,
         "not_applicable": 0,
-        "pass": 69,
+        "pass": 102,
         "runner_error": 0,
         "total": 102
       },
@@ -6021,17 +5866,17 @@
     "tag": "proposal-revision"
   },
   "totals": {
-    "fail": 155,
+    "fail": 0,
     "not_applicable": 1,
-    "pass": 542,
+    "pass": 697,
     "runner_error": 0,
     "total": 698
   },
   "totals_by_feature_area": {
     "gc": {
-      "fail": 155,
+      "fail": 0,
       "not_applicable": 1,
-      "pass": 542,
+      "pass": 697,
       "runner_error": 0,
       "total": 698
     }
