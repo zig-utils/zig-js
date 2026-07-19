@@ -161,6 +161,11 @@ def main() -> int:
         default=ROOT / "docs/.data/wasm-exception-handling-inventory.json",
     )
     parser.add_argument(
+        "--multi-memory-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-multi-memory-binary-inventory.json",
+    )
+    parser.add_argument(
         "--multi-memory-terminal-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-multi-memory-runtime-inventory.json",
@@ -498,6 +503,79 @@ def main() -> int:
         files=[("tag.wast", 4, 0), ("throw.wast", 13, 0), ("throw_ref.wast", 15, 0), ("try_table.wast", 52, 2)],
     )
     multi_memory_feature = next(feature for feature in features if feature["id"] == "multi_memory")
+    multi_memory = json.loads(args.multi_memory_inventory.read_text())
+    require(multi_memory.get("schema_version") == 1, "multi-memory inventory: unsupported schema version")
+    require(multi_memory.get("kind") == "webassembly_multi_memory_binary_inventory", "multi-memory inventory: invalid kind")
+    multi_memory_source = multi_memory.get("source", {})
+    require(multi_memory_source.get("repository") == multi_memory_feature["repository"], "multi-memory inventory/registry repository drift")
+    require(multi_memory_source.get("commit") == multi_memory_feature["commit"], "multi-memory inventory/registry commit drift")
+    require(multi_memory.get("standardization") == multi_memory_feature["standardization"] == "finished", "multi-memory inventory standardization drift")
+    require(multi_memory.get("edition") == multi_memory_feature["edition"] == "3.0", "multi-memory inventory edition drift")
+    require(multi_memory.get("dependencies") == multi_memory_feature["dependencies"] == [], "multi-memory inventory dependency drift")
+    require(
+        multi_memory_source.get("document_sha256") == {
+            "proposals/multi-memory/Overview.md": "6e75c9c80c961a0ae63647b128fd6bf3ebcdac859f96108ddfb3ef047706a977",
+            "document/core/binary/instructions.rst": "36d52da86f46f26435ac82dec7afa6d700745ab71568aacbd08dd506fdee91f4",
+            "document/core/text/instructions.rst": "4730bd06008b74d505165e155c26024bd688e17333e78a5cf7d5604f4515016e",
+            "document/core/syntax/instructions.rst": "6b7b74c53c0f946bef5990bd0c45040a165f24843e1eddb28451fab6092e40ca",
+        },
+        "multi-memory inventory normative document drift",
+    )
+    multi_memory_binary = multi_memory.get("binary_changes", {})
+    require(multi_memory_binary.get("new_opcodes") == [], "multi-memory inventory must not declare new opcodes")
+    require(multi_memory_binary.get("memory_index") == "u32", "multi-memory inventory index encoding drift")
+    multi_memory_memarg = multi_memory_binary.get("memarg", {})
+    require(
+        multi_memory_memarg.get("implicit_memory_zero") == {
+            "fields": ["align_flags:u32", "offset:u32"],
+            "align_flags_range": [0, 63],
+            "memory_index": 0,
+        },
+        "multi-memory inventory implicit memarg drift",
+    )
+    require(
+        multi_memory_memarg.get("explicit_memory") == {
+            "fields": ["align_flags:u32", "memory_index:u32", "offset:u32"],
+            "align_flags_range": [64, 127],
+            "explicit_memory_index_bit": 6,
+            "decoded_alignment": "align_flags - 64",
+        },
+        "multi-memory inventory explicit memarg drift",
+    )
+    require(
+        [(entry.get("instruction", entry.get("family")), entry.get("opcode"), entry.get("fields")) for entry in multi_memory_binary.get("instruction_immediates", [])]
+        == [
+            ("scalar/vector load/store", None, ["memarg"]),
+            ("memory.size", "0x3f", ["memory_index:u32"]),
+            ("memory.grow", "0x40", ["memory_index:u32"]),
+            ("memory.init", "0xfc:8", ["data_index:u32", "memory_index:u32"]),
+            ("memory.copy", "0xfc:10", ["destination_memory_index:u32", "source_memory_index:u32"]),
+            ("memory.fill", "0xfc:11", ["memory_index:u32"]),
+        ],
+        "multi-memory inventory instruction immediate drift",
+    )
+    multi_memory_text = multi_memory.get("text_changes", {})
+    require(multi_memory_text.get("omitted_memory_index") == 0, "multi-memory inventory text default drift")
+    require(multi_memory_text.get("load_store_order") == ["memory_index", "offset", "align"], "multi-memory inventory load/store text order drift")
+    require(
+        multi_memory_text.get("memory_copy_order") == ["destination_memory_index", "source_memory_index"]
+        and multi_memory_text.get("memory_copy_presence") == "both_or_neither",
+        "multi-memory inventory memory.copy text drift",
+    )
+    require(
+        multi_memory.get("complete_upstream_inventory") == args.multi_memory_terminal_inventory.name,
+        "multi-memory inventory terminal evidence link drift",
+    )
+    require(
+        all(token in decode_source for token in (
+            "const has_memory_index = flags & 0x40 != 0;",
+            "if (has_memory_index and !self.features.multi_memory)",
+            "const memory_index = if (has_memory_index) try self.readU32Leb() else 0;",
+            ".align_ = if (has_memory_index) flags - 0x40 else flags,",
+            ".memory_index = memory_index,",
+        )),
+        "multi-memory inventory/runtime memarg decoder drift",
+    )
     verify_terminal_inventory(
         args.multi_memory_terminal_inventory,
         kind="webassembly_multi_memory_runtime_inventory",

@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_multi_memory_binary_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/multi-memory.git",
+    "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+    "overview": "proposals/multi-memory/Overview.md",
+    "binary_instruction_document": "document/core/binary/instructions.rst",
+    "text_instruction_document": "document/core/text/instructions.rst",
+    "syntax_instruction_document": "document/core/syntax/instructions.rst",
+    "corpus_root": "test/core",
+    "document_sha256": {
+      "proposals/multi-memory/Overview.md": "6e75c9c80c961a0ae63647b128fd6bf3ebcdac859f96108ddfb3ef047706a977",
+      "document/core/binary/instructions.rst": "36d52da86f46f26435ac82dec7afa6d700745ab71568aacbd08dd506fdee91f4",
+      "document/core/text/instructions.rst": "4730bd06008b74d505165e155c26024bd688e17333e78a5cf7d5604f4515016e",
+      "document/core/syntax/instructions.rst": "6b7b74c53c0f946bef5990bd0c45040a165f24843e1eddb28451fab6092e40ca"
+    },
+    "document_license": "W3C Software and Document Notice and License",
+    "corpus_license": "Apache-2.0"
+  },
+  "standardization": "finished",
+  "edition": "3.0",
+  "dependencies": [],
+  "binary_changes": {
+    "new_opcodes": [],
+    "memory_index": "u32",
+    "memarg": {
+      "implicit_memory_zero": {
+        "fields": ["align_flags:u32", "offset:u32"],
+        "align_flags_range": [0, 63],
+        "memory_index": 0
+      },
+      "explicit_memory": {
+        "fields": ["align_flags:u32", "memory_index:u32", "offset:u32"],
+        "align_flags_range": [64, 127],
+        "explicit_memory_index_bit": 6,
+        "decoded_alignment": "align_flags - 64"
+      }
+    },
+    "instruction_immediates": [
+      {
+        "family": "scalar/vector load/store",
+        "fields": ["memarg"]
+      },
+      {
+        "instruction": "memory.size",
+        "opcode": "0x3f",
+        "fields": ["memory_index:u32"]
+      },
+      {
+        "instruction": "memory.grow",
+        "opcode": "0x40",
+        "fields": ["memory_index:u32"]
+      },
+      {
+        "instruction": "memory.init",
+        "opcode": "0xfc:8",
+        "fields": ["data_index:u32", "memory_index:u32"]
+      },
+      {
+        "instruction": "memory.copy",
+        "opcode": "0xfc:10",
+        "fields": ["destination_memory_index:u32", "source_memory_index:u32"]
+      },
+      {
+        "instruction": "memory.fill",
+        "opcode": "0xfc:11",
+        "fields": ["memory_index:u32"]
+      }
+    ],
+    "existing_module_indices": ["data_segment.memory_index", "memory_export.memory_index"]
+  },
+  "text_changes": {
+    "omitted_memory_index": 0,
+    "load_store_order": ["memory_index", "offset", "align"],
+    "memory_copy_order": ["destination_memory_index", "source_memory_index"],
+    "memory_copy_presence": "both_or_neither",
+    "single_memory_index_instructions": [
+      "memory.size",
+      "memory.grow",
+      "memory.fill",
+      "memory.init"
+    ]
+  },
+  "semantic_changes": {
+    "module": "multiple imported and defined memories are permitted",
+    "validation": "validate each instruction memory index instead of requiring index zero",
+    "execution": "access the store memory selected by each instruction index"
+  },
+  "complete_upstream_inventory": "wasm-multi-memory-runtime-inventory.json"
+}

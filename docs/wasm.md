@@ -343,9 +343,11 @@ zig build wasm-feature-profiles-check
 
 The finished Wasm 3.0 multi-memory proposal is pinned independently at
 `WebAssembly/multi-memory@cf8b5aa27257311b8eac80ae83f4ba22ee308064`.
-Its [terminal inventory](.data/wasm-multi-memory-runtime-inventory.json) scores
-all 38 proposal files and **829/829 commands**, with zero failures, skips, or
-runner errors.
+The [binary/text contract](.data/wasm-multi-memory-binary-inventory.json) pins
+the normative documents, hashes, memarg bit, immediate order, and text defaults.
+Its [terminal inventory](.data/wasm-multi-memory-runtime-inventory.json) then
+scores all 38 proposal files and **829/829 commands**, with zero failures,
+skips, or runner errors.
 
 `Features.multi_memory` retains every memory index through scalar, SIMD,
 atomic, bulk-memory, size, grow, import, export, data-segment, validation, and
