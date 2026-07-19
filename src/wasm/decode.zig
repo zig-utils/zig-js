@@ -439,9 +439,13 @@ const Reader = struct {
         return .{ .val = val, .mutable = mutable };
     }
 
-    /// MVP constant expression: exactly one constant-producing instruction
-    /// followed by `end`.
-    fn readConstExpr(self: *Reader) DecodeError!types.ConstExpr {
+    /// MVP uses exactly one constant-producing instruction. GC extends this to
+    /// a typed instruction sequence; keep its decoded offsets for diagnostics.
+    fn readConstExpr(self: *Reader, a: Allocator) DecodeError!types.ConstExpr {
+        if (self.features.gc) {
+            const decoded = try decodeInstrs(self, a);
+            return .{ .extended = .{ .instrs = decoded.instrs, .offsets = decoded.offsets } };
+        }
         const op_off = self.offset();
         const op = try self.readU8();
         const expr: types.ConstExpr = switch (op) {
@@ -639,7 +643,18 @@ fn parseFuncSection(r: *Reader, a: Allocator) DecodeError![]const u32 {
 fn parseTableSection(r: *Reader, a: Allocator) DecodeError![]const types.TableType {
     const n = try r.readCount();
     const tables = try a.alloc(types.TableType, n);
-    for (tables) |*t| t.* = try r.readTableType();
+    for (tables) |*t| {
+        if (r.features.typed_function_references and r.pos < r.limit and r.bytes[r.pos] == 0x40) {
+            const marker_off = r.offset();
+            _ = try r.readU8();
+            if (try r.readU8() != 0)
+                return r.failAt(marker_off, "zero flag expected", .{});
+            t.* = try r.readTableType();
+            t.init = try r.readConstExpr(a);
+        } else {
+            t.* = try r.readTableType();
+        }
+    }
     return tables;
 }
 
@@ -660,7 +675,7 @@ fn parseTagSection(r: *Reader, a: Allocator) DecodeError![]const types.Tag {
 fn parseGlobalSection(r: *Reader, a: Allocator) DecodeError![]const types.Global {
     const n = try r.readCount();
     const globals = try a.alloc(types.Global, n);
-    for (globals) |*g| g.* = .{ .type = try r.readGlobalType(), .init = try r.readConstExpr() };
+    for (globals) |*g| g.* = .{ .type = try r.readGlobalType(), .init = try r.readConstExpr(a) };
     return globals;
 }
 
@@ -692,7 +707,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
         e.* = switch (kind) {
             0 => .{
                 .type = .funcref,
-                .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr() } },
+                .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr(a) } },
                 .init = try readFuncElemInit(r, a),
             },
             1 => blk: {
@@ -703,7 +718,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
             2 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 const table = try r.readU32Leb();
-                const offset = try r.readConstExpr();
+                const offset = try r.readConstExpr(a);
                 try readElemKind(r);
                 break :blk .{
                     .type = .funcref,
@@ -720,7 +735,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
                 if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
                 break :blk .{
                     .type = .funcref,
-                    .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr() } },
+                    .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr(a) } },
                     .init = try readExprElemInit(r, a),
                 };
             },
@@ -733,7 +748,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
             6 => blk: {
                 if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
                 const table = try r.readU32Leb();
-                const offset = try r.readConstExpr();
+                const offset = try r.readConstExpr(a);
                 const elem_type = try r.readValType();
                 if (!elem_type.isReference()) return r.failAt(kind_off, "reference type expected", .{});
                 break :blk .{
@@ -769,7 +784,7 @@ fn readFuncElemInit(r: *Reader, a: Allocator) DecodeError![]const types.ConstExp
 fn readExprElemInit(r: *Reader, a: Allocator) DecodeError![]const types.ConstExpr {
     const count = try r.readCount();
     const init = try a.alloc(types.ConstExpr, count);
-    for (init) |*entry| entry.* = try r.readConstExpr();
+    for (init) |*entry| entry.* = try r.readConstExpr(a);
     return init;
 }
 
@@ -780,14 +795,14 @@ fn parseDataSection(r: *Reader, a: Allocator) DecodeError![]const types.Data {
         const kind_off = r.offset();
         const kind = try r.readU32Leb();
         const mode: types.DataMode = switch (kind) {
-            0 => .{ .active = .{ .mem = 0, .offset = try r.readConstExpr() } },
+            0 => .{ .active = .{ .mem = 0, .offset = try r.readConstExpr(a) } },
             1 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 break :blk .passive;
             },
             2 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
-                break :blk .{ .active = .{ .mem = try r.readU32Leb(), .offset = try r.readConstExpr() } };
+                break :blk .{ .active = .{ .mem = try r.readU32Leb(), .offset = try r.readConstExpr(a) } };
             },
             else => return r.failAt(kind_off, "malformed data segment kind", .{}),
         };

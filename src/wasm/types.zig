@@ -413,6 +413,9 @@ pub const TableType = struct {
     address: AddressType = .i32,
     elem: ValType = .funcref,
     limits: Limits,
+    /// Defined tables may provide a typed-function-references initializer;
+    /// imported tables leave this null.
+    init: ?ConstExpr = null,
 };
 
 pub const MemType = struct {
@@ -469,9 +472,9 @@ pub const Export = struct {
     index: u32,
 };
 
-/// MVP constant expression: a single constant-producing instruction. The
-/// decoder rejects anything else; the validator additionally constrains
-/// `global` to imported, immutable globals.
+/// A constant initializer. MVP expressions use one of the compact cases;
+/// proposal profiles may retain a decoded instruction sequence so validation
+/// and execution share the same GC instruction representation as functions.
 pub const ConstExpr = union(enum) {
     i32: i32,
     i64: i64,
@@ -481,6 +484,10 @@ pub const ConstExpr = union(enum) {
     global: u32, // imported global index
     ref_null: ValType,
     ref_func: u32,
+    extended: struct {
+        instrs: []const Instr,
+        offsets: []const u32,
+    },
 
     pub fn valType(self: ConstExpr) ValType {
         return switch (self) {
@@ -492,6 +499,7 @@ pub const ConstExpr = union(enum) {
             .global => unreachable, // resolved against the import list
             .ref_null => |ref_type| ref_type,
             .ref_func => .funcref,
+            .extended => unreachable, // resolved by instruction validation
         };
     }
 };

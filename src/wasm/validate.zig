@@ -613,6 +613,9 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
         const elem_type = mod.tableType(@intCast(tableidx)).elem;
         if (elem_type != .funcref) try validateValType(mod, elem_type, diag);
     }
+    for (mod.tables) |table|
+        if (table.init) |init|
+            try checkConstExpr(mod, init, table.elem, mod.imported_globals, diag, allocator);
     for (0..mod.totalMems()) |memidx| {
         const memory = mod.memoryType(@intCast(memidx));
         if (memory.shared and memory.limits.max == null)
@@ -620,9 +623,16 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
     }
 
     // 3. Global initializers: typed constant expressions.
-    for (mod.globals) |g| {
+    for (mod.globals, 0..) |g, index| {
         try validateValType(mod, g.type.val, diag);
-        try checkConstExpr(mod, g.init, g.type.val, diag);
+        try checkConstExpr(
+            mod,
+            g.init,
+            g.type.val,
+            mod.imported_globals + @as(u32, @intCast(index)),
+            diag,
+            allocator,
+        );
     }
     for (mod.code) |body| {
         for (body.locals) |local| {
@@ -642,11 +652,11 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
                     return failModFmt(diag, "unknown table {d}", .{active.table});
                 if (!valTypeMatches(mod, e.type, mod.tableType(active.table).elem))
                     return failMod(diag, "type mismatch");
-                try checkConstExpr(mod, active.offset, mod.tableType(active.table).address.valType(), diag);
+                try checkConstExpr(mod, active.offset, mod.tableType(active.table).address.valType(), mod.totalGlobals(), diag, allocator);
             },
             .passive, .declarative => {},
         }
-        for (e.init) |init| try checkConstExpr(mod, init, e.type, diag);
+        for (e.init) |init| try checkConstExpr(mod, init, e.type, mod.totalGlobals(), diag, allocator);
     }
 
     // 5. Data segments.
@@ -655,7 +665,7 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
             .active => |active| {
                 if (active.mem >= mod.totalMems())
                     return failModFmt(diag, "unknown memory {d}", .{active.mem});
-                try checkConstExpr(mod, active.offset, mod.memoryType(active.mem).address.valType(), diag);
+                try checkConstExpr(mod, active.offset, mod.memoryType(active.mem).address.valType(), mod.totalGlobals(), diag, allocator);
             },
             .passive => {},
         }
@@ -713,14 +723,16 @@ fn failModFmt(diag: *types.Diagnostic, comptime fmt: []const u8, args: anytype) 
     return error.Invalid;
 }
 
-/// A constant expression of type `expected`. `global.get` may only refer to
-/// imported, immutable globals of the right type (wg-1.0 rule).
+/// A constant expression of type `expected`. MVP `global.get` is import-only;
+/// GC expressions may also see immutable module globals declared earlier.
 fn checkConstExpr(
     mod: *const types.Module,
     expr: types.ConstExpr,
     expected: types.ValType,
+    visible_globals: u32,
     diag: *types.Diagnostic,
-) Error!void {
+    allocator: Allocator,
+) (Error || Allocator.Error)!void {
     switch (expr) {
         .global => |gi| {
             if (gi >= mod.imported_globals) return failMod(diag, "unknown global");
@@ -732,23 +744,118 @@ fn checkConstExpr(
             if (funcidx >= mod.totalFuncs()) return failModFmt(diag, "unknown function {d}", .{funcidx});
             if (!valTypeMatches(mod, .funcref, expected)) return failMod(diag, "type mismatch");
         },
+        .extended => |extended| try checkExtendedConstExpr(mod, extended, expected, visible_globals, diag, allocator),
         else => if (!valTypeMatches(mod, expr.valType(), expected))
             return failMod(diag, "type mismatch"),
     }
 }
 
+fn gcConstOp(instr: types.Instr) ?gc.Op {
+    return switch (instr.imm) {
+        .gc => |op| op,
+        .gc_type => |immediate| immediate.op,
+        .gc_two_indices => |immediate| immediate.op,
+        else => null,
+    };
+}
+
+fn isExtendedConstInstruction(instr: types.Instr) bool {
+    return switch (instr.op) {
+        .i32_const,
+        .i64_const,
+        .f32_const,
+        .f64_const,
+        .global_get,
+        .ref_null,
+        .ref_func,
+        .end,
+        => true,
+        .simd => switch (instr.imm) {
+            .simd_v128 => |immediate| immediate.op == .v128_const,
+            else => false,
+        },
+        .gc => switch (gcConstOp(instr) orelse return false) {
+            .ref_i31,
+            .struct_new,
+            .struct_new_default,
+            .array_new,
+            .array_new_default,
+            .array_new_fixed,
+            .any_convert_extern,
+            .extern_convert_any,
+            => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn checkExtendedConstExpr(
+    mod: *const types.Module,
+    extended: anytype,
+    expected: types.ValType,
+    visible_globals: u32,
+    diag: *types.Diagnostic,
+    allocator: Allocator,
+) (Error || Allocator.Error)!void {
+    for (extended.instrs, 0..) |instr, index| {
+        if (!isExtendedConstInstruction(instr) or (instr.op == .end and index != extended.instrs.len - 1)) {
+            diag.set(extended.offsets[index], "constant expression required", .{});
+            return error.Invalid;
+        }
+        if (instr.op == .global_get) {
+            const global_index = instr.imm.idx;
+            if (global_index >= visible_globals) {
+                diag.set(extended.offsets[index], "unknown global", .{});
+                return error.Invalid;
+            }
+            if (mod.globalType(global_index).mutable) {
+                diag.set(extended.offsets[index], "constant expression required", .{});
+                return error.Invalid;
+            }
+        }
+    }
+
+    const slots = extended.instrs.len + 1;
+    const opds = try allocator.alloc(StackVal, slots);
+    defer allocator.free(opds);
+    const frames = try allocator.alloc(Frame, slots);
+    defer allocator.free(frames);
+    var v: FuncValidator = .{
+        .mod = mod,
+        .diag = diag,
+        .params = &.{},
+        .locals = &.{},
+        .instrs = extended.instrs,
+        .offsets = extended.offsets,
+        .opds = opds,
+        .frames = frames,
+    };
+    try v.pushFrame(.block, .{ .params = &.{}, .results = &.{expected} });
+    try v.run();
+}
+
+fn constExprDeclaresFunction(expr: types.ConstExpr, funcidx: u32) bool {
+    return switch (expr) {
+        .ref_func => |declared| declared == funcidx,
+        .extended => |extended| for (extended.instrs) |instr| {
+            if (instr.op == .ref_func and instr.imm.idx == funcidx) break true;
+        } else false,
+        else => false,
+    };
+}
+
 fn isDeclaredFunction(mod: *const types.Module, funcidx: u32) bool {
     for (mod.exports) |exported|
         if (exported.kind == .func and exported.index == funcidx) return true;
-    for (mod.globals) |global| switch (global.init) {
-        .ref_func => |declared| if (declared == funcidx) return true,
-        else => {},
-    };
+    for (mod.tables) |table|
+        if (table.init) |init|
+            if (constExprDeclaresFunction(init, funcidx)) return true;
+    for (mod.globals) |global|
+        if (constExprDeclaresFunction(global.init, funcidx)) return true;
     for (mod.elems) |elem|
-        for (elem.init) |init| switch (init) {
-            .ref_func => |declared| if (declared == funcidx) return true,
-            else => {},
-        };
+        for (elem.init) |init|
+            if (constExprDeclaresFunction(init, funcidx)) return true;
     return false;
 }
 

@@ -685,7 +685,7 @@ function __sameOne(actual, item) {
     return actual === __externref(item.value);
   }
   if (item.type === 'i31ref') return typeof actual === 'number';
-  if (item.type === 'structref' || item.type === 'arrayref') return actual !== null && typeof actual === 'object';
+  if (item.type === 'eqref' || item.type === 'structref' || item.type === 'arrayref') return actual !== null && typeof actual === 'object';
   if (item.type === 'funcref' && item.value === 'null') return actual === null;
   return false;
 }

@@ -913,7 +913,7 @@ fn importedFuncTypeCompatible(owner: ?*Instance, actual: types.FuncType, target_
     return validate.funcTypesEquivalentAcross(actual_mod, actual, target_mod, declared);
 }
 
-fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
+fn evalConstExpr(inst: *Instance, ce: types.ConstExpr) error{OutOfMemory}!ValueSlot {
     return switch (ce) {
         .i32 => |v| .{ .numeric = @as(u32, @bitCast(v)) },
         .i64 => |v| .{ .numeric = @as(u64, @bitCast(v)) },
@@ -930,7 +930,103 @@ fn evalConstExpr(inst: *const Instance, ce: types.ConstExpr) ValueSlot {
             };
         },
         .ref_func => |funcidx| .{ .funcref = @ptrCast(inst.funcs[funcidx]) },
+        .extended => |extended| try evalExtendedConstExpr(inst, extended.instrs),
     };
+}
+
+fn evalExtendedConstExpr(inst: *Instance, instrs: []const types.Instr) error{OutOfMemory}!ValueSlot {
+    var stack: std.ArrayListUnmanaged(ValueSlot) = .empty;
+    defer stack.deinit(inst.gpa);
+
+    for (instrs) |instr| switch (instr.op) {
+        .i32_const => try stack.append(inst.gpa, .{ .numeric = @as(u32, @bitCast(instr.imm.i32)) }),
+        .i64_const => try stack.append(inst.gpa, .{ .numeric = @as(u64, @bitCast(instr.imm.i64)) }),
+        .f32_const => try stack.append(inst.gpa, .{ .numeric = instr.imm.f32 }),
+        .f64_const => try stack.append(inst.gpa, .{ .numeric = instr.imm.f64 }),
+        .simd => try stack.append(inst.gpa, .{ .vector = instr.imm.simd_v128.bits }),
+        .global_get => try stack.append(inst.gpa, inst.globals[instr.imm.idx].value),
+        .ref_null => try stack.append(inst.gpa, zeroSlot(instr.imm.type)),
+        .ref_func => try stack.append(inst.gpa, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
+        .gc => {
+            const op = switch (instr.imm) {
+                .gc => |value| value,
+                .gc_type => |value| value.op,
+                .gc_two_indices => |value| value.op,
+                else => unreachable,
+            };
+            switch (op) {
+                .ref_i31 => try stack.append(inst.gpa, .{ .i31ref = @as(u32, @truncate(stack.pop().?.numericBits())) & 0x7fff_ffff }),
+                .any_convert_extern => {
+                    const reference = stack.pop().?;
+                    try stack.append(inst.gpa, switch (reference) {
+                        .externref => |host| if (host.isNull()) .{ .gcref = null } else .{ .hostref = host },
+                        .externalized_gcref => |inner| .{ .gcref = inner },
+                        .externalized_i31 => |inner| .{ .i31ref = inner },
+                        else => unreachable,
+                    });
+                },
+                .extern_convert_any => {
+                    const reference = stack.pop().?;
+                    try stack.append(inst.gpa, switch (reference) {
+                        .hostref => |host| .{ .externref = host },
+                        .gcref => |inner| if (inner) |value| .{ .externalized_gcref = value } else .{ .externref = js_value.Value.nul() },
+                        .i31ref => |inner| .{ .externalized_i31 = inner },
+                        else => unreachable,
+                    });
+                },
+                .struct_new, .struct_new_default => {
+                    const type_index = instr.imm.gc_type.type_index;
+                    const structure = inst.module.types[type_index].subtype.composite.struct_;
+                    const fields = try inst.gpa.alloc(ValueSlot, structure.fields.len);
+                    defer inst.gpa.free(fields);
+                    if (op == .struct_new) {
+                        var index = fields.len;
+                        while (index > 0) {
+                            index -= 1;
+                            fields[index] = normalizePackedField(structure.fields[index].storage, stack.pop().?);
+                        }
+                    } else for (structure.fields, fields) |field, *slot|
+                        slot.* = zeroSlot(field.storage.unpacked());
+                    const object = try createGcAggregate(inst, type_index, .struct_, fields);
+                    try stack.append(inst.gpa, .{ .gcref = gcObjectRef(object) });
+                },
+                .array_new, .array_new_default, .array_new_fixed => {
+                    const immediate = if (op == .array_new_fixed)
+                        instr.imm.gc_two_indices
+                    else
+                        types.Instr.GcTwoIndices{ .op = op, .first = instr.imm.gc_type.type_index, .second = 0 };
+                    const array_type = inst.module.types[immediate.first].subtype.composite.array;
+                    const count: u32 = switch (op) {
+                        .array_new, .array_new_default => @truncate(stack.pop().?.numericBits()),
+                        .array_new_fixed => immediate.second,
+                        else => unreachable,
+                    };
+                    const fields = try inst.gpa.alloc(ValueSlot, count);
+                    defer inst.gpa.free(fields);
+                    if (op == .array_new_fixed) {
+                        var index = fields.len;
+                        while (index > 0) {
+                            index -= 1;
+                            fields[index] = normalizePackedField(array_type.field.storage, stack.pop().?);
+                        }
+                    } else {
+                        const initial = if (op == .array_new)
+                            normalizePackedField(array_type.field.storage, stack.pop().?)
+                        else
+                            zeroSlot(array_type.field.storage.unpacked());
+                        @memset(fields, initial);
+                    }
+                    const object = try createGcAggregate(inst, immediate.first, .array, fields);
+                    try stack.append(inst.gpa, .{ .gcref = gcObjectRef(object) });
+                },
+                else => unreachable,
+            }
+        },
+        .end => {},
+        else => unreachable,
+    };
+    std.debug.assert(stack.items.len == 1);
+    return stack.items[0];
 }
 
 /// Allocate/link an instance and apply active segments without invoking its
@@ -1016,6 +1112,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     var created_globals: usize = 0;
     var created_tags: usize = 0;
     errdefer {
+        destroyGcAggregates(inst);
         if (created_tables != 0)
             for (inst.tables[mod.imported_tables..][0..created_tables]) |t| destroyTable(gpa, t);
         if (created_mems != 0)
@@ -1049,11 +1146,14 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     // 2. Allocate defined tables, memories, globals (imports first).
     inst.tables = try a.alloc(*TableInst, mod.totalTables());
     for (imports.tables, 0..) |t, k| inst.tables[k] = t;
+    inst.globals = try a.alloc(*GlobalInst, mod.totalGlobals());
+    for (imports.globals, 0..) |g, k| inst.globals[k] = g;
     for (mod.tables, 0..) |tt, j| {
         const t = try createTableAddressed(gpa, tt.address, tt.elem, tt.limits.min, tt.limits.max);
         t.owner_instance = inst;
-        created_tables += 1;
         inst.tables[mod.imported_tables + j] = t;
+        created_tables += 1;
+        if (tt.init) |init| @memset(t.elems, try evalConstExpr(inst, init));
     }
 
     inst.mems = try a.alloc(*MemoryInst, mod.totalMems());
@@ -1064,10 +1164,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
         inst.mems[mod.imported_mems + j] = m;
     }
 
-    inst.globals = try a.alloc(*GlobalInst, mod.totalGlobals());
-    for (imports.globals, 0..) |g, k| inst.globals[k] = g;
     for (mod.globals, 0..) |gd, j| {
-        const g = try createGlobalSlot(gpa, gd.type, evalConstExpr(inst, gd.init));
+        const g = try createGlobalSlot(gpa, gd.type, try evalConstExpr(inst, gd.init));
         g.owner_instance = inst;
         created_globals += 1;
         inst.globals[mod.imported_globals + j] = g;
@@ -1085,7 +1183,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     inst.elem_segments = try a.alloc(ElemSegmentInst, mod.elems.len);
     for (mod.elems, inst.elem_segments) |elem, *segment| {
         const values = try a.alloc(ValueSlot, elem.init.len);
-        for (elem.init, values) |init, *slot| slot.* = evalConstExpr(inst, init);
+        for (elem.init, values) |init, *slot| slot.* = try evalConstExpr(inst, init);
         segment.* = .{ .elems = values, .dropped = switch (elem.mode) {
             .passive => false,
             .active, .declarative => true,
@@ -1104,7 +1202,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
 /// Apply active segments in declaration order. Core 2 requires writes from a
 /// completed segment to remain visible when a later segment traps, while the
 /// failing segment itself performs no partial write.
-pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}!void {
+pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{ OutOfMemory, Trap }!void {
     const mod = inst.module;
 
     for (mod.elems, inst.elem_segments) |e, segment| {
@@ -1114,8 +1212,8 @@ pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}
         };
         const tab = inst.tables[active.table];
         const start = switch (tab.address) {
-            .i32 => @as(u64, @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()))),
-            .i64 => evalConstExpr(inst, active.offset).numericBits(),
+            .i32 => @as(u64, @as(u32, @truncate((try evalConstExpr(inst, active.offset)).numericBits()))),
+            .i64 => (try evalConstExpr(inst, active.offset)).numericBits(),
         };
         tab.lockTable();
         const table_len: u64 = @intCast(tab.elems.len);
@@ -1136,8 +1234,8 @@ pub fn applyActiveSegments(inst: *Instance, diag: *types.Diagnostic) error{Trap}
         };
         const mem = inst.mems[active.mem];
         const start = switch (mem.address) {
-            .i32 => @as(u64, @as(u32, @truncate(evalConstExpr(inst, active.offset).numericBits()))),
-            .i64 => evalConstExpr(inst, active.offset).numericBits(),
+            .i32 => @as(u64, @as(u32, @truncate((try evalConstExpr(inst, active.offset)).numericBits()))),
+            .i64 => (try evalConstExpr(inst, active.offset)).numericBits(),
         };
         const memory_len: u64 = @intCast(mem.bytes().len);
         const available = if (start <= memory_len) mem.bytes().len - @as(usize, @intCast(start)) else 0;
@@ -1736,9 +1834,22 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             });
         },
         .ref_i31 => try pushSlot(s, .{ .i31ref = popI32(s) & 0x7fff_ffff }),
-        .i31_get_u => try pushI32(s, popSlot(s).i31ref),
+        .i31_get_u => {
+            const operand = popSlot(s);
+            const raw = switch (operand) {
+                .i31ref => |value| value,
+                .gcref => |reference| if (reference == null) return s.trap("null i31 reference") else unreachable,
+                else => unreachable,
+            };
+            try pushI32(s, raw);
+        },
         .i31_get_s => {
-            const raw = popSlot(s).i31ref;
+            const operand = popSlot(s);
+            const raw = switch (operand) {
+                .i31ref => |value| value,
+                .gcref => |reference| if (reference == null) return s.trap("null i31 reference") else unreachable,
+                else => unreachable,
+            };
             const signed: i32 = @as(i32, @bitCast(raw << 1)) >> 1;
             try pushI32(s, @bitCast(signed));
         },
@@ -6758,11 +6869,12 @@ test "wasm.exec GC i31 equality and non-null scalar operations" {
     };
     const bytes = comptime (hdr ++
         typesSec(&.{ ft("", I32), ft("", "") }) ++
-        funcSec(&.{ 0, 0, 1 }) ++
+        funcSec(&.{ 0, 0, 1, 0 }) ++
         codeSec(&.{
             i32c(-1) ++ "\xFB\x1C\xFB\x1D",
             i32c(5) ++ "\xFB\x1C" ++ i32c(5) ++ "\xFB\x1C\xD3",
             "\xD0\x6C\xD4\x1A",
+            "\xD0\x6C\xFB\x1E",
         }));
     var diag: types.Diagnostic = .{};
     const mod = try buildModuleWithFeatures(bytes, features, &diag);
@@ -6777,6 +6889,67 @@ test "wasm.exec GC i31 equality and non-null scalar operations" {
     try std.testing.expectEqual(@as(u64, 1), result[0]);
     try std.testing.expectError(error.Trap, invoke(inst, 2, &.{}, &.{}, &diag));
     try std.testing.expectEqualStrings("null reference", diag.message());
+    try std.testing.expectError(error.Trap, invoke(inst, 3, &.{}, &result, &diag));
+    try std.testing.expectEqualStrings("null i31 reference", diag.message());
+}
+
+test "wasm.exec GC extended constant expressions initialize aggregates" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{
+            "\x5F\x01\x7F\x00", // type 0: immutable i32 struct
+            "\x5E\x7F\x00", // type 1: immutable i32 array
+            ft("", I32),
+        }) ++
+        funcSec(&.{ 2, 2, 2 }) ++
+        globalSec(&.{
+            glob("\x64\x6C", false, i32c(42) ++ "\xFB\x1C"),
+            glob("\x64\x00", false, i32c(7) ++ "\xFB\x00\x00"),
+            glob("\x64\x01", false, i32c(9) ++ i32c(2) ++ "\xFB\x06\x01"),
+        }) ++
+        codeSec(&.{
+            "\x23\x00\xFB\x1E",
+            "\x23\x01\xFB\x02\x00\x00",
+            "\x23\x02" ++ i32c(1) ++ "\xFB\x0B\x01",
+        }));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const inst = try instantiate(talloc, mod, .{}, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try std.testing.expectEqual(@as(u64, 42), try run1(inst, 0, &.{}));
+    try std.testing.expectEqual(@as(u64, 7), try run1(inst, 1, &.{}));
+    try std.testing.expectEqual(@as(u64, 9), try run1(inst, 2, &.{}));
+    try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
+}
+
+test "wasm.exec GC extended constant expressions initialize typed table" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+        .gc = true,
+    };
+    const bytes = comptime (hdr ++
+        typesSec(&.{ft(I32, I32)}) ++
+        importSec(&.{impGlobal("env", "g", I32, false)}) ++
+        funcSec(&.{0}) ++
+        sec(4, "\x01\x40\x00\x64\x6C\x01\x03\x03\x23\x00\xFB\x1C\x0B") ++
+        codeSec(&.{"\x20\x00\x25\x00\xFB\x1E"}));
+    var diag: types.Diagnostic = .{};
+    const mod = try buildModuleWithFeatures(bytes, features, &diag);
+    defer decode.destroyModule(talloc, mod);
+    const imported = try createGlobal(talloc, .{ .val = .i32, .mutable = false }, 42);
+    defer destroyGlobal(talloc, imported);
+    const inst = try instantiate(talloc, mod, .{ .globals = &.{imported} }, &diag);
+    defer destroyInstance(talloc, inst);
+
+    try std.testing.expectEqual(@as(u64, 42), try run1(inst, 0, &.{0}));
+    try std.testing.expectEqual(@as(u64, 42), try run1(inst, 0, &.{2}));
 }
 
 test "wasm.exec GC extern conversions preserve host aggregate and i31 identity" {

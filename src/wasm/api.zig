@@ -1959,12 +1959,15 @@ fn instantiateModuleObject(
     for (resolved.mem_values, 0..) |entry, i| memory_cache[i] = entry;
     for (resolved.global_values, 0..) |entry, i| global_cache[i] = entry;
     for (resolved.tag_values, 0..) |entry, i| tag_cache[i] = entry;
-    exec.applyActiveSegments(inst, &diag) catch {
-        // Core 2 store mutations from earlier active segments survive a later
-        // instantiation trap. The already-registered hidden instance keeps any
-        // functions written into imported tables callable.
-        try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
-        return throwWasmTrap(self, diag.message(), descriptor.runtime_error_proto);
+    exec.applyActiveSegments(inst, &diag) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Trap => {
+            // Core 2 store mutations from earlier active segments survive a later
+            // instantiation trap. The already-registered hidden instance keeps any
+            // functions written into imported tables callable.
+            try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
+            return throwWasmTrap(self, diag.message(), descriptor.runtime_error_proto);
+        },
     };
     try syncImportedTables(self, descriptor, store, object, inst, &resolved, function_cache);
 
