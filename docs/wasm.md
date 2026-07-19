@@ -187,6 +187,14 @@ post-MVP profile are implemented. Validate registry drift with:
 zig build wasm-feature-profiles-check
 ```
 
+The generated [terminal conformance matrix](.data/wasm-conformance-matrix.json)
+combines all nine scored profiles: **87,838/87,838 applicable commands pass**,
+with 1,627 explicit N/A and zero failures or runner errors. It records each
+inventory, proposal pin, converter, execution-mode counts, host requirements,
+and architecture-independent interpreter scope. The same CI command above
+rejects matrix drift; regenerate intentional inventory changes with
+`python3 tools/wasm-conformance-matrix.py --write`.
+
 The tail-call binary, validation, and bounded execution foundation is pinned
 independently to
 `WebAssembly/tail-call@a6003d06aefef41e20a3e36fe2e500062555c895`. Its

@@ -556,11 +556,16 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/wasm-feature-profiles.py",
     });
+    const wasm_conformance_matrix_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/wasm-conformance-matrix.py",
+    });
     const wasm_feature_profiles_step = b.step(
         "wasm-feature-profiles-check",
         "Validate the pinned WebAssembly feature/profile registry",
     );
     wasm_feature_profiles_step.dependOn(&wasm_feature_profiles_cmd.step);
+    wasm_feature_profiles_step.dependOn(&wasm_conformance_matrix_cmd.step);
 
     // Threads corpus: `zig build threads-test` runs the vendored WebKit
     // PR-249 thread tests (the green allowlist) against the Phase-6 API.

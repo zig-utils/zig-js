@@ -24,7 +24,7 @@ All numbers below are scoped, reproducible results—not claims that every JavaS
 | Wasm GC | **697 / 697 applicable** | [inventory](docs/.data/wasm-gc-runtime-inventory.json) |
 | Wasm Memory64 + multi-memory | **14,655 / 14,655 applicable** | [Memory64](docs/.data/wasm-memory64-runtime-inventory.json) · [multi-memory](docs/.data/wasm-multi-memory-runtime-inventory.json) |
 
-Exact feature scope and reproduction live in [WebAssembly status](docs/wasm.md).
+The [nine-profile matrix](docs/.data/wasm-conformance-matrix.json) records **87,838 / 87,838 applicable** passes, pins, modes, and host scope; reproduction lives in [WebAssembly status](docs/wasm.md).
 
 ## Performance
 

@@ -1,0 +1,455 @@
+{
+  "combined_totals": {
+    "fail": 0,
+    "not_applicable": 1627,
+    "pass": 87838,
+    "runner_error": 0,
+    "total": 89465
+  },
+  "kind": "zig_js_webassembly_conformance_matrix",
+  "profiles": [
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "cf261f2bd561297e0da7008ddde8c09ba5ea35a2",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.12"
+      },
+      "default": true,
+      "engine_commit": "977d02c8d9b164405e6cd205fe6acd06adf1449b",
+      "execution_modes": {
+        "bit_exact": 2039,
+        "javascript_api": 16801,
+        "not_applicable": 430
+      },
+      "features": [],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "mvp",
+      "inventory": "docs/.data/wasm-spec-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 430
+      },
+      "spec": {
+        "commit": "977f97014c962f7bd1291fcc6d28b41a924882bf",
+        "files_scored": 73,
+        "repository": "https://github.com/WebAssembly/spec.git",
+        "tag": "wg-1.0"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 430,
+        "pass": 18840,
+        "runner_error": 0,
+        "total": 19270
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "a593fdea3f823f86f92d218865096710fa39c4f2",
+      "execution_modes": {
+        "bit_exact": 2087,
+        "javascript_api": 25350,
+        "not_applicable": 581
+      },
+      "features": [
+        "sign_extension_ops",
+        "nontrapping_float_to_int",
+        "multi_value",
+        "reference_types",
+        "bulk_memory"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "core-2-structural",
+      "inventory": "docs/.data/wasm-core-2-structural-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 581
+      },
+      "spec": {
+        "commit": "fffc6e12fa454e475455a7b58d3b5dc343980c10",
+        "files_scored": 90,
+        "repository": "https://github.com/WebAssembly/spec.git",
+        "tag": "wg-2.0"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 581,
+        "pass": 27437,
+        "runner_error": 0,
+        "total": 28018
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "9c7288bfdda16e49cf5026a5057570cc222e7f37",
+      "execution_modes": {
+        "javascript_api": 1396,
+        "not_applicable": 510,
+        "vector_bits": 22478,
+        "vector_nan_policy": 1592
+      },
+      "features": [
+        "sign_extension_ops",
+        "nontrapping_float_to_int",
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "fixed_width_simd"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "simd",
+      "inventory": "docs/.data/wasm-simd-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 510
+      },
+      "spec": {
+        "commit": "a78b98a6899c9e91a13095e560767af6e99d98fd",
+        "files_scored": 56,
+        "repository": "https://github.com/WebAssembly/simd.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 510,
+        "pass": 25466,
+        "runner_error": 0,
+        "total": 25976
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "fd1e20eafea0589885404fd1189fc430a9f08769",
+      "execution_modes": {
+        "javascript_api": 493,
+        "proposal_thread": 29,
+        "proposal_wait": 29
+      },
+      "features": [
+        "threads"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "threaded-context"
+        ]
+      },
+      "id": "threads",
+      "inventory": "docs/.data/wasm-threads-inventory.json",
+      "not_applicable_reasons": {},
+      "spec": {
+        "commit": "979d0fcb994439423d63b2f0a8a7332d6285dd84",
+        "files_scored": 13,
+        "repository": "https://github.com/WebAssembly/threads.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 551,
+        "runner_error": 0,
+        "total": 551
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "b2d3f2480886d292fff4c3cac37a2e445aae7151",
+      "execution_modes": {
+        "javascript_api": 108,
+        "not_applicable": 11
+      },
+      "features": [
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "tail_calls"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "tail-calls",
+      "inventory": "docs/.data/wasm-tail-call-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 11
+      },
+      "spec": {
+        "commit": "a6003d06aefef41e20a3e36fe2e500062555c895",
+        "files_scored": 2,
+        "repository": "https://github.com/WebAssembly/tail-call.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 11,
+        "pass": 108,
+        "runner_error": 0,
+        "total": 119
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "b2d3f2480886d292fff4c3cac37a2e445aae7151",
+      "execution_modes": {
+        "javascript_api": 84,
+        "not_applicable": 2
+      },
+      "features": [
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "tail_calls",
+        "exception_handling"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "exception-handling",
+      "inventory": "docs/.data/wasm-exception-handling-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 2
+      },
+      "spec": {
+        "commit": "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
+        "files_scored": 4,
+        "repository": "https://github.com/WebAssembly/exception-handling.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 2,
+        "pass": 84,
+        "runner_error": 0,
+        "total": 86
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "ad75c5edcdff96d73c245b57fbc07607aaca9f95",
+        "kind": "wabt",
+        "repository": "https://github.com/WebAssembly/wabt.git",
+        "version": "1.0.39"
+      },
+      "default": false,
+      "engine_commit": "3cdb0b87ba00623f29b9fb19e90bddca80071120",
+      "execution_modes": {
+        "bit_exact": 6,
+        "javascript_api": 823
+      },
+      "features": [
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "multi_memory"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "multi-memory",
+      "inventory": "docs/.data/wasm-multi-memory-runtime-inventory.json",
+      "not_applicable_reasons": {},
+      "spec": {
+        "commit": "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
+        "files_scored": 38,
+        "repository": "https://github.com/WebAssembly/multi-memory.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 0,
+        "pass": 829,
+        "runner_error": 0,
+        "total": 829
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "kind": "wasm-tools",
+        "repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "version": "1.253.0"
+      },
+      "default": false,
+      "engine_commit": "3f0982ee69a698c1d190fbb87fd8884bb322b54f",
+      "execution_modes": {
+        "bit_exact": 20,
+        "javascript_api": 13806,
+        "not_applicable": 92
+      },
+      "features": [
+        "memory64",
+        "multi_memory",
+        "typed_function_references",
+        "tail_calls",
+        "exception_handling"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "pointer-width-32",
+          "pointer-width-64"
+        ],
+        "execute": [
+          "pointer-width-64"
+        ]
+      },
+      "id": "memory64",
+      "inventory": "docs/.data/wasm-memory64-runtime-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 92
+      },
+      "spec": {
+        "commit": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
+        "files_scored": 23,
+        "repository": "https://github.com/WebAssembly/memory64.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 92,
+        "pass": 13826,
+        "runner_error": 0,
+        "total": 13918
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "kind": "wasm-tools",
+        "repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "version": "1.253.0"
+      },
+      "default": false,
+      "engine_commit": "e60432ab7a7f626373c3ea5c4211b3d6801250db",
+      "execution_modes": {
+        "javascript_api": 697,
+        "not_applicable": 1
+      },
+      "features": [
+        "typed_function_references",
+        "gc"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "portable"
+        ],
+        "execute": [
+          "portable"
+        ]
+      },
+      "id": "gc",
+      "inventory": "docs/.data/wasm-gc-runtime-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 1
+      },
+      "spec": {
+        "commit": "756060f5816c7e2159f4817fbdee76cf52f9c923",
+        "files_scored": 18,
+        "repository": "https://github.com/WebAssembly/gc.git",
+        "tag": "proposal-revision"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 1,
+        "pass": 697,
+        "runner_error": 0,
+        "total": 698
+      }
+    }
+  ],
+  "schema_version": 1
+}
