@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 290/290 compiled fixture additionally
+sibling realms, GC, and reentry; the 291/291 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -638,6 +638,17 @@ fixture covers disarmed, future, and elapsed trap consumption against bounded
 and unbounded loops plus termination attribution. The third pinned notify,
 `JSC__VM__notifyNeedShellTimeoutCheck`, stays rejected: it is jsc-shell
 `--timeout` machinery with no possible zig-js consumer.
+
+The Bun-only object-marshalling boundary mirrors `JSC::constructEmptyObject`
+followed by the consumer initializer (bindings.cpp:2477), the path Bun's
+struct-to-POJO conversion uses. A fresh empty object with the realm
+`Object.prototype` is handed to the callback exactly once, synchronously,
+before the export returns, along with the exact pass-through context pointer,
+the stable canonical cell handle the returned EncodedJSValue exposes at the
+private cell boundary, and the same global handle. The capacity argument
+stays a performance-only hint — JSC clamps it to `maxInlineCapacity`, zig-js
+shapes grow on demand — a null initializer still creates the object, and a
+null VM returns empty without invoking the callback.
 
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
@@ -794,7 +805,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 290-symbol
+the same frame/script identity and own every returned string. The 291-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -839,7 +850,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (280 implemented, 141 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (281 implemented, 140 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
