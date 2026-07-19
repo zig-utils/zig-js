@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (311 implemented, 120 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (317 implemented, 114 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 311 private entries are implemented; the other 120 remain pending
+The first 317 private entries are implemented; the other 114 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 314/314 compiled fixture additionally
+sibling realms, GC, and reentry; the 320/320 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -722,6 +722,24 @@ the DOMURL object-creation group (`BunString__toURL`/`toJSDOMURL` +
 `WebCore__DOMURL__cast_`/`href_`/`pathname_`/`fileSystemPath`) remains in
 the cluster.
 
+The DOMURL object boundary (#313, final URL-cluster sub-slice) completes the
+cluster. `BunString__toJSDOMURL` and its ZigString-input sibling
+`BunString__toURL` build the realm's URL-interface object exactly like
+`new URL(str)` minus the new-target check — URL prototype, hidden component
+slots, live `searchParams` snapshot — and, because `DOMURL::create` is
+`ExceptionOr`, publish the TypeError and return an empty handle on invalid
+input instead of creating empty-href objects. `WebCore__DOMURL__cast_` is
+the VM-scoped downcast: it validates the VM handle zig-js publishes from
+`JSC__JSGlobalObject__vm` (the context group), decodes with VM affinity, and
+applies the hidden-slot predicate; the returned `DOMURL*` borrows the live
+JS object (Bun's wrapper-owned impl pointer), so `href_`/`pathname_` read
+through it as borrowed ZigString views interned in a process-global
+latin1/UTF-16 store, and `fileSystemPath` stays context-free — `file:`
+scheme required (error 3), non-empty host rejected (error 1),
+case-insensitive `%2f` rejected (error 2) — returning the percent-decoded
+path as an owned BunString and writing error codes only on failure, exactly
+like Bun.
+
 Seven shared job/registry imports implement selected-realm native callbacks and
 encoded jobs, selected-realm and VM-wide microtask checkpoints, explicit
 rejected-promise notification, exact ZigString module-entry deletion, and
@@ -877,7 +895,7 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The 314-symbol
+the same frame/script identity and own every returned string. The 320-symbol
 combined runtime fixture covers these semantics; the two
 profile-selected JSType exports retain
 their separate Home/Bun runtime fixtures.
@@ -922,7 +940,7 @@ profile contains 437 unique declarations from 54 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 421 (304 implemented, 117 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 421 (308 implemented, 113 pending) |
 | Public-C overlap | 15 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **437** |
