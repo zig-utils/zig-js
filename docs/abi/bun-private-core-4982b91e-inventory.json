@@ -83,8 +83,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 323,
-      "pending": 113
+      "implemented": 325,
+      "pending": 111
     }
   },
   "home_comparison": {
@@ -534,10 +534,10 @@
       "line": 2284,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__SerializedScriptSlice__free(*anyopaque) void;",
       "declaration_sha256": "d8564b86315844a54655cca34699fdfc595c830bde57d99d34fdf51b6c30471e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__StrongRef__clear",
@@ -886,10 +886,10 @@
       "line": 2283,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__serializeJSValue(global: *jsc.JSGlobalObject, value: JSValue, flags: u8) SerializedScriptValue.External;",
       "declaration_sha256": "27af2a1710048fe091825ea8ebbd679ba60eabb1daf538716865130a51412afc",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__setSamplingInterval",

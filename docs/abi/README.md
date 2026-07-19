@@ -44,7 +44,7 @@ convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 431 (317 implemented, 114 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 431 (319 implemented, 112 pending) |
 | Overlap with zig-js's completed public C target | 15 |
 | Platform libc import | 1 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-The first 317 private entries are implemented; the other 114 remain pending
+The first 319 private entries are implemented; the other 112 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -516,7 +516,7 @@ visits own string and Symbol keys in pinned order, filters indices, length,
 constructor, private/internal keys, and non-enumerable special cases, never
 invokes ordinary or C-class accessors, clears property-read failures where JSC
 does, and stops on callback-published exceptions. Descriptor identity survives
-sibling realms, GC, and reentry; the 320/320 compiled fixture additionally
+sibling realms, GC, and reentry; the 323/323 compiled fixture additionally
 covers every accessor shape, proxies, Symbols, filters, and foreign inputs.
 
 The ZigString JSON boundary decodes every tagged representation and constructs
@@ -524,6 +524,14 @@ the parsed graph with selected-realm intrinsics. Its pinned exceptional contract
 returns the SyntaxError value after clearing the transient parse exception; an
 input longer than `2^32 - 1` returns `ERR_STRING_TOO_LONG` without touching the
 untrusted span.
+
+The owned serialization boundary returns the pinned 24-byte
+`{bytes,size,handle}` layout and keeps its structured-clone frame stable until
+an idempotent opaque-token release. Ordinary graphs round-trip cycles, aliases,
+and typed data; default-mode SharedArrayBuffers retain process-local backing,
+while storage and cross-process flags reject them rather than publishing
+non-portable tokens. Malformed input, foreign values, uncloneable values, and
+allocation failure use the shared pending-exception channel.
 
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in

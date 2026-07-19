@@ -643,6 +643,21 @@ pub fn releaseSerialized(bytes: []const u8) void {
     }
 }
 
+/// Whether a valid serialized stream retains process-local SharedArrayBuffer
+/// storage references. This is used by persistence/cross-process boundaries,
+/// whose returned byte slice must not silently depend on this process's token
+/// registry. Fresh serializer output is always valid; malformed input returns
+/// false and remains the deserializer's responsibility to reject.
+pub fn hasSharedReferences(bytes: []const u8) bool {
+    var remaining = bytes;
+    while (remaining.len > 0) {
+        const frame = readFrame(remaining) catch return false;
+        if (frame.tokenCount() != 0) return true;
+        remaining = remaining[frame.frame_len..];
+    }
+    return false;
+}
+
 const Frame = struct {
     tokens: []const u8,
     payload: []const u8,

@@ -77,13 +77,26 @@ const EncodedValue = enum(i64) {
         return fromBits(@as(u64, @bitCast(value)) +% (1 << 49));
     }
 
+    fn isInt32(value: EncodedValue) bool {
+        return @as(u64, @bitCast(@intFromEnum(value))) & 0xfffe_0000_0000_0000 == 0xfffe_0000_0000_0000;
+    }
+
+    fn isNumber(value: EncodedValue) bool {
+        return @as(u64, @bitCast(@intFromEnum(value))) & 0xfffe_0000_0000_0000 != 0;
+    }
+
+    fn isCell(value: EncodedValue) bool {
+        if (value == .empty or value == .deleted) return false;
+        return @as(u64, @bitCast(@intFromEnum(value))) & 0xfffe_0000_0000_0002 == 0;
+    }
+
     fn fromRef(value: JSValueRef) EncodedValue {
         return fromBits(@intFromPtr(value.?));
     }
 
     fn cellPointer(value: EncodedValue) ?*anyopaque {
+        if (!value.isCell() or value.isNumber()) return null;
         const bits: u64 = @bitCast(@intFromEnum(value));
-        if (bits == 0) return null;
         return @ptrFromInt(@as(usize, @intCast(bits)));
     }
 };
@@ -141,6 +154,12 @@ const BunStringImpl = extern union {
 const BunString = extern struct {
     tag: BunStringTag,
     value: BunStringImpl,
+};
+
+const SerializedScriptExternal = extern struct {
+    bytes: ?[*]const u8,
+    size: usize,
+    handle: ?*anyopaque,
 };
 
 const SystemError = extern struct {
@@ -293,6 +312,7 @@ extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRe
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
 extern "c" fn JSContextGetGroup(JSContextRef) ?*anyopaque;
 extern "c" fn JSContextGetGlobalObject(JSContextRef) JSObjectRef;
+extern "c" fn JSValueMakeNumber(JSContextRef, f64) JSValueRef;
 extern "c" fn JSValueMakeString(JSContextRef, JSStringRef) JSValueRef;
 extern "c" fn JSValueToNumber(JSContextRef, JSValueRef, [*c]JSValueRef) f64;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
@@ -471,6 +491,9 @@ extern "c" fn Bun__handleUnhandledRejection(JSContextRef, EncodedValue, EncodedV
 extern "c" fn Bun__emitHandledPromiseEvent(JSContextRef, EncodedValue) bool;
 extern "c" fn Bun__handleUncaughtException(JSContextRef, EncodedValue, c_int) c_int;
 extern "c" fn Bun__wrapUnhandledRejectionErrorForUncaughtException(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn Bun__serializeJSValue(JSContextRef, EncodedValue, u8) SerializedScriptExternal;
+extern "c" fn Bun__SerializedScriptSlice__free(?*anyopaque) void;
+extern "c" fn Bun__JSValue__deserialize(JSContextRef, [*c]const u8, usize) EncodedValue;
 extern "c" fn Process__dispatchOnBeforeExit(JSContextRef, u8) void;
 extern "c" fn Process__dispatchOnExit(JSContextRef, u8) void;
 extern "c" fn Process__emitMessageEvent(JSContextRef, EncodedValue, EncodedValue) void;
@@ -737,14 +760,30 @@ fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
     if (actual.tag == .empty) return expected.len == 0;
     if (actual.tag != .wtf_string_impl) return false;
     const impl = actual.value.wtf_string_impl orelse return false;
-    if (impl.length != expected.len) return false;
-    if (impl.hash_and_flags & 4 != 0) // 8-bit buffer
-        return std.mem.eql(u8, impl.bytes[0..impl.length], expected);
-    const units: [*]align(1) const u16 = @ptrCast(impl.bytes);
-    for (units[0..impl.length], expected) |unit, byte| {
-        if (unit != byte) return false;
+    var view = std.unicode.Utf8View.init(expected) catch return false;
+    var codepoints = view.iterator();
+    var index: usize = 0;
+    if (impl.hash_and_flags & 4 != 0) { // Latin-1 buffer
+        while (codepoints.nextCodepoint()) |codepoint| {
+            if (index >= impl.length or codepoint > 0xff or impl.bytes[index] != @as(u8, @intCast(codepoint))) return false;
+            index += 1;
+        }
+        return index == impl.length;
     }
-    return true;
+    const units: [*]align(1) const u16 = @ptrCast(impl.bytes);
+    while (codepoints.nextCodepoint()) |codepoint| {
+        if (codepoint <= 0xffff) {
+            if (index >= impl.length or units[index] != @as(u16, @intCast(codepoint))) return false;
+            index += 1;
+            continue;
+        }
+        if (index + 1 >= impl.length) return false;
+        const scalar = codepoint - 0x10000;
+        if (units[index] != @as(u16, @intCast(0xd800 + (scalar >> 10))) or
+            units[index + 1] != @as(u16, @intCast(0xdc00 + (scalar & 0x3ff)))) return false;
+        index += 2;
+    }
+    return index == impl.length;
 }
 
 fn zigStringUtf8Equals(actual: ZigString, expected: []const u8) bool {
@@ -1213,7 +1252,9 @@ fn exposeCell(context: JSContextRef, name: [*:0]const u8, encoded: EncodedValue)
     const global = JSContextGetGlobalObject(context) orelse fail("global object lookup failed");
     const property = JSStringCreateWithUTF8CString(name) orelse fail("global property string creation failed");
     defer JSStringRelease(property);
-    const cell = encoded.cellPointer() orelse fail("attempted to expose a non-cell value");
+    const cell = encoded.cellPointer() orelse
+        (JSValueMakeNumber(context, @floatFromInt(JSC__JSValue__toInt32(encoded))) orelse
+            fail("failed to materialize an immediate value"));
     var exception: JSValueRef = null;
     JSObjectSetProperty(context, global, property, cell, 0, &exception);
     if (exception != null) fail("global property write failed");
@@ -5926,5 +5967,26 @@ pub fn main() void {
         !JSC__JSValue__toBoolean(evaluate(context, "Temporal.Now.timeZoneId() === 'UTC'")))
         fail("private setTimeZone empty reset mismatch");
 
-    std.debug.print("Home private value shims: 320/320 symbols linked; runtime matrix passed\n", .{});
+    // Owned structured serialization (#323): exact returned layout, stable
+    // graph identity/typed data, companion round-trip, and idempotent release.
+    if (@sizeOf(SerializedScriptExternal) != 24 or @alignOf(SerializedScriptExternal) != 8 or
+        @offsetOf(SerializedScriptExternal, "size") != 8 or @offsetOf(SerializedScriptExternal, "handle") != 16)
+        fail("private serialized-script external layout mismatch");
+    const serialized_source = evaluate(context, "globalThis.__serialized_source_323={typed:new Uint8Array([3,2,3])};" ++
+        "__serialized_source_323.self=__serialized_source_323;__serialized_source_323");
+    const serialized = Bun__serializeJSValue(context, serialized_source, 0);
+    if (serialized.bytes == null or serialized.size == 0 or serialized.handle == null)
+        fail("private structured serialization returned an empty slice");
+    const deserialized = Bun__JSValue__deserialize(context, serialized.bytes.?, serialized.size);
+    if (deserialized == .empty or JSGlobalObject__hasException(context))
+        fail("private structured deserialization failed");
+    exposeCell(context, "__serialized_restored_323", deserialized);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__serialized_restored_323!==__serialized_source_323&&" ++
+        "__serialized_restored_323.self===__serialized_restored_323&&" ++
+        "Array.from(__serialized_restored_323.typed).join(',')==='3,2,3'")))
+        fail("private structured serialization round-trip mismatch");
+    Bun__SerializedScriptSlice__free(serialized.handle);
+    Bun__SerializedScriptSlice__free(serialized.handle);
+
+    std.debug.print("Home private value shims: 323/323 symbols linked; runtime matrix passed\n", .{});
 }

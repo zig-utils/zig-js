@@ -37,6 +37,7 @@ const agent = @import("agent.zig");
 const interp = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
+const structured_clone = @import("structured_clone.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
@@ -107,6 +108,19 @@ const PrivateBunString = extern struct {
     fn empty() PrivateBunString {
         return .{ .tag = .empty, .value = .{ .zig_string = .{} } };
     }
+};
+
+/// Pinned Home/Bun `SerializedScriptValue.External` return layout. The byte
+/// view borrows the opaque handle and remains valid until its matching free.
+const PrivateSerializedScriptExternal = extern struct {
+    bytes: ?[*]const u8 = null,
+    size: usize = 0,
+    handle: ?*anyopaque = null,
+};
+
+const PrivateSerializedScriptOwned = struct {
+    bytes: []u8,
+    allocator: std.mem.Allocator,
 };
 
 /// Pure-Zig storage for the pinned 24-byte/8-byte WTF::StringBuilder boundary.
@@ -320,6 +334,11 @@ comptime {
     if (@sizeOf(PrivateBunString) != 24 or @alignOf(PrivateBunString) != 8 or
         @offsetOf(PrivateBunString, "value") != 8)
         @compileError("private BunString must retain its pinned 24-byte/8-byte ABI");
+    if (@sizeOf(PrivateSerializedScriptExternal) != 24 or
+        @alignOf(PrivateSerializedScriptExternal) != 8 or
+        @offsetOf(PrivateSerializedScriptExternal, "size") != 8 or
+        @offsetOf(PrivateSerializedScriptExternal, "handle") != 16)
+        @compileError("private serialized-script slice must retain its pinned 24-byte/8-byte ABI");
     if (@sizeOf(PrivateSystemError) != 160 or @alignOf(PrivateSystemError) != 8 or
         @offsetOf(PrivateSystemError, "code") != 8 or @offsetOf(PrivateSystemError, "message") != 32 or
         @offsetOf(PrivateSystemError, "path") != 56 or @offsetOf(PrivateSystemError, "syscall") != 80 or
@@ -376,6 +395,34 @@ const PrivateRemoteInspectorProcessState = struct {
 
 var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
+var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
+var private_serialized_script_handles: std.AutoHashMapUnmanaged(usize, PrivateSerializedScriptOwned) = .empty;
+var private_serialized_script_next_handle: usize = 1;
+
+fn lockPrivateSerializedScripts() void {
+    var spins: usize = 0;
+    while (!private_serialized_script_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn registerPrivateSerializedScript(owned: PrivateSerializedScriptOwned) error{OutOfMemory}!*anyopaque {
+    lockPrivateSerializedScripts();
+    defer private_serialized_script_lock.unlock();
+    const token = private_serialized_script_next_handle;
+    private_serialized_script_next_handle = std.math.add(usize, token, 1) catch
+        return error.OutOfMemory;
+    try private_serialized_script_handles.putNoClobber(gpa, token, owned);
+    return @ptrFromInt(token);
+}
+
+fn takePrivateSerializedScript(raw: ?*anyopaque) ?PrivateSerializedScriptOwned {
+    const token = @intFromPtr(raw orelse return null);
+    lockPrivateSerializedScripts();
+    defer private_serialized_script_lock.unlock();
+    const removed = private_serialized_script_handles.fetchRemove(token) orelse return null;
+    return removed.value;
+}
 
 fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     const existing = context.c_api_script_execution_context_id.load(.acquire);
@@ -8595,8 +8642,9 @@ export fn WebCore__DOMURL__cast_(encoded: EncodedValue, vm_handle: ?*anyopaque) 
     const primary = group.primary;
     if (@intFromPtr(primary) % @alignOf(Context) != 0) return null;
     if (primary.c_api_group != pointer) return null; // not a zig-js VM handle
-    const internal = privateValueFrom(@ptrCast(primary), encoded) orelse return null;
-    const object = privateDomUrlFromValue(internal) orelse return null;
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or boxed.owner.c_api_group != pointer) return null;
+    const object = privateDomUrlFromValue(boxed.value) orelse return null;
     return @ptrCast(object);
 }
 
@@ -9740,6 +9788,115 @@ export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) call
             continue;
         };
     }
+}
+
+/// Serialize through the engine's context-independent structured-clone frame.
+/// The two pinned flags only change behavior for special host objects in JSC;
+/// zig-js's currently supported ordinary graph has the same wire bytes. A
+/// SharedArrayBuffer is different: its frame retains a process-local token, so
+/// persistence/cross-process requests reject it instead of publishing bytes
+/// that cannot satisfy the flag's lifetime contract.
+export fn Bun__serializeJSValue(
+    global: JSContextRef,
+    encoded: EncodedValue,
+    flags: u8,
+) callconv(.c) PrivateSerializedScriptExternal {
+    return privateSerializeJSValue(global, encoded, flags, gpa);
+}
+
+fn privateSerializeJSValue(
+    global: JSContextRef,
+    encoded: EncodedValue,
+    flags: u8,
+    allocator: std.mem.Allocator,
+) PrivateSerializedScriptExternal {
+    const context = ctxForEvaluation(global) orelse return .{};
+    const group = privatePropertyBoundaryGroup(context) orelse return .{};
+    if (group.pending_exception != null) return .{};
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (flags & ~@as(u8, 0x03) != 0) {
+        const abrupt = machine.throwError("TypeError", "Invalid structured serialization flags");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .{};
+    }
+    const input = privateValueFrom(global, encoded) orelse {
+        const abrupt = machine.throwError("TypeError", "Serialized value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .{};
+    };
+    const bytes = structured_clone.serialize(&machine, allocator, input) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .{};
+    };
+    if (flags & 0x03 != 0 and structured_clone.hasSharedReferences(bytes)) {
+        structured_clone.releaseSerialized(bytes);
+        allocator.free(bytes);
+        const detail = if (flags & 0x02 != 0)
+            "SharedArrayBuffer cannot be serialized for storage"
+        else
+            "SharedArrayBuffer requires a portable cross-process backing handle";
+        const abrupt = machine.throwDOMException("DataCloneError", detail);
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .{};
+    }
+
+    const handle = registerPrivateSerializedScript(.{ .bytes = bytes, .allocator = allocator }) catch {
+        structured_clone.releaseSerialized(bytes);
+        allocator.free(bytes);
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return .{};
+    };
+    return .{ .bytes = bytes.ptr, .size = bytes.len, .handle = handle };
+}
+
+export fn Bun__SerializedScriptSlice__free(raw: ?*anyopaque) callconv(.c) void {
+    // Monotonic opaque tokens are never dereferenced or reused, so null,
+    // duplicate, and arbitrarily stale caller input cannot free newer data.
+    const owned = takePrivateSerializedScript(raw) orelse return;
+    structured_clone.releaseSerialized(owned.bytes);
+    owned.allocator.free(owned.bytes);
+}
+
+export fn Bun__JSValue__deserialize(
+    global: JSContextRef,
+    data: [*c]const u8,
+    size: usize,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (data == null and size != 0) {
+        const abrupt = machine.throwError("TypeError", "Invalid serialized byte span");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    }
+    const bytes: []const u8 = if (size == 0) "" else data[0..size];
+    const result = structured_clone.deserialize(&machine, bytes) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
 }
 
 fn privateModuleLoaderPromiseFromBunString(
@@ -23351,4 +23508,108 @@ test "private async Error stacks follow pending Promise await chains" {
     const cleared = promise.asyncStackLink(gate_promise);
     try std.testing.expect(cleared.state != .pending);
     try std.testing.expect(cleared.activation == null and cleared.forward_to == null);
+}
+
+test "private structured serialization owns bytes and preserves clone semantics" {
+    const Probe = struct {
+        fn expose(global: JSContextRef, name: [*:0]const u8, encoded: EncodedValue) !void {
+            const key = JSStringCreateWithUTF8CString(name) orelse return error.StringCreateFailed;
+            defer JSStringRelease(key);
+            const ref = privateRefFromEncoded(global, encoded) orelse return error.ValueCreateFailed;
+            var exception: JSValueRef = null;
+            JSObjectSetProperty(global, JSContextGetGlobalObject(global), key, ref, 0, &exception);
+            if (exception != null) return error.PropertySetFailed;
+        }
+
+        fn expectRejected(external: PrivateSerializedScriptExternal, global: JSContextRef) !void {
+            try std.testing.expect(external.bytes == null and external.size == 0 and external.handle == null);
+            try std.testing.expect(JSGlobalObject__hasException(global));
+            JSGlobalObject__clearException(global);
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const source = try internal.evaluate(
+        \\globalThis.__serial_source_323 = { number: 323, typed: new Uint8Array([3, 2, 3]) };
+        \\__serial_source_323.self = __serial_source_323;
+        \\__serial_source_323.aliases = [__serial_source_323.typed, __serial_source_323.typed];
+        \\__serial_source_323;
+    );
+    const source_encoded = privateEncodedFromValue(internal, source);
+    const external = Bun__serializeJSValue(context, source_encoded, 0);
+    try std.testing.expect(external.bytes != null and external.size != 0 and external.handle != null);
+    const stable = try std.testing.allocator.dupe(u8, external.bytes.?[0..external.size]);
+    defer std.testing.allocator.free(stable);
+    JSGarbageCollect(context);
+    try std.testing.expectEqualSlices(u8, stable, external.bytes.?[0..external.size]);
+
+    const restored = Bun__JSValue__deserialize(context, external.bytes.?, external.size);
+    try std.testing.expect(restored != .empty and !JSGlobalObject__hasException(context));
+    try Probe.expose(context, "__serial_restored_323", restored);
+    try std.testing.expect((try internal.evaluate(
+        \\__serial_restored_323 !== __serial_source_323 &&
+        \\__serial_restored_323.self === __serial_restored_323 &&
+        \\__serial_restored_323.aliases[0] === __serial_restored_323.typed &&
+        \\__serial_restored_323.aliases[1] === __serial_restored_323.typed &&
+        \\__serial_restored_323.number === 323 &&
+        \\Array.from(__serial_restored_323.typed).join(',') === '3,2,3'
+    )).asBool());
+    Bun__SerializedScriptSlice__free(external.handle);
+    Bun__SerializedScriptSlice__free(external.handle);
+    Bun__SerializedScriptSlice__free(null);
+
+    for ([_]u8{ 1, 2, 3 }) |flags| {
+        const flagged = Bun__serializeJSValue(context, EncodedValue.fromInt32(323), flags);
+        try std.testing.expect(flagged.bytes != null and flagged.handle != null);
+        const primitive = Bun__JSValue__deserialize(context, flagged.bytes.?, flagged.size);
+        try std.testing.expectEqual(EncodedValue.fromInt32(323), primitive);
+        Bun__SerializedScriptSlice__free(flagged.handle);
+    }
+
+    const sab = privateEncodedFromValue(internal, try internal.evaluate(
+        \\globalThis.__serial_sab_323 = new SharedArrayBuffer(4);
+        \\new Uint8Array(__serial_sab_323)[0] = 23;
+        \\__serial_sab_323;
+    ));
+    const sab_external = Bun__serializeJSValue(context, sab, 0);
+    try std.testing.expect(sab_external.bytes != null and sab_external.handle != null);
+    const sab_restored = Bun__JSValue__deserialize(context, sab_external.bytes.?, sab_external.size);
+    try Probe.expose(context, "__serial_sab_restored_323", sab_restored);
+    try std.testing.expect((try internal.evaluate(
+        \\__serial_sab_restored_323 !== __serial_sab_323 &&
+        \\new Uint8Array(__serial_sab_restored_323)[0] === 23 &&
+        \\(new Uint8Array(__serial_sab_restored_323)[1] = 32,
+        \\ new Uint8Array(__serial_sab_323)[1] === 32)
+    )).asBool());
+    Bun__SerializedScriptSlice__free(sab_external.handle);
+    for ([_]u8{ 1, 2, 3 }) |flags|
+        try Probe.expectRejected(Bun__serializeJSValue(context, sab, flags), context);
+
+    try Probe.expectRejected(Bun__serializeJSValue(context, source_encoded, 4), context);
+    const uncloneable = privateEncodedFromValue(internal, try internal.evaluate("(() => 323)"));
+    try Probe.expectRejected(Bun__serializeJSValue(context, uncloneable, 0), context);
+
+    const malformed = [_]u8{ 0x5a, 0x4a, 0x53, 0x43 };
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSValue__deserialize(context, &malformed, malformed.len));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSValue__deserialize(context, null, 1));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_value = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ foreign: 323 })"));
+    try Probe.expectRejected(Bun__serializeJSValue(context, foreign_value, 0), context);
+
+    var no_memory: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&no_memory);
+    try Probe.expectRejected(
+        privateSerializeJSValue(context, EncodedValue.fromInt32(323), 0, failing.allocator()),
+        context,
+    );
 }
