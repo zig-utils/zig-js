@@ -2135,16 +2135,25 @@ fn loadExtended(bytes: []const u8, source_width: u8, target_width: u8, signed: b
     return result;
 }
 
-fn loadExtendedMemory(range: SimdMemoryRange, source_width: u8, target_width: u8, signed: bool) u128 {
-    const source_size: usize = source_width / 8;
-    const lanes = range.len / source_size;
-    var result: u128 = 0;
-    for (0..lanes) |lane| {
-        var value = range.readLittle(lane * source_size, source_size);
-        if (signed) value = signExtendLane(value, source_width);
-        result = replaceLaneBits(result, @intCast(lane), target_width, value);
+fn loadExtendedLanes(comptime sw: u8, comptime signed: bool, range: SimdMemoryRange) u128 {
+    const lanes = 128 / (sw * 2);
+    const raw = range.readLittle(0, lanes * (sw / 8));
+    const source: @Vector(lanes, ULane(sw)) = @bitCast(raw);
+    if (signed) {
+        const sh: @Vector(lanes, SLane(sw)) = @bitCast(source);
+        return fromVec(@as(@Vector(lanes, SLane(sw * 2)), @intCast(sh)));
     }
-    return result;
+    return fromVec(@as(@Vector(lanes, ULane(sw * 2)), @intCast(source)));
+}
+
+fn loadExtendedMemory(range: SimdMemoryRange, source_width: u8, target_width: u8, signed: bool) u128 {
+    _ = target_width;
+    return switch (source_width) {
+        8 => if (signed) loadExtendedLanes(8, true, range) else loadExtendedLanes(8, false, range),
+        16 => if (signed) loadExtendedLanes(16, true, range) else loadExtendedLanes(16, false, range),
+        32 => if (signed) loadExtendedLanes(32, true, range) else loadExtendedLanes(32, false, range),
+        else => unreachable,
+    };
 }
 
 const SimdRelation = enum { eq, ne, lt, gt, le, ge };
@@ -2757,16 +2766,39 @@ fn simdExtend(op: simd.Op) ?SimdIntegerTransform {
     };
 }
 
-fn extendSimdHalf(vector: u128, descriptor: SimdIntegerTransform) u128 {
-    const lanes = 128 / descriptor.target_width;
-    const first = if (descriptor.high) lanes else 0;
-    var result: u128 = 0;
-    for (0..lanes) |lane| {
-        var value = laneBits(vector, @intCast(first + lane), descriptor.source_width);
-        if (descriptor.signed) value = signExtendLane(value, descriptor.source_width);
-        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, value);
+fn halfMask(comptime lanes: usize, comptime first: usize) [lanes]i32 {
+    var m: [lanes]i32 = undefined;
+    for (0..lanes) |i| m[i] = @intCast(first + i);
+    return m;
+}
+
+fn extendHalf(comptime sw: u8, comptime signed: bool, comptime high: bool, vector: u128) u128 {
+    const lanes = 128 / (sw * 2);
+    const source: @Vector(lanes * 2, ULane(sw)) = @bitCast(vector);
+    const half = @shuffle(ULane(sw), source, undefined, halfMask(lanes, if (high) lanes else 0));
+    if (signed) {
+        const sh: @Vector(lanes, SLane(sw)) = @bitCast(half);
+        return fromVec(@as(@Vector(lanes, SLane(sw * 2)), @intCast(sh)));
     }
-    return result;
+    return fromVec(@as(@Vector(lanes, ULane(sw * 2)), @intCast(half)));
+}
+
+fn extendSimdHalf(vector: u128, descriptor: SimdIntegerTransform) u128 {
+    return switch (descriptor.source_width) {
+        8 => if (descriptor.signed)
+            (if (descriptor.high) extendHalf(8, true, true, vector) else extendHalf(8, true, false, vector))
+        else
+            (if (descriptor.high) extendHalf(8, false, true, vector) else extendHalf(8, false, false, vector)),
+        16 => if (descriptor.signed)
+            (if (descriptor.high) extendHalf(16, true, true, vector) else extendHalf(16, true, false, vector))
+        else
+            (if (descriptor.high) extendHalf(16, false, true, vector) else extendHalf(16, false, false, vector)),
+        32 => if (descriptor.signed)
+            (if (descriptor.high) extendHalf(32, true, true, vector) else extendHalf(32, true, false, vector))
+        else
+            (if (descriptor.high) extendHalf(32, false, true, vector) else extendHalf(32, false, false, vector)),
+        else => unreachable,
+    };
 }
 
 fn simdExtMul(op: simd.Op) ?SimdIntegerTransform {
@@ -2787,20 +2819,37 @@ fn simdExtMul(op: simd.Op) ?SimdIntegerTransform {
     };
 }
 
-fn extMulSimdHalf(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
-    const lanes = 128 / descriptor.target_width;
-    const first = if (descriptor.high) lanes else 0;
-    var result: u128 = 0;
-    for (0..lanes) |lane| {
-        const a = laneBits(left, @intCast(first + lane), descriptor.source_width);
-        const b = laneBits(right, @intCast(first + lane), descriptor.source_width);
-        const product: u64 = if (descriptor.signed)
-            @bitCast(signedSimdLane(a, descriptor.source_width) * signedSimdLane(b, descriptor.source_width))
-        else
-            a * b;
-        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, product);
+fn extMulHalf(comptime sw: u8, comptime signed: bool, comptime high: bool, left: u128, right: u128) u128 {
+    const lanes = 128 / (sw * 2);
+    const mask = comptime halfMask(lanes, if (high) lanes else 0);
+    const a = @shuffle(ULane(sw), @as(@Vector(lanes * 2, ULane(sw)), @bitCast(left)), undefined, mask);
+    const b = @shuffle(ULane(sw), @as(@Vector(lanes * 2, ULane(sw)), @bitCast(right)), undefined, mask);
+    if (signed) {
+        const wa: @Vector(lanes, SLane(sw * 2)) = @intCast(@as(@Vector(lanes, SLane(sw)), @bitCast(a)));
+        const wb: @Vector(lanes, SLane(sw * 2)) = @intCast(@as(@Vector(lanes, SLane(sw)), @bitCast(b)));
+        return fromVec(wa *% wb);
     }
-    return result;
+    const wa: @Vector(lanes, ULane(sw * 2)) = @intCast(a);
+    const wb: @Vector(lanes, ULane(sw * 2)) = @intCast(b);
+    return fromVec(wa *% wb);
+}
+
+fn extMulSimdHalf(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
+    return switch (descriptor.source_width) {
+        8 => if (descriptor.signed)
+            (if (descriptor.high) extMulHalf(8, true, true, left, right) else extMulHalf(8, true, false, left, right))
+        else
+            (if (descriptor.high) extMulHalf(8, false, true, left, right) else extMulHalf(8, false, false, left, right)),
+        16 => if (descriptor.signed)
+            (if (descriptor.high) extMulHalf(16, true, true, left, right) else extMulHalf(16, true, false, left, right))
+        else
+            (if (descriptor.high) extMulHalf(16, false, true, left, right) else extMulHalf(16, false, false, left, right)),
+        32 => if (descriptor.signed)
+            (if (descriptor.high) extMulHalf(32, true, true, left, right) else extMulHalf(32, true, false, left, right))
+        else
+            (if (descriptor.high) extMulHalf(32, false, true, left, right) else extMulHalf(32, false, false, left, right)),
+        else => unreachable,
+    };
 }
 
 fn simdNarrow(op: simd.Op) ?SimdIntegerTransform {
@@ -2813,61 +2862,66 @@ fn simdNarrow(op: simd.Op) ?SimdIntegerTransform {
     };
 }
 
-fn narrowSimdLanes(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
-    const source_lanes = 128 / descriptor.source_width;
-    const signed_min = -(@as(i64, 1) << @intCast(descriptor.target_width - 1));
-    const signed_max = (@as(i64, 1) << @intCast(descriptor.target_width - 1)) - 1;
-    const unsigned_max = (@as(i64, 1) << @intCast(descriptor.target_width)) - 1;
-    var result: u128 = 0;
-    for (0..source_lanes * 2) |lane| {
-        const source = if (lane < source_lanes) left else right;
-        const source_lane = lane % source_lanes;
-        const value = signedSimdLane(laneBits(source, @intCast(source_lane), descriptor.source_width), descriptor.source_width);
-        const narrowed = if (descriptor.signed)
-            std.math.clamp(value, signed_min, signed_max)
-        else
-            std.math.clamp(value, 0, unsigned_max);
-        result = replaceLaneBits(result, @intCast(lane), descriptor.target_width, signedLaneBits(narrowed));
-    }
-    return result;
+fn narrowLanes(comptime sw: u8, comptime signed: bool, left: u128, right: u128) u128 {
+    const lanes = 128 / sw;
+    const a: @Vector(lanes, SLane(sw)) = @bitCast(left);
+    const b: @Vector(lanes, SLane(sw)) = @bitCast(right);
+    const lo: @Vector(lanes, SLane(sw)) = @splat(if (signed) std.math.minInt(SLane(sw / 2)) else 0);
+    const hi: @Vector(lanes, SLane(sw)) = @splat(if (signed) std.math.maxInt(SLane(sw / 2)) else std.math.maxInt(ULane(sw / 2)));
+    const ca: @Vector(lanes, SLane(sw)) = @min(@max(a, lo), hi);
+    const cb: @Vector(lanes, SLane(sw)) = @min(@max(b, lo), hi);
+    const ta: @Vector(lanes, ULane(sw / 2)) = @truncate(@as(@Vector(lanes, ULane(sw)), @bitCast(ca)));
+    const tb: @Vector(lanes, ULane(sw / 2)) = @truncate(@as(@Vector(lanes, ULane(sw)), @bitCast(cb)));
+    return fromVec(std.simd.join(ta, tb));
 }
 
-fn extAddPairwise(vector: u128, source_width: u8, signed: bool) u128 {
-    const target_width = source_width * 2;
-    var result: u128 = 0;
-    for (0..128 / target_width) |lane| {
-        var a = laneBits(vector, @intCast(lane * 2), source_width);
-        var b = laneBits(vector, @intCast(lane * 2 + 1), source_width);
-        if (signed) {
-            a = signExtendLane(a, source_width);
-            b = signExtendLane(b, source_width);
-        }
-        result = replaceLaneBits(result, @intCast(lane), target_width, a +% b);
+fn narrowSimdLanes(left: u128, right: u128, descriptor: SimdIntegerTransform) u128 {
+    return switch (descriptor.source_width) {
+        16 => if (descriptor.signed) narrowLanes(16, true, left, right) else narrowLanes(16, false, left, right),
+        32 => if (descriptor.signed) narrowLanes(32, true, left, right) else narrowLanes(32, false, left, right),
+        else => unreachable,
+    };
+}
+
+fn pairwiseMask(comptime lanes: usize, comptime odd: bool) [lanes]i32 {
+    var m: [lanes]i32 = undefined;
+    for (0..lanes) |i| m[i] = @intCast(i * 2 + @intFromBool(odd));
+    return m;
+}
+
+fn extAddPairwise(comptime sw: u8, comptime signed: bool, vector: u128) u128 {
+    const lanes = 128 / (sw * 2);
+    const source: @Vector(lanes * 2, ULane(sw)) = @bitCast(vector);
+    const evens = @shuffle(ULane(sw), source, undefined, pairwiseMask(lanes, false));
+    const odds = @shuffle(ULane(sw), source, undefined, pairwiseMask(lanes, true));
+    if (signed) {
+        const we: @Vector(lanes, SLane(sw * 2)) = @intCast(@as(@Vector(lanes, SLane(sw)), @bitCast(evens)));
+        const wo: @Vector(lanes, SLane(sw * 2)) = @intCast(@as(@Vector(lanes, SLane(sw)), @bitCast(odds)));
+        return fromVec(we + wo);
     }
-    return result;
+    const we: @Vector(lanes, ULane(sw * 2)) = @intCast(evens);
+    const wo: @Vector(lanes, ULane(sw * 2)) = @intCast(odds);
+    return fromVec(we + wo);
 }
 
 fn dotI16x8(left: u128, right: u128) u128 {
-    var result: u128 = 0;
-    for (0..4) |lane| {
-        const a0 = signedSimdLane(laneBits(left, @intCast(lane * 2), 16), 16);
-        const a1 = signedSimdLane(laneBits(left, @intCast(lane * 2 + 1), 16), 16);
-        const b0 = signedSimdLane(laneBits(right, @intCast(lane * 2), 16), 16);
-        const b1 = signedSimdLane(laneBits(right, @intCast(lane * 2 + 1), 16), 16);
-        result = replaceLaneBits(result, @intCast(lane), 32, signedLaneBits(a0 * b0 + a1 * b1));
-    }
-    return result;
+    const a = @as(@Vector(8, i32), @intCast(@as(@Vector(8, i16), @bitCast(left))));
+    const b = @as(@Vector(8, i32), @intCast(@as(@Vector(8, i16), @bitCast(right))));
+    const prod = a *% b;
+    const evens = @shuffle(i32, prod, undefined, [4]i32{ 0, 2, 4, 6 });
+    const odds = @shuffle(i32, prod, undefined, [4]i32{ 1, 3, 5, 7 });
+    return fromVec(evens +% odds);
 }
 
 fn q15MulRoundSaturate(left: u128, right: u128) u128 {
-    var result: u128 = 0;
-    for (0..8) |lane| {
-        const a = signedSimdLane(laneBits(left, @intCast(lane), 16), 16);
-        const b = signedSimdLane(laneBits(right, @intCast(lane), 16), 16);
-        const value = std.math.clamp((a * b + 0x4000) >> 15, -32768, 32767);
-        result = replaceLaneBits(result, @intCast(lane), 16, signedLaneBits(value));
-    }
-    return result;
+    const a = @as(@Vector(8, i32), @intCast(@as(@Vector(8, i16), @bitCast(left))));
+    const b = @as(@Vector(8, i32), @intCast(@as(@Vector(8, i16), @bitCast(right))));
+    const rounding: @Vector(8, i32) = @splat(0x4000);
+    const shifted = (a *% b +% rounding) >> @as(@Vector(8, u5), @splat(15));
+    const lo: @Vector(8, i32) = @splat(-32768);
+    const hi: @Vector(8, i32) = @splat(32767);
+    const clamped: @Vector(8, i32) = @min(@max(shifted, lo), hi);
+    return fromVec(@as(@Vector(8, u16), @truncate(@as(@Vector(8, u32), @bitCast(clamped)))));
 }
 
 fn executeSimdIntegerTransform(s: *State, op: simd.Op) ExecError!bool {
@@ -2886,8 +2940,10 @@ fn executeSimdIntegerTransform(s: *State, op: simd.Op) ExecError!bool {
         return true;
     }
     switch (op) {
-        .i16x8_extadd_pairwise_i8x16_s, .i16x8_extadd_pairwise_i8x16_u => try pushVector(s, extAddPairwise(popVector(s), 8, op == .i16x8_extadd_pairwise_i8x16_s)),
-        .i32x4_extadd_pairwise_i16x8_s, .i32x4_extadd_pairwise_i16x8_u => try pushVector(s, extAddPairwise(popVector(s), 16, op == .i32x4_extadd_pairwise_i16x8_s)),
+        .i16x8_extadd_pairwise_i8x16_s => try pushVector(s, extAddPairwise(8, true, popVector(s))),
+        .i16x8_extadd_pairwise_i8x16_u => try pushVector(s, extAddPairwise(8, false, popVector(s))),
+        .i32x4_extadd_pairwise_i16x8_s => try pushVector(s, extAddPairwise(16, true, popVector(s))),
+        .i32x4_extadd_pairwise_i16x8_u => try pushVector(s, extAddPairwise(16, false, popVector(s))),
         .i32x4_dot_i16x8_s => {
             const right = popVector(s);
             try pushVector(s, dotI16x8(popVector(s), right));
