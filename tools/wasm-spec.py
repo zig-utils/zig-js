@@ -1197,6 +1197,27 @@ def counts(commands: list[dict]) -> dict[str, int]:
     return result
 
 
+def runner_error_details(
+    commands: list[dict], limit: int = 3, max_length: int = 2000,
+) -> list[str]:
+    """Return bounded unique evaluator failures for durable CI output."""
+    details: list[str] = []
+    seen: set[str] = set()
+    for command in commands:
+        if command.get("status") != "runner_error":
+            continue
+        detail = str(command.get("detail") or "runner failed without detail").strip()
+        if detail in seen:
+            continue
+        seen.add(detail)
+        if len(detail) > max_length:
+            detail = detail[: max_length - 1] + "…"
+        details.append(detail)
+        if len(details) == limit:
+            break
+    return details
+
+
 def feature_area(profile_name: str, filename: str) -> str:
     if profile_name == "mvp":
         return "mvp"
@@ -1341,6 +1362,8 @@ def main() -> int:
             f"{entry['counts']['not_applicable']} n/a, "
             f"{entry['counts']['runner_error']} runner"
         )
+        for detail in runner_error_details(entry["commands"]):
+            print(f"  runner error: {detail}", file=sys.stderr, flush=True)
 
     all_commands = [command for entry in files for command in entry["commands"]]
     totals = counts(all_commands)

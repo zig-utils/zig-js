@@ -62,6 +62,19 @@ class WastParserTests(unittest.TestCase):
 
 
 class ScriptGenerationTests(unittest.TestCase):
+    def test_runner_error_details_are_unique_and_bounded(self) -> None:
+        commands = [
+            {"status": "runner_error", "detail": "engine exited 1"},
+            {"status": "runner_error", "detail": "engine exited 1"},
+            {"status": "pass"},
+            {"status": "runner_error", "detail": "x" * 12},
+            {"status": "runner_error", "detail": "third"},
+        ]
+        self.assertEqual(
+            wasm_spec.runner_error_details(commands, limit=2, max_length=8),
+            ["engine …", "xxxxxxx…"],
+        )
+
     def test_thread_wait_and_either_modes_are_explicit(self) -> None:
         directory = pathlib.Path(".")
         thread_js = wasm_spec.generate_command(0, {
