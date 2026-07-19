@@ -111,6 +111,17 @@ jobs:
               python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_f32x4_rounding.wast --inventory "$RUNNER_TEMP/wasm-simd-float.json"
               python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_lane.wast --inventory "$RUNNER_TEMP/wasm-simd-lane.json"
               python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_load.wast --inventory "$RUNNER_TEMP/wasm-simd-memory.json"
+          # Proposal script parsing stays unit-gated, while exact-pin runtime
+          # witnesses cover ordinary, recursively nested, and wait/notify
+          # thread directives without running the complete corpus on each push.
+          - name: wasm-threads-smoke
+            wasm_threads: true
+            cmd: |
+              python3 -m unittest tools/test_wasm_spec.py
+              zig build wasm-spec-eval
+              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simple.wast --inventory "$RUNNER_TEMP/wasm-threads-simple.json"
+              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter deeply_nested.wast --inventory "$RUNNER_TEMP/wasm-threads-nested.json"
+              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter wait_notify.wast --inventory "$RUNNER_TEMP/wasm-threads-wait.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
@@ -246,6 +257,19 @@ jobs:
           git -C "$RUNNER_TEMP/wasm-simd" remote add origin https://github.com/WebAssembly/simd.git
           git -C "$RUNNER_TEMP/wasm-simd" fetch --depth=1 origin a78b98a6899c9e91a13095e560767af6e99d98fd
           git -C "$RUNNER_TEMP/wasm-simd" checkout --detach FETCH_HEAD
+          curl --fail --location --silent --show-error \
+            https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
+          echo "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f  $RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" | sha256sum --check
+          tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" --directory "$RUNNER_TEMP"
+      - name: Install pinned WebAssembly Threads corpus tools
+        if: matrix.wasm_threads == true
+        working-directory: zig-js
+        run: |
+          git init "$RUNNER_TEMP/wasm-threads"
+          git -C "$RUNNER_TEMP/wasm-threads" remote add origin https://github.com/WebAssembly/threads.git
+          git -C "$RUNNER_TEMP/wasm-threads" fetch --depth=1 origin 979d0fcb994439423d63b2f0a8a7332d6285dd84
+          git -C "$RUNNER_TEMP/wasm-threads" checkout --detach FETCH_HEAD
           curl --fail --location --silent --show-error \
             https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-linux-x64.tar.gz \
             --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
