@@ -150,7 +150,7 @@ jobs:
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
-            cmd: zig build test-jit test-vm test-concurrency
+            cmd: zig build test-jit test-vm test-concurrency gc-relocation-inventory-check
           # The inventories are executable contracts: parser regressions,
           # exported-but-uninventoried shims, stale statuses, and broken Home
           # runtime linkage all fail this bounded leg.
