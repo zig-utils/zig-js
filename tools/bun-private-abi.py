@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/bun-private-core-4982b91e-inventory.json"
 DIAGNOSTIC_CONTRACT = ROOT / "docs/abi/bun-diagnostic-inspector-4982b91e.json"
+INSPECTOR_AGENTS_CONTRACT = ROOT / "docs/abi/bun-inspector-agents-4982b91e.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -249,6 +250,73 @@ def validate_diagnostic_contract(bun_root: Path | None) -> None:
         fail("diagnostic inspector semantic inventory is incomplete or duplicated")
 
 
+def validate_inspector_agents_contract(bun_root: Path | None) -> None:
+    if not INSPECTOR_AGENTS_CONTRACT.is_file():
+        fail(f"missing checked-in inspector agents contract {INSPECTOR_AGENTS_CONTRACT}")
+    contract = json.loads(INSPECTOR_AGENTS_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "lifecycle-test-reporter-inspector-agents"
+        or contract.get("revision") != REVISION
+        or contract.get("issue") != 396
+        or contract.get("parent_issue") != 140
+    ):
+        fail("inspector agents contract schema, revision, or issue drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "src/jsc/bindings/InspectorLifecycleAgent.cpp",
+        "src/jsc/bindings/InspectorTestReporterAgent.cpp",
+        "packages/bun-inspector-protocol/src/protocol/jsc/protocol.json",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("inspector agents source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid inspector agents digest for {relative}")
+        if bun_root is not None:
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"inspector agents source drift for {relative}")
+    expected_exports = {
+        "Bun__LifecycleAgentReportReload",
+        "Bun__LifecycleAgentReportError",
+        "Bun__LifecycleAgentPreventExit",
+        "Bun__LifecycleAgentStopPreventingExit",
+        "Bun__TestReporterAgentReportTestFound",
+        "Bun__TestReporterAgentReportTestFoundWithLocation",
+        "Bun__TestReporterAgentReportTestStart",
+        "Bun__TestReporterAgentReportTestEnd",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("inspector agents export inventory drift")
+    domains = contract.get("domains")
+    if not isinstance(domains, dict) or set(domains) != {"LifecycleReporter", "TestReporter"}:
+        fail("inspector agents domain inventory drift")
+    lifecycle = domains["LifecycleReporter"]
+    tests = domains["TestReporter"]
+    if lifecycle.get("commands") != ["enable", "disable", "preventExit", "stopPreventingExit"]:
+        fail("LifecycleReporter command contract drift")
+    if lifecycle.get("events") != ["reload", "error"]:
+        fail("LifecycleReporter event contract drift")
+    if tests.get("commands") != ["enable", "disable"] or tests.get("events") != ["found", "start", "end"]:
+        fail("TestReporter command or event contract drift")
+    if tests.get("test_type") != {"0": "test", "1": "describe"}:
+        fail("TestReporter type enum drift")
+    if tests.get("test_status") != {
+        "0": "pass",
+        "1": "fail",
+        "2": "timeout",
+        "3": "skip",
+        "4": "todo",
+        "5": "skipped_because_label",
+    }:
+        fail("TestReporter status enum drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("inspector agents semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -273,6 +341,7 @@ def main() -> None:
         OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate(stored)
     validate_diagnostic_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_inspector_agents_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

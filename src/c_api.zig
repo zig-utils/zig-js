@@ -977,6 +977,9 @@ const CInspectorSession = struct {
     attached: bool = true,
     runtime_enabled: bool = false,
     debugger_enabled: bool = false,
+    lifecycle_reporter_enabled: bool = false,
+    lifecycle_preventing_exit: bool = false,
+    test_reporter_enabled: bool = false,
     release_requested: bool = false,
     /// Process-wide broadcasts retain a session across arbitrary frontend
     /// callbacks. A callback may release this or a later snapshotted session;
@@ -14734,6 +14737,299 @@ fn privateInspectorSessionDeliverable(session: *CInspectorSession) bool {
     return session.attached and !session.release_requested;
 }
 
+/// Private inspector-agent handles are the exact per-frontend session in
+/// zig-js. Validate identity against the process registry without dereferencing
+/// arbitrary consumer pointers, then retain the session across a reentrant
+/// frontend callback exactly like the process-wide hot-reload broadcast.
+fn acquirePrivateInspectorAgent(agent_ref: ?*anyopaque) ?*CInspectorSession {
+    const raw = agent_ref orelse return null;
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    for (private_inspector_sessions.items) |session| {
+        if (@intFromPtr(session) != @intFromPtr(raw)) continue;
+        if (!session.attached or session.release_requested) return null;
+        session.broadcast_refs += 1;
+        return session;
+    }
+    return null;
+}
+
+const PrivateTestReporterType = enum(u8) {
+    test_ = 0,
+    describe = 1,
+    _,
+};
+
+const PrivateTestReporterStatus = enum(u8) {
+    pass = 0,
+    fail = 1,
+    timeout = 2,
+    skip = 3,
+    todo = 4,
+    skipped_because_label = 5,
+    _,
+};
+
+fn privateTestReporterTypeName(item_type: PrivateTestReporterType) ?[]const u8 {
+    return switch (item_type) {
+        .test_ => "test",
+        .describe => "describe",
+        _ => null,
+    };
+}
+
+fn privateTestReporterStatusName(status: PrivateTestReporterStatus) ?[]const u8 {
+    return switch (status) {
+        .pass => "pass",
+        .fail => "fail",
+        .timeout => "timeout",
+        .skip => "skip",
+        .todo => "todo",
+        .skipped_because_label => "skipped_because_label",
+        _ => null,
+    };
+}
+
+fn privateInspectorAgentString(
+    allocator: std.mem.Allocator,
+    string: ?*const PrivateBunString,
+) PrivateBunStringError![]const u8 {
+    return privateBunStringWTF8Alloc(allocator, string orelse return error.InvalidString);
+}
+
+const PrivateLifecycleErrorPayload = struct {
+    message: []const u8,
+    name: []const u8,
+    urls: []const []const u8,
+    lineColumns: []const i32,
+    sourceLines: []const []const u8,
+};
+
+fn privateLifecycleErrorPayload(
+    allocator: std.mem.Allocator,
+    source: *const PrivateZigException,
+) PrivateBunStringError!PrivateLifecycleErrorPayload {
+    const message = try privateInspectorAgentString(allocator, &source.message);
+    const name = try privateInspectorAgentString(allocator, &source.name);
+
+    var urls: std.ArrayListUnmanaged([]const u8) = .empty;
+    var line_columns: std.ArrayListUnmanaged(i32) = .empty;
+    var source_lines: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (source.stack.frames_len > 0) {
+        const frames = source.stack.frames_ptr orelse return error.InvalidString;
+        for (frames[0..source.stack.frames_len]) |*frame| {
+            const url = try privateInspectorAgentString(allocator, &frame.source_url);
+            try urls.append(allocator, url);
+            try line_columns.append(allocator, std.math.add(i32, frame.position.line, 1) catch std.math.maxInt(i32));
+            try line_columns.append(allocator, std.math.add(i32, frame.position.column, 1) catch std.math.maxInt(i32));
+        }
+    }
+    if (source.stack.source_lines_len > 0) {
+        const lines = source.stack.source_lines_ptr orelse return error.InvalidString;
+        for (lines[0..source.stack.source_lines_len]) |*line| {
+            const bytes = try privateInspectorAgentString(allocator, line);
+            try source_lines.append(allocator, bytes);
+        }
+    }
+    return .{
+        .message = message,
+        .name = name,
+        .urls = urls.items,
+        .lineColumns = line_columns.items,
+        .sourceLines = source_lines.items,
+    };
+}
+
+export fn Bun__LifecycleAgentReportReload(agent_ref: ?*anyopaque) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.lifecycle_reporter_enabled) return;
+    _ = sendInspectorJson(session, .{ .method = "LifecycleReporter.reload", .params = .{} });
+}
+
+export fn Bun__LifecycleAgentReportError(
+    agent_ref: ?*anyopaque,
+    exception: ?*const PrivateZigException,
+) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.lifecycle_reporter_enabled) return;
+    const source = exception orelse return;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const payload = privateLifecycleErrorPayload(arena_state.allocator(), source) catch return;
+    _ = sendInspectorJson(session, .{
+        .method = "LifecycleReporter.error",
+        .params = payload,
+    });
+}
+
+export fn Bun__LifecycleAgentPreventExit(agent_ref: ?*anyopaque) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    session.lifecycle_preventing_exit = true;
+}
+
+export fn Bun__LifecycleAgentStopPreventingExit(agent_ref: ?*anyopaque) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    session.lifecycle_preventing_exit = false;
+}
+
+fn privateTestReporterFound(
+    session: *CInspectorSession,
+    test_id: c_int,
+    name_string: ?*const PrivateBunString,
+    item_type: PrivateTestReporterType,
+    parent_id: c_int,
+    source_url: []const u8,
+    script_id: []const u8,
+    line: c_int,
+) void {
+    if (!session.test_reporter_enabled) return;
+    const type_name = privateTestReporterTypeName(item_type) orelse return;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const name = privateInspectorAgentString(arena_state.allocator(), name_string) catch return;
+    if (script_id.len != 0 and parent_id > 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .scriptId = script_id,
+                .line = line,
+                .name = name,
+                .type = type_name,
+                .parentId = parent_id,
+            },
+        });
+    } else if (script_id.len != 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .scriptId = script_id,
+                .line = line,
+                .name = name,
+                .type = type_name,
+            },
+        });
+    } else if (source_url.len != 0 and parent_id > 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .url = source_url,
+                .line = line,
+                .name = name,
+                .type = type_name,
+                .parentId = parent_id,
+            },
+        });
+    } else if (source_url.len != 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .url = source_url,
+                .line = line,
+                .name = name,
+                .type = type_name,
+            },
+        });
+    } else if (parent_id > 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .line = line,
+                .name = name,
+                .type = type_name,
+                .parentId = parent_id,
+            },
+        });
+    } else {
+        _ = sendInspectorJson(session, .{
+            .method = "TestReporter.found",
+            .params = .{
+                .id = test_id,
+                .line = line,
+                .name = name,
+                .type = type_name,
+            },
+        });
+    }
+}
+
+export fn Bun__TestReporterAgentReportTestFound(
+    agent_ref: ?*anyopaque,
+    call_frame: ?*const PrivateCallFrame,
+    test_id: c_int,
+    name: ?*const PrivateBunString,
+    item_type: PrivateTestReporterType,
+    parent_id: c_int,
+) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.test_reporter_enabled) return;
+
+    const active = privateActiveCallFrame(call_frame);
+    const location = if (active) |frame| frame.caller_location else null;
+    var script_id_buffer: [32]u8 = undefined;
+    const source_url = if (location) |source| source.source_url else "";
+    const script_id = if (source_url.len == 0 and location != null and location.?.script_id != 0)
+        std.fmt.bufPrint(&script_id_buffer, "{d}", .{location.?.script_id}) catch return
+    else
+        "";
+    const line: c_int = if (location) |source|
+        std.math.cast(c_int, source.location.line) orelse std.math.maxInt(c_int)
+    else
+        0;
+    privateTestReporterFound(session, test_id, name, item_type, parent_id, source_url, script_id, line);
+}
+
+export fn Bun__TestReporterAgentReportTestFoundWithLocation(
+    agent_ref: ?*anyopaque,
+    test_id: c_int,
+    name: ?*const PrivateBunString,
+    item_type: PrivateTestReporterType,
+    parent_id: c_int,
+    source_url_string: ?*const PrivateBunString,
+    line: c_int,
+) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.test_reporter_enabled) return;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const source_url = privateInspectorAgentString(arena_state.allocator(), source_url_string) catch return;
+    privateTestReporterFound(session, test_id, name, item_type, parent_id, source_url, "", line);
+}
+
+export fn Bun__TestReporterAgentReportTestStart(agent_ref: ?*anyopaque, test_id: c_int) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.test_reporter_enabled) return;
+    _ = sendInspectorJson(session, .{ .method = "TestReporter.start", .params = .{ .id = test_id } });
+}
+
+export fn Bun__TestReporterAgentReportTestEnd(
+    agent_ref: ?*anyopaque,
+    test_id: c_int,
+    status: PrivateTestReporterStatus,
+    elapsed: f64,
+) callconv(.c) void {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!session.test_reporter_enabled) return;
+    const status_name = privateTestReporterStatusName(status) orelse return;
+    _ = sendInspectorJson(session, .{
+        .method = "TestReporter.end",
+        .params = .{ .id = test_id, .status = status_name, .elapsed = elapsed },
+    });
+}
+
 /// Notify every live inspector connection that a hot reload may proceed. The
 /// pinned Bun implementation broadcasts this process-wide rather than limiting
 /// it to one VM or to sessions that enabled the Runtime/Debugger domains.
@@ -15827,6 +16123,9 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
     }
     session.release_requested = true;
     session.attached = false;
+    session.lifecycle_reporter_enabled = false;
+    session.lifecycle_preventing_exit = false;
+    session.test_reporter_enabled = false;
     const broadcast_refs = session.broadcast_refs;
     private_inspector_sessions_lock.unlock();
     if (state.operation_depth > 0 or state.callback_depth > 0 or broadcast_refs != 0) {
@@ -15886,9 +16185,36 @@ export fn ZJSInspectorSessionDispatch(
             .result = .{ .domains = &[_]struct { name: []const u8, version: []const u8 }{
                 .{ .name = "Runtime", .version = "1.0" },
                 .{ .name = "Debugger", .version = "0.1" },
+                .{ .name = "LifecycleReporter", .version = "1.0" },
+                .{ .name = "TestReporter", .version = "1.0" },
                 .{ .name = "Schema", .version = "1.0" },
             } },
         });
+    }
+    if (std.mem.eql(u8, method, "LifecycleReporter.enable")) {
+        session.lifecycle_reporter_enabled = true;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "LifecycleReporter.disable")) {
+        session.lifecycle_reporter_enabled = false;
+        session.lifecycle_preventing_exit = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "LifecycleReporter.preventExit")) {
+        session.lifecycle_preventing_exit = true;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "LifecycleReporter.stopPreventingExit")) {
+        session.lifecycle_preventing_exit = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "TestReporter.enable")) {
+        session.test_reporter_enabled = true;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "TestReporter.disable")) {
+        session.test_reporter_enabled = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Runtime.enable")) {
         session.runtime_enabled = true;
@@ -19604,6 +19930,183 @@ test "private hot-reload inspector broadcast spans VMs and survives reentrant re
     JSGlobalContextRelease(first);
     try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.items.len);
     BunDebugger__willHotReload();
+}
+
+test "private lifecycle and test reporter agents are session exact and reentrant safe" {
+    const Capture = struct {
+        bytes: [32 * 1024]u8 = undefined,
+        len: usize = 0,
+        session: ZJSInspectorSessionRef = null,
+        release_on_reload: bool = false,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (self.release_on_reload and std.mem.indexOf(u8, message[0..message_len], "LifecycleReporter.reload") != null) {
+                self.release_on_reload = false;
+                const doomed = self.session;
+                self.session = null;
+                ZJSInspectorSessionRelease(doomed);
+            }
+        }
+
+        fn contains(self: *const @This(), needle: []const u8) bool {
+            return std.mem.indexOf(u8, self.bytes[0..self.len], needle) != null;
+        }
+
+        fn bunString(bytes: []const u8) PrivateBunString {
+            return .{
+                .tag = .static_zig_string,
+                .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
+            };
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    JSGlobalContextSetInspectable(context, true);
+    var lifecycle: Capture = .{};
+    var tests: Capture = .{};
+    lifecycle.session = ZJSInspectorSessionCreate(context, Capture.receive, &lifecycle) orelse return error.SessionCreateFailed;
+    defer if (lifecycle.session != null) ZJSInspectorSessionRelease(lifecycle.session);
+    tests.session = ZJSInspectorSessionCreate(context, Capture.receive, &tests) orelse return error.SessionCreateFailed;
+    defer if (tests.session != null) ZJSInspectorSessionRelease(tests.session);
+
+    const lifecycle_base = lifecycle.len;
+    const tests_base = tests.len;
+    Bun__LifecycleAgentReportReload(lifecycle.session);
+    Bun__TestReporterAgentReportTestStart(tests.session, 1);
+    try std.testing.expectEqual(lifecycle_base, lifecycle.len);
+    try std.testing.expectEqual(tests_base, tests.len);
+
+    const schema = "{\"id\":1,\"method\":\"Schema.getDomains\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(lifecycle.session, schema, schema.len));
+    try std.testing.expect(lifecycle.contains("LifecycleReporter") and lifecycle.contains("TestReporter"));
+    const lifecycle_enable = "{\"id\":2,\"method\":\"LifecycleReporter.enable\"}";
+    const tests_enable = "{\"id\":3,\"method\":\"TestReporter.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(lifecycle.session, lifecycle_enable, lifecycle_enable.len));
+    try std.testing.expect(ZJSInspectorSessionDispatch(tests.session, tests_enable, tests_enable.len));
+
+    Bun__LifecycleAgentReportReload(lifecycle.session);
+    try std.testing.expect(lifecycle.contains("\"method\":\"LifecycleReporter.reload\""));
+    try std.testing.expect(!tests.contains("LifecycleReporter.reload"));
+    Bun__LifecycleAgentPreventExit(lifecycle.session);
+    try std.testing.expect(inspectorSession(lifecycle.session).?.lifecycle_preventing_exit);
+    Bun__LifecycleAgentStopPreventingExit(lifecycle.session);
+    try std.testing.expect(!inspectorSession(lifecycle.session).?.lifecycle_preventing_exit);
+
+    const error_name = Capture.bunString("TypeError");
+    const error_message = Capture.bunString("broken <value>");
+    const frame_url = Capture.bunString("file:///agent.js");
+    const source_line = Capture.bunString("throw new TypeError('broken')");
+    var frames = [_]PrivateZigStackFrame{.{
+        .function_name = .empty(),
+        .source_url = frame_url,
+        .position = .{ .line = 4, .column = 6, .line_start_byte = 0 },
+        .code_type = .function,
+        .is_async = false,
+    }};
+    var source_lines = [_]PrivateBunString{source_line};
+    var exception = PrivateZigException{
+        .name = error_name,
+        .message = error_message,
+        .stack = .{
+            .source_lines_ptr = &source_lines,
+            .source_lines_numbers = null,
+            .source_lines_len = 1,
+            .source_lines_to_collect = 1,
+            .frames_ptr = &frames,
+            .frames_len = 1,
+            .frames_cap = 1,
+        },
+    };
+    Bun__LifecycleAgentReportError(lifecycle.session, &exception);
+    try std.testing.expect(lifecycle.contains("\"method\":\"LifecycleReporter.error\""));
+    try std.testing.expect(lifecycle.contains("\"message\":\"broken <value>\""));
+    try std.testing.expect(lifecycle.contains("\"name\":\"TypeError\""));
+    try std.testing.expect(lifecycle.contains("\"urls\":[\"file:///agent.js\"]"));
+    try std.testing.expect(lifecycle.contains("\"lineColumns\":[5,7]"));
+    try std.testing.expect(lifecycle.contains("throw new TypeError('broken')"));
+
+    var explicit_name = Capture.bunString("nested test");
+    var explicit_url = Capture.bunString("file:///suite.test.ts");
+    Bun__TestReporterAgentReportTestFoundWithLocation(tests.session, 11, &explicit_name, .describe, 7, &explicit_url, 33);
+    Bun__TestReporterAgentReportTestStart(tests.session, 11);
+    Bun__TestReporterAgentReportTestEnd(tests.session, 11, .skipped_because_label, 12.5);
+    try std.testing.expect(tests.contains("\"method\":\"TestReporter.found\""));
+    try std.testing.expect(tests.contains("\"url\":\"file:///suite.test.ts\""));
+    try std.testing.expect(tests.contains("\"line\":33"));
+    try std.testing.expect(tests.contains("\"type\":\"describe\""));
+    try std.testing.expect(tests.contains("\"parentId\":7"));
+    try std.testing.expect(tests.contains("\"method\":\"TestReporter.start\""));
+    try std.testing.expect(tests.contains("\"status\":\"skipped_because_label\""));
+    try std.testing.expect(tests.contains("\"elapsed\":12.5"));
+
+    var frame_storage: usize = 0;
+    const call_frame: *PrivateCallFrame = @ptrCast(&frame_storage);
+    var active = PrivateActiveCallFrame{
+        .frame = call_frame,
+        .context = ctxForHandleInspection(context).?,
+        .caller_location = .{
+            .script_id = 91,
+            .source_url = "file:///live.test.ts",
+            .location = .{ .line = 8, .column = 3, .byte_offset = 40 },
+        },
+        .caller_function_name = "hostTest",
+    };
+    const saved_active = private_active_call_frame;
+    private_active_call_frame = &active;
+    defer private_active_call_frame = saved_active;
+    var live_name = Capture.bunString("live test");
+    Bun__TestReporterAgentReportTestFound(tests.session, call_frame, 12, &live_name, .test_, -1);
+    try std.testing.expect(tests.contains("\"url\":\"file:///live.test.ts\""));
+    try std.testing.expect(tests.contains("\"line\":8"));
+    try std.testing.expect(tests.contains("\"name\":\"live test\""));
+    try std.testing.expect(!tests.contains("\"parentId\":-1"));
+
+    const before_invalid = tests.len;
+    Bun__TestReporterAgentReportTestFound(tests.session, call_frame, 13, &live_name, @enumFromInt(255), -1);
+    Bun__TestReporterAgentReportTestEnd(tests.session, 13, @enumFromInt(255), 1);
+    Bun__TestReporterAgentReportTestStart(lifecycle.session, 13);
+    Bun__TestReporterAgentReportTestStart(@ptrFromInt(1), 13);
+    try std.testing.expectEqual(before_invalid, tests.len);
+
+    var dead_exception = exception;
+    dead_exception.name = .dead();
+    const before_dead = lifecycle.len;
+    Bun__LifecycleAgentReportError(lifecycle.session, &dead_exception);
+    try std.testing.expectEqual(before_dead, lifecycle.len);
+    var saw_payload_oom = false;
+    var saw_payload_success = false;
+    for (0..64) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var failing_arena = std.heap.ArenaAllocator.init(failing.allocator());
+        defer failing_arena.deinit();
+        if (privateLifecycleErrorPayload(failing_arena.allocator(), &exception)) |_| {
+            saw_payload_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_payload_oom = true;
+        }
+    }
+    try std.testing.expect(saw_payload_oom and saw_payload_success);
+
+    const lifecycle_disable = "{\"id\":4,\"method\":\"LifecycleReporter.disable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(lifecycle.session, lifecycle_disable, lifecycle_disable.len));
+    try std.testing.expect(!inspectorSession(lifecycle.session).?.lifecycle_reporter_enabled);
+    try std.testing.expect(!inspectorSession(lifecycle.session).?.lifecycle_preventing_exit);
+
+    var reentrant: Capture = .{ .release_on_reload = true };
+    reentrant.session = ZJSInspectorSessionCreate(context, Capture.receive, &reentrant) orelse return error.SessionCreateFailed;
+    try std.testing.expect(ZJSInspectorSessionDispatch(reentrant.session, lifecycle_enable, lifecycle_enable.len));
+    Bun__LifecycleAgentReportReload(reentrant.session);
+    try std.testing.expect(reentrant.session == null);
+    try std.testing.expect(reentrant.contains("LifecycleReporter.reload"));
 }
 
 test "C-API: inspectability gates concurrent in-process protocol sessions" {

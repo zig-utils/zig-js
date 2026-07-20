@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 424,
-      "pending": 59
+      "implemented": 432,
+      "pending": 51
     }
   },
   "home_comparison": {
@@ -679,10 +679,10 @@
       "line": 465,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__LifecycleAgentPreventExit(agent: *Handle) void;",
       "declaration_sha256": "d3c75e18edc8cc1cdf650c1894caa670131c0488c407ff1972d34edafb064f5f",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__LifecycleAgentReportError",
@@ -690,10 +690,10 @@
       "line": 464,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__LifecycleAgentReportError(agent: *Handle, exception: *ZigException) void;",
       "declaration_sha256": "2db65622d12db11ae8126af5d67ee034802ed5444e959faab577218cc6eb367b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__LifecycleAgentReportReload",
@@ -701,10 +701,10 @@
       "line": 463,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__LifecycleAgentReportReload(agent: *Handle) void;",
       "declaration_sha256": "8736a24165d0d7627d8ad5bcc51a8bd7fe39a688f4d9b806596847f787bc029c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__LifecycleAgentStopPreventingExit",
@@ -712,10 +712,10 @@
       "line": 466,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__LifecycleAgentStopPreventingExit(agent: *Handle) void;",
       "declaration_sha256": "642fbb6f8fabd95e8cb2cbc5581e42dd2b8445b6113ec454542eb0071f12d886",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__Process__emitWarning",
@@ -855,10 +855,10 @@
       "line": 321,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestEnd(agent: *Handle, testId: c_int, bunTestStatus: TestStatus, elapsed: f64) void;",
       "declaration_sha256": "48ff3c0d41b2daecea2ae8b7c29201e2fa1a4745a71807cb91d0a58f85c5d45d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__TestReporterAgentReportTestFound",
@@ -866,10 +866,10 @@
       "line": 318,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestFound(agent: *Handle, callFrame: *jsc.CallFrame, testId: c_int, name: *bun.String, item_type: TestType, parentId: c_int) void;",
       "declaration_sha256": "242d695430cafbab6fefd6e627b7d8e59ee3c9f5fec2fbc16b5d8582a2ac1f66",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__TestReporterAgentReportTestFoundWithLocation",
@@ -877,10 +877,10 @@
       "line": 319,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestFoundWithLocation(agent: *Handle, testId: c_int, name: *bun.String, item_type: TestType, parentId: c_int, sourceURL: *bun.String, line: c_int) void;",
       "declaration_sha256": "e3f25ffac3425875bacec2f7824d1d6ecca14149be37c21e7f58ecb513c120c2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__TestReporterAgentReportTestStart",
@@ -888,10 +888,10 @@
       "line": 320,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__TestReporterAgentReportTestStart(agent: *Handle, testId: c_int) void;",
       "declaration_sha256": "d2ffcb7e1b5431c9c242a36291db1a4669e0c2f82818ed01c7e474f67107fa7c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__WeakRef__clear",

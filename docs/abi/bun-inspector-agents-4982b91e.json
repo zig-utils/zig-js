@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "contract": "lifecycle-test-reporter-inspector-agents",
+  "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+  "issue": 396,
+  "parent_issue": 140,
+  "sources": {
+    "src/jsc/bindings/InspectorLifecycleAgent.cpp": "59addd0ab5ce9572d88bfaa0cf94449e6999aa169406fd39932ca25fd0d4c640",
+    "src/jsc/bindings/InspectorTestReporterAgent.cpp": "815f7b20af2e5cc2c8e35d76fe8f70205b95620a4b91d59de0fd9dab8aa3fd7e",
+    "packages/bun-inspector-protocol/src/protocol/jsc/protocol.json": "38413abb5ac37e56acff2025ab6734457c35546aa1c13be1b295ee3b81eb70d7"
+  },
+  "exports": [
+    "Bun__LifecycleAgentReportReload",
+    "Bun__LifecycleAgentReportError",
+    "Bun__LifecycleAgentPreventExit",
+    "Bun__LifecycleAgentStopPreventingExit",
+    "Bun__TestReporterAgentReportTestFound",
+    "Bun__TestReporterAgentReportTestFoundWithLocation",
+    "Bun__TestReporterAgentReportTestStart",
+    "Bun__TestReporterAgentReportTestEnd"
+  ],
+  "domains": {
+    "LifecycleReporter": {
+      "commands": [
+        "enable",
+        "disable",
+        "preventExit",
+        "stopPreventingExit"
+      ],
+      "events": [
+        "reload",
+        "error"
+      ]
+    },
+    "TestReporter": {
+      "commands": [
+        "enable",
+        "disable"
+      ],
+      "events": [
+        "found",
+        "start",
+        "end"
+      ],
+      "test_type": {
+        "0": "test",
+        "1": "describe"
+      },
+      "test_status": {
+        "0": "pass",
+        "1": "fail",
+        "2": "timeout",
+        "3": "skip",
+        "4": "todo",
+        "5": "skipped_because_label"
+      }
+    }
+  },
+  "semantics": [
+    "The private agent handle maps to one live ZJS inspector session and never broadcasts across sessions.",
+    "LifecycleReporter and TestReporter events are suppressed until their respective domains are enabled.",
+    "Disabling LifecycleReporter also clears its prevent-exit state; session release clears every agent state.",
+    "LifecycleReporter.error projects message, name, source URLs, one-based line/column pairs, and source lines atomically.",
+    "Invalid, dead, or allocation-failing BunString payloads produce no partial inspector event.",
+    "TestReporter TestType values 0 and 1 map to test and describe; every other value is rejected without an event.",
+    "TestReporter TestStatus values 0 through 5 map in pinned protocol order; every other value is rejected without an event.",
+    "Found-with-location preserves the supplied URL and line and includes parentId only when it is positive.",
+    "Found-from-frame uses the first active public caller location, emits a source URL or script ID when available, and omits absent optional fields.",
+    "Agent handles are validated against the live session registry before dereference, so arbitrary and detached pointers are inert.",
+    "Each call retains its session across the frontend callback, allowing callback-driven release without use-after-free.",
+    "The Home and Bun profile libraries compile, link, and run the same external consumer against all eight exports."
+  ]
+}
