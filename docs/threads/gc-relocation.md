@@ -55,6 +55,15 @@ allocation pressure, publication swaps under one size-class lock, and live-slot
 accounting stays unchanged. Production movement remains off until #334/#335
 finish the engine cell policy and complete root/edge rewrite implementation.
 
+The first engine rewrite slice is complete under
+[#338](https://github.com/zig-utils/zig-js/issues/338): `Function` marking and
+relocation now cover its closure, realm, home/super/wrapper objects,
+`import.meta`, lexical `this`/`new.target`, shared derived-constructor `this`
+cell, and captured `with` objects. Old functions are rescanned by minor GC
+because `super()` can initialize the shared `this` cell after publication.
+Movement is still disabled until every cell kind and root surface has the same
+complete treatment.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

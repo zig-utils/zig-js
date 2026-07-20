@@ -18,12 +18,14 @@ const std = @import("std");
 const builtin = @import("builtin");
 const gc = @import("gc");
 const value = @import("value.zig");
+const ast = @import("ast.zig");
 const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const vm = @import("vm.zig");
 const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
 const gc_runtime = @import("gc_runtime.zig");
+const gc_relocation = @import("gc_relocation.zig");
 const stack_scan = @import("stack_scan.zig");
 const agent = @import("agent.zig");
 const strcell = @import("strcell.zig");
@@ -482,12 +484,125 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
 
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
+    v.mark(f.realm_global);
     v.mark(f.home_object);
     v.mark(f.super_ctor);
     v.mark(f.obj);
     if (f.import_meta_slot) |slot| if (slot.obj) |o| v.mark(o);
     markValue(v, f.arrow_this);
+    markValue(v, f.arrow_new_target);
+    if (f.this_cell) |cell| markValue(v, cell.value);
+    for (f.with_stack) |object| v.mark(object);
     // `params`/`body`/`source`/`chunk` are immutable arena/AST — not cells.
+}
+
+/// Rewrite the same complete Function edge set that `traceFunction` marks.
+/// The function record, import-meta slot, shared this cell, and with-stack
+/// allocation are arena-owned containers; only their managed payloads move.
+pub fn relocateFunction(f: *interp.Function, v: anytype) void {
+    gc_relocation.rewriteRequiredSlot(v, Environment, &f.closure);
+    gc_relocation.rewriteOptionalSlot(v, Object, &f.realm_global);
+    gc_relocation.rewriteOptionalSlot(v, Object, &f.home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &f.super_ctor);
+    gc_relocation.rewriteOptionalSlot(v, Object, &f.obj);
+    if (f.import_meta_slot) |slot|
+        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+    gc_relocation.rewriteValueSlot(v, &f.arrow_this);
+    gc_relocation.rewriteValueSlot(v, &f.arrow_new_target);
+    if (f.this_cell) |cell| gc_relocation.rewriteValueSlot(v, &cell.value);
+    for (f.with_stack) |*object|
+        gc_relocation.rewriteRequiredSlot(v, Object, object);
+}
+
+test "Function marking and relocation cover every managed field" {
+    var old_environment = Environment{
+        .arena = std.testing.allocator,
+        .gc_managed = true,
+    };
+    var new_environment = Environment{
+        .arena = std.testing.allocator,
+        .gc_managed = true,
+    };
+    var old_objects: [10]Object = undefined;
+    var new_objects: [10]Object = undefined;
+    var body: ast.Node = .undefined_lit;
+    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[4] };
+    var this_cell = interp.ThisCell{
+        .value = Value.obj(&old_objects[7]),
+        .initialized = true,
+    };
+    var with_stack = [_]*Object{ &old_objects[8], &old_objects[9] };
+    var function = interp.Function{
+        .params = &.{},
+        .body = &body,
+        .is_expr_body = true,
+        .closure = &old_environment,
+        .realm_global = &old_objects[0],
+        .home_object = &old_objects[1],
+        .super_ctor = &old_objects[2],
+        .obj = &old_objects[3],
+        .import_meta_slot = &import_meta,
+        .arrow_this = Value.obj(&old_objects[5]),
+        .arrow_new_target = Value.obj(&old_objects[6]),
+        .this_cell = &this_cell,
+        .with_stack = &with_stack,
+    };
+
+    const TraceVisitor = struct {
+        seen: std.AutoHashMap(usize, void),
+
+        fn mark(self: *@This(), maybe_cell: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
+                .optional => maybe_cell orelse return,
+                .pointer => maybe_cell,
+                else => @compileError("Function trace test expects a cell pointer"),
+            };
+            self.seen.put(@intFromPtr(cell), {}) catch @panic("trace test allocation failed");
+        }
+    };
+    var trace = TraceVisitor{ .seen = .init(std.testing.allocator) };
+    defer trace.seen.deinit();
+    traceFunction(&function, &trace);
+    try std.testing.expect(trace.seen.contains(@intFromPtr(&old_environment)));
+    for (&old_objects) |*object|
+        try std.testing.expect(trace.seen.contains(@intFromPtr(object)));
+    try std.testing.expectEqual(@as(usize, 11), trace.seen.count());
+
+    const Plan = struct {
+        old_environment: *Environment,
+        new_environment: *Environment,
+        old_objects: *[10]Object,
+        new_objects: *[10]Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
+                return @ptrCast(self.new_environment);
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+    };
+    relocateFunction(&function, &plan);
+
+    try std.testing.expectEqual(&new_environment, function.closure);
+    try std.testing.expectEqual(&new_objects[0], function.realm_global.?);
+    try std.testing.expectEqual(&new_objects[1], function.home_object.?);
+    try std.testing.expectEqual(&new_objects[2], function.super_ctor.?);
+    try std.testing.expectEqual(&new_objects[3], function.obj.?);
+    try std.testing.expectEqual(&new_objects[4], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[5], function.arrow_this.asObj());
+    try std.testing.expectEqual(&new_objects[6], function.arrow_new_target.asObj());
+    try std.testing.expectEqual(&new_objects[7], this_cell.value.asObj());
+    try std.testing.expectEqual(&new_objects[8], with_stack[0]);
+    try std.testing.expectEqual(&new_objects[9], with_stack[1]);
+    try std.testing.expect(Binding.traceOldOnMinor(.function));
 }
 
 pub fn traceBoundFn(b: *interp.Interpreter.BoundFn, v: anytype) void {
@@ -1062,12 +1177,11 @@ pub const Binding = struct {
     /// Object and Environment mutations are funneled through owner-aware
     /// barriers. Mutable type-erased side cells have a wider set of lifecycle
     /// writes, so quiescent minor GC conservatively rescans those old kinds.
-    /// Function reference fields are the exception: closure/home/super/object
-    /// links are fully initialized before the function is published and never
-    /// rewritten afterward, so promoting the function and its edges together is
-    /// sufficient and avoids retracing every old builtin closure each cycle.
+    /// Function cells are rescanned too: most edges are immutable after
+    /// publication, but a captured derived-constructor `this_cell.value` is
+    /// initialized by `super()` and can therefore acquire a young object.
     pub fn traceOldOnMinor(kind: Kind) bool {
-        return kind != .object and kind != .string and kind != .environment and kind != .function;
+        return kind != .object and kind != .string and kind != .environment;
     }
 
     pub fn traceEphemeron(self: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
