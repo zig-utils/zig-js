@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 435,
-      "pending": 95
+      "implemented": 456,
+      "pending": 74
     }
   },
   "declarations": [
@@ -5296,10 +5296,10 @@
       "line": 2,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__append(arg0: *FetchHeaders, arg1: *const ZigString, arg2: *const ZigString, arg3: *JSGlobalObject) void;",
       "declaration_sha256": "07007ec8cc2e1b5063517993c99601c14b7b77db90859f5f3711b5474523cf87",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__cast_",
@@ -5307,10 +5307,10 @@
       "line": 3,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__cast_(JSValue0: JSValue, arg1: *VM) ?*FetchHeaders;",
       "declaration_sha256": "9014a88f7f82fd02eed4d01e1940e1fa152123a57dd20dde8ed7c66cd47093b2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__clone",
@@ -5318,10 +5318,10 @@
       "line": 4,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__clone(arg0: *FetchHeaders, arg1: *JSGlobalObject) JSValue;",
       "declaration_sha256": "6d4145064df8075e63a346704692c9c0c06a346fcd7e37b84d7abd69bba0f7d5",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__cloneThis",
@@ -5329,10 +5329,10 @@
       "line": 5,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__cloneThis(arg0: *FetchHeaders, arg1: *JSGlobalObject) *FetchHeaders;",
       "declaration_sha256": "8c13234fc62add0677a381a771469f0a65da73ebe694dd4d7fb077f30fe3eb07",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__copyTo",
@@ -5340,10 +5340,10 @@
       "line": 6,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__copyTo(arg0: *FetchHeaders, arg1: [*]StringPointer, arg2: [*]StringPointer, arg3: [*]u8) void;",
       "declaration_sha256": "d0f734f437e71fbbb2370b1a8f15ec5d49337ac7594a75514c59b5815196ffa9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__count",
@@ -5351,10 +5351,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__count(arg0: *FetchHeaders, arg1: *u32, arg2: *u32) void;",
       "declaration_sha256": "9c80e7c1bd56a69b89b1c06512421d2fad58abd8ecb8ec74ffdf4d98fedbb5ee",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createEmpty",
@@ -5362,10 +5362,10 @@
       "line": 8,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createEmpty() *FetchHeaders;",
       "declaration_sha256": "4efa58892185c3428d34e1b22f313d1731a33b146e8d029747b3f4e203ddcee6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createFromH3",
@@ -5384,10 +5384,10 @@
       "line": 42,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn WebCore__FetchHeaders__createFromJS(*jsc.JSGlobalObject, JSValue) ?*FetchHeaders;",
       "declaration_sha256": "b842f0449261b5b83b9c0face5352dc6eb72918f80711c540a7eb76494ad99ea",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createFromPicoHeaders_",
@@ -5417,10 +5417,10 @@
       "line": 12,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createValue(arg0: *JSGlobalObject, arg1: [*c]StringPointer, arg2: [*c]StringPointer, arg3: [*c]const ZigString, arg4: u32) JSValue;",
       "declaration_sha256": "c5cd864205bf2b53d393bd7efa02b427103633cc33d8630b75b4ddb8101e54ea",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createValueNotJS",
@@ -5428,10 +5428,10 @@
       "line": 11,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createValueNotJS(arg0: *JSGlobalObject, arg1: [*c]StringPointer, arg2: [*c]StringPointer, arg3: [*c]const ZigString, arg4: u32) ?*FetchHeaders;",
       "declaration_sha256": "3e767390c51b36a717ff0592d8bf36f9c06f44c710020cc2f916b541a2b60c8a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__deref",
@@ -5439,10 +5439,10 @@
       "line": 13,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__deref(arg0: *FetchHeaders) void;",
       "declaration_sha256": "1391cb0cfb82e6c128672b5f93e2523899933dfae576f7be9b8a6250a3eafca0",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__fastGet_",
@@ -5450,10 +5450,10 @@
       "line": 14,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__fastGet_(arg0: *FetchHeaders, arg1: u8, arg2: [*c]ZigString) void;",
       "declaration_sha256": "263a0b77235dc81f19e14e8a430dd4b7fbf1893d058619a129d33a140d0c86e8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__fastHas_",
@@ -5461,10 +5461,10 @@
       "line": 15,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__fastHas_(arg0: *FetchHeaders, arg1: u8) bool;",
       "declaration_sha256": "0046986b8a7553a45c22aef169144b633667f68fc4d87b9f6eded30f2d22f752",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__fastRemove_",
@@ -5472,10 +5472,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__fastRemove_(arg0: *FetchHeaders, arg1: u8) void;",
       "declaration_sha256": "0c96c10139523d0bab39f3d0145d7344ce30808051f93063681eee2f038eb50c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__get_",
@@ -5483,10 +5483,10 @@
       "line": 17,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__get_(arg0: *FetchHeaders, arg1: [*c]const ZigString, arg2: [*c]ZigString, arg3: *JSGlobalObject) void;",
       "declaration_sha256": "39e5da76f8c32375aec39573b47396d587fa12c65ca642e2157741d1be94dd28",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__has",
@@ -5494,10 +5494,10 @@
       "line": 18,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__has(arg0: *FetchHeaders, arg1: [*c]const ZigString, arg2: *JSGlobalObject) bool;",
       "declaration_sha256": "152ad4eecf9b3023a0824c2a57fc5e8ac0fdce08cd2aec96f7002c2279f5a8fc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__isEmpty",
@@ -5505,10 +5505,10 @@
       "line": 19,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__isEmpty(arg0: *FetchHeaders) bool;",
       "declaration_sha256": "21b69c6e3cb56f3a7916453623c1d8f77709ca4667c30673b35a71f946a15804",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__put",
@@ -5516,10 +5516,10 @@
       "line": 167,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__put(this: *FetchHeaders, name_: HTTPHeaderName, value: *const ZigString, global: *JSGlobalObject) void;",
       "declaration_sha256": "1ebeb7de5cd335cd4481d750dd3e23ef80f024c18449c0c78cabe2b24d4d3667",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__put_",
@@ -5527,10 +5527,10 @@
       "line": 20,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__put_(arg0: *FetchHeaders, arg1: [*c]const ZigString, arg2: [*c]const ZigString, arg3: *JSGlobalObject) void;",
       "declaration_sha256": "3e7c5b994960938bbe568ab6078a87f687b8dd633325252b6581d1eff38d7897",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__remove",
@@ -5538,10 +5538,10 @@
       "line": 21,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__remove(arg0: *FetchHeaders, arg1: [*c]const ZigString, arg2: *JSGlobalObject) void;",
       "declaration_sha256": "37e30be5e66fbaa1db6c87d40b48d43ae646399ca8acd54b719a2257d6da3f9c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__toJS",
@@ -5549,10 +5549,10 @@
       "line": 22,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__toJS(arg0: *FetchHeaders, arg1: *JSGlobalObject) JSValue;",
       "declaration_sha256": "aab98519409f6275e59e9b19d6f1afadfaed25263ebc4392959c51532e6cdf4f",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__toUWSResponse",

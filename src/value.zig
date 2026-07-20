@@ -1459,6 +1459,9 @@ pub const ObjectPrivateDataTag = enum(u8) {
     /// DOMFormData boundary. The pointer is an opaque identity token: GC must
     /// neither trace nor dereference it.
     form_data_native_blob,
+    /// Independently ref-counted FetchHeaders record. It contains only native
+    /// byte storage, so GC tracing and relocation deliberately ignore it.
+    fetch_headers,
 };
 
 /// Type-erased bridge installed only on genuine engine-created AbortSignals.

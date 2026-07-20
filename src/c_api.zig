@@ -42,6 +42,7 @@ const jit = @import("jit.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
+const fetch_headers = @import("fetch_headers.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
 const private_jstype = @import("private_abi/jstype.zig");
 const WorkerMod = @import("worker.zig");
@@ -9501,6 +9502,451 @@ export fn DOMFormData__forEach(
         const filename_view = privateBorrowedZigStringView(group, filename) catch return;
         cb(callback_context, &name_view, blob_pointer, &filename_view, 1);
     }
+}
+
+// ===== FetchHeaders native boundary (#376) =====
+
+const PrivateStringPointer = extern struct {
+    offset: u32,
+    length: u32,
+};
+
+fn privateFetchHeadersBoxed(encoded: EncodedValue) ?*Boxed {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or interp.fetchHeadersRecord(boxed.value) == null) return null;
+    return boxed;
+}
+
+fn privateFetchHeadersExistingBox(group: *CContextGroup, record: *fetch_headers.Record) ?*Boxed {
+    var boxes = group.private_object_boxes.iterator();
+    while (boxes.next()) |entry| {
+        const object = entry.key_ptr.*;
+        if (object.private_data_tag != .fetch_headers or object.private_data == null) continue;
+        if (@intFromPtr(object.private_data.?) == @intFromPtr(record)) return entry.value_ptr.*;
+    }
+    return null;
+}
+
+fn privatePublishFetchHeadersError(context: *Context, err: fetch_headers.Error) void {
+    if (err == error.OutOfMemory) {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return;
+    }
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |push_err| {
+        privateSetPendingAbrupt(context, &machine, push_err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const abrupt = machine.throwError("TypeError", switch (err) {
+        error.InvalidName => "Invalid header name",
+        error.InvalidValue => "Invalid header value",
+        error.OutOfMemory => unreachable,
+    });
+    privateSetPendingAbrupt(context, &machine, abrupt);
+}
+
+fn privatePublishFetchHeadersInitError(context: *Context, message: []const u8) void {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |push_err| {
+        privateSetPendingAbrupt(context, &machine, push_err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    privateSetPendingAbrupt(context, &machine, machine.throwError("TypeError", message));
+}
+
+fn privateFetchHeadersWrap(
+    context: *Context,
+    record: *fetch_headers.Record,
+    consume_reference: bool,
+) EncodedValue {
+    var reference_transferred = !consume_reference;
+    defer if (!reference_transferred) record.release();
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    if (privateFetchHeadersExistingBox(group, record)) |existing| {
+        return privateEncodedFromRef(@ptrCast(existing));
+    }
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const owned = if (consume_reference) record else record.retain();
+    if (consume_reference) reference_transferred = true;
+    const wrapper = interp.fetchHeadersCreateWithRecord(&machine, owned) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const encoded = privateEncodedFromValue(context, wrapper);
+    if (encoded == .empty) privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+    return encoded;
+}
+
+fn privateFetchHeadersBufferSlice(
+    allocator: std.mem.Allocator,
+    buffer: *const PrivateZigString,
+    pointer: PrivateStringPointer,
+) PrivateBunStringError!?[]const u8 {
+    const start: usize = pointer.offset;
+    const length: usize = pointer.length;
+    const end = std.math.add(usize, start, length) catch return null;
+    if (end > buffer.len) return null;
+    if (length == 0) return "";
+    const address = buffer.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (address == 0) return null;
+    if (buffer.tagged_ptr & (@as(usize, 1) << 63) != 0) {
+        const units: [*]align(1) const u16 = @ptrFromInt(address);
+        return try privateUTF16ToWTF8(allocator, units[start..end]);
+    }
+    const bytes: [*]const u8 = @ptrFromInt(address);
+    if (buffer.tagged_ptr & (@as(usize, 1) << 61) != 0)
+        return try privateUTF8PrefixAsWTF8(allocator, bytes[start..end], null);
+    return try privateLatin1ToWTF8(allocator, bytes[start..end]);
+}
+
+export fn WebCore__FetchHeaders__createEmpty() callconv(.c) *fetch_headers.Record {
+    return fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed");
+}
+
+export fn WebCore__FetchHeaders__deref(raw_headers: ?*fetch_headers.Record) callconv(.c) void {
+    if (raw_headers) |headers| headers.release();
+}
+
+export fn WebCore__FetchHeaders__isEmpty(raw_headers: ?*fetch_headers.Record) callconv(.c) bool {
+    return if (raw_headers) |headers| headers.isEmpty() else true;
+}
+
+export fn WebCore__FetchHeaders__append(
+    raw_headers: ?*fetch_headers.Record,
+    raw_name: ?*const PrivateZigString,
+    raw_value: ?*const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const name = privateZigStringPropertyKey(context, raw_name orelse return) orelse return;
+    const header_value = privateZigStringPropertyKey(context, raw_value orelse return) orelse return;
+    headers.append(name, header_value) catch |err| privatePublishFetchHeadersError(context, err);
+}
+
+export fn WebCore__FetchHeaders__put_(
+    raw_headers: ?*fetch_headers.Record,
+    raw_name: ?*const PrivateZigString,
+    raw_value: ?*const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const name = privateZigStringPropertyKey(context, raw_name orelse return) orelse return;
+    const header_value = privateZigStringPropertyKey(context, raw_value orelse return) orelse return;
+    headers.set(name, header_value) catch |err| privatePublishFetchHeadersError(context, err);
+}
+
+export fn WebCore__FetchHeaders__put(
+    raw_headers: ?*fetch_headers.Record,
+    header_name: u8,
+    raw_value: ?*const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const header_value = privateZigStringPropertyKey(context, raw_value orelse return) orelse return;
+    headers.setKnown(header_name, header_value) catch |err| privatePublishFetchHeadersError(context, err);
+}
+
+export fn WebCore__FetchHeaders__get_(
+    raw_headers: ?*fetch_headers.Record,
+    raw_name: ?*const PrivateZigString,
+    output: ?*PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    const out = output orelse return;
+    out.* = .{};
+    const headers = raw_headers orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const name = privateZigStringPropertyKey(context, raw_name orelse return) orelse return;
+    const bytes = headers.getCopy(gpa, name) catch |err| {
+        privatePublishFetchHeadersError(context, err);
+        return;
+    } orelse return;
+    defer gpa.free(bytes);
+    out.* = privateBorrowedZigStringView(group, bytes) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+}
+
+export fn WebCore__FetchHeaders__has(
+    raw_headers: ?*fetch_headers.Record,
+    raw_name: ?*const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) bool {
+    const headers = raw_headers orelse return false;
+    const context = ctxForHandleInspection(global) orelse return false;
+    const opaque_group = context.c_api_group orelse return false;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return false;
+    const name = privateZigStringPropertyKey(context, raw_name orelse return false) orelse return false;
+    return headers.has(name) catch |err| {
+        privatePublishFetchHeadersError(context, err);
+        return false;
+    };
+}
+
+export fn WebCore__FetchHeaders__remove(
+    raw_headers: ?*fetch_headers.Record,
+    raw_name: ?*const PrivateZigString,
+    global: JSContextRef,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const context = ctxForHandleInspection(global) orelse return;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const name = privateZigStringPropertyKey(context, raw_name orelse return) orelse return;
+    headers.remove(name) catch |err| privatePublishFetchHeadersError(context, err);
+}
+
+export fn WebCore__FetchHeaders__fastHas_(raw_headers: ?*fetch_headers.Record, header_name: u8) callconv(.c) bool {
+    return if (raw_headers) |headers| headers.hasKnown(header_name) else false;
+}
+
+export fn WebCore__FetchHeaders__fastRemove_(raw_headers: ?*fetch_headers.Record, header_name: u8) callconv(.c) void {
+    if (raw_headers) |headers| headers.removeKnown(header_name);
+}
+
+export fn WebCore__FetchHeaders__fastGet_(
+    raw_headers: ?*fetch_headers.Record,
+    header_name: u8,
+    output: ?*PrivateZigString,
+) callconv(.c) void {
+    const out = output orelse return;
+    out.* = .{};
+    const headers = raw_headers orelse return;
+    const maybe_bytes = headers.getKnownCopy(gpa, header_name) catch return;
+    const bytes = maybe_bytes orelse return;
+    defer gpa.free(bytes);
+    out.* = privateGlobalZigStringView(bytes) catch return;
+}
+
+export fn WebCore__FetchHeaders__count(
+    raw_headers: ?*fetch_headers.Record,
+    output_count: ?*u32,
+    output_buffer_length: ?*u32,
+) callconv(.c) void {
+    const count_out = output_count orelse return;
+    const length_out = output_buffer_length orelse return;
+    count_out.* = 0;
+    length_out.* = 0;
+    const headers = raw_headers orelse return;
+    const snapshot = headers.snapshot(gpa, .lower) catch return;
+    defer snapshot.deinit(gpa);
+    if (snapshot.rows.len > std.math.maxInt(u32)) return;
+    var total: usize = 0;
+    for (snapshot.rows) |row| {
+        total = std.math.add(usize, total, row.name.len) catch return;
+        total = std.math.add(usize, total, row.value.len) catch return;
+    }
+    if (total > std.math.maxInt(u32)) return;
+    count_out.* = @intCast(snapshot.rows.len);
+    length_out.* = @intCast(total);
+}
+
+export fn WebCore__FetchHeaders__copyTo(
+    raw_headers: ?*fetch_headers.Record,
+    names: [*c]PrivateStringPointer,
+    values: [*c]PrivateStringPointer,
+    buffer: [*c]u8,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const snapshot = headers.snapshot(gpa, .display) catch return;
+    defer snapshot.deinit(gpa);
+    if (snapshot.rows.len != 0 and (names == null or values == null or buffer == null)) return;
+    var total: usize = 0;
+    for (snapshot.rows) |row| {
+        total = std.math.add(usize, total, row.name.len) catch return;
+        total = std.math.add(usize, total, row.value.len) catch return;
+    }
+    if (total > std.math.maxInt(u32)) return;
+    var used: usize = 0;
+    for (snapshot.rows, 0..) |row, index| {
+        names[index] = .{ .offset = @intCast(used), .length = @intCast(row.name.len) };
+        if (row.name.len != 0) @memcpy(buffer[used .. used + row.name.len], row.name);
+        used += row.name.len;
+        values[index] = .{ .offset = @intCast(used), .length = @intCast(row.value.len) };
+        if (row.value.len != 0) @memcpy(buffer[used .. used + row.value.len], row.value);
+        used += row.value.len;
+    }
+}
+
+export fn WebCore__FetchHeaders__createValueNotJS(
+    global: JSContextRef,
+    names: [*c]const PrivateStringPointer,
+    values: [*c]const PrivateStringPointer,
+    raw_buffer: ?*const PrivateZigString,
+    count: u32,
+) callconv(.c) ?*fetch_headers.Record {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return null;
+    if (count != 0 and (names == null or values == null)) {
+        privatePublishFetchHeadersInitError(context, "Invalid FetchHeaders string table");
+        return null;
+    }
+    const buffer = raw_buffer orelse return null;
+    var scratch_state = std.heap.ArenaAllocator.init(gpa);
+    defer scratch_state.deinit();
+    const scratch = scratch_state.allocator();
+    const headers = fetch_headers.Record.create() catch {
+        privatePublishFetchHeadersError(context, error.OutOfMemory);
+        return null;
+    };
+    var returned = false;
+    defer if (!returned) headers.release();
+    for (0..count) |index| {
+        const name = (privateFetchHeadersBufferSlice(scratch, buffer, names[index]) catch |err| {
+            privatePublishBunStringError(context, err);
+            return null;
+        }) orelse {
+            privatePublishFetchHeadersInitError(context, "FetchHeaders name range exceeds its string buffer");
+            return null;
+        };
+        const header_value = (privateFetchHeadersBufferSlice(scratch, buffer, values[index]) catch |err| {
+            privatePublishBunStringError(context, err);
+            return null;
+        }) orelse {
+            privatePublishFetchHeadersInitError(context, "FetchHeaders value range exceeds its string buffer");
+            return null;
+        };
+        headers.append(name, header_value) catch |err| {
+            privatePublishFetchHeadersError(context, err);
+            return null;
+        };
+    }
+    returned = true;
+    return headers;
+}
+
+export fn WebCore__FetchHeaders__createValue(
+    global: JSContextRef,
+    names: [*c]const PrivateStringPointer,
+    values: [*c]const PrivateStringPointer,
+    raw_buffer: ?*const PrivateZigString,
+    count: u32,
+) callconv(.c) EncodedValue {
+    const headers = WebCore__FetchHeaders__createValueNotJS(global, names, values, raw_buffer, count) orelse return .empty;
+    const context = ctxForHandleInspection(global) orelse {
+        headers.release();
+        return .empty;
+    };
+    return privateFetchHeadersWrap(context, headers, true);
+}
+
+export fn WebCore__FetchHeaders__createFromJS(global: JSContextRef, encoded: EncodedValue) callconv(.c) ?*fetch_headers.Record {
+    const context = ctxForHandleInspection(global) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return null;
+    const init = privateValueFrom(global, encoded) orelse return null;
+    if (init.isUndefined() or init.isNull()) return null;
+    if (interp.fetchHeadersRecord(init)) |source| {
+        if (source.isEmpty()) return null;
+        return source.clone() catch {
+            privatePublishFetchHeadersError(context, error.OutOfMemory);
+            return null;
+        };
+    }
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const headers = fetch_headers.Record.create() catch {
+        privateSetPendingAbrupt(context, &machine, error.OutOfMemory);
+        return null;
+    };
+    const wrapper = interp.fetchHeadersCreateWithRecord(&machine, headers) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    interp.fetchHeadersFill(&machine, wrapper, init) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    if (headers.isEmpty()) return null;
+    return headers.retain();
+}
+
+export fn WebCore__FetchHeaders__toJS(raw_headers: ?*fetch_headers.Record, global: JSContextRef) callconv(.c) EncodedValue {
+    const headers = raw_headers orelse return .empty;
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    return privateFetchHeadersWrap(context, headers, false);
+}
+
+export fn WebCore__FetchHeaders__clone(raw_headers: ?*fetch_headers.Record, global: JSContextRef) callconv(.c) EncodedValue {
+    const headers = raw_headers orelse return .empty;
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const cloned = headers.clone() catch {
+        privatePublishFetchHeadersError(context, error.OutOfMemory);
+        return .empty;
+    };
+    return privateFetchHeadersWrap(context, cloned, true);
+}
+
+export fn WebCore__FetchHeaders__cloneThis(raw_headers: ?*fetch_headers.Record, global: JSContextRef) callconv(.c) ?*fetch_headers.Record {
+    const headers = raw_headers orelse return null;
+    const context = ctxForHandleInspection(global) orelse return null;
+    return headers.clone() catch {
+        privatePublishFetchHeadersError(context, error.OutOfMemory);
+        return null;
+    };
+}
+
+export fn WebCore__FetchHeaders__cast_(encoded: EncodedValue, vm_handle: ?*anyopaque) callconv(.c) ?*fetch_headers.Record {
+    const pointer = vm_handle orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(CContextGroup) != 0) return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(pointer));
+    const primary = group.primary;
+    if (@intFromPtr(primary) % @alignOf(Context) != 0 or primary.c_api_group != pointer) return null;
+    const boxed = privateFetchHeadersBoxed(encoded) orelse return null;
+    if (boxed.owner.c_api_group != pointer) return null;
+    return interp.fetchHeadersRecord(boxed.value);
 }
 
 // ===== URL native record boundary (#308) =====

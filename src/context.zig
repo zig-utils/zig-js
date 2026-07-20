@@ -26,6 +26,7 @@ const structured_clone = @import("structured_clone.zig");
 const jit = @import("jit.zig");
 const wasm_api = @import("wasm/api.zig");
 const wasm_types = @import("wasm/types.zig");
+const fetch_headers = @import("fetch_headers.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
@@ -3576,6 +3577,8 @@ pub const Context = struct {
             .abort_timeout_ctx = self,
             .abort_timeout_schedule = scheduleAbortSignalTimeout,
             .abort_timeout_poll = pollAbortSignalTimeouts,
+            .fetch_headers_attach_ctx = self,
+            .fetch_headers_attach = attachFetchHeadersObject,
             .timer_ctx = self,
             .timer_schedule = scheduleTimer,
             .timer_cancel = cancelTimer,
@@ -4166,6 +4169,33 @@ pub const Context = struct {
         owner.native.run_abort_steps = null;
         owner.native.finish_owner = null;
         owner.context.gpa.destroy(owner);
+    }
+
+    fn finishFetchHeadersObject(object_owner: *value.CApiObjectOwner) void {
+        const raw = object_owner.payload orelse return;
+        object_owner.payload = null;
+        const record: *fetch_headers.Record = @ptrCast(@alignCast(raw));
+        record.release();
+    }
+
+    fn attachFetchHeadersObject(
+        raw_context: ?*anyopaque,
+        object: *value.Object,
+        record: *fetch_headers.Record,
+    ) interp.EvalError!void {
+        const self: *Context = @ptrCast(@alignCast(raw_context orelse return error.OutOfMemory));
+        if (object.private_data_tag != .none or object.private_data != null or object.cApiObjectOwner() != null)
+            return error.OutOfMemory;
+        const owner = self.createCApiObjectOwner(@ptrCast(record), finishFetchHeadersObject) catch return error.OutOfMemory;
+        object.setCApiObjectOwner(self.arena(), owner) catch {
+            // Payload is intentionally still null: the caller retains ownership
+            // of the record when attachment cannot be completed.
+            owner.finishOnce();
+            return error.OutOfMemory;
+        };
+        owner.payload = @ptrCast(record);
+        object.private_data = @ptrCast(record);
+        object.private_data_tag = .fetch_headers;
     }
 
     pub fn ensureAbortSignalNativeState(

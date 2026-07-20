@@ -39,6 +39,7 @@ const cldr_plurals = @import("cldr_plurals.zig");
 const cldr_timedata = @import("cldr_timedata.zig");
 const cldr_tzalias = @import("cldr_tzalias.zig");
 const wasm_api = @import("wasm/api.zig");
+const fetch_headers = @import("fetch_headers.zig");
 
 const Node = ast.Node;
 const Value = value.Value;
@@ -1144,6 +1145,11 @@ pub const Interpreter = struct {
     abort_timeout_schedule: ?*const fn (?*anyopaque, *Interpreter, *value.Object, u64) EvalError!void = null,
     abort_timeout_poll: ?*const fn (?*anyopaque, *Interpreter) EvalError!void = null,
     polling_abort_timeouts: bool = false,
+    /// Context-owned finalizer bridge for the independently ref-counted native
+    /// FetchHeaders record. Standalone interpreter helpers leave this null;
+    /// their arena lifetime deliberately owns the wrapper for the whole run.
+    fetch_headers_attach_ctx: ?*anyopaque = null,
+    fetch_headers_attach: ?*const fn (?*anyopaque, *value.Object, *fetch_headers.Record) EvalError!void = null,
     /// Context-owned public timer lane. Unlike AbortSignal's deliberately
     /// unrefed ABI record, these hooks implement refed shell event-loop work
     /// and key records by this interpreter's microtask queue (its event loop).
@@ -43081,161 +43087,113 @@ fn installURLSearchParams(env: *Environment, rs: *Shape, object_proto: *value.Ob
 }
 
 // ===== Headers (Fetch) ===============================================
-// The header list is stored in \x00hdrs as an array of [lowercased-name, value]
-// pairs in insertion order; iteration presents a sorted, combined view.
-fn hdrIsTokenChar(c: u8) bool {
-    return switch (c) {
-        'a'...'z', 'A'...'Z', '0'...'9' => true,
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
+// JavaScript and the private WebCore ABI share one independently owned native
+// record. A wrapper owns exactly one record reference and is branded by the
+// private-data tag; prototype spoofing cannot manufacture a Headers instance.
+pub fn fetchHeadersRecord(input: Value) ?*fetch_headers.Record {
+    if (!input.isObject()) return null;
+    const object = input.asObj();
+    if (object.private_data_tag != .fetch_headers) return null;
+    return @ptrCast(@alignCast(object.private_data orelse return null));
+}
+
+fn headersRecord(self: *Interpreter, this: Value) EvalError!*fetch_headers.Record {
+    return fetchHeadersRecord(this) orelse self.throwError("TypeError", "Illegal invocation");
+}
+
+fn headersThrow(self: *Interpreter, err: fetch_headers.Error) EvalError {
+    return switch (err) {
+        error.InvalidName => self.throwError("TypeError", "Invalid header name"),
+        error.InvalidValue => self.throwError("TypeError", "Invalid header value"),
+        error.OutOfMemory => error.OutOfMemory,
     };
 }
-fn hdrValidName(n: []const u8) bool {
-    if (n.len == 0) return false;
-    for (n) |c| if (!hdrIsTokenChar(c)) return false;
-    return true;
+
+/// Consume one native record reference and create its genuine JS wrapper.
+pub fn fetchHeadersCreateWithRecord(self: *Interpreter, record: *fetch_headers.Record) EvalError!Value {
+    var consumed = false;
+    defer if (!consumed) record.release();
+    const object = try gc_mod.allocObj(self.arena);
+    object.* = .{};
+    if (self.env.get("Headers")) |constructor| if (constructor.isObject()) {
+        if (constructor.asObj().getOwn("prototype")) |prototype| if (prototype.isObject()) object.setProtoAtomic(prototype.asObj());
+    };
+    if (self.fetch_headers_attach) |attach| {
+        try attach(self.fetch_headers_attach_ctx, object, record);
+    } else {
+        object.private_data = @ptrCast(record);
+        object.private_data_tag = .fetch_headers;
+    }
+    consumed = true;
+    return Value.obj(object);
 }
-fn hdrNormalizeValue(v: []const u8) []const u8 {
-    var s = v;
-    while (s.len > 0 and (s[0] == 0x09 or s[0] == 0x0A or s[0] == 0x0D or s[0] == 0x20)) s = s[1..];
-    while (s.len > 0 and (s[s.len - 1] == 0x09 or s[s.len - 1] == 0x0A or s[s.len - 1] == 0x0D or s[s.len - 1] == 0x20)) s = s[0 .. s.len - 1];
-    return s;
+
+pub fn fetchHeadersCreateEmpty(self: *Interpreter) EvalError!Value {
+    return fetchHeadersCreateWithRecord(self, fetch_headers.Record.create() catch return error.OutOfMemory);
 }
-fn hdrValidValue(v: []const u8) bool {
-    for (v) |c| if (c == 0 or c == 0x0A or c == 0x0D) return false;
-    return true;
+
+pub fn fetchHeadersAppendBytes(self: *Interpreter, this: Value, name: []const u8, header_value: []const u8) EvalError!void {
+    const record = try headersRecord(self, this);
+    record.append(name, header_value) catch |err| return headersThrow(self, err);
 }
-fn hdrLower(self: *Interpreter, n: []const u8) EvalError![]const u8 {
-    const buf = try self.arena.alloc(u8, n.len);
-    for (n, 0..) |c, i| buf[i] = std.ascii.toLower(c);
-    return buf;
-}
-fn headersList(self: *Interpreter, this: Value) EvalError!*value.Object {
-    if (this.isObject()) if (this.asObj().getOwn("\x00hdrs")) |v| if (v.isObject()) return v.asObj();
-    const arr = (try self.newArray()).asObj();
-    if (this.isObject()) try this.asObj().setOwn(self.arena, self.root_shape, "\x00hdrs", Value.obj(arr));
-    return arr;
-}
-/// Append a validated (name,value): coerce, normalize, validate, push.
+
 fn headersAppendRaw(self: *Interpreter, this: Value, name_v: Value, value_v: Value) EvalError!void {
-    const n = try self.toStringV(name_v);
-    const raw = try self.toStringV(value_v);
-    const v = hdrNormalizeValue(raw);
-    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
-    if (!hdrValidValue(v)) return self.throwError("TypeError", "Invalid header value");
-    const list = try headersList(self, this);
-    const pair = (try self.newArray()).asObj();
-    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, try hdrLower(self, n)));
-    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, v));
-    try list.appendElement(self.arena, Value.obj(pair));
+    const name = try self.toStringV(name_v);
+    const header_value = try self.toStringV(value_v);
+    try fetchHeadersAppendBytes(self, this, name, header_value);
 }
 fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     try headersAppendRaw(self, this, if (args.len > 0) args[0] else Value.undef(), if (args.len > 1) args[1] else Value.undef());
     return Value.undef();
 }
-fn headersDeleteRaw(self: *Interpreter, this: Value, lower: []const u8) EvalError!void {
-    const list = try headersList(self, this);
-    const fresh = (try self.newArray()).asObj();
-    for (try list.internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) continue;
-        try fresh.appendElement(self.arena, pair);
-    }
-    try this.asObj().setOwn(self.arena, self.root_shape, "\x00hdrs", Value.obj(fresh));
-}
 fn headersSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const v = hdrNormalizeValue(try self.toStringV(if (args.len > 1) args[1] else Value.undef()));
-    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
-    if (!hdrValidValue(v)) return self.throwError("TypeError", "Invalid header value");
-    const lower = try hdrLower(self, n);
-    try headersDeleteRaw(self, this, lower);
-    const list = try headersList(self, this);
-    const pair = (try self.newArray()).asObj();
-    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, lower));
-    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, v));
-    try list.appendElement(self.arena, Value.obj(pair));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const header_value = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const record = try headersRecord(self, this);
+    record.set(name, header_value) catch |err| return headersThrow(self, err);
     return Value.undef();
 }
 fn headersGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
-    const lower = try hdrLower(self, n);
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    var found = false;
-    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        if (!std.mem.eql(u8, kv.k, lower)) continue;
-        if (found) try out.appendSlice(self.arena, ", ");
-        try out.appendSlice(self.arena, kv.v);
-        found = true;
-    }
-    if (!found) return Value.nul();
-    return try Value.strAlloc(self.arena, out.items);
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const record = try headersRecord(self, this);
+    const result = record.getCopy(self.arena, name) catch |err| return headersThrow(self, err);
+    return if (result) |bytes| try Value.strAlloc(self.arena, bytes) else Value.nul();
 }
 fn headersHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
-    const lower = try hdrLower(self, n);
-    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) return Value.boolVal(true);
-    }
-    return Value.boolVal(false);
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const record = try headersRecord(self, this);
+    return Value.boolVal(record.has(name) catch |err| return headersThrow(self, err));
 }
 fn headersDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const n = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    if (!hdrValidName(n)) return self.throwError("TypeError", "Invalid header name");
-    try headersDeleteRaw(self, this, try hdrLower(self, n));
+    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const record = try headersRecord(self, this);
+    record.remove(name) catch |err| return headersThrow(self, err);
     return Value.undef();
 }
 fn headersGetSetCookieFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const arr = (try self.newArray()).asObj();
-    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        if (std.mem.eql(u8, kv.k, "set-cookie")) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+    const snapshot = (try headersRecord(self, this)).snapshot(self.arena, .lower) catch |err| return headersThrow(self, err);
+    defer snapshot.deinit(self.arena);
+    for (snapshot.rows) |row| {
+        if (std.mem.eql(u8, row.name, "set-cookie")) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, row.value));
     }
     return Value.obj(arr);
 }
-/// The sorted, combined header entries used by forEach and the iterators: one
-/// entry per name (values joined with ", "), except set-cookie which stays split.
 fn headersSortedEntries(self: *Interpreter, this: Value) EvalError!*value.Object {
-    const Entry = struct { name: []const u8, value: []const u8 };
-    var combined: std.ArrayListUnmanaged(Entry) = .empty;
-    var cookies: std.ArrayListUnmanaged(Entry) = .empty;
-    for (try (try headersList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        if (std.mem.eql(u8, kv.k, "set-cookie")) {
-            try cookies.append(self.arena, .{ .name = kv.k, .value = kv.v });
-            continue;
-        }
-        var hit = false;
-        for (combined.items) |*e| {
-            if (std.mem.eql(u8, e.name, kv.k)) {
-                e.value = try std.mem.concat(self.arena, u8, &.{ e.value, ", ", kv.v });
-                hit = true;
-                break;
-            }
-        }
-        if (!hit) try combined.append(self.arena, .{ .name = kv.k, .value = kv.v });
-    }
-    try combined.appendSlice(self.arena, cookies.items);
-    // Stable sort by name (set-cookie entries keep insertion order among equals).
-    std.mem.sort(Entry, combined.items, {}, struct {
-        fn lt(_: void, x: Entry, y: Entry) bool {
-            return std.mem.order(u8, x.name, y.name) == .lt;
-        }
-    }.lt);
+    const snapshot = (try headersRecord(self, this)).snapshot(self.arena, .lower) catch |err| return headersThrow(self, err);
+    defer snapshot.deinit(self.arena);
     const out = (try self.newArray()).asObj();
-    for (combined.items) |e| {
+    for (snapshot.rows) |row| {
         const pair = (try self.newArray()).asObj();
-        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, e.name));
-        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, e.value));
+        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, row.name));
+        try pair.appendElement(self.arena, try Value.strAlloc(self.arena, row.value));
         try out.appendElement(self.arena, Value.obj(pair));
     }
     return out;
@@ -43269,16 +43227,26 @@ fn headersIterFn(comptime which: enum { entries, keys, values }) value.NativeFn 
         }
     }.call;
 }
-fn headersFill(self: *Interpreter, this: Value, init: Value) EvalError!void {
-    if (init.isObject() and init.asObj().getOwn("\x00hdrs") != null) {
+pub fn fetchHeadersFill(self: *Interpreter, this: Value, init: Value) EvalError!void {
+    if (fetchHeadersRecord(init)) |source| {
         // Another Headers: copy its (already validated) entries.
-        for (try (try headersList(self, init)).internalElementsSnapshot(self.arena)) |pair| {
-            const kv = uspPairKV(pair);
-            try headersAppendRaw(self, this, try Value.strAlloc(self.arena, kv.k), try Value.strAlloc(self.arena, kv.v));
+        const snapshot = source.snapshot(self.arena, .display) catch |err| return headersThrow(self, err);
+        defer snapshot.deinit(self.arena);
+        for (snapshot.rows) |row| {
+            try fetchHeadersAppendBytes(self, this, row.name, row.value);
         }
         return;
     }
-    if (init.isObject() and init.asObj().is_array) {
+    var is_sequence = init.isObject() and init.asObj().is_array;
+    if (init.isObject() and !is_sequence) {
+        if (self.env.get("Symbol")) |symbol| if (symbol.isObject()) {
+            if (symbol.asObj().getOwn("iterator")) |iterator_symbol| if (iterator_symbol.isObject() and iterator_symbol.asObj().is_symbol) {
+                const iterator = try self.getProperty(init, iterator_symbol.asObj().symbolKey());
+                is_sequence = iterator.isObject() and iterator.asObj().isCallableObject();
+            };
+        };
+    }
+    if (is_sequence) {
         // Sequence of [name, value] sequences.
         for (try collectIterable(self, init)) |entry| {
             const pair = try collectIterable(self, entry);
@@ -43294,19 +43262,15 @@ fn headersFill(self: *Interpreter, this: Value, init: Value) EvalError!void {
         }
         return;
     }
+    return self.throwError("TypeError", "Invalid Headers initializer");
 }
 fn headersConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'Headers': Please use the 'new' operator");
-    const obj = try gc_mod.allocObj(self.arena);
-    obj.* = .{};
-    if (self.env.get("Headers")) |c| if (c.isObject()) {
-        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
-    };
-    _ = try headersList(self, Value.obj(obj)); // seed empty \x00hdrs
-    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) try headersFill(self, Value.obj(obj), args[0]);
-    return Value.obj(obj);
+    const created = try fetchHeadersCreateEmpty(self);
+    if (args.len > 0 and !args[0].isUndefined() and !args[0].isNull()) try fetchHeadersFill(self, created, args[0]);
+    return created;
 }
 fn installHeaders(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
@@ -43941,18 +43905,13 @@ fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
     return .{ .bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringV(body_v)), .ctype = "text/plain;charset=UTF-8" };
 }
 fn fetchMakeHeaders(self: *Interpreter, init_v: Value) EvalError!*value.Object {
-    const obj = try gc_mod.allocObj(self.arena);
-    obj.* = .{};
-    if (self.env.get("Headers")) |c| if (c.isObject()) if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
-    _ = try headersList(self, Value.obj(obj));
-    if (!init_v.isUndefined() and !init_v.isNull()) try headersFill(self, Value.obj(obj), init_v);
-    return obj;
+    const created = try fetchHeadersCreateEmpty(self);
+    if (!init_v.isUndefined() and !init_v.isNull()) try fetchHeadersFill(self, created, init_v);
+    return created.asObj();
 }
 fn fetchHeadersHasName(self: *Interpreter, headers: *value.Object, lower: []const u8) EvalError!bool {
-    for (try (try headersList(self, Value.obj(headers))).internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, lower)) return true;
-    }
-    return false;
+    const record = try headersRecord(self, Value.obj(headers));
+    return record.has(lower) catch |err| return headersThrow(self, err);
 }
 fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, bytes: ?[]const u8) EvalError!void {
     if (bytes) |b| {
@@ -44027,10 +43986,8 @@ fn bodyBlobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     if (this.isObject()) {
         const hv = this.asObj().getOwn("\x00Rheaders") orelse this.asObj().getOwn("\x00Qheaders");
         if (hv != null and hv.?.isObject()) {
-            for (try (try headersList(self, hv.?)).internalElementsSnapshot(self.arena)) |pair| {
-                const kv = uspPairKV(pair);
-                if (std.mem.eql(u8, kv.k, "content-type")) ct = kv.v;
-            }
+            const record = try headersRecord(self, hv.?);
+            ct = (record.getCopy(self.arena, "content-type") catch |err| return headersThrow(self, err)) orelse "";
         }
     }
     return try promiseResolveValue(self, Value.obj(try blobMake(self, "Blob", fetchBodyBytes(this), ct)));
