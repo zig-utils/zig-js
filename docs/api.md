@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 410
-implemented and 61 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 418
+implemented and 53 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -378,7 +378,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 402 shims are implemented and 59 remain pending. Its
+of which 410 shims are implemented and 51 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
