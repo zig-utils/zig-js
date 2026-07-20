@@ -622,6 +622,7 @@ extern "c" fn WebCore__FetchHeaders__put(*FetchHeaders, u8, *const ZigString, JS
 extern "c" fn WebCore__FetchHeaders__put_(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
 extern "c" fn WebCore__FetchHeaders__remove(*FetchHeaders, *const ZigString, JSContextRef) void;
 extern "c" fn WebCore__FetchHeaders__toJS(*FetchHeaders, JSContextRef) EncodedValue;
+extern "c" fn WebCore__FetchHeaders__toUWSResponse(*FetchHeaders, i32, ?*anyopaque) void;
 extern "c" fn URL__fromString(?*const BunString) ?*anyopaque;
 extern "c" fn URL__deinit(?*anyopaque) void;
 extern "c" fn URL__href(?*anyopaque) BunString;
@@ -1630,6 +1631,8 @@ fn runFetchHeadersFixture(context: JSContextRef, vm: ?*anyopaque) void {
     const absent_h3 = WebCore__FetchHeaders__createFromH3(&opaque_request);
     if (!WebCore__FetchHeaders__isEmpty(absent_h3)) fail("private FetchHeaders absent H3 bridge mismatch");
     WebCore__FetchHeaders__deref(absent_h3);
+    var opaque_response: u8 = 0;
+    WebCore__FetchHeaders__toUWSResponse(headers, 0, &opaque_response);
 
     WebCore__FetchHeaders__remove(headers, &custom_name, context);
     if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("private FetchHeaders remove mismatch");
@@ -6850,5 +6853,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 387/387 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 388/388 symbols linked; runtime matrix passed\n", .{});
 }
