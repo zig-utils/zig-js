@@ -13390,6 +13390,87 @@ export fn Bun__stopCPUProfiler(
     if (out_text) |slot| slot.* = text_string.?;
 }
 
+fn privateReadableStreamConsume(
+    global: JSContextRef,
+    stream_encoded: EncodedValue,
+    kind: interp.ReadableStreamConsumeKind,
+    content_type_encoded: EncodedValue,
+) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const stream = privateValueFrom(global, stream_encoded) orelse {
+        const abrupt = machine.throwError("TypeError", "ReadableStream belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    const content_type = privateValueFrom(global, content_type_encoded) orelse {
+        const abrupt = machine.throwError("TypeError", "FormData content type belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    const result = interp.readableStreamConsume(&machine, stream, kind, content_type) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
+export fn ZigGlobalObject__readableStreamToArrayBuffer(
+    global: JSContextRef,
+    stream: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .array_buffer, .undefined);
+}
+
+export fn ZigGlobalObject__readableStreamToBytes(
+    global: JSContextRef,
+    stream: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .bytes, .undefined);
+}
+
+export fn ZigGlobalObject__readableStreamToText(
+    global: JSContextRef,
+    stream: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .text, .undefined);
+}
+
+export fn ZigGlobalObject__readableStreamToJSON(
+    global: JSContextRef,
+    stream: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .json, .undefined);
+}
+
+export fn ZigGlobalObject__readableStreamToBlob(
+    global: JSContextRef,
+    stream: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .blob, .undefined);
+}
+
+export fn ZigGlobalObject__readableStreamToFormData(
+    global: JSContextRef,
+    stream: EncodedValue,
+    content_type: EncodedValue,
+) callconv(.c) EncodedValue {
+    return privateReadableStreamConsume(global, stream, .form_data, content_type);
+}
+
 /// Release the single owner reference published by `JSC__VM__create`.
 /// Retained realms continue to own the group, and a foreign global cannot
 /// release another VM. Repeated calls while the realm remains alive are inert.
@@ -31888,4 +31969,240 @@ test "private CPU profile serializers fail without partial allocations" {
         }
         try std.testing.expect(saw_oom);
     }
+}
+
+test "private ReadableStream consumers drain sync and async chunks" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        const Settled = struct { state: promise.State, value: Value };
+
+        fn stream(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn settled(global: JSContextRef, result_encoded: EncodedValue) !Settled {
+            if (result_encoded == .empty) return error.ValueInitFailed;
+            _ = JSC__JSGlobalObject__drainMicrotasks(global);
+            const result = privateValueFrom(global, result_encoded) orelse return error.ValueInitFailed;
+            const cell = promise.promiseOf(result) orelse return error.ValueInitFailed;
+            const snap = promise.snapshot(cell);
+            return .{ .state = snap.state, .value = snap.value };
+        }
+    };
+
+    const text_stream = try Probe.stream(internal,
+        \\new ReadableStream({
+        \\  start(c) {
+        \\    c.enqueue(new Uint8Array([239]));
+        \\    c.enqueue(new Uint8Array([187, 191, 240, 159]));
+        \\    c.enqueue(new Uint8Array([152, 128]));
+        \\    c.close();
+        \\  }
+        \\})
+    );
+    const text = try Probe.settled(context, ZigGlobalObject__readableStreamToText(context, text_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, text.state);
+    try std.testing.expectEqualStrings("😀", text.value.asStr());
+    const consumed_text = try Probe.settled(context, ZigGlobalObject__readableStreamToText(context, text_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, consumed_text.state);
+    try std.testing.expectEqualStrings("", consumed_text.value.asStr());
+
+    const bytes_stream = try Probe.stream(internal,
+        \\new ReadableStream({
+        \\  pull(c) {
+        \\    return Promise.resolve().then(function () {
+        \\      c.enqueue("ab"); c.enqueue(new Uint8Array([99, 100])); c.close();
+        \\    });
+        \\  }
+        \\})
+    );
+    const bytes = try Probe.settled(context, ZigGlobalObject__readableStreamToBytes(context, bytes_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, bytes.state);
+    const bytes_array = bytes.value.asObj().typedArray() orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("abcd", bytes_array.buffer.arrayBuffer().?.bytes()[0..4]);
+
+    const array_stream = try Probe.stream(internal,
+        \\new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2])); c.enqueue("3"); c.close(); } })
+    );
+    const array = try Probe.settled(context, ZigGlobalObject__readableStreamToArrayBuffer(context, array_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, array.state);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, '3' }, array.value.asObj().arrayBuffer().?.bytes());
+
+    const blob_stream = try Probe.stream(internal,
+        \\new ReadableStream({ start(c) { c.enqueue("blob"); c.close(); } })
+    );
+    const blob = try Probe.settled(context, ZigGlobalObject__readableStreamToBlob(context, blob_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, blob.state);
+    try std.testing.expect(blob.value.asObj().behavior.is_blob);
+    const blob_buffer = blob.value.asObj().getOwn("\x00blobbuf") orelse return error.ValueInitFailed;
+    try std.testing.expectEqualStrings("blob", blob_buffer.asObj().arrayBuffer().?.bytes());
+
+    const json_stream = try Probe.stream(internal,
+        \\new ReadableStream({ start(c) { c.enqueue('{"ok":'); c.enqueue('405}'); c.close(); } })
+    );
+    const json = try Probe.settled(context, ZigGlobalObject__readableStreamToJSON(context, json_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, json.state);
+    try std.testing.expectEqual(@as(f64, 405), json.value.asObj().getOwn("ok").?.asNum());
+
+    const empty_stream = try Probe.stream(internal,
+        \\new ReadableStream({ start(c) { c.close(); } })
+    );
+    const empty = try Probe.settled(context, ZigGlobalObject__readableStreamToArrayBuffer(context, empty_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, empty.state);
+    try std.testing.expectEqual(@as(usize, 0), empty.value.asObj().arrayBuffer().?.bytes().len);
+
+    const invalid_chunk_stream = try Probe.stream(internal,
+        \\new ReadableStream({ start(c) { c.enqueue(405); c.close(); } })
+    );
+    const invalid_chunk = try Probe.settled(context, ZigGlobalObject__readableStreamToBytes(context, invalid_chunk_stream));
+    try std.testing.expectEqual(promise.State.rejected, invalid_chunk.state);
+
+    const abrupt_pull_stream = try Probe.stream(internal,
+        \\new ReadableStream({ pull() { throw new Error("pull-405"); } })
+    );
+    const abrupt_pull = try Probe.settled(context, ZigGlobalObject__readableStreamToText(context, abrupt_pull_stream));
+    try std.testing.expectEqual(promise.State.rejected, abrupt_pull.state);
+}
+
+test "private ReadableStream FormData, locking, errors, and cancellation" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+
+    const Probe = struct {
+        const Settled = struct { state: promise.State, value: Value };
+
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn settled(global: JSContextRef, result_encoded: EncodedValue) !Settled {
+            if (result_encoded == .empty) return error.ValueInitFailed;
+            _ = JSC__JSGlobalObject__drainMicrotasks(global);
+            const result = privateValueFrom(global, result_encoded) orelse return error.ValueInitFailed;
+            const snap = promise.snapshot(promise.promiseOf(result) orelse return error.ValueInitFailed);
+            return .{ .state = snap.state, .value = snap.value };
+        }
+    };
+
+    const url_stream = try Probe.encoded(internal,
+        \\new ReadableStream({ start(c) { c.enqueue("a=one&a=two&emoji=%F0%9F%98%80"); c.close(); } })
+    );
+    const url_form = try Probe.settled(context, ZigGlobalObject__readableStreamToFormData(context, url_stream, .undefined));
+    try std.testing.expectEqual(promise.State.fulfilled, url_form.state);
+    const url_list = url_form.value.asObj().getOwn("\x00fd").?.asObj();
+    try std.testing.expectEqual(@as(usize, 3), url_list.elementsLen());
+    try std.testing.expectEqualStrings("a", url_list.elementAt(1).?.asObj().elementAt(0).?.asStr());
+    try std.testing.expectEqualStrings("two", url_list.elementAt(1).?.asObj().elementAt(1).?.asStr());
+    try std.testing.expectEqualStrings("emoji", url_list.elementAt(2).?.asObj().elementAt(0).?.asStr());
+    try std.testing.expectEqualStrings("😀", url_list.elementAt(2).?.asObj().elementAt(1).?.asStr());
+
+    const multipart_stream = try Probe.encoded(internal,
+        \\new ReadableStream({ start(c) {
+        \\  c.enqueue("--xyz\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nvalue\r\n");
+        \\  c.enqueue("--xyz\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nfile-body\r\n--xyz--\r\n");
+        \\  c.close();
+        \\} })
+    );
+    const multipart_type = try Probe.encoded(internal, "'multipart/form-data; boundary=xyz'");
+    const multipart = try Probe.settled(context, ZigGlobalObject__readableStreamToFormData(context, multipart_stream, multipart_type));
+    try std.testing.expectEqual(promise.State.fulfilled, multipart.state);
+    const multipart_list = multipart.value.asObj().getOwn("\x00fd").?.asObj();
+    try std.testing.expectEqual(@as(usize, 2), multipart_list.elementsLen());
+    try std.testing.expectEqualStrings("value", multipart_list.elementAt(0).?.asObj().elementAt(1).?.asStr());
+    const file = multipart_list.elementAt(1).?.asObj().elementAt(1).?.asObj();
+    try std.testing.expect(file.behavior.is_file);
+    try std.testing.expectEqualStrings("a.txt", file.getOwn("\x00filename").?.asStr());
+    try std.testing.expectEqualStrings("file-body", file.getOwn("\x00blobbuf").?.asObj().arrayBuffer().?.bytes());
+
+    const malformed_stream = try Probe.encoded(internal,
+        \\new ReadableStream({ start(c) { c.enqueue("--xyz\\r\\nContent-Disposition: form-data; name=\\\"field\\\"\\r\\n\\r\\nmissing-end"); c.close(); } })
+    );
+    const malformed = try Probe.settled(context, ZigGlobalObject__readableStreamToFormData(context, malformed_stream, multipart_type));
+    try std.testing.expectEqual(promise.State.rejected, malformed.state);
+
+    const locked_stream = try Probe.encoded(internal,
+        \\globalThis.__locked405 = new ReadableStream({}); __locked405.getReader(); __locked405
+    );
+    const locked = try Probe.settled(context, ZigGlobalObject__readableStreamToText(context, locked_stream));
+    try std.testing.expectEqual(promise.State.rejected, locked.state);
+
+    const invalid_json_stream = try Probe.encoded(internal,
+        \\new ReadableStream({ start(c) { c.enqueue("{"); c.close(); } })
+    );
+    const invalid_json = try Probe.settled(context, ZigGlobalObject__readableStreamToJSON(context, invalid_json_stream));
+    try std.testing.expectEqual(promise.State.rejected, invalid_json.state);
+
+    _ = try internal.evaluate(
+        \\globalThis.__cancel405 = "";
+        \\globalThis.__cancelStream405 = new ReadableStream({ cancel(reason) { __cancel405 = reason; } });
+        \\__cancelStream405.cancel("stop");
+    );
+    try std.testing.expectEqualStrings("stop", (try internal.evaluate("__cancel405")).asStr());
+    const abrupt_cancel_promise = try Probe.encoded(internal,
+        \\new ReadableStream({ cancel() { throw new Error("cancel-405"); } }).cancel()
+    );
+    const abrupt_cancel = try Probe.settled(context, abrupt_cancel_promise);
+    try std.testing.expectEqual(promise.State.rejected, abrupt_cancel.state);
+    try std.testing.expectEqualStrings("cancel-405", abrupt_cancel.value.asObj().getOwn("message").?.asStr());
+
+    _ = try internal.evaluate(
+        \\globalThis.__life405 = [];
+        \\let controller405;
+        \\let stream405 = new ReadableStream({ start(c) { controller405 = c; } });
+        \\let reader405 = new ReadableStreamDefaultReader(stream405);
+        \\reader405.read().then(function (r) { __life405.push(r.value + ":" + r.done); });
+        \\reader405.closed.then(function () { __life405.push("closed"); });
+        \\controller405.enqueue("chunk");
+        \\controller405.close();
+        \\reader405.read().then(function (r) { __life405.push("done:" + r.done); reader405.releaseLock(); });
+    );
+    try std.testing.expectEqualStrings("chunk:false,closed,done:true", (try internal.evaluate("__life405.join(',')")).asStr());
+    try std.testing.expect((try internal.evaluate("stream405.locked === false")).asBool());
+    _ = try internal.evaluate(
+        \\reader405.read().catch(function (e) { __life405.push(e instanceof TypeError ? "released" : "wrong"); });
+    );
+    try std.testing.expectEqualStrings("chunk:false,closed,done:true,released", (try internal.evaluate("__life405.join(',')")).asStr());
+
+    _ = try internal.evaluate(
+        \\globalThis.__error405 = [];
+        \\let errorController405;
+        \\let errorStream405 = new ReadableStream({ start(c) { errorController405 = c; } });
+        \\let errorReader405 = errorStream405.getReader();
+        \\errorReader405.read().catch(function (e) { __error405.push("read:" + e); });
+        \\errorReader405.closed.catch(function (e) { __error405.push("closed:" + e); });
+        \\errorController405.error("boom");
+    );
+    try std.testing.expectEqualStrings("read:boom,closed:boom", (try internal.evaluate("__error405.join(',')")).asStr());
+
+    const sibling_stream = try Probe.encoded(sibling_internal,
+        \\new ReadableStream({ start(c) { c.enqueue("sibling"); c.close(); } })
+    );
+    const sibling_text = try Probe.settled(context, ZigGlobalObject__readableStreamToText(context, sibling_stream));
+    try std.testing.expectEqual(promise.State.fulfilled, sibling_text.state);
+    try std.testing.expectEqualStrings("sibling", sibling_text.value.asStr());
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_stream = try Probe.encoded(foreign_internal,
+        \\new ReadableStream({ start(c) { c.close(); } })
+    );
+    try std.testing.expectEqual(EncodedValue.empty, ZigGlobalObject__readableStreamToText(context, foreign_stream));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    try std.testing.expectEqual(EncodedValue.empty, ZigGlobalObject__readableStreamToText(context, .true));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
 }
