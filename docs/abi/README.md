@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (409 implemented, 62 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (410 implemented, 61 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 409 are implemented and 62 remain pending
+Of the private entries, 410 are implemented and 61 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -484,6 +484,17 @@ references allow callbacks to detach themselves or later sessions and to
 rebroadcast recursively without stale delivery or use-after-free. Both profile
 libraries compile and run the same exact consumer through
 `zig build test-private-hot-reload`.
+
+The shared ErrorCode diagnostic boundary returns a freshly owned BunString for
+the exact null/undefined, Number, Boolean, arbitrary BigInt, Symbol, callable,
+string-preview, and object-constructor forms used in Bun/Home argument errors.
+String previews apply the 28/25 UTF-16-code-unit rule without repairing lone
+surrogates; quote selection scans the complete input and only embedded double
+quotes are escaped. Callable naming is non-observable, whereas object
+`constructor`, `name`, and name coercion are ordinary gets in order. Getter and
+Proxy throws, foreign VMs, allocation failure, and existing pending exceptions
+return a dead string without publishing partial output. Both exact profile
+libraries run the same consumer via `zig build test-private-error-code`.
 
 The proxy internal-field projection returns exact live target/handler cells
 without ordinary property access or userland traps. Revoked fields become
@@ -1078,7 +1089,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (401 implemented, 60 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (402 implemented, 59 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1097,9 +1108,10 @@ zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
 zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
 zig build test-private-hot-reload
+zig build test-private-error-code
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 60
+not claim complete Bun runtime compatibility; #164 remains open for the 59
 pending core entries and later wider/generated profiles.

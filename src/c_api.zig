@@ -3881,6 +3881,152 @@ fn privateWTF8ToUTF16(allocator: std.mem.Allocator, bytes: []const u8) PrivateBu
     return units;
 }
 
+fn privateSpecificTypeAppendUTF16(
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    units: []align(1) const u16,
+) error{OutOfMemory}!void {
+    const bytes = try privateUTF16ToWTF8(allocator, units);
+    defer allocator.free(bytes);
+    try output.appendSlice(allocator, bytes);
+}
+
+/// Bun's error formatter deliberately avoids an ordinary `name` read for a
+/// callable: a Proxy trap or a user getter must not run merely because an
+/// argument diagnostic is being assembled. This follows Zig::functionName's
+/// own-data-first order and then uses the engine's immutable function metadata.
+fn privateSpecificTypeFunctionName(object: *Object) []const u8 {
+    if (object.proxyHandler() != null or object.proxy_revoked) return "";
+    if (privateDirectDataProperty(object, "name")) |name|
+        if (name.isString() and name.asStr().len > 0) return name.asStr();
+    return privateCalculatedDisplayName(object);
+}
+
+fn privateDetermineSpecificTypeBytes(
+    allocator: std.mem.Allocator,
+    machine: *interp.Interpreter,
+    input: Value,
+) ![]u8 {
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    switch (input.kind()) {
+        .null => try output.appendSlice(allocator, "null"),
+        .undefined => try output.appendSlice(allocator, "undefined"),
+        .number => {
+            const number = input.asNum();
+            try output.appendSlice(allocator, "type number (");
+            try output.appendSlice(allocator, try value.numberToString(machine.arena, number));
+            try output.append(allocator, ')');
+        },
+        .boolean => try output.appendSlice(
+            allocator,
+            if (input.asBool()) "type boolean (true)" else "type boolean (false)",
+        ),
+        .string => {
+            const units = try privateWTF8ToUTF16(allocator, input.asStr());
+            defer allocator.free(units);
+            const needs_ellipsis = units.len > 28;
+            const preview = if (needs_ellipsis) units[0..25] else units;
+            const use_double_quotes = std.mem.indexOfScalar(u16, units, '\'') != null;
+
+            try output.appendSlice(allocator, "type string (");
+            try output.append(allocator, if (use_double_quotes) '"' else '\'');
+            if (use_double_quotes) {
+                var start: usize = 0;
+                for (preview, 0..) |unit, index| {
+                    if (unit != '"') continue;
+                    try privateSpecificTypeAppendUTF16(&output, allocator, preview[start..index]);
+                    try output.appendSlice(allocator, "\\\"");
+                    start = index + 1;
+                }
+                try privateSpecificTypeAppendUTF16(&output, allocator, preview[start..]);
+            } else {
+                try privateSpecificTypeAppendUTF16(&output, allocator, preview);
+            }
+            if (needs_ellipsis) try output.appendSlice(allocator, "...");
+            try output.append(allocator, if (use_double_quotes) '"' else '\'');
+            try output.append(allocator, ')');
+        },
+        .object => {
+            const object = input.asObj();
+            if (object.is_bigint) {
+                try output.appendSlice(allocator, "type bigint (");
+                try output.appendSlice(allocator, try value.bigIntToString(object, machine.arena));
+                try output.appendSlice(allocator, "n)");
+            } else if (object.is_symbol) {
+                try output.appendSlice(allocator, "type symbol (Symbol(");
+                if (object.symbolDescription()) |description|
+                    try output.appendSlice(allocator, description);
+                try output.appendSlice(allocator, "))");
+            } else if (object.isCallableObject()) {
+                try output.appendSlice(allocator, "function ");
+                try output.appendSlice(allocator, privateSpecificTypeFunctionName(object));
+            } else {
+                const constructor = try machine.getProperty(input, "constructor");
+                const constructor_root = try machine.pushTempRoot(constructor);
+                defer machine.restoreTempRoots(constructor_root);
+                if (constructor.toBoolean()) {
+                    const name = try machine.getProperty(constructor, "name");
+                    const name_root = try machine.pushTempRoot(name);
+                    defer machine.restoreTempRoots(name_root);
+                    const name_string = try machine.toStringV(name);
+                    try output.appendSlice(allocator, "an instance of ");
+                    try output.appendSlice(allocator, name_string);
+                } else {
+                    // JSValueToStringSafe delegates this rare, falsy-constructor
+                    // case to Bun's inspector. The engine's no-side-effect
+                    // projection is the stable fallback until that broader
+                    // presentation-only inspector surface is itself targeted.
+                    try output.appendSlice(allocator, try input.toString(machine.arena));
+                }
+            }
+        },
+    }
+    return output.toOwnedSlice(allocator);
+}
+
+/// Exact shared Home/Bun argument-error diagnostic boundary. The returned
+/// BunString owns its backing WTFStringImpl and the consumer must dereference
+/// it. Any abrupt completion leaves no live partial string behind.
+export fn Bun__ErrorCode__determineSpecificType(
+    global: JSContextRef,
+    encoded: EncodedValue,
+) callconv(.c) PrivateBunString {
+    const context = ctxForEvaluation(global) orelse return PrivateBunString.dead();
+    const group = privatePropertyBoundaryGroup(context) orelse return PrivateBunString.dead();
+    if (group.pending_exception != null) return PrivateBunString.dead();
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    defer context.popActiveInterpreter(&machine);
+    const input = privateValueFrom(global, encoded) orelse {
+        const abrupt = machine.throwError("TypeError", "Diagnostic value belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return PrivateBunString.dead();
+    };
+    const input_root = machine.pushTempRoot(input) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    defer machine.restoreTempRoots(input_root);
+
+    const bytes = privateDetermineSpecificTypeBytes(context.arena(), &machine, input) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return PrivateBunString.dead();
+    };
+    return privateOwnedWTF8String(bytes) catch |err| {
+        privatePublishBunStringError(context, err);
+        return PrivateBunString.dead();
+    };
+}
+
 fn privateStringBuilderFromOpaque(raw: ?*anyopaque) ?*PrivateStringBuilder {
     const pointer = raw orelse return null;
     if (@intFromPtr(pointer) % @alignOf(PrivateStringBuilder) != 0) return null;
@@ -25577,6 +25723,168 @@ test "private record construction preserves cardinality ownership and direct ins
     const pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(227), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
     try std.testing.expect(target.asObj().getOwn("blocked") == null);
+}
+
+test "private received-value diagnostics preserve exact types and abrupt completion" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn run(context_: *Context, global: JSContextRef, value_encoded: EncodedValue) ![]const u8 {
+            const output = Bun__ErrorCode__determineSpecificType(global, value_encoded);
+            defer privateDerefBunString(output);
+            if (output.tag == .dead) return error.DiagnosticFailed;
+            const projected = try privateBunStringValue(context_, &output, null);
+            return context_.arena().dupe(u8, projected.asStr());
+        }
+    };
+
+    const primitive_cases = [_]struct { EncodedValue, []const u8 }{
+        .{ .null, "null" },
+        .{ .undefined, "undefined" },
+        .{ .true, "type boolean (true)" },
+        .{ .false, "type boolean (false)" },
+        .{ EncodedValue.fromInt32(42), "type number (42)" },
+        .{ EncodedValue.fromDouble(-0.0), "type number (0)" },
+        .{ EncodedValue.fromDouble(std.math.nan(f64)), "type number (NaN)" },
+        .{ EncodedValue.fromDouble(std.math.inf(f64)), "type number (Infinity)" },
+        .{ EncodedValue.fromDouble(-std.math.inf(f64)), "type number (-Infinity)" },
+        .{ EncodedValue.fromDouble(1e21), "type number (1e+21)" },
+    };
+    for (primitive_cases) |case|
+        try std.testing.expectEqualStrings(case[1], try Probe.run(internal, context, case[0]));
+
+    try std.testing.expectEqualStrings(
+        "type bigint (1234567890123456789012345678901234567890n)",
+        try Probe.run(internal, context, try Probe.encoded(internal, "1234567890123456789012345678901234567890n")),
+    );
+    try std.testing.expectEqualStrings(
+        "type symbol (Symbol(described))",
+        try Probe.run(internal, context, try Probe.encoded(internal, "Symbol('described')")),
+    );
+    try std.testing.expectEqualStrings(
+        "type symbol (Symbol())",
+        try Probe.run(internal, context, try Probe.encoded(internal, "Symbol()")),
+    );
+    try std.testing.expectEqualStrings(
+        "function named",
+        try Probe.run(internal, context, try Probe.encoded(internal, "(function named() {})")),
+    );
+    try std.testing.expectEqualStrings(
+        "function renamed",
+        try Probe.run(internal, context, try Probe.encoded(internal, "(() => { function original() {} Object.defineProperty(original, 'name', { value: 'renamed' }); return original; })()")),
+    );
+    try std.testing.expectEqualStrings(
+        "function ",
+        try Probe.run(internal, context, try Probe.encoded(internal, "(() => { globalThis.__diagnostic_name_gets_393 = 0; const target = function hidden() {}; const proxy = new Proxy(target, { get(t, k, r) { __diagnostic_name_gets_393++; return Reflect.get(t, k, r); } }); return proxy; })()")),
+    );
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__diagnostic_name_gets_393")).asNum());
+
+    const string_cases = [_]struct { []const u8, []const u8 }{
+        .{ "''", "type string ('')" },
+        .{ "'plain'", "type string ('plain')" },
+        .{ "\"a'b\\\"c\"", "type string (\"a'b\\\"c\")" },
+        .{ "'1234567890123456789012345678'", "type string ('1234567890123456789012345678')" },
+        .{ "'12345678901234567890123456789'", "type string ('1234567890123456789012345...')" },
+        .{ "'12345678901234567890123456789\\\''", "type string (\"1234567890123456789012345...\")" },
+    };
+    for (string_cases) |case|
+        try std.testing.expectEqualStrings(case[1], try Probe.run(internal, context, try Probe.encoded(internal, case[0])));
+
+    const split_surrogate = try Probe.run(
+        internal,
+        context,
+        try Probe.encoded(internal, "'aaaaaaaaaaaaaaaaaaaaaaaa😀tail'"),
+    );
+    const split_units = try privateWTF8ToUTF16(std.testing.allocator, split_surrogate);
+    defer std.testing.allocator.free(split_units);
+    const expected_split_units = [_]u16{
+        't',  'y', 'p', 'e', ' ', 's', 't', 'r', 'i', 'n', 'g',    ' ', '(', '\'',
+        'a',  'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a',    'a', 'a', 'a',
+        'a',  'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 0xd83d, '.', '.', '.',
+        '\'', ')',
+    };
+    try std.testing.expectEqualSlices(u16, &expected_split_units, split_units);
+
+    try std.testing.expectEqualStrings(
+        "an instance of Widget",
+        try Probe.run(internal, sibling, try Probe.encoded(internal, "new (class Widget {})")),
+    );
+    const observable = try Probe.encoded(
+        internal,
+        "globalThis.__diagnostic_order_393 = ''; ({ get constructor() { __diagnostic_order_393 += 'c'; return { get name() { __diagnostic_order_393 += 'n'; return { toString() { __diagnostic_order_393 += 's'; return 'Observed'; } }; } }; } })",
+    );
+    try std.testing.expectEqualStrings("an instance of Observed", try Probe.run(internal, context, observable));
+    try std.testing.expectEqualStrings("cns", (try internal.evaluate("__diagnostic_order_393")).asStr());
+
+    var abrupt = Bun__ErrorCode__determineSpecificType(
+        context,
+        try Probe.encoded(internal, "({ get constructor() { throw 3931; } })"),
+    );
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3931), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    abrupt = Bun__ErrorCode__determineSpecificType(
+        context,
+        try Probe.encoded(internal, "({ constructor: { get name() { throw 3932; } } })"),
+    );
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3932), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    abrupt = Bun__ErrorCode__determineSpecificType(
+        context,
+        privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({})")),
+    );
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(3933));
+    abrupt = Bun__ErrorCode__determineSpecificType(context, EncodedValue.fromInt32(1));
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3933), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    var owned = Bun__ErrorCode__determineSpecificType(context, EncodedValue.fromInt32(393));
+    try std.testing.expectEqual(PrivateBunStringTag.wtf_string_impl, owned.tag);
+    const impl = owned.value.wtf_string_impl orelse return error.MissingOwnedString;
+    const initial_refs = @atomicLoad(u32, &impl.m_ref_count, .acquire);
+    Bun__WTFStringImpl__ref(impl);
+    try std.testing.expectEqual(initial_refs + private_wtf_ref_increment, @atomicLoad(u32, &impl.m_ref_count, .acquire));
+    Bun__WTFStringImpl__deref(impl);
+    try std.testing.expectEqual(initial_refs, @atomicLoad(u32, &impl.m_ref_count, .acquire));
+    privateDerefBunString(owned);
+    owned = PrivateBunString.dead();
+
+    var saw_allocation_failure = false;
+    var saw_allocation_success = false;
+    var machine = internal.interpreter();
+    for (0..32) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        const result = privateDetermineSpecificTypeBytes(allocator, &machine, Value.str("allocation'failure\"preview-abcdefghijklmnopqrstuvwxyz"));
+        if (result) |bytes| {
+            allocator.free(bytes);
+            saw_allocation_success = true;
+            break;
+        } else |err| {
+            if (err == error.OutOfMemory) saw_allocation_failure = true else return err;
+        }
+    }
+    try std.testing.expect(saw_allocation_failure and saw_allocation_success);
 }
 
 test "private JSON stringification preserves normal and undefined-space semantics" {

@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 423,
-      "pending": 60
+      "implemented": 424,
+      "pending": 59
     }
   },
   "home_comparison": {
@@ -393,10 +393,10 @@
       "line": 153,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__ErrorCode__determineSpecificType(*JSGlobalObject, JSValue) String;",
       "declaration_sha256": "7807be8fc00d2b3bb86dbb41315615f09b6f2ff15c8e86135764a649c0743b6e",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__EventLoopTaskNoContext__createdInBunVm",
