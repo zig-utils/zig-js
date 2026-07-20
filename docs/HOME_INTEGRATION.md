@@ -289,7 +289,7 @@ second pass over current/preceding source lines by retained script ID.
 stackless native errors by walking pending await/transparent-forwarding links,
 with exact suspension positions, a per-segment 32-hop guard, realm stack limits,
 precise GC retention, and existing/materialized-stack preservation. The
-348-symbol combined fixture covers sibling realms, foreign VMs, callback
+349-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

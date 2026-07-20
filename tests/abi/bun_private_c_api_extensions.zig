@@ -42,6 +42,7 @@ extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
+extern "c" fn Bun__JSC__operationMathPow(f64, f64) f64;
 
 fn fail(message: []const u8) noreturn {
     std.debug.panic("{s}", .{message});
@@ -111,4 +112,12 @@ pub fn main() void {
     const revoked = evaluate(context, "(()=>{const p=Proxy.revocable({},{});p.revoke();return p.proxy})()");
     if (JSObjectGetProxyTarget(revoked.cellPointer()) != null or JSObjectGetProxyTarget(null) != null)
         fail("Bun proxy target invalid/revoked mismatch");
+
+    const negative_zero = Bun__JSC__operationMathPow(-0.0, 3);
+    if (Bun__JSC__operationMathPow(2, 10) != 1024 or
+        !std.math.isNan(Bun__JSC__operationMathPow(1, std.math.nan(f64))) or
+        !std.math.isNan(Bun__JSC__operationMathPow(-1, std.math.inf(f64))) or
+        negative_zero != 0 or !std.math.signbit(negative_zero) or
+        Bun__JSC__operationMathPow(-0.0, -3) != -std.math.inf(f64))
+        fail("Bun JSC Math.pow operation mismatch");
 }

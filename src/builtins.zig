@@ -330,16 +330,23 @@ pub fn mathSign(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     if (n < 0) return Value.num(-1);
     return Value.num(n); // preserves +0 / -0
 }
+
+pub fn operationMathPow(base: f64, exponent: f64) f64 {
+    // ECMAScript overrides the host pow operation for these cases: a NaN
+    // exponent is always NaN, and either signed one to an infinite exponent is
+    // NaN. The platform operation supplies the remaining signed-zero,
+    // infinity, odd/even integer, and negative-fractional behavior.
+    if (std.math.isNan(exponent)) return std.math.nan(f64);
+    if (std.math.isInf(exponent) and @abs(base) == 1) return std.math.nan(f64);
+    return std.math.pow(f64, base, exponent);
+}
+
 pub fn mathPow(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
     const base = try self.toNumberV(arg(args, 0));
     const exp = try self.toNumberV(arg(args, 1));
-    // JS exponentiation overrides IEEE pow: a NaN exponent is always NaN (even
-    // `pow(1, NaN)`), and `pow(±1, ±Infinity)` is NaN (IEEE returns 1).
-    if (std.math.isNan(exp)) return Value.num(std.math.nan(f64));
-    if (std.math.isInf(exp) and @abs(base) == 1) return Value.num(std.math.nan(f64));
-    return Value.num(std.math.pow(f64, base, exp));
+    return Value.num(operationMathPow(base, exp));
 }
 pub fn mathMax(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;

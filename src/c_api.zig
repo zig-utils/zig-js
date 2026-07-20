@@ -2811,6 +2811,10 @@ export fn JSVALUE_TO_INT64_SLOW(encoded: EncodedValue) callconv(.c) i64 {
     return @bitCast(privateBigIntModuloU64(boxed.value.asObj()));
 }
 
+export fn Bun__JSC__operationMathPow(base: f64, exponent: f64) callconv(.c) f64 {
+    return builtins.operationMathPow(base, exponent);
+}
+
 export fn Bun__JSValue__toNumber(encoded: EncodedValue, global: JSContextRef) callconv(.c) f64 {
     const context = ctxForEvaluation(global) orelse return std.math.nan(f64);
     const opaque_group = context.c_api_group orelse return std.math.nan(f64);
@@ -19187,6 +19191,29 @@ test "private C-API call and proxy extensions preserve lock exception and target
     try std.testing.expect(JSObjectGetProxyTarget(revoked_ref) == null);
     try std.testing.expect(JSObjectGetProxyTarget(@ptrFromInt(try exception.asCellAddress())) == null);
     try std.testing.expect(JSObjectGetProxyTarget(null) == null);
+}
+
+test "private JSC Math.pow operation preserves ECMAScript edge semantics" {
+    try std.testing.expectEqual(@as(f64, 8), Bun__JSC__operationMathPow(2, 3));
+    try std.testing.expectEqual(@as(f64, 0.25), Bun__JSC__operationMathPow(2, -2));
+    try std.testing.expectEqual(@as(f64, 1), Bun__JSC__operationMathPow(std.math.nan(f64), 0));
+    try std.testing.expect(std.math.isNan(Bun__JSC__operationMathPow(1, std.math.nan(f64))));
+    try std.testing.expect(std.math.isNan(Bun__JSC__operationMathPow(-1, std.math.inf(f64))));
+    try std.testing.expect(std.math.isNan(Bun__JSC__operationMathPow(-2, 0.5)));
+    try std.testing.expect(std.math.isNan(Bun__JSC__operationMathPow(std.math.nan(f64), 2)));
+    try std.testing.expectEqual(@as(f64, -8), Bun__JSC__operationMathPow(-2, 3));
+    try std.testing.expectEqual(@as(f64, 16), Bun__JSC__operationMathPow(-2, 4));
+
+    const negative_zero_odd = Bun__JSC__operationMathPow(-0.0, 3);
+    const positive_zero_even = Bun__JSC__operationMathPow(-0.0, 2);
+    try std.testing.expect(negative_zero_odd == 0 and std.math.signbit(negative_zero_odd));
+    try std.testing.expect(positive_zero_even == 0 and !std.math.signbit(positive_zero_even));
+    try std.testing.expectEqual(-std.math.inf(f64), Bun__JSC__operationMathPow(-0.0, -3));
+    try std.testing.expectEqual(std.math.inf(f64), Bun__JSC__operationMathPow(-0.0, -2));
+    try std.testing.expectEqual(-std.math.inf(f64), Bun__JSC__operationMathPow(-std.math.inf(f64), 3));
+    const negative_zero_infinity = Bun__JSC__operationMathPow(-std.math.inf(f64), -3);
+    try std.testing.expect(negative_zero_infinity == 0 and std.math.signbit(negative_zero_infinity));
+    try std.testing.expectEqual(@as(f64, 0), Bun__JSC__operationMathPow(std.math.inf(f64), -2));
 }
 
 test "C-API: JSObjectSetPropertyForKey preserves key coercion and attributes" {

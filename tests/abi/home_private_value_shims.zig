@@ -332,6 +332,7 @@ extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringR
 extern "c" fn JSGarbageCollect(JSContextRef) void;
 extern "c" fn JSObjectCallAsFunctionReturnValueHoldingAPILock(JSContextRef, JSObjectRef, JSObjectRef, usize, [*c]const JSValueRef) EncodedValue;
 extern "c" fn JSObjectGetProxyTarget(JSObjectRef) JSObjectRef;
+extern "c" fn Bun__JSC__operationMathPow(f64, f64) f64;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
@@ -1439,6 +1440,14 @@ fn jsStringIterator(state: *JSStringIteratorState) JSStringIterator {
 pub fn main() void {
     const context = JSGlobalContextCreate(null) orelse fail("context creation failed");
     defer JSGlobalContextRelease(context);
+
+    const private_pow_negative_zero = Bun__JSC__operationMathPow(-0.0, 3);
+    if (Bun__JSC__operationMathPow(2, 10) != 1024 or
+        !std.math.isNan(Bun__JSC__operationMathPow(1, std.math.nan(f64))) or
+        !std.math.isNan(Bun__JSC__operationMathPow(-1, std.math.inf(f64))) or
+        private_pow_negative_zero != 0 or !std.math.signbit(private_pow_negative_zero) or
+        Bun__JSC__operationMathPow(-0.0, -3) != -std.math.inf(f64))
+        fail("private JSC Math.pow operation mismatch");
 
     // The pinned bridge is deliberately dormant without an attached debugger
     // agent, but every enum and lifecycle entry still crosses the real ABI.
@@ -6437,5 +6446,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 348/348 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 349/349 symbols linked; runtime matrix passed\n", .{});
 }

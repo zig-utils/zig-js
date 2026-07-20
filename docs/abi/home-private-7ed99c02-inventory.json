@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 420,
-      "pending": 110
+      "implemented": 421,
+      "pending": 109
     }
   },
   "declarations": [
@@ -426,10 +426,10 @@
       "line": 276,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSC__operationMathPow(f64, f64) f64;",
       "declaration_sha256": "f4df188aa360f2fb4a9fef2674d2308d11efa40341d494eddc688bbb284f018b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__create",
