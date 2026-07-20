@@ -41448,10 +41448,12 @@ fn urlCanonHost(arena: std.mem.Allocator, scheme: []const u8, host_str: []const 
         return try urlSerializeIPv6(arena, urlParseIPv6(host_str[1..close]) orelse return null);
     }
     if (urlIsSpecialScheme(scheme)) {
-        // WHATWG domain-to-ASCII: UTS-46 mapping + NFC + Punycode, lowercasing
-        // ASCII, validating `xn--` labels, and rejecting forbidden domain code
-        // points. IPv4 detection then runs on the resulting ASCII domain.
-        const domain = (try idna.domainToAscii(arena, host_str)) orelse return null;
+        // WHATWG host parser: UTF-8 percent-decode, then domain-to-ASCII (UTS-46
+        // mapping + NFC + Punycode, lowercasing ASCII, validating `xn--` labels,
+        // rejecting forbidden domain code points). `%C3%A9.com` → `xn--9ca.com`.
+        // IPv4 detection then runs on the resulting ASCII domain.
+        const decoded = try urlPercentDecode(arena, host_str);
+        const domain = (try idna.domainToAscii(arena, decoded)) orelse return null;
         if (urlHostEndsInNumber(domain)) return (try urlParseIPv4(arena, domain)) orelse return null;
         return domain;
     }
