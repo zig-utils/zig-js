@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 484,
-      "pending": 46
+      "implemented": 486,
+      "pending": 44
     }
   },
   "declarations": [
@@ -5956,10 +5956,10 @@
       "line": 889,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__getModuleRegistryMap(*JSGlobalObject) *anyopaque;",
       "declaration_sha256": "137eaa348ac07b1cef96904c8f9330f476599263d366dff13ae4a14f8276a7fb",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Zig__GlobalObject__resetModuleRegistryMap",
@@ -5967,10 +5967,10 @@
       "line": 894,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__resetModuleRegistryMap(*JSGlobalObject, *anyopaque) bool;",
       "declaration_sha256": "c5b74470eb7c066e6095c80f589f52e533d830872d5f77180e2e356f43207cd9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "connect",

@@ -19,6 +19,7 @@ DIAGNOSTIC_CONTRACT = ROOT / "docs/abi/bun-diagnostic-inspector-4982b91e.json"
 INSPECTOR_AGENTS_CONTRACT = ROOT / "docs/abi/bun-inspector-agents-4982b91e.json"
 HTTP_SERVER_INSPECTOR_CONTRACT = ROOT / "docs/abi/bun-http-server-inspector-4982b91e.json"
 PROCESS_SIGNAL_CONTRACT = ROOT / "docs/abi/bun-process-signal-4982b91e.json"
+MODULE_REGISTRY_SHIMS_CONTRACT = ROOT / "docs/abi/bun-module-registry-shims-4982b91e.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -431,6 +432,41 @@ def validate_process_signal_contract(bun_root: Path | None) -> None:
         fail("process signal semantic inventory is incomplete or duplicated")
 
 
+def validate_module_registry_shims_contract(bun_root: Path | None) -> None:
+    if not MODULE_REGISTRY_SHIMS_CONTRACT.is_file():
+        fail(f"missing checked-in module registry shims contract {MODULE_REGISTRY_SHIMS_CONTRACT}")
+    contract = json.loads(MODULE_REGISTRY_SHIMS_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "retired-module-registry-snapshot-shims"
+        or contract.get("revision") != REVISION
+        or contract.get("issue") != 402
+        or contract.get("parent_issue") != 140
+    ):
+        fail("module registry shims contract schema, revision, or issue drift")
+    sources = contract.get("sources")
+    expected_sources = {"src/jsc/bindings/ZigGlobalObject.cpp"}
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("module registry shims source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid module registry shims digest for {relative}")
+        if bun_root is not None:
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"module registry shims source drift for {relative}")
+    expected_exports = {
+        "Zig__GlobalObject__getModuleRegistryMap",
+        "Zig__GlobalObject__resetModuleRegistryMap",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("module registry shims export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 7 or len(semantics) != len(set(semantics)):
+        fail("module registry shims semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -458,6 +494,7 @@ def main() -> None:
     validate_inspector_agents_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_http_server_inspector_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_process_signal_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_module_registry_shims_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

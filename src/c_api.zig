@@ -14705,6 +14705,22 @@ export fn JSContextGetGlobalContext(ctx: JSContextRef) callconv(.c) JSContextRef
     return ctx;
 }
 
+/// JSC's module-loader registry stopped being a JavaScript Map, so pinned Bun
+/// retains this symbol only as a dead compatibility shim with no callers.
+export fn Zig__GlobalObject__getModuleRegistryMap(global: JSContextRef) callconv(.c) ?*anyopaque {
+    _ = global;
+    return null;
+}
+
+/// Snapshot restore is unsupported for the native module-loader registry. The
+/// pinned implementation deliberately inspects neither argument and returns
+/// false, including for null or stale opaque pointers.
+export fn Zig__GlobalObject__resetModuleRegistryMap(global: JSContextRef, map: ?*anyopaque) callconv(.c) bool {
+    _ = global;
+    _ = map;
+    return false;
+}
+
 export fn JSGlobalContextCopyName(ctx: JSContextRef) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
     const units = c.c_api_name_utf16 orelse return null;
@@ -20247,6 +20263,24 @@ test "private script execution context identifiers are stable and process unique
         try std.testing.expect(result.live_before_release and result.retired_after_release);
         for (results[0..index]) |prior| try std.testing.expect(id != prior.id);
     }
+}
+
+test "private retired module registry snapshot shims are exact and inert" {
+    try std.testing.expectEqual(@as(?*anyopaque, null), Zig__GlobalObject__getModuleRegistryMap(null));
+    try std.testing.expectEqual(@as(?*anyopaque, null), Zig__GlobalObject__getModuleRegistryMap(@ptrFromInt(1)));
+    try std.testing.expect(!Zig__GlobalObject__resetModuleRegistryMap(null, null));
+    try std.testing.expect(!Zig__GlobalObject__resetModuleRegistryMap(@ptrFromInt(1), @ptrFromInt(2)));
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const vm_ref = JSC__JSGlobalObject__vm(context);
+    JSC__VM__throwError(vm_ref, context, EncodedValue.fromInt32(402));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    try std.testing.expectEqual(@as(?*anyopaque, null), Zig__GlobalObject__getModuleRegistryMap(context));
+    try std.testing.expect(!Zig__GlobalObject__resetModuleRegistryMap(context, @ptrFromInt(2)));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(402), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 }
 
 test "private hot-reload inspector broadcast spans VMs and survives reentrant release" {

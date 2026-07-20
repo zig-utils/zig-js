@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "contract": "retired-module-registry-snapshot-shims",
+  "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+  "issue": 402,
+  "parent_issue": 140,
+  "sources": {
+    "src/jsc/bindings/ZigGlobalObject.cpp": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04"
+  },
+  "exports": [
+    "Zig__GlobalObject__getModuleRegistryMap",
+    "Zig__GlobalObject__resetModuleRegistryMap"
+  ],
+  "semantics": [
+    "The JSC module-loader registry is no longer a JavaScript Map, so snapshot and restore are unsupported.",
+    "The get export always returns null and does not inspect its global argument.",
+    "The reset export always returns false and does not inspect either argument.",
+    "Null, stale-looking, and live arguments therefore have identical inert behavior.",
+    "Neither export changes the VM's pending exception or module-loader state.",
+    "Pinned upstream documents that both symbols have no callers and remain only for ABI compatibility.",
+    "The Home and Bun profile libraries compile, link, and run one external consumer against both exports."
+  ]
+}

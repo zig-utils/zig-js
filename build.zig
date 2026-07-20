@@ -521,6 +521,36 @@ pub fn build(b: *std.Build) void {
     );
     home_private_script_execution_context_test_step.dependOn(&run_home_private_script_execution_context_fixture.step);
 
+    const home_private_module_registry_shims_fixture = b.addExecutable(.{
+        .name = "home-private-module-registry-shims",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_module_registry_shims.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    home_private_module_registry_shims_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_module_registry_shims_fixture = b.addRunArtifact(home_private_module_registry_shims_fixture);
+    run_home_private_module_registry_shims_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_module_registry_shims_fixture = b.addExecutable(.{
+        .name = "bun-private-module-registry-shims",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_module_registry_shims.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bun_private_module_registry_shims_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_module_registry_shims_fixture = b.addRunArtifact(bun_private_module_registry_shims_fixture);
+    run_bun_private_module_registry_shims_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_module_registry_shims_test_step = b.step(
+        "test-private-module-registry-shims",
+        "Compile, link, and run both retired module-registry snapshot shims",
+    );
+    private_module_registry_shims_test_step.dependOn(&run_home_private_module_registry_shims_fixture.step);
+    private_module_registry_shims_test_step.dependOn(&run_bun_private_module_registry_shims_fixture.step);
+
     const home_private_error_code_fixture = b.addExecutable(.{
         .name = "home-private-error-code",
         .root_module = b.createModule(.{
