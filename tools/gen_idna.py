@@ -110,6 +110,32 @@ for line in open(UCD):
         virama.append(cp)
 mark_ranges = coalesce(marks)
 
+# Bidi_Class ranges for CheckBidi (RFC 5893). Store every class except L (the
+# default); the classes we don't individually need collapse to 'other'.
+BIDI = '/tmp/bidi.txt'
+BCLASS = {'R': 'r', 'AL': 'al', 'AN': 'an', 'EN': 'en', 'ES': 'es', 'CS': 'cs',
+          'ET': 'et', 'ON': 'on', 'BN': 'bn', 'NSM': 'nsm'}
+bidi = []
+for line in open(BIDI):
+    line = line.split('#')[0].strip()
+    if not line:
+        continue
+    rng, bc = [p.strip() for p in line.split(';')]
+    if bc == 'L':
+        continue  # default
+    cls = BCLASS.get(bc, 'other')  # WS/B/S/formatting → other (disallowed in a bidi label)
+    lo, hi = (rng.split('..') if '..' in rng else (rng, rng))
+    bidi.append((int(lo, 16), int(hi, 16), cls))
+bidi.sort()
+# Coalesce adjacent same-class ranges.
+bmerged = []
+for lo, hi, cls in bidi:
+    if bmerged and bmerged[-1][2] == cls and lo == bmerged[-1][1] + 1:
+        bmerged[-1] = (bmerged[-1][0], hi, cls)
+    else:
+        bmerged.append((lo, hi, cls))
+bidi = bmerged
+
 # Joining_Type ranges (L/R/D/T; U=default omitted, C not used by the ZWNJ rule).
 JMAP = {'L': 'l', 'R': 'r', 'D': 'd', 'T': 't'}
 join = []
@@ -161,7 +187,16 @@ with open(OUT, 'w') as f:
     vs = sorted(set(virama))
     for i in range(0, len(vs), 12):
         f.write('    ' + ', '.join(f'0x{c:X}' for c in vs[i:i+12]) + ',\n')
+    f.write('};\n\n')
+
+    f.write('pub const BidiClass = enum(u8) { l, r, al, an, en, es, cs, et, on, bn, nsm, other };\n')
+    f.write('pub const BidiRange = struct { lo: u21, hi: u21, bc: BidiClass };\n\n')
+    f.write(f'// {len(bidi)} Bidi_Class ranges (non-L; unlisted defaults to .l) for CheckBidi.\n')
+    f.write('pub const bidi_ranges = [_]BidiRange{\n')
+    for lo, hi, cls in bidi:
+        f.write(f'    .{{ .lo = 0x{lo:X}, .hi = 0x{hi:X}, .bc = .{cls} }},\n')
     f.write('};\n')
 
 print(f'wrote {OUT}: {len(entries)} entries, {len(mapdata)} map cps, '
-      f'{len(mark_ranges)} mark ranges, {len(join)} join ranges, {len(set(virama))} virama')
+      f'{len(mark_ranges)} mark ranges, {len(join)} join ranges, {len(set(virama))} virama, '
+      f'{len(bidi)} bidi ranges')

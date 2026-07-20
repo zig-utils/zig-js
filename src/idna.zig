@@ -148,10 +148,11 @@ fn punyDecode(arena: std.mem.Allocator, input: []const u8) !?[]const u21 {
 /// Validate an `xn--` label: it must be canonical Punycode — decode it, then
 /// re-encode and require a case-insensitive round-trip match (node/ICU reject a
 /// non-canonical or malformed Punycode label).
-fn validXnLabel(arena: std.mem.Allocator, puny: []const u8) !bool {
+fn validXnLabel(arena: std.mem.Allocator, puny: []const u8, is_bidi: bool) !bool {
     const cps = (try punyDecode(arena, puny)) orelse return false;
     if (cps.len == 0) return false;
     if (!validateLabel(cps)) return false;
+    if (is_bidi and !checkBidiLabel(cps)) return false;
     const re = (try punyEncode(arena, cps)) orelse return false;
     return std.ascii.eqlIgnoreCase(re, puny);
 }
@@ -231,6 +232,69 @@ fn validateLabel(cps: []const u21) bool {
     return true;
 }
 
+fn bidiClass(cp: u21) data.BidiClass {
+    var lo: usize = 0;
+    var hi: usize = data.bidi_ranges.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const r = data.bidi_ranges[mid];
+        if (cp < r.lo) hi = mid else if (cp > r.hi) lo = mid + 1 else return r.bc;
+    }
+    return .l; // unlisted → L (the default)
+}
+
+/// RFC 5893 Bidi Rule: applied to every label of a "bidi domain" (a domain with
+/// any R/AL/AN code point). An RTL label (first char R/AL) admits only RTL-safe
+/// classes and must end in R/AL/EN/AN; an LTR label (first char L) admits only
+/// LTR-safe classes and must end in L/EN; EN and AN can't mix in an RTL label.
+fn checkBidiLabel(cps: []const u21) bool {
+    if (cps.len == 0) return true;
+    // Direction is set by the first STRONG character (matching ICU, which is
+    // looser than RFC 5893 rule 1: a leading weak char — EN/AN/ON — does not
+    // reject, it just doesn't set direction). No strong char → LTR.
+    var rtl = false;
+    for (cps) |cp| {
+        const bc = bidiClass(cp);
+        if (bc == .r or bc == .al) {
+            rtl = true;
+            break;
+        }
+        if (bc == .l) break;
+    }
+    var last = cps.len;
+    while (last > 0 and bidiClass(cps[last - 1]) == .nsm) last -= 1;
+    if (last == 0) return false;
+    const last_bc = bidiClass(cps[last - 1]);
+    if (rtl) {
+        var has_en = false;
+        var has_an = false;
+        for (cps) |cp| {
+            const bc = bidiClass(cp);
+            switch (bc) {
+                .r, .al, .an, .en, .es, .cs, .et, .on, .bn, .nsm => {},
+                else => return false, // rule 2
+            }
+            if (bc == .en) has_en = true;
+            if (bc == .an) has_an = true;
+        }
+        if (has_en and has_an) return false; // rule 4
+        switch (last_bc) { // rule 3
+            .r, .al, .en, .an => {},
+            else => return false,
+        }
+    } else {
+        for (cps) |cp| switch (bidiClass(cp)) {
+            .l, .en, .es, .cs, .et, .on, .bn, .nsm => {},
+            else => return false, // rule 5
+        };
+        switch (last_bc) { // rule 6
+            .l, .en => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
 /// WHATWG forbidden domain code point: a forbidden host code point, a C0
 /// control, U+007F, or U+0025 (%). The ToASCII result must contain none.
 fn isForbiddenDomainCodePoint(c: u8) bool {
@@ -272,6 +336,19 @@ pub fn domainToAscii(arena: std.mem.Allocator, input: []const u8) !?[]const u8 {
     }
     // 2. NFC-normalize the mapped string.
     const norm = try unicode_normalize.normalize(arena, mapped.items, .nfc);
+    // A "bidi domain" (any R/AL/AN code point) triggers CheckBidi on every label.
+    var is_bidi = false;
+    {
+        var k: usize = 0;
+        while (k < norm.len) {
+            const cp = decodeUtf8(norm, &k) orelse return null;
+            switch (bidiClass(cp)) {
+                .r, .al, .an => is_bidi = true,
+                else => {},
+            }
+            if (is_bidi) break;
+        }
+    }
     // 3. Punycode-encode each label that still has non-ASCII.
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var first = true;
@@ -288,7 +365,7 @@ pub fn domainToAscii(arena: std.mem.Allocator, input: []const u8) !?[]const u8 {
             // A pure-ASCII `xn--` label must be canonical Punycode (a bare
             // `xn--` with no payload is invalid).
             if (label.len >= 4 and std.ascii.eqlIgnoreCase(label[0..4], "xn--")) {
-                if (!try validXnLabel(arena, label[4..])) return null;
+                if (!try validXnLabel(arena, label[4..], is_bidi)) return null;
             }
             try out.appendSlice(arena, label);
             continue;
@@ -297,6 +374,7 @@ pub fn domainToAscii(arena: std.mem.Allocator, input: []const u8) !?[]const u8 {
         var j: usize = 0;
         while (j < label.len) try cps.append(arena, decodeUtf8(label, &j) orelse return null);
         if (!validateLabel(cps.items)) return null;
+        if (is_bidi and !checkBidiLabel(cps.items)) return null;
         const enc = (try punyEncode(arena, cps.items)) orelse return null;
         try out.appendSlice(arena, "xn--");
         try out.appendSlice(arena, enc);
