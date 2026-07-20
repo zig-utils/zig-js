@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (425 implemented, 46 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (427 implemented, 44 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -533,6 +533,11 @@ worker removal and every natural teardown retire the mapping before context
 storage is freed. Sibling realms remain isolated, while zero, unknown, and
 already-retired IDs are inert. The pinned teardown/UAF-prevention contract is
 in [`home-script-execution-context-7ed99c02.json`](home-script-execution-context-7ed99c02.json).
+
+The two retired module-registry snapshot exports exactly preserve pinned JSC's
+documented no-caller shims: get returns null and reset returns false without
+inspecting either argument or VM state. Their immutable contract is
+[`bun-module-registry-shims-4982b91e.json`](bun-module-registry-shims-4982b91e.json).
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
@@ -1121,7 +1126,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (416 implemented, 45 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (418 implemented, 43 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
