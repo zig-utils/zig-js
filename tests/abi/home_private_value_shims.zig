@@ -119,6 +119,23 @@ const PrivateTypedArrayType = enum(u8) {
     _,
 };
 
+const CommonStringsForZig = enum(u8) {
+    IPv4 = 0,
+    IPv6 = 1,
+    IN4Loopback = 2,
+    IN6Any = 3,
+    ipv4Lower = 4,
+    ipv6Lower = 5,
+    fetchDefault = 6,
+    fetchError = 7,
+    fetchInclude = 8,
+    buffer = 9,
+    binaryTypeArrayBuffer = 10,
+    binaryTypeNodeBuffer = 11,
+    binaryTypeUint8Array = 12,
+    _,
+};
+
 const DebuggerAsyncCallType = enum(u8) {
     DOMTimer = 1,
     EventListener = 2,
@@ -564,6 +581,7 @@ extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn
 extern "c" fn URLSearchParams__create(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn URLSearchParams__fromJS(EncodedValue) ?*anyopaque;
 extern "c" fn URLSearchParams__toString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
+extern "c" fn Bun__CommonStringsForZig__toJS(CommonStringsForZig, JSContextRef) EncodedValue;
 extern "c" fn WebCore__DOMFormData__create(JSContextRef) EncodedValue;
 extern "c" fn WebCore__DOMFormData__createFromURLQuery(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn WebCore__DOMFormData__fromJS(EncodedValue) ?*anyopaque;
@@ -4111,6 +4129,31 @@ pub fn main() void {
     defer JSGlobalContextRelease(sibling_context);
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
+
+    const common_string_kinds = [_]CommonStringsForZig{
+        .IPv4,       .IPv6,         .IN4Loopback, .IN6Any,                .ipv4Lower,            .ipv6Lower,            .fetchDefault,
+        .fetchError, .fetchInclude, .buffer,      .binaryTypeArrayBuffer, .binaryTypeNodeBuffer, .binaryTypeUint8Array,
+    };
+    const common_string_sources = [_][*:0]const u8{
+        "'IPv4'",  "'IPv6'",    "'127.0.0.1'", "'::'",          "'ipv4'",       "'ipv6'",       "'default'",
+        "'error'", "'include'", "'buffer'",    "'arraybuffer'", "'nodebuffer'", "'uint8array'",
+    };
+    for (common_string_kinds, common_string_sources) |kind, source| {
+        const projected = Bun__CommonStringsForZig__toJS(kind, context);
+        if (projected == .empty or
+            projected != Bun__CommonStringsForZig__toJS(kind, sibling_context) or
+            !JSC__JSValue__isStrictEqual(projected, evaluate(context, source), context) or
+            projected == Bun__CommonStringsForZig__toJS(kind, foreign_context))
+            fail("private CommonStrings VM identity/value mismatch");
+    }
+    const common_ipv4 = Bun__CommonStringsForZig__toJS(.IPv4, context);
+    JSC__VM__throwError(vm, context, EncodedValue.fromInt32(378));
+    const common_exception = JSGlobalObject__tryTakeException(context);
+    if (Bun__CommonStringsForZig__toJS(.IPv4, context) != common_ipv4 or
+        JSC__Exception__asJSValue(common_exception.cellPointer()) != EncodedValue.fromInt32(378) or
+        Bun__CommonStringsForZig__toJS(@enumFromInt(13), context) != .empty or
+        Bun__CommonStringsForZig__toJS(.IPv4, null) != .empty)
+        fail("private CommonStrings invalid/pending-exception mismatch");
     const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
     if (JSC__VM__isEntered(null) or JSC__VM__isEntered(vm) or JSC__VM__isEntered(sibling_vm) or JSC__VM__isEntered(foreign_vm))
         fail("private idle VM entry state mismatch");
@@ -6676,5 +6719,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 362/362 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 363/363 symbols linked; runtime matrix passed\n", .{});
 }

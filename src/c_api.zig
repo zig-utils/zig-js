@@ -589,6 +589,9 @@ const CContextGroup = struct {
     /// small strings. Keep the eight possible private JSString handles stable
     /// across sibling realms for the same VM, without sharing them across VMs.
     typeof_strings: [8]?*Boxed = @splat(null),
+    /// Bun exposes thirteen lazily initialized common JSStrings. Preserve their
+    /// cell identity per VM, including across sibling realms.
+    common_strings: [13]?*Boxed = @splat(null),
     /// Stable borrowed Latin-1/UTF-16 views returned to private ABI consumers.
     /// Keys and backing buffers are group-owned so sibling realms share them.
     zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty,
@@ -6813,6 +6816,56 @@ fn privateTypeofStringValue(index: usize) Value {
         6 => Value.str("function"),
         else => Value.str("object"),
     };
+}
+
+const PrivateCommonString = enum(u8) {
+    IPv4 = 0,
+    IPv6 = 1,
+    IN4Loopback = 2,
+    IN6Any = 3,
+    ipv4Lower = 4,
+    ipv6Lower = 5,
+    fetchDefault = 6,
+    fetchError = 7,
+    fetchInclude = 8,
+    buffer = 9,
+    binaryTypeArrayBuffer = 10,
+    binaryTypeNodeBuffer = 11,
+    binaryTypeUint8Array = 12,
+    _,
+};
+
+fn privateCommonStringValue(kind: PrivateCommonString) ?Value {
+    return switch (kind) {
+        .IPv4 => Value.str("IPv4"),
+        .IPv6 => Value.str("IPv6"),
+        .IN4Loopback => Value.str("127.0.0.1"),
+        .IN6Any => Value.str("::"),
+        .ipv4Lower => Value.str("ipv4"),
+        .ipv6Lower => Value.str("ipv6"),
+        .fetchDefault => Value.str("default"),
+        .fetchError => Value.str("error"),
+        .fetchInclude => Value.str("include"),
+        .buffer => Value.str("buffer"),
+        .binaryTypeArrayBuffer => Value.str("arraybuffer"),
+        .binaryTypeNodeBuffer => Value.str("nodebuffer"),
+        .binaryTypeUint8Array => Value.str("uint8array"),
+        _ => null,
+    };
+}
+
+export fn Bun__CommonStringsForZig__toJS(kind: PrivateCommonString, global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForHandleInspection(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const index = @intFromEnum(kind);
+    if (index >= group.common_strings.len) return .empty;
+    const slot = &group.common_strings[index];
+    if (slot.*) |boxed| return privateEncodedFromRef(@ptrCast(boxed));
+    const projected = privateCommonStringValue(kind) orelse return .empty;
+    const boxed: *Boxed = @ptrCast(@alignCast(box(group.primary, projected) orelse return .empty));
+    slot.* = boxed;
+    return privateEncodedFromRef(@ptrCast(boxed));
 }
 
 export fn JSC__jsTypeStringForValue(

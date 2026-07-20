@@ -30,6 +30,22 @@ const EncodedValue = enum(i64) {
     }
 };
 
+const CommonStringsForZig = enum(u8) {
+    IPv4 = 0,
+    IPv6 = 1,
+    IN4Loopback = 2,
+    IN6Any = 3,
+    ipv4Lower = 4,
+    ipv6Lower = 5,
+    fetchDefault = 6,
+    fetchError = 7,
+    fetchInclude = 8,
+    buffer = 9,
+    binaryTypeArrayBuffer = 10,
+    binaryTypeNodeBuffer = 11,
+    binaryTypeUint8Array = 12,
+};
+
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
 extern "c" fn JSStringCreateWithUTF8CString([*:0]const u8) JSStringRef;
@@ -46,6 +62,7 @@ extern "c" fn Bun__JSC__operationMathPow(f64, f64) f64;
 extern "c" fn AsyncContextFrame__withAsyncContextIfNeeded(JSContextRef, EncodedValue) EncodedValue;
 extern "c" fn Bun__JSValue__isAsyncContextFrame(EncodedValue) bool;
 extern "c" fn Bun__JSValue__call(JSContextRef, EncodedValue, EncodedValue, usize, [*]const EncodedValue) EncodedValue;
+extern "c" fn Bun__CommonStringsForZig__toJS(CommonStringsForZig, JSContextRef) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.panic("{s}", .{message});
@@ -64,6 +81,21 @@ pub fn main() void {
     const context = JSGlobalContextCreate(null) orelse fail("context creation failed");
     defer JSGlobalContextRelease(context);
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("VM projection failed");
+
+    const common_string_kinds = [_]CommonStringsForZig{
+        .IPv4,       .IPv6,         .IN4Loopback, .IN6Any,                .ipv4Lower,            .ipv6Lower,            .fetchDefault,
+        .fetchError, .fetchInclude, .buffer,      .binaryTypeArrayBuffer, .binaryTypeNodeBuffer, .binaryTypeUint8Array,
+    };
+    const common_string_sources = [_][*:0]const u8{
+        "'IPv4'",  "'IPv6'",    "'127.0.0.1'", "'::'",          "'ipv4'",       "'ipv6'",       "'default'",
+        "'error'", "'include'", "'buffer'",    "'arraybuffer'", "'nodebuffer'", "'uint8array'",
+    };
+    for (common_string_kinds, common_string_sources) |kind, source| {
+        const projected = Bun__CommonStringsForZig__toJS(kind, context);
+        if (projected == .empty or projected != Bun__CommonStringsForZig__toJS(kind, context) or
+            !JSC__JSValue__isStrictEqual(projected, evaluate(context, source), context))
+            fail("Bun CommonStrings projection mismatch");
+    }
 
     const function = evaluate(context, "(function(a,b){return [this.marker,a,b]})");
     const this_object = evaluate(context, "({marker:371})");

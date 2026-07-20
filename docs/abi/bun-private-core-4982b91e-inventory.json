@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 389,
-      "pending": 94
+      "implemented": 390,
+      "pending": 93
     }
   },
   "home_comparison": {
@@ -360,10 +360,10 @@
       "line": 22,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__CommonStringsForZig__toJS(commonString: CommonStringsForZig, globalObject: *jsc.JSGlobalObject) jsc.JSValue;",
       "declaration_sha256": "26cf066092c6c1c3c9e1d7bfe0048581fce62f7579b57ba5cc33078751cebf1a",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__CreateFFIFunctionValue",
