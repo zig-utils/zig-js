@@ -61,10 +61,12 @@ during deterministic context teardown. `customSections` returns fresh
 
 The streaming methods deliberately follow the observable specification model:
 consume the complete body, take a stable byte copy, then compile through the
-same decoder used by every feature profile. A true incremental private compiler
-feed is a separate optimization/ABI slice under issue #409. The exact WG3 Web
-API source and Home/Bun evidence are pinned in
-[`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json).
+same decoder used by every feature profile. The private incremental feed uses a
+VM-affine opaque-token lifecycle shared by the JavaScript path, with external
+Home/Bun consumers and deterministic teardown. The WG3 API contract is
+[`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json); the feed
+contract is
+[`abi/wasm-streaming-compiler-feed-409.json`](abi/wasm-streaming-compiler-feed-409.json).
 
 ## Evidence
 

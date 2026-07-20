@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "contract": "wasm-streaming-compiler-feed",
+  "issue": 409,
+  "parent_issues": [140, 143, 163, 164, 406],
+  "related_issue": 408,
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "home": {
+      "packages/runtime/src/jsc/JSGlobalObject.zig": "b7f74131f8316ebce31fa65add121e73367e6c2d4bbe59eb8c53643a5e6189b2",
+      "packages/runtime/upstream/src/jsc/bindings/ZigGlobalObject.cpp": "72f4a089c9e75ad919be6ebe8d47e846db74b1872aecdad7f9b217e3c696cf9d",
+      "packages/runtime/upstream/src/jsc/bindings/webcore/JSWasmStreamingCompiler.cpp": "3f4e1bd09fd0265aebfbd91b2e523741db2a27f4c31603eecee121f949db1a7f",
+      "packages/runtime/upstream/src/jsc/bindings/webcore/JSWasmStreamingCompiler.h": "fdf68c688f3edca3a3449ca62364b4b609553adf0484c3522fcb5391cf4425e7"
+    },
+    "bun": {
+      "src/jsc/JSGlobalObject.zig": "acb3aba5a555edecf26a13c672b59a2c32554194b6b7d0e7fad38d8f4c2db1ab",
+      "src/jsc/bindings/ZigGlobalObject.cpp": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04",
+      "src/jsc/bindings/webcore/JSWasmStreamingCompiler.cpp": "3f4e1bd09fd0265aebfbd91b2e523741db2a27f4c31603eecee121f949db1a7f",
+      "src/jsc/bindings/webcore/JSWasmStreamingCompiler.h": "fdf68c688f3edca3a3449ca62364b4b609553adf0484c3522fcb5391cf4425e7"
+    }
+  },
+  "exports": [
+    "JSC__Wasm__StreamingCompiler__addBytes"
+  ],
+  "extensions": [
+    "ZJSWasmStreamingCompilerCreate",
+    "ZJSWasmStreamingCompilerFinalize",
+    "ZJSWasmStreamingCompilerRelease"
+  ],
+  "semantics": [
+    "The pinned JSC__Wasm__StreamingCompiler__addBytes export retains its exact C calling convention, opaque compiler token, byte pointer, byte length, and void result.",
+    "Opaque handles are monotonically issued nonzero registry tokens and are never dereferenced or reused, so null, forged, and stale caller values fail closed.",
+    "Every record retains both its creating Context identity and its VM identity; sibling contexts in one group may finalize it while an independent VM is rejected.",
+    "A non-empty span requires a non-null pointer and is copied before the call returns; the caller retains no backing-storage lifetime obligation.",
+    "Zero-length input is an exact no-op and accepts a null pointer.",
+    "Ordered calls append ordered bytes; concurrent calls are serialized into complete spans with unspecified inter-span order and no torn data.",
+    "Length overflow and allocation failure are sticky and failure-atomic: existing bytes remain unchanged and later appends are inert.",
+    "The upstream void addBytes ABI makes invalid, failed, and finalized calls inert; status is observable only through the zig-js lifecycle extensions.",
+    "Finalization is idempotent, freezes the byte vector exactly once, reports the required size, and copies only into sufficient caller-owned storage.",
+    "Release validates VM ownership, removes the registry record exactly once, and makes every later feed, finalize, or release fail closed.",
+    "Context teardown retires every unreleased compiler created by that Context before its Wasm store and allocator disappear.",
+    "The JavaScript compileStreaming and instantiateStreaming path creates, feeds, finalizes, and releases this same lifecycle before dispatching the ordinary compiler jobs.",
+    "The registry and every state transition are protected by one process-wide lock and use a thread-safe allocator, making cross-VM calls and concurrent feed operations TSan-clean.",
+    "External Home and Bun fixtures link the exact pinned symbol and exercise ordered, zero-length, invalid-pointer, overflow, finalized, stale, forged, sibling, foreign, concurrent, and teardown boundaries.",
+    "Focused Debug, ReleaseSafe, and TSan gates run both external ownership profiles and the JavaScript streaming compilation path."
+  ]
+}

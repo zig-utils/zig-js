@@ -25,6 +25,7 @@ CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
 FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
+WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed-409.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
@@ -715,6 +716,56 @@ def validate_wasm_streaming_contract(bun_root: Path | None) -> None:
         fail("WebAssembly streaming semantic inventory is incomplete or duplicated")
 
 
+def validate_wasm_streaming_compiler_contract(bun_root: Path | None) -> None:
+    if not WASM_STREAMING_COMPILER_CONTRACT.is_file():
+        fail(f"missing checked-in Wasm StreamingCompiler contract {WASM_STREAMING_COMPILER_CONTRACT}")
+    contract = json.loads(WASM_STREAMING_COMPILER_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "wasm-streaming-compiler-feed"
+        or contract.get("issue") != 409
+        or contract.get("parent_issues") != [140, 143, 163, 164, 406]
+        or contract.get("related_issue") != 408
+        or contract.get("revisions") != {"home": "7ed99c02e50034f869d0db6d487115bb44332fe4", "bun": REVISION}
+    ):
+        fail("Wasm StreamingCompiler contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_bun = {
+        "src/jsc/JSGlobalObject.zig",
+        "src/jsc/bindings/ZigGlobalObject.cpp",
+        "src/jsc/bindings/webcore/JSWasmStreamingCompiler.cpp",
+        "src/jsc/bindings/webcore/JSWasmStreamingCompiler.h",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("Wasm StreamingCompiler contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(bun_sources, dict) or set(bun_sources) != expected_bun or not isinstance(home_sources, dict):
+        fail("Wasm StreamingCompiler contract Bun source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid Wasm StreamingCompiler digest for {relative}")
+    if bun_root is not None:
+        for relative, digest in bun_sources.items():
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"Wasm StreamingCompiler source drift for {relative}")
+    if contract.get("exports") != ["JSC__Wasm__StreamingCompiler__addBytes"]:
+        fail("Wasm StreamingCompiler export inventory drift")
+    expected_extensions = {
+        "ZJSWasmStreamingCompilerCreate",
+        "ZJSWasmStreamingCompilerFinalize",
+        "ZJSWasmStreamingCompilerRelease",
+    }
+    extensions = contract.get("extensions")
+    if not isinstance(extensions, list) or set(extensions) != expected_extensions or not expected_extensions <= set(EXPORT_RE.findall(EXPORT_SOURCE.read_text())):
+        fail("Wasm StreamingCompiler lifecycle extension inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 15 or len(semantics) != len(set(semantics)):
+        fail("Wasm StreamingCompiler semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -748,6 +799,7 @@ def main() -> None:
     validate_readable_stream_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_fetch_body_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_wasm_streaming_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_wasm_streaming_compiler_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

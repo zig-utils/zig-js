@@ -19,6 +19,7 @@ CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
 FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
+WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed-409.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -689,6 +690,56 @@ def validate_wasm_streaming_contract(home_root: Path | None) -> None:
         fail("WebAssembly streaming semantic inventory is incomplete or duplicated")
 
 
+def validate_wasm_streaming_compiler_contract(home_root: Path | None) -> None:
+    if not WASM_STREAMING_COMPILER_CONTRACT.is_file():
+        fail(f"missing checked-in Wasm StreamingCompiler contract {WASM_STREAMING_COMPILER_CONTRACT}")
+    contract = json.loads(WASM_STREAMING_COMPILER_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "wasm-streaming-compiler-feed"
+        or contract.get("issue") != 409
+        or contract.get("parent_issues") != [140, 143, 163, 164, 406]
+        or contract.get("related_issue") != 408
+        or contract.get("revisions") != {"home": REVISION, "bun": "4982b91e3702094330f3be3883354c52b8c01323"}
+    ):
+        fail("Wasm StreamingCompiler contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_home = {
+        "packages/runtime/src/jsc/JSGlobalObject.zig",
+        "packages/runtime/upstream/src/jsc/bindings/ZigGlobalObject.cpp",
+        "packages/runtime/upstream/src/jsc/bindings/webcore/JSWasmStreamingCompiler.cpp",
+        "packages/runtime/upstream/src/jsc/bindings/webcore/JSWasmStreamingCompiler.h",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("Wasm StreamingCompiler contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(home_sources, dict) or set(home_sources) != expected_home or not isinstance(bun_sources, dict):
+        fail("Wasm StreamingCompiler contract Home source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid Wasm StreamingCompiler digest for {relative}")
+    if home_root is not None:
+        for relative, digest in home_sources.items():
+            path = home_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"Wasm StreamingCompiler source drift for {relative}")
+    if contract.get("exports") != ["JSC__Wasm__StreamingCompiler__addBytes"]:
+        fail("Wasm StreamingCompiler export inventory drift")
+    expected_extensions = {
+        "ZJSWasmStreamingCompilerCreate",
+        "ZJSWasmStreamingCompilerFinalize",
+        "ZJSWasmStreamingCompilerRelease",
+    }
+    extensions = contract.get("extensions")
+    if not isinstance(extensions, list) or set(extensions) != expected_extensions or not expected_extensions <= set(EXPORT_RE.findall(EXPORT_SOURCE.read_text())):
+        fail("Wasm StreamingCompiler lifecycle extension inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 15 or len(semantics) != len(set(semantics)):
+        fail("Wasm StreamingCompiler semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -722,6 +773,7 @@ def main() -> None:
     validate_readable_stream_contract(args.home_root.resolve() if args.home_root else None)
     validate_fetch_body_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_contract(args.home_root.resolve() if args.home_root else None)
+    validate_wasm_streaming_compiler_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

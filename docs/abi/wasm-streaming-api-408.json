@@ -45,7 +45,7 @@
     "Only successful 200 through 299 responses are accepted; a non-Response, failed status, locked body, or already-used non-null body rejects with TypeError before compilation.",
     "Content-Type is compared byte-case-insensitively with application/wasm after HTTP-whitespace trimming, and every parameter including an empty trailing semicolon is rejected.",
     "The Response body is consumed through the same pull-driven Fetch Body bytes machinery as the public body methods, so bodyUsed, locking, cancellation, and abrupt stream errors stay coherent.",
-    "The fully consumed body is copied into stable engine-owned bytes before queued compilation; incremental private compiler feeding remains separately tracked by issue 409 and is not claimed here.",
+    "The fully consumed body is copied into stable engine-owned bytes before queued compilation; issue 409 separately implements the private incremental feed and is not part of this Web API claim.",
     "Streaming compilation uses the exact ordinary WebAssembly parser, validator, enabled feature profile, module owner, and CompileError conversion without a permissive alternate path.",
     "Streaming instantiation uses the exact ordinary import resolver, linker, start-function execution, result shape, and TypeError, LinkError, RuntimeError, or original exception behavior.",
     "compileStreaming fulfills with a WebAssembly.Module while instantiateStreaming fulfills with an ordinary object containing the compiled module and instance.",

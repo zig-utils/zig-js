@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 439
-implemented and 32 pending private symbols; `zig build test-home-private-abi`,
+or extension totals. The pinned Home inventory currently reports 440
+implemented and 31 pending private symbols; `zig build test-home-private-abi`,
 `zig build test-private-jstype`, and the feature-specific private ABI fixtures
 are their focused compile-link-runtime gates.
 
@@ -38,6 +38,9 @@ recorded in [`abi/fetch-body-lifecycle-407.json`](abi/fetch-body-lifecycle-407.j
 WebAssembly streaming compilation reuses that lifecycle and the ordinary Wasm
 parser/linker; its exact MIME, Promise, realm, and error contract is recorded in
 [`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json).
+`Extensions.h` exposes the VM-affine create/finalize/release lifecycle around
+the pinned void `JSC__Wasm__StreamingCompiler__addBytes` feed; arbitrary tokens
+are never dereferenced, and finalization copies into caller storage.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact

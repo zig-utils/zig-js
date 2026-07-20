@@ -193,6 +193,9 @@ jobs:
               zig build test -Dtest-filter='streaming compilation'
               zig build test -Dtest-filter='streaming compilation' -Doptimize=ReleaseSafe
               zig build test -Dtest-filter='streaming compilation' -Dtsan=true
+              zig build test-private-wasm-streaming-compiler
+              zig build test-private-wasm-streaming-compiler -Doptimize=ReleaseSafe
+              zig build test-private-wasm-streaming-compiler -Dtsan=true
               zig build test-private-error-code
               zig build test-private-inspector-agents
               zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun

@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 498,
-      "pending": 32
+      "implemented": 499,
+      "pending": 31
     }
   },
   "declarations": [
@@ -3327,10 +3327,10 @@
       "line": 922,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__Wasm__StreamingCompiler__addBytes(streaming_compiler: *anyopaque, bytes_ptr: [*]const u8, bytes_len: usize) void;",
       "declaration_sha256": "7e033f867f31424e291e9dd9ede26d9a88e0bcf0d01448b446e030336e12c567",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__createError",

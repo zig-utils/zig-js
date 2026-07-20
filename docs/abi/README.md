@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (439 implemented, 32 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (440 implemented, 31 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 439 are implemented and 32 remain pending
+Of the private entries, 440 are implemented and 31 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -577,7 +577,10 @@ path, enforce the official status and exact `application/wasm` MIME boundary,
 then enter the ordinary parser/linker with a stable byte snapshot. The pinned
 specification and Home/Bun evidence is
 [`wasm-streaming-api-408.json`](wasm-streaming-api-408.json); the unobservable
-incremental private compiler feed remains tracked separately by issue 409.
+incremental private compiler feed uses a never-dereferenced, VM-affine token
+registry with idempotent finalization and teardown. Its exact symbol, lifecycle
+extensions, sources, and external Home/Bun fixtures are pinned in
+[`wasm-streaming-compiler-feed-409.json`](wasm-streaming-compiler-feed-409.json).
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
@@ -1166,7 +1169,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (430 implemented, 31 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (431 implemented, 30 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
