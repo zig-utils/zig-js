@@ -1065,6 +1065,11 @@ fn importedValTypeCompatible(owner: ?*Instance, actual: types.ValType, target_mo
     return validate.valTypesEquivalentAcross(actual_mod, actual, target_mod, declared);
 }
 
+fn importedValTypeSubtype(owner: ?*Instance, actual: types.ValType, target_mod: *const types.Module, declared: types.ValType) bool {
+    const actual_mod = if (owner) |inst| inst.module else return actual == declared;
+    return validate.valTypeMatchesAcross(actual_mod, actual, target_mod, declared);
+}
+
 fn importedFuncTypeCompatible(owner: ?*Instance, actual: types.FuncType, target_mod: *const types.Module, declared: types.FuncType) bool {
     const actual_mod = if (owner) |inst| inst.module else return types.funcTypeEql(actual, declared);
     return validate.funcTypesEquivalentAcross(actual_mod, actual, target_mod, declared);
@@ -1273,7 +1278,11 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                 },
                 .global => |gt| {
                     const ig = imports.globals[gi];
-                    if (!importedValTypeCompatible(ig.owner_instance, ig.type.val, mod, gt.val) or ig.type.mutable != gt.mutable) {
+                    const value_type_matches = if (gt.mutable)
+                        importedValTypeCompatible(ig.owner_instance, ig.type.val, mod, gt.val)
+                    else
+                        importedValTypeSubtype(ig.owner_instance, ig.type.val, mod, gt.val);
+                    if (!value_type_matches or ig.type.mutable != gt.mutable) {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
                         return error.Link;
                     }

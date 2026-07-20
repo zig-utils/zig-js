@@ -372,6 +372,23 @@ pub fn valTypesEquivalentAcross(a_mod: *const types.Module, a: types.ValType, b_
     return a_ref.heap == b_ref.heap;
 }
 
+/// Structural value subtyping across separately decoded modules. Concrete
+/// heap indices are compared through canonical recursive type identity rather
+/// than by their unrelated module-local numbers.
+pub fn valTypeMatchesAcross(
+    sub_mod: *const types.Module,
+    sub: types.ValType,
+    super_mod: *const types.Module,
+    super: types.ValType,
+) bool {
+    if (sub.refType()) |sub_ref| {
+        const super_ref = super.refType() orelse return false;
+        if (sub_ref.nullable and !super_ref.nullable) return false;
+        return heapTypeMatchesAcross(sub_mod, sub_ref.heap, super_mod, super_ref.heap);
+    }
+    return sub == super;
+}
+
 pub fn funcTypesEquivalentAcross(a_mod: *const types.Module, a: types.FuncType, b_mod: *const types.Module, b: types.FuncType) bool {
     if (a.params.len != b.params.len or a.results.len != b.results.len) return false;
     for (a.params, b.params) |a_param, b_param|
@@ -666,7 +683,7 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
     for (mod.elems) |e| {
         // MVP element segments use the implicit funcref type without opting
         // into the later reference-types feature.
-        if (e.type != .funcref) try validateValType(mod, e.type, diag);
+        if (!e.legacy_func_indices and e.type != .funcref) try validateValType(mod, e.type, diag);
         switch (e.mode) {
             .active => |active| {
                 if (active.table >= mod.totalTables())
@@ -3252,6 +3269,15 @@ test "wasm.validate GC canonical identity crosses module-local indices" {
     try std.testing.expect(definedTypesEquivalentAcross(a, 0, b, 1));
     try std.testing.expect(definedTypesEquivalentAcross(b, 1, a, 0));
     try std.testing.expect(!definedTypesEquivalentAcross(a, 0, distinct, 1));
+
+    const non_null_a = types.ValType.fromRef(.{ .nullable = false, .heap = .concrete(0) });
+    const nullable_b = types.ValType.fromRef(.{ .nullable = true, .heap = .concrete(1) });
+    const non_null_b = types.ValType.fromRef(.{ .nullable = false, .heap = .concrete(1) });
+    try std.testing.expect(valTypeMatchesAcross(a, non_null_a, b, nullable_b));
+    try std.testing.expect(valTypeMatchesAcross(a, non_null_a, b, .anyref));
+    try std.testing.expect(!valTypeMatchesAcross(b, nullable_b, a, non_null_a));
+    try std.testing.expect(valTypeMatchesAcross(b, non_null_b, a, non_null_a));
+    try std.testing.expect(!valTypeMatchesAcross(a, non_null_a, distinct, non_null_b));
 }
 
 test "wasm.validate GC packed access mutability and defaultability" {

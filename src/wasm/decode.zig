@@ -736,6 +736,7 @@ fn parseExportSection(r: *Reader, a: Allocator) DecodeError![]const types.Export
 }
 
 fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
+    const legacy_func_type = types.ValType.fromRef(.{ .nullable = false, .heap = .func });
     const n = try r.readCount();
     const elems = try a.alloc(types.Elem, n);
     for (elems) |*e| {
@@ -743,14 +744,20 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
         const kind = try r.readU32Leb();
         e.* = switch (kind) {
             0 => .{
-                .type = .funcref,
+                .type = legacy_func_type,
                 .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr(a) } },
                 .init = try readFuncElemInit(r, a),
+                .legacy_func_indices = true,
             },
             1 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 try readElemKind(r);
-                break :blk .{ .type = .funcref, .mode = .passive, .init = try readFuncElemInit(r, a) };
+                break :blk .{
+                    .type = legacy_func_type,
+                    .mode = .passive,
+                    .init = try readFuncElemInit(r, a),
+                    .legacy_func_indices = true,
+                };
             },
             2 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
@@ -758,15 +765,21 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
                 const offset = try r.readConstExpr(a);
                 try readElemKind(r);
                 break :blk .{
-                    .type = .funcref,
+                    .type = legacy_func_type,
                     .mode = .{ .active = .{ .table = table, .offset = offset } },
                     .init = try readFuncElemInit(r, a),
+                    .legacy_func_indices = true,
                 };
             },
             3 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 try readElemKind(r);
-                break :blk .{ .type = .funcref, .mode = .declarative, .init = try readFuncElemInit(r, a) };
+                break :blk .{
+                    .type = legacy_func_type,
+                    .mode = .declarative,
+                    .init = try readFuncElemInit(r, a),
+                    .legacy_func_indices = true,
+                };
             },
             4 => blk: {
                 if (!r.features.reference_types) return r.unsupportedFeature(kind_off, .reference_types);
@@ -1432,7 +1445,11 @@ test "wasm.decode kitchen sink module" {
     // Start / elem / data.
     try std.testing.expectEqual(@as(?u32, 1), mod.start);
     try std.testing.expectEqual(@as(usize, 1), mod.elems.len);
-    try std.testing.expectEqual(types.ValType.funcref, mod.elems[0].type);
+    try std.testing.expectEqual(
+        types.ValType.fromRef(.{ .nullable = false, .heap = .func }),
+        mod.elems[0].type,
+    );
+    try std.testing.expect(mod.elems[0].legacy_func_indices);
     const elem_active = mod.elems[0].mode.active;
     try std.testing.expectEqual(@as(u32, 0), elem_active.table);
     try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 0 }, elem_active.offset);
@@ -2177,6 +2194,12 @@ test "wasm.decode bulk memory segment forms DataCount order and immediates" {
 
     try std.testing.expectEqual(@as(?u32, 3), mod.data_count);
     try std.testing.expectEqual(@as(usize, 8), mod.elems.len);
+    const non_null_funcref = types.ValType.fromRef(.{ .nullable = false, .heap = .func });
+    for (mod.elems[0..4]) |elem| {
+        try std.testing.expectEqual(non_null_funcref, elem.type);
+        try std.testing.expect(elem.legacy_func_indices);
+    }
+    for (mod.elems[4..]) |elem| try std.testing.expect(!elem.legacy_func_indices);
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).active, std.meta.activeTag(mod.elems[0].mode));
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).passive, std.meta.activeTag(mod.elems[1].mode));
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).declarative, std.meta.activeTag(mod.elems[3].mode));
