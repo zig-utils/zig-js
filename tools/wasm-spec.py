@@ -665,6 +665,14 @@ def raw_value_bits(value: dict) -> str:
     return str(bits)
 
 
+def raw_argument_bits(value: dict) -> str:
+    kind = value["type"]
+    widths = {"i32": 32, "f32": 32, "i64": 64, "f64": 64}
+    if kind in widths:
+        return str(int(value["value"], 0) & ((1 << widths[kind]) - 1))
+    return raw_value_bits(value)
+
+
 def action_expression(action: dict) -> str:
     instance = instance_expression(action)
     field = js_string(action["field"])
@@ -683,7 +691,7 @@ def raw_action_expression(action: dict) -> str:
         return f"__wasmSpecInvokeBits({target})"
     if action["type"] == "invoke":
         args = "".join(
-            f",{js_string(raw_value_bits(value))}" for value in action.get("args", [])
+            f",{js_string(raw_argument_bits(value))}" for value in action.get("args", [])
         )
         return f"__wasmSpecInvokeBits({target}{args})"
     raise ValueError(f"unknown raw action type {action['type']}")
@@ -744,14 +752,15 @@ def vector_comparison(actual: str, expected: list[dict]) -> str:
             f"{json.dumps(expected[0]['value'], separators=(',', ':'))})"
         )
     if len(expected) == 1:
-        return f"{actual}==={js_string(raw_value_bits(expected[0]))}"
-    expected_bits = [raw_value_bits(value) for value in expected]
+        return f"{actual}==={js_string(raw_argument_bits(expected[0]))}"
+    expected_bits = [raw_argument_bits(value) for value in expected]
     return f"JSON.stringify({actual})==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
 
 
 PRELUDE = r"""
 const __report = { commands: [] };
 const __modules = Object.create(null);
+const __moduleDefinitions = Object.create(null);
 const __registry = Object.create(null);
 const __threads = Object.create(null);
 let __last = null;
@@ -912,6 +921,7 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 "{try{"
                 f"__threads[{js_string(command['name'])}]=new Thread((__shared)=>{{"
                 "const __report={commands:[]};const __modules=Object.create(null);"
+                "const __moduleDefinitions=Object.create(null);"
                 "const __registry=Object.create(null);const __threads=Object.create(null);"
                 "let __last=null;__registry.spectest=__spectest;"
                 "function __record(index,line,type,status,detail,mode){"
@@ -935,7 +945,7 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{passed}}}catch(__error){{{failed}}}}}"
             )
         if kind == "module":
-            binary = binary_expression(directory / command["filename"])
+            binary = binary_expression(directory / command.get("binary_filename", command["filename"]))
             name = command.get("name")
             assign_name = f"__modules[{js_string(name)}]=__last;" if name is not None else ""
             passed = record_line(index, command, "pass")
@@ -948,15 +958,29 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                 f"{assign_name}{passed}}}catch(__error){{{failed}}}}}"
             )
         if kind == "module_definition":
-            binary = binary_expression(directory / command["filename"])
+            binary = binary_expression(directory / command.get("binary_filename", command["filename"]))
+            name = command.get("name")
+            assign_name = f"__moduleDefinitions[{js_string(name)}]=__definition;" if name is not None else ""
             passed = record_line(index, command, "pass")
             failed = (
                 f"__record({index},{int(command.get('line', 0))},{js_string(kind)},"
                 "'fail',__message(__error));"
             )
             return (
-                f"{{try{{new WebAssembly.Module({binary});{passed}"
+                f"{{try{{const __definition=new WebAssembly.Module({binary});{assign_name}{passed}"
                 f"}}catch(__error){{{failed}}}}}"
+            )
+        if kind == "module_instance":
+            module = f"__moduleDefinitions[{js_string(command['module'])}]"
+            instance = js_string(command["instance"])
+            passed = record_line(index, command, "pass")
+            failed = (
+                f"__record({index},{int(command.get('line', 0))},{js_string(kind)},"
+                "'fail',__message(__error));"
+            )
+            return (
+                f"{{try{{__last=new WebAssembly.Instance({module},__registry);"
+                f"__modules[{instance}]=__last;{passed}}}catch(__error){{{failed}}}}}"
             )
         if kind == "register":
             source = (
@@ -1011,7 +1035,7 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
                         "bit_exact",
                     )
                 expression = raw_action_expression(command["action"])
-                expected_bits = js_string(expected[0]["value"])
+                expected_bits = js_string(raw_argument_bits(expected[0]))
                 return (
                     f"{{try{{const __actual={expression};if(__actual==={expected_bits}){{"
                     f"{record_line(index, command, 'pass', mode='bit_exact')}"
@@ -1198,8 +1222,8 @@ def run_file(
     command_shard_count: int,
 ) -> dict:
     stem = wast.stem
-    directory = work_root / stem
-    directory.mkdir()
+    directory = work_root / wast.relative_to(spec_root).with_suffix("")
+    directory.mkdir(parents=True)
     json_path = directory / f"{stem}.json"
     source = wast.read_text()
     if evaluator_profile == "threads" and ("(thread" in source or "(wait" in source):

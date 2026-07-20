@@ -62,6 +62,34 @@ class WastParserTests(unittest.TestCase):
 
 
 class ScriptGenerationTests(unittest.TestCase):
+    def test_work_directories_preserve_duplicate_basename_paths(self) -> None:
+        root = pathlib.Path("/spec")
+        work = pathlib.Path("/work")
+        first = work / pathlib.Path("/spec/test/core/memory_grow.wast").relative_to(root).with_suffix("")
+        second = work / pathlib.Path("/spec/test/core/multi-memory/memory_grow.wast").relative_to(root).with_suffix("")
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, pathlib.Path("/work/test/core/memory_grow"))
+        self.assertEqual(second, pathlib.Path("/work/test/core/multi-memory/memory_grow"))
+
+    def test_raw_scalar_bits_normalize_signed_converter_values(self) -> None:
+        self.assertEqual(wasm_spec.raw_argument_bits({"type": "i32", "value": "-1"}), "4294967295")
+        self.assertEqual(wasm_spec.raw_argument_bits({"type": "f64", "value": "-1"}), "18446744073709551615")
+        self.assertEqual(wasm_spec.raw_value_bits({"type": "i32", "value": "-1"}), "-1")
+
+    def test_module_definitions_create_named_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = pathlib.Path(raw_directory)
+            (directory / "named.wasm").write_bytes(b"\0asm\1\0\0\0")
+            definition = wasm_spec.generate_command(0, {
+                "type": "module_definition", "line": 1, "name": "M", "filename": "named.wasm",
+            }, directory)
+            instance = wasm_spec.generate_command(1, {
+                "type": "module_instance", "line": 2, "module": "M", "instance": "I",
+            }, directory)
+        self.assertIn('__moduleDefinitions["M"]', definition)
+        self.assertIn('new WebAssembly.Instance(__moduleDefinitions["M"]', instance)
+        self.assertIn('__modules["I"]', instance)
+
     def test_runner_error_details_are_unique_and_bounded(self) -> None:
         commands = [
             {"status": "runner_error", "detail": "engine exited 1"},
