@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "contract": "heap-snapshot-graph-and-profile-serialization",
+  "issue": 403,
+  "parent_issues": [140, 143, 246],
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+    "webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0",
+    "zig_gc": "c17c01af7ee8a38bbe1b47bc02751653d2b81afc"
+  },
+  "sources": {
+    "packages/runtime/src/jsc/BunHeapProfiler.zig": "c29c22a19125ba72c5a3d428bee38bd9c117e6e8f8dea61a1909cc7b424a7b60",
+    "packages/runtime/upstream/src/jsc/BunHeapProfiler.zig": "03c46cc369fe7a31bb591a49716cca56b8ee179cd7f612880a0d343e2c8b9cef",
+    "packages/runtime/upstream/src/jsc/bindings/BunHeapProfiler.cpp": "615af79100cb5d42dc7aa9228a0b5f3e008fe087b2632046ca79f43e84938405",
+    "WebKit/Source/JavaScriptCore/heap/HeapSnapshotBuilder.cpp": "ab628b005f13e2ef77f869551206c3c041bbc9c03791141b46e8c0830cd548cb",
+    "WebKit/Source/JavaScriptCore/heap/BunV8HeapSnapshotBuilder.cpp": "6621be214ca961b2e198338b1fb1a90c1301e07af927962ccf895d5bf4db7158"
+  },
+  "exports": [
+    "JSC__JSGlobalObject__generateHeapSnapshot",
+    "Bun__generateHeapSnapshotV8",
+    "Bun__generateHeapProfile"
+  ],
+  "semantics": [
+    "All three exports serialize one VM-wide strong graph built from the exact zig-gc binding trace policy across the primary runtime and every sibling realm.",
+    "WeakRef targets and weak collection keys do not retain nodes; ephemeron values are included only when their keys are otherwise strongly reachable.",
+    "Precise-GC cells use process-unique zig-gc identities that survive relocation; arena cells receive VM-lifetime identities that remain stable across repeated snapshots.",
+    "The GCDebugging object uses version 3, the pinned seven-field node stride, four-field edge stride, class/name/type tables, and explicit roots.",
+    "The V8 serializer publishes the pinned seven-field node and three-field edge schema with valid node offsets and string-table references.",
+    "The text profile reports exact reachable shallow totals, class statistics, roots, the complete cell inventory, and the complete strong-edge inventory.",
+    "Property, index, variable, and internal edge labels are sourced from object shapes, dense elements, environments, and internal-slot tracing without invoking JavaScript.",
+    "Home receives an owned StringImpl pointer while Bun receives an owned by-value BunString; both release through Bun__WTFStringImpl__deref.",
+    "Focused external fixtures cover sibling realms, cycles, weak targets, ArrayBuffer ownership, lone-surrogate JSON safety, repeated stable IDs, and both ownership profiles."
+  ]
+}

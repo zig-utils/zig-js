@@ -46,6 +46,7 @@ const fetch_headers = @import("fetch_headers.zig");
 const parser_mod = @import("parser.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
 const private_jstype = @import("private_abi/jstype.zig");
+const private_abi_options = @import("private_abi_options");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
 
@@ -506,20 +507,46 @@ const ReachabilityCell = struct {
     kind: gc_mod.CellKind,
 };
 
+const ReachabilityEdgeKind = enum { internal, property, index, variable };
+
+const ReachabilityEdgeName = union(enum) {
+    none,
+    string: []const u8,
+    index: usize,
+};
+
+const ReachabilityEdge = struct {
+    from_index: usize,
+    to_index: usize,
+    kind: ReachabilityEdgeKind,
+    name: ReachabilityEdgeName,
+};
+
 const ReachabilityVisitor = struct {
     allocator: std.mem.Allocator,
-    seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    seen: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     queue: std.ArrayListUnmanaged(ReachabilityCell) = .empty,
     objects: std.ArrayListUnmanaged(*Object) = .empty,
+    roots_seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
+    roots: std.ArrayListUnmanaged(usize) = .empty,
+    edges: std.ArrayListUnmanaged(ReachabilityEdge) = .empty,
+    current_source_index: ?usize = null,
+    failed: bool = false,
 
     fn deinit(self: *ReachabilityVisitor) void {
         self.seen.deinit(self.allocator);
         self.queue.deinit(self.allocator);
         self.objects.deinit(self.allocator);
+        self.roots_seen.deinit(self.allocator);
+        self.roots.deinit(self.allocator);
+        self.edges.deinit(self.allocator);
     }
 
     pub fn concurrent(_: *ReachabilityVisitor) bool {
         return false;
+    }
+    pub fn includeUnmanagedStrings(_: *ReachabilityVisitor) bool {
+        return true;
     }
     pub fn markWeak(_: *ReachabilityVisitor, _: *?*anyopaque) void {}
     pub fn markWeakAtomic(_: *ReachabilityVisitor, _: *std.atomic.Value(?*anyopaque)) void {}
@@ -534,7 +561,12 @@ const ReachabilityVisitor = struct {
         return if (cell) |pointer| self.seen.contains(@intFromPtr(pointer)) else false;
     }
 
-    pub fn mark(self: *ReachabilityVisitor, maybe_cell: anytype) void {
+    fn markEdge(
+        self: *ReachabilityVisitor,
+        edge_kind: ReachabilityEdgeKind,
+        edge_name: ReachabilityEdgeName,
+        maybe_cell: anytype,
+    ) void {
         const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
             .optional => maybe_cell orelse return,
             .pointer => maybe_cell,
@@ -562,29 +594,97 @@ const ReachabilityVisitor = struct {
         else
             @compileError("unclassified reachability cell " ++ @typeName(Pointer));
         const pointer: *anyopaque = @ptrCast(cell);
-        const result = self.seen.getOrPut(self.allocator, @intFromPtr(pointer)) catch return;
-        if (result.found_existing) return;
-        self.queue.append(self.allocator, .{ .pointer = pointer, .kind = kind }) catch return;
-        if (kind == .object)
-            self.objects.append(self.allocator, @ptrCast(@alignCast(pointer))) catch return;
+        const result = self.seen.getOrPut(self.allocator, @intFromPtr(pointer)) catch {
+            self.failed = true;
+            return;
+        };
+        if (!result.found_existing) {
+            const node_index = self.queue.items.len + 1; // zero is the synthetic root
+            self.queue.append(self.allocator, .{ .pointer = pointer, .kind = kind }) catch {
+                _ = self.seen.remove(@intFromPtr(pointer));
+                self.failed = true;
+                return;
+            };
+            result.value_ptr.* = node_index;
+            if (kind == .object)
+                self.objects.append(self.allocator, @ptrCast(@alignCast(pointer))) catch {
+                    self.failed = true;
+                    return;
+                };
+        }
+        const to_index = result.value_ptr.*;
+        if (self.current_source_index) |from_index| {
+            self.edges.append(self.allocator, .{
+                .from_index = from_index,
+                .to_index = to_index,
+                .kind = edge_kind,
+                .name = edge_name,
+            }) catch {
+                self.failed = true;
+            };
+        } else {
+            const root = self.roots_seen.getOrPut(self.allocator, to_index) catch {
+                self.failed = true;
+                return;
+            };
+            if (root.found_existing) return;
+            self.roots.append(self.allocator, to_index) catch {
+                _ = self.roots_seen.remove(to_index);
+                self.failed = true;
+                return;
+            };
+            self.edges.append(self.allocator, .{
+                .from_index = 0,
+                .to_index = to_index,
+                .kind = edge_kind,
+                .name = switch (edge_name) {
+                    .none => .{ .string = "GC root" },
+                    else => edge_name,
+                },
+            }) catch {
+                self.failed = true;
+            };
+        }
+    }
+
+    pub fn mark(self: *ReachabilityVisitor, maybe_cell: anytype) void {
+        self.markEdge(.internal, .none, maybe_cell);
+    }
+
+    pub fn markInternal(self: *ReachabilityVisitor, name: []const u8, maybe_cell: anytype) void {
+        self.markEdge(.internal, .{ .string = name }, maybe_cell);
+    }
+
+    pub fn markProperty(self: *ReachabilityVisitor, name: []const u8, maybe_cell: anytype) void {
+        self.markEdge(.property, .{ .string = name }, maybe_cell);
+    }
+
+    pub fn markIndex(self: *ReachabilityVisitor, index: usize, maybe_cell: anytype) void {
+        self.markEdge(.index, .{ .index = index }, maybe_cell);
+    }
+
+    pub fn markVariable(self: *ReachabilityVisitor, name: []const u8, maybe_cell: anytype) void {
+        self.markEdge(.variable, .{ .string = name }, maybe_cell);
     }
 
     fn drain(self: *ReachabilityVisitor) void {
         var index: usize = 0;
         while (index < self.queue.items.len) : (index += 1) {
             const cell = self.queue.items[index];
+            self.current_source_index = index + 1;
+            defer self.current_source_index = null;
             switch (cell.kind) {
                 .function => {
                     const function: *interp.Function = @ptrCast(@alignCast(cell.pointer));
-                    self.mark(function.closure);
-                    self.mark(function.realm_global);
+                    self.markInternal("[[Environment]]", function.closure);
+                    self.markInternal("[[RealmGlobal]]", function.realm_global);
                     gc_mod.traceFunction(function, self);
                 },
                 .environment => {
                     const environment: *interp.Environment = @ptrCast(@alignCast(cell.pointer));
-                    self.mark(environment.parent);
+                    self.markInternal("[[OuterEnv]]", environment.parent);
                     var aliases = environment.aliases.valueIterator();
-                    while (aliases.next()) |alias| self.mark(alias.env);
+                    while (aliases.next()) |alias| self.markInternal("[[AliasEnv]]", alias.env);
                     gc_mod.traceEnv(environment, self);
                 },
                 else => gc_mod.Binding.trace(cell.pointer, cell.kind, self),
@@ -595,7 +695,11 @@ const ReachabilityVisitor = struct {
     fn finishEphemerons(self: *ReachabilityVisitor) void {
         while (true) {
             const before = self.queue.items.len;
-            for (self.objects.items) |object| gc_mod.traceObjectEphemeron(object, self);
+            for (self.objects.items) |object| {
+                self.current_source_index = self.seen.get(@intFromPtr(object));
+                gc_mod.traceObjectEphemeron(object, self);
+            }
+            self.current_source_index = null;
             self.drain();
             if (self.queue.items.len == before) return;
         }
@@ -643,6 +747,12 @@ const CContextGroup = struct {
     /// Stable borrowed Latin-1/UTF-16 views returned to private ABI consumers.
     /// Keys and backing buffers are group-owned so sibling realms share them.
     zig_string_views: std.StringHashMapUnmanaged(PrivateZigStringView) = .empty,
+    /// Arena cells have stable addresses for the VM lifetime. Assign their
+    /// diagnostic heap-snapshot IDs lazily and retain the mapping so repeated
+    /// snapshots preserve identity. Precise-GC cells use zig-gc's relocation-
+    /// stable header identity instead and never enter this table.
+    heap_snapshot_ids: std.AutoHashMapUnmanaged(usize, u64) = .empty,
+    next_heap_snapshot_id: u64 = 2,
     collection_epoch: u64 = 0,
     /// JavaScriptCore stores the active exception on the VM, not the realm.
     /// Preserve a distinct cell so sibling globals observe the same identity.
@@ -731,9 +841,409 @@ const CContextGroup = struct {
             }
         }
         self.zig_string_views.deinit(gpa);
+        self.heap_snapshot_ids.deinit(gpa);
         self.record_allocator.destroy(self);
     }
 };
+
+const PrivateHeapSnapshotNode = struct {
+    id: u64,
+    size: usize,
+    name: []const u8,
+    kind: gc_mod.CellKind,
+    pointer: *anyopaque,
+};
+
+const PrivateHeapSnapshotStrings = struct {
+    allocator: std.mem.Allocator,
+    map: std.StringHashMapUnmanaged(u32) = .empty,
+    items: std.ArrayListUnmanaged([]const u8) = .empty,
+
+    fn deinit(self: *PrivateHeapSnapshotStrings) void {
+        self.map.deinit(self.allocator);
+        self.items.deinit(self.allocator);
+    }
+
+    fn intern(self: *PrivateHeapSnapshotStrings, string: []const u8) !u32 {
+        const result = try self.map.getOrPut(self.allocator, string);
+        if (result.found_existing) return result.value_ptr.*;
+        const index: u32 = @intCast(self.items.items.len);
+        self.items.append(self.allocator, string) catch |err| {
+            _ = self.map.remove(string);
+            return err;
+        };
+        result.value_ptr.* = index;
+        return index;
+    }
+};
+
+fn privateHeapSnapshotObjectName(object: *const Object) []const u8 {
+    if (object.is_symbol) return "Symbol";
+    if (object.is_bigint) return "BigInt";
+    if (object.is_array) return "Array";
+    if (object.is_arguments) return "Arguments";
+    if (object.behavior.is_regex) return "RegExp";
+    if (object.behavior.is_date) return "Date";
+    if (object.behavior.is_error) return object.errorName();
+    if (object.behavior.is_file) return "File";
+    if (object.behavior.is_blob) return "Blob";
+    if (object.behavior.is_form_data) return "FormData";
+    if (object.behavior.is_abort_signal) return "AbortSignal";
+    if (object.behavior.is_weak_ref) return "WeakRef";
+    if (object.behavior.is_finalization_registry) return "FinalizationRegistry";
+    if (object.is_map) return if (object.is_weak) "WeakMap" else "Map";
+    if (object.is_set) return if (object.is_weak) "WeakSet" else "Set";
+    if (object.isCallableObject()) return "Function";
+    return "Object";
+}
+
+fn privateHeapSnapshotNodeName(cell: ReachabilityCell) []const u8 {
+    return switch (cell.kind) {
+        .object => privateHeapSnapshotObjectName(@ptrCast(@alignCast(cell.pointer))),
+        .string => @as(*strcell.StringCell, @ptrCast(@alignCast(cell.pointer))).bytes,
+        .environment => "Environment",
+        .function => blk: {
+            const function: *interp.Function = @ptrCast(@alignCast(cell.pointer));
+            break :blk if (function.name.len == 0) "Function" else function.name;
+        },
+        .bound_fn => "BoundFunction",
+        .promise => "Promise",
+        .generator => "Generator",
+        .iter_helper => "IteratorHelper",
+        .module_ns => "ModuleNamespace",
+    };
+}
+
+fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) usize {
+    return switch (cell.kind) {
+        .object => blk: {
+            const object: *Object = @ptrCast(@alignCast(cell.pointer));
+            const external_slots = object.slotsItems().len -| Object.inline_slot_capacity;
+            break :blk @sizeOf(Object) +
+                external_slots * @sizeOf(Value) +
+                object.elementsItems().len * @sizeOf(Value);
+        },
+        .string => blk: {
+            const string: *strcell.StringCell = @ptrCast(@alignCast(cell.pointer));
+            break :blk @sizeOf(strcell.StringCell) + string.bytes.len;
+        },
+        .environment => @sizeOf(interp.Environment),
+        .function => @sizeOf(interp.Function),
+        .bound_fn => @sizeOf(interp.Interpreter.BoundFn),
+        .promise => @sizeOf(promise.Promise),
+        .generator => @sizeOf(vm.Generator),
+        .iter_helper => @sizeOf(value.IterHelper),
+        .module_ns => @sizeOf(interp.ModuleNs),
+    };
+}
+
+fn privateHeapSnapshotCellId(group: *CContextGroup, pointer: *anyopaque) !u64 {
+    if (group.primary.gc) |heap| if (heap.cellMetadata(pointer)) |metadata| {
+        const raw = @intFromEnum(metadata.id);
+        if (raw > (std.math.maxInt(u64) - 1) / 2) return error.StableIdExhausted;
+        return raw * 2 + 1;
+    };
+    const address = @intFromPtr(pointer);
+    if (group.heap_snapshot_ids.get(address)) |id| return id;
+    const id = group.next_heap_snapshot_id;
+    if (id == 0 or id > std.math.maxInt(u64) - 2) return error.StableIdExhausted;
+    try group.heap_snapshot_ids.putNoClobber(gpa, address, id);
+    group.next_heap_snapshot_id = id + 2;
+    return id;
+}
+
+fn privateBuildHeapSnapshotGraph(group: *CContextGroup) !ReachabilityVisitor {
+    // GCDebugging snapshots are taken after a full collection. Arena VMs have
+    // VM-lifetime storage, but use the same semantic root walk and weak-edge
+    // policy, so their graph still contains exactly the strongly reachable set.
+    if (group.primary.gc != null) group.primary.collectGarbage();
+    var visitor = ReachabilityVisitor{ .allocator = gpa };
+    errdefer visitor.deinit();
+    var primary_binding = gc_mod.Binding{ .context = group.primary };
+    primary_binding.traceRoots(&visitor);
+    for (group.contexts.items) |realm| {
+        var binding = gc_mod.Binding{ .context = realm };
+        binding.traceRoots(&visitor);
+    }
+    visitor.drain();
+    visitor.finishEphemerons();
+    if (visitor.failed) return error.OutOfMemory;
+    std.mem.sort(ReachabilityEdge, visitor.edges.items, {}, struct {
+        fn lessThan(_: void, left: ReachabilityEdge, right: ReachabilityEdge) bool {
+            if (left.from_index != right.from_index) return left.from_index < right.from_index;
+            if (left.to_index != right.to_index) return left.to_index < right.to_index;
+            return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+        }
+    }.lessThan);
+    return visitor;
+}
+
+fn privateHeapSnapshotNodes(group: *CContextGroup, visitor: *const ReachabilityVisitor) ![]PrivateHeapSnapshotNode {
+    const nodes = try gpa.alloc(PrivateHeapSnapshotNode, visitor.queue.items.len);
+    errdefer gpa.free(nodes);
+    for (visitor.queue.items, nodes) |cell, *node| {
+        node.* = .{
+            .id = try privateHeapSnapshotCellId(group, cell.pointer),
+            .size = privateHeapSnapshotFallbackSize(cell),
+            .name = privateHeapSnapshotNodeName(cell),
+            .kind = cell.kind,
+            .pointer = cell.pointer,
+        };
+    }
+    return nodes;
+}
+
+fn privateSnapshotAppendFmt(
+    output: *std.ArrayListUnmanaged(u8),
+    comptime format: []const u8,
+    args: anytype,
+) !void {
+    var buffer: [192]u8 = undefined;
+    const text = try std.fmt.bufPrint(&buffer, format, args);
+    try output.appendSlice(gpa, text);
+}
+
+fn privateSnapshotAppendJsonValue(output: *std.ArrayListUnmanaged(u8), value_: anytype) !void {
+    const encoded = try std.json.Stringify.valueAlloc(gpa, value_, .{});
+    defer gpa.free(encoded);
+    try output.appendSlice(gpa, encoded);
+}
+
+fn privateHeapSnapshotEdgeName(strings: *PrivateHeapSnapshotStrings, edge: ReachabilityEdge) !u64 {
+    return switch (edge.name) {
+        .none => try strings.intern(""),
+        .string => |name| try strings.intern(name),
+        .index => |index| index,
+    };
+}
+
+fn privateHeapSnapshotV8NodeType(node: PrivateHeapSnapshotNode) u64 {
+    return switch (node.kind) {
+        .string => 2,
+        .function, .bound_fn => 5,
+        .object => if (@as(*Object, @ptrCast(@alignCast(node.pointer))).is_array) 1 else 3,
+        else => 8,
+    };
+}
+
+fn privateHeapSnapshotClassName(node: PrivateHeapSnapshotNode) []const u8 {
+    return switch (node.kind) {
+        .object => privateHeapSnapshotObjectName(@ptrCast(@alignCast(node.pointer))),
+        .string => "String",
+        .environment => "Environment",
+        .function => "Function",
+        .bound_fn => "BoundFunction",
+        .promise => "Promise",
+        .generator => "Generator",
+        .iter_helper => "IteratorHelper",
+        .module_ns => "ModuleNamespace",
+    };
+}
+
+fn privateGenerateHeapSnapshotV8(group: *CContextGroup) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group);
+    defer visitor.deinit();
+    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor);
+    defer gpa.free(snapshot_nodes);
+
+    var strings = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    defer strings.deinit();
+    const root_name = try strings.intern("(root)");
+    var nodes: std.ArrayListUnmanaged(u64) = .empty;
+    defer nodes.deinit(gpa);
+    var edges: std.ArrayListUnmanaged(u64) = .empty;
+    defer edges.deinit(gpa);
+    const edge_counts = try gpa.alloc(u64, snapshot_nodes.len + 1);
+    defer gpa.free(edge_counts);
+    @memset(edge_counts, 0);
+    for (visitor.edges.items) |edge| edge_counts[edge.from_index] += 1;
+
+    try nodes.appendSlice(gpa, &.{ 9, root_name, 1, 0, edge_counts[0], 0, 0 });
+    for (snapshot_nodes, 1..) |node, node_index| {
+        const name_index = try strings.intern(node.name);
+        try nodes.appendSlice(gpa, &.{
+            privateHeapSnapshotV8NodeType(node),
+            name_index,
+            node.id,
+            node.size,
+            edge_counts[node_index],
+            0,
+            0,
+        });
+    }
+    for (visitor.edges.items) |edge| {
+        const edge_type: u64 = switch (edge.kind) {
+            .variable => 0,
+            .index => 1,
+            .property => 2,
+            .internal => 3,
+        };
+        try edges.appendSlice(gpa, &.{
+            edge_type,
+            try privateHeapSnapshotEdgeName(&strings, edge),
+            edge.to_index * 7,
+        });
+    }
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(gpa);
+    try output.appendSlice(gpa, "{\"snapshot\":{\"meta\":{\"node_fields\":[\"type\",\"name\",\"id\",\"self_size\",\"edge_count\",\"trace_node_id\",\"detachedness\"]," ++
+        "\"node_types\":[[\"hidden\",\"array\",\"string\",\"object\",\"code\",\"closure\",\"regexp\",\"number\",\"native\",\"synthetic\",\"concatenated string\",\"sliced string\",\"symbol\",\"bigint\",\"object shape\"],\"string\",\"number\",\"number\",\"number\",\"number\",\"number\"]," ++
+        "\"edge_fields\":[\"type\",\"name_or_index\",\"to_node\"],\"edge_types\":[[\"context\",\"element\",\"property\",\"internal\",\"hidden\",\"shortcut\",\"weak\"],\"string_or_number\",\"node\"]," ++
+        "\"trace_function_info_fields\":[\"function_id\",\"name\",\"script_name\",\"script_id\",\"line\",\"column\"],\"trace_node_fields\":[\"id\",\"function_info_index\",\"count\",\"size\",\"children\"],\"sample_fields\":[\"timestamp_us\",\"last_assigned_id\"],\"location_fields\":[\"object_index\",\"script_id\",\"line\",\"column\"]},\"node_count\":");
+    try privateSnapshotAppendFmt(&output, "{d},\"edge_count\":{d},\"trace_function_count\":0}},\"nodes\":", .{ snapshot_nodes.len + 1, visitor.edges.items.len });
+    try privateSnapshotAppendJsonValue(&output, nodes.items);
+    try output.appendSlice(gpa, ",\"edges\":");
+    try privateSnapshotAppendJsonValue(&output, edges.items);
+    try output.appendSlice(gpa, ",\"trace_function_infos\":[],\"trace_tree\":[],\"samples\":[],\"locations\":[],\"strings\":");
+    try privateSnapshotAppendJsonValue(&output, strings.items.items);
+    try output.append(gpa, '}');
+    return try output.toOwnedSlice(gpa);
+}
+
+fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group);
+    defer visitor.deinit();
+    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor);
+    defer gpa.free(snapshot_nodes);
+
+    var class_names = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    defer class_names.deinit();
+    var edge_names = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    defer edge_names.deinit();
+    const root_class = try class_names.intern("(root)");
+    _ = try edge_names.intern("");
+    const class_indices = try gpa.alloc(u32, snapshot_nodes.len);
+    defer gpa.free(class_indices);
+    for (snapshot_nodes, class_indices) |node, *index|
+        index.* = try class_names.intern(privateHeapSnapshotClassName(node));
+
+    var edges: std.ArrayListUnmanaged(u64) = .empty;
+    defer edges.deinit(gpa);
+    for (visitor.edges.items) |edge| {
+        if (edge.from_index == 0) continue;
+        const edge_type: u64 = switch (edge.kind) {
+            .internal => 0,
+            .property => 1,
+            .index => 2,
+            .variable => 3,
+        };
+        const data: u64 = switch (edge.name) {
+            .none => 0,
+            .string => |name| try edge_names.intern(name),
+            .index => |index| index,
+        };
+        try edges.appendSlice(gpa, &.{
+            snapshot_nodes[edge.from_index - 1].id,
+            snapshot_nodes[edge.to_index - 1].id,
+            edge_type,
+            data,
+        });
+    }
+    var roots: std.ArrayListUnmanaged(u64) = .empty;
+    defer roots.deinit(gpa);
+    for (visitor.roots.items) |root_index|
+        try roots.appendSlice(gpa, &.{ snapshot_nodes[root_index - 1].id, 0, 0 });
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(gpa);
+    try output.appendSlice(gpa, "{\"version\":3,\"type\":\"GCDebugging\",\"nodes\":[");
+    try privateSnapshotAppendFmt(&output, "0,0,{d},1,0,\"0x0\",\"0x0\"", .{root_class});
+    for (snapshot_nodes, class_indices) |node, class_index| {
+        const internal: u8 = if (node.kind == .object or node.kind == .string or
+            node.kind == .function or node.kind == .bound_fn) 0 else 1;
+        try privateSnapshotAppendFmt(&output, ",{d},{d},{d},{d},0,\"0x{x}\",\"0x0\"", .{
+            node.id,
+            node.size,
+            class_index,
+            internal,
+            @intFromPtr(node.pointer),
+        });
+    }
+    try output.appendSlice(gpa, "],\"nodeClassNames\":");
+    try privateSnapshotAppendJsonValue(&output, class_names.items.items);
+    try output.appendSlice(gpa, ",\"edges\":");
+    try privateSnapshotAppendJsonValue(&output, edges.items);
+    try output.appendSlice(gpa, ",\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":");
+    try privateSnapshotAppendJsonValue(&output, edge_names.items.items);
+    try output.appendSlice(gpa, ",\"roots\":");
+    try privateSnapshotAppendJsonValue(&output, roots.items);
+    try output.appendSlice(gpa, ",\"labels\":[\"Strong root\"]}");
+    return try output.toOwnedSlice(gpa);
+}
+
+fn privateSnapshotAppendMarkdownText(output: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
+    for (text) |byte| switch (byte) {
+        '|', '`', '\\' => {
+            try output.append(gpa, '\\');
+            try output.append(gpa, byte);
+        },
+        '\n', '\r', '\t' => try output.append(gpa, ' '),
+        else => if (byte >= 0x20) try output.append(gpa, byte),
+    };
+}
+
+fn privateGenerateHeapProfile(group: *CContextGroup) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group);
+    defer visitor.deinit();
+    const nodes = try privateHeapSnapshotNodes(group, &visitor);
+    defer gpa.free(nodes);
+
+    const TypeStats = struct { count: usize = 0, bytes: usize = 0 };
+    var stats: std.StringHashMapUnmanaged(TypeStats) = .empty;
+    defer stats.deinit(gpa);
+    var total_bytes: usize = 0;
+    for (nodes) |node| {
+        total_bytes += node.size;
+        const entry = try stats.getOrPut(gpa, privateHeapSnapshotClassName(node));
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        entry.value_ptr.count += 1;
+        entry.value_ptr.bytes += node.size;
+    }
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(gpa);
+    try output.appendSlice(gpa, "# Bun Heap Profile\n\n## Summary\n\n| Metric | Value |\n| --- | ---: |\n");
+    try privateSnapshotAppendFmt(&output, "| Reachable shallow size | {d} B |\n| Reachable cells | {d} |\n| Strong edges | {d} |\n| GC roots | {d} |\n| Cell classes | {d} |\n\n", .{ total_bytes, nodes.len, visitor.edges.items.len - visitor.roots.items.len, visitor.roots.items.len, stats.count() });
+    try output.appendSlice(gpa, "## Type Statistics\n\n| Type | Count | Shallow size |\n| --- | ---: | ---: |\n");
+    var stat_iterator = stats.iterator();
+    while (stat_iterator.next()) |entry| {
+        try output.appendSlice(gpa, "| `");
+        try privateSnapshotAppendMarkdownText(&output, entry.key_ptr.*);
+        try privateSnapshotAppendFmt(&output, "` | {d} | {d} B |\n", .{ entry.value_ptr.count, entry.value_ptr.bytes });
+    }
+    try output.appendSlice(gpa, "\n## GC Roots\n\n| ID | Type | Name |\n| ---: | --- | --- |\n");
+    for (visitor.roots.items) |root_index| {
+        const node = nodes[root_index - 1];
+        try privateSnapshotAppendFmt(&output, "| {d} | `", .{node.id});
+        try privateSnapshotAppendMarkdownText(&output, privateHeapSnapshotClassName(node));
+        try output.appendSlice(gpa, "` | `");
+        try privateSnapshotAppendMarkdownText(&output, node.name);
+        try output.appendSlice(gpa, "` |\n");
+    }
+    try output.appendSlice(gpa, "\n## Complete Cells\n\n| ID | Type | Shallow size | Name |\n| ---: | --- | ---: | --- |\n");
+    for (nodes) |node| {
+        try privateSnapshotAppendFmt(&output, "| {d} | `", .{node.id});
+        try privateSnapshotAppendMarkdownText(&output, privateHeapSnapshotClassName(node));
+        try privateSnapshotAppendFmt(&output, "` | {d} B | `", .{node.size});
+        try privateSnapshotAppendMarkdownText(&output, node.name);
+        try output.appendSlice(gpa, "` |\n");
+    }
+    try output.appendSlice(gpa, "\n## Complete Strong Edges\n\n| From | Kind | Name/index | To |\n| ---: | --- | --- | ---: |\n");
+    for (visitor.edges.items) |edge| {
+        const from_id: u64 = if (edge.from_index == 0) 0 else nodes[edge.from_index - 1].id;
+        const to_id = nodes[edge.to_index - 1].id;
+        try privateSnapshotAppendFmt(&output, "| {d} | {s} | `", .{ from_id, @tagName(edge.kind) });
+        switch (edge.name) {
+            .none => {},
+            .string => |name| try privateSnapshotAppendMarkdownText(&output, name),
+            .index => |index| try privateSnapshotAppendFmt(&output, "{d}", .{index}),
+        }
+        try privateSnapshotAppendFmt(&output, "` | {d} |\n", .{to_id});
+    }
+    try output.appendSlice(gpa, "\n---\n\n*End of heap profile*\n");
+    return try output.toOwnedSlice(gpa);
+}
 
 /// Bun's `Strong.Impl` reads the first machine word directly as an
 /// EncodedJSValue, so keep the encoded slot at offset zero. The paired internal
@@ -3295,6 +3805,22 @@ fn privateOwnedWTF8String(bytes: []const u8) PrivateBunStringError!PrivateBunStr
         .private_magic = private_wtf_magic,
     };
     return .{ .tag = .wtf_string_impl, .value = .{ .wtf_string_impl = impl } };
+}
+
+const PrivateHeapProfilerString = if (private_abi_options.is_bun) PrivateBunString else ?*PrivateWTFStringImpl;
+
+fn privateOwnedHeapProfilerString(bytes: []const u8) PrivateHeapProfilerString {
+    const string = privateOwnedWTF8String(bytes) catch {
+        if (comptime private_abi_options.is_bun) return PrivateBunString.dead();
+        return null;
+    };
+    if (comptime private_abi_options.is_bun) return string;
+    return if (string.tag == .wtf_string_impl) string.value.wtf_string_impl else null;
+}
+
+fn privateEmptyHeapProfilerString() PrivateHeapProfilerString {
+    if (comptime private_abi_options.is_bun) return PrivateBunString.dead();
+    return null;
 }
 
 const PrivateBunStringError = error{ OutOfMemory, StringTooLong, InvalidString };
@@ -12056,6 +12582,62 @@ fn privateCreateVMWithAllocator(allocator: std.mem.Allocator, heap_type: u8) ?*a
 /// leaves the ownership identity independent from any realm later attached.
 export fn JSC__VM__create(heap_type: u8) callconv(.c) ?*anyopaque {
     return privateCreateVMWithAllocator(gpa, heap_type);
+}
+
+/// Build WebKit's pinned GCDebugging heap-snapshot object from the VM-wide
+/// strong graph. The JSON intermediate is parsed through the engine's ordinary
+/// JSON path so callers receive a genuine realm-local JS object.
+export fn JSC__JSGlobalObject__generateHeapSnapshot(global: JSContextRef) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const json = privateGenerateHeapSnapshotGCDebugging(group) catch {
+        var failed_machine = context.interpreter();
+        privateSetPendingAbrupt(context, &failed_machine, error.OutOfMemory);
+        return .empty;
+    };
+    defer gpa.free(json);
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const string_arena_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(string_arena_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const input = Value.strAlloc(context.arena(), json) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const parsed = builtins.jsonParse(&machine, Value.undef(), &.{input}) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, parsed);
+}
+
+/// Serialize the same graph in the Chrome/V8 `.heapsnapshot` wire format.
+/// Home's pinned leaf port receives an owned StringImpl pointer; Bun receives
+/// its current by-value BunString wrapper. Both are released by the existing
+/// `Bun__WTFStringImpl__deref` ownership boundary.
+export fn Bun__generateHeapSnapshotV8(vm_ref: ?*anyopaque) callconv(.c) PrivateHeapProfilerString {
+    const group = privateGroupFromVM(vm_ref) orelse return privateEmptyHeapProfilerString();
+    const json = privateGenerateHeapSnapshotV8(group) catch return privateEmptyHeapProfilerString();
+    defer gpa.free(json);
+    return privateOwnedHeapProfilerString(json);
+}
+
+/// Produce a complete human-readable inventory of reachable cell classes,
+/// roots, cells, and strong edges from the same graph used by both JSON forms.
+export fn Bun__generateHeapProfile(vm_ref: ?*anyopaque) callconv(.c) PrivateHeapProfilerString {
+    const group = privateGroupFromVM(vm_ref) orelse return privateEmptyHeapProfilerString();
+    const profile = privateGenerateHeapProfile(group) catch return privateEmptyHeapProfilerString();
+    defer gpa.free(profile);
+    return privateOwnedHeapProfilerString(profile);
 }
 
 /// Release the single owner reference published by `JSC__VM__create`.

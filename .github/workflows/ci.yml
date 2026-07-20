@@ -178,6 +178,7 @@ jobs:
               zig build test-private-process-signal
               zig build test-home-private-script-execution-context
               zig build test-private-module-registry-shims
+              zig build test-private-heap-snapshot
               zig build test-private-error-code
               zig build test-private-inspector-agents
               zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun

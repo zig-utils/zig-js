@@ -20,6 +20,7 @@ INSPECTOR_AGENTS_CONTRACT = ROOT / "docs/abi/bun-inspector-agents-4982b91e.json"
 HTTP_SERVER_INSPECTOR_CONTRACT = ROOT / "docs/abi/bun-http-server-inspector-4982b91e.json"
 PROCESS_SIGNAL_CONTRACT = ROOT / "docs/abi/bun-process-signal-4982b91e.json"
 MODULE_REGISTRY_SHIMS_CONTRACT = ROOT / "docs/abi/bun-module-registry-shims-4982b91e.json"
+HEAP_SNAPSHOT_CONTRACT = ROOT / "docs/abi/heap-snapshot-serialization-403.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -467,6 +468,59 @@ def validate_module_registry_shims_contract(bun_root: Path | None) -> None:
         fail("module registry shims semantic inventory is incomplete or duplicated")
 
 
+def validate_heap_snapshot_contract(bun_root: Path | None) -> None:
+    if not HEAP_SNAPSHOT_CONTRACT.is_file():
+        fail(f"missing checked-in heap snapshot contract {HEAP_SNAPSHOT_CONTRACT}")
+    contract = json.loads(HEAP_SNAPSHOT_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "heap-snapshot-graph-and-profile-serialization"
+        or contract.get("issue") != 403
+        or contract.get("parent_issues") != [140, 143, 246]
+    ):
+        fail("heap snapshot contract schema or issue lineage drift")
+    if contract.get("revisions") != {
+        "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+        "bun": REVISION,
+        "webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0",
+        "zig_gc": "c17c01af7ee8a38bbe1b47bc02751653d2b81afc",
+    }:
+        fail("heap snapshot revision set drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "packages/runtime/src/jsc/BunHeapProfiler.zig",
+        "packages/runtime/upstream/src/jsc/BunHeapProfiler.zig",
+        "packages/runtime/upstream/src/jsc/bindings/BunHeapProfiler.cpp",
+        "WebKit/Source/JavaScriptCore/heap/HeapSnapshotBuilder.cpp",
+        "WebKit/Source/JavaScriptCore/heap/BunV8HeapSnapshotBuilder.cpp",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("heap snapshot source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid heap snapshot digest for {relative}")
+    if bun_root is not None:
+        bun_sources = {
+            "packages/runtime/upstream/src/jsc/BunHeapProfiler.zig": "src/jsc/BunHeapProfiler.zig",
+            "packages/runtime/upstream/src/jsc/bindings/BunHeapProfiler.cpp": "src/jsc/bindings/BunHeapProfiler.cpp",
+        }
+        for contract_path, bun_path in bun_sources.items():
+            path = bun_root / bun_path
+            if not path.is_file() or sha256(path) != sources[contract_path]:
+                fail(f"heap snapshot source drift for {bun_path}")
+    expected_exports = {
+        "JSC__JSGlobalObject__generateHeapSnapshot",
+        "Bun__generateHeapSnapshotV8",
+        "Bun__generateHeapProfile",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("heap snapshot export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 9 or len(semantics) != len(set(semantics)):
+        fail("heap snapshot semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -495,6 +549,7 @@ def main() -> None:
     validate_http_server_inspector_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_process_signal_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_module_registry_shims_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_heap_snapshot_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

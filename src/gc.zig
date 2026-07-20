@@ -72,8 +72,55 @@ pub inline fn markValue(v: anytype, val: Value) void {
         v.mark(val.asObj());
     } else if (val.isString()) {
         const cell = val.asStringCell();
-        if (cell.isGcManaged()) v.mark(@constCast(cell));
+        const include_unmanaged = comptime @hasDecl(@TypeOf(v.*), "includeUnmanagedStrings");
+        if (cell.isGcManaged() or (include_unmanaged and v.includeUnmanagedStrings()))
+            v.mark(@constCast(cell));
     }
+}
+
+inline fn markCellEdge(v: anytype, comptime method: []const u8, label: anytype, cell: anytype) void {
+    if (comptime @hasDecl(@TypeOf(v.*), method)) {
+        @call(.always_inline, @field(@TypeOf(v.*), method), .{ v, label, cell });
+    } else {
+        v.mark(cell);
+    }
+}
+
+pub inline fn markValueProperty(v: anytype, name: []const u8, val: Value) void {
+    if (val.isObject()) {
+        markCellEdge(v, "markProperty", name, val.asObj());
+    } else if (val.isString()) {
+        const cell = val.asStringCell();
+        const include_unmanaged = comptime @hasDecl(@TypeOf(v.*), "includeUnmanagedStrings");
+        if (cell.isGcManaged() or (include_unmanaged and v.includeUnmanagedStrings()))
+            markCellEdge(v, "markProperty", name, @constCast(cell));
+    }
+}
+
+pub inline fn markValueIndex(v: anytype, index: usize, val: Value) void {
+    if (val.isObject()) {
+        markCellEdge(v, "markIndex", index, val.asObj());
+    } else if (val.isString()) {
+        const cell = val.asStringCell();
+        const include_unmanaged = comptime @hasDecl(@TypeOf(v.*), "includeUnmanagedStrings");
+        if (cell.isGcManaged() or (include_unmanaged and v.includeUnmanagedStrings()))
+            markCellEdge(v, "markIndex", index, @constCast(cell));
+    }
+}
+
+pub inline fn markValueVariable(v: anytype, name: []const u8, val: Value) void {
+    if (val.isObject()) {
+        markCellEdge(v, "markVariable", name, val.asObj());
+    } else if (val.isString()) {
+        const cell = val.asStringCell();
+        const include_unmanaged = comptime @hasDecl(@TypeOf(v.*), "includeUnmanagedStrings");
+        if (cell.isGcManaged() or (include_unmanaged and v.includeUnmanagedStrings()))
+            markCellEdge(v, "markVariable", name, @constCast(cell));
+    }
+}
+
+inline fn markInternal(v: anytype, name: []const u8, cell: anytype) void {
+    markCellEdge(v, "markInternal", name, cell);
 }
 
 inline fn markValueOpt(v: anytype, val: ?Value) void {
@@ -135,7 +182,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // The cold pointer itself can also be installed lazily on an already-live
     // object, so snapshot it and all rare GC edges under `backing_lock`.
     const concurrent = v.concurrent();
-    v.mark(if (concurrent) @atomicLoad(?*Object, &o.proto, .monotonic) else o.proto);
+    markInternal(v, "[[Prototype]]", if (concurrent) @atomicLoad(?*Object, &o.proto, .monotonic) else o.proto);
     const cold = o.traceColdSnapshot(concurrent);
     v.mark(cold.ctor_ref);
     v.mark(cold.proxy_target);
@@ -147,7 +194,16 @@ pub fn traceObject(o: *Object, v: anytype) void {
     // tears the slice. Under stop-the-world (M1) / GIL-held incremental (M2)
     // marking the world is quiescent during the read, so we skip the lock.
     if (concurrent) o.lockProperties();
-    for (o.slotsItems()) |slot| markValue(v, slot);
+    for (o.slotsItems(), 0..) |slot, slot_index| {
+        var shape = o.shape;
+        const name = while (shape) |current| : (shape = current.parent) {
+            if (current.name != null and current.slot == slot_index) break current.name.?;
+        } else null;
+        if (name) |property_name|
+            markValueProperty(v, property_name, slot)
+        else
+            markValue(v, slot);
+    }
     if (o.accessorsMap()) |acc| {
         var it = acc.valueIterator();
         while (it.next()) |a| {
@@ -171,7 +227,7 @@ pub fn traceObject(o: *Object, v: anytype) void {
         // mutator append, and no `&entry.key` can dangle when the buffer grows.
     } else {
         if (concurrent) o.lockElements();
-        for (o.elementsItems()) |el| markValue(v, el);
+        for (o.elementsItems(), 0..) |el, index| markValueIndex(v, index, el);
         if (concurrent) o.unlockElements();
     }
     markValueOpt(v, cold.boxed_primitive);
@@ -206,8 +262,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
     jsthread.traceNativePrivateData(o, v);
     vm.traceNativePrivateData(o, v);
     // The viewed ArrayBuffer object keeps a TypedArray/DataView's storage alive.
-    if (cold.typed_array) |ta| v.mark(ta.buffer);
-    if (cold.data_view) |dv| v.mark(dv.buffer);
+    if (cold.typed_array) |ta| markInternal(v, "[[ViewedArrayBuffer]]", ta.buffer);
+    if (cold.data_view) |dv| markInternal(v, "[[ViewedArrayBuffer]]", dv.buffer);
     // WebAssembly JS API rare-state edges (issue #141): the JS wrapper objects
     // keep their linked Module/exports/buffer/owner objects alive. The native
     // payload memory is registry-owned; live exception and GC-reference
@@ -1007,8 +1063,8 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     // are set at env creation and never rewritten, so they need no lock.
     const concurrent = v.concurrent();
     if (concurrent) e.lockBindings();
-    var vit = e.vars.valueIterator();
-    while (vit.next()) |val| markValue(v, val.*);
+    var vit = e.vars.iterator();
+    while (vit.next()) |entry| markValueVariable(v, entry.key_ptr.*, entry.value_ptr.*);
     for (e.disposables.items) |d| {
         markValue(v, d.value);
         markValue(v, d.method);

@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 486,
-      "pending": 44
+      "implemented": 489,
+      "pending": 41
     }
   },
   "declarations": [
@@ -995,10 +995,10 @@
       "line": 29,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__generateHeapProfile(vm: *VM) *String;",
       "declaration_sha256": "f93aec932c9b775d36423bc3b0a63313814ca26d33303660dfbf8eb43057ba37",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__generateHeapSnapshotV8",
@@ -1006,10 +1006,10 @@
       "line": 30,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__generateHeapSnapshotV8(vm: *VM) *String;",
       "declaration_sha256": "8f60bf3ffe20ca94a6cd85d2afc2ddac704a5f38ea1406fab95b7d9e151a0968",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__getCanonicalEncodingName",
@@ -1721,10 +1721,10 @@
       "line": 533,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__JSGlobalObject__generateHeapSnapshot(*JSGlobalObject) JSValue;",
       "declaration_sha256": "27bc326e2d33ca377d878e075e6b047141846b5b90416233f5d267351beab32d",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSGlobalObject__handleRejectedPromises",
