@@ -564,6 +564,17 @@ extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn
 extern "c" fn URLSearchParams__create(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn URLSearchParams__fromJS(EncodedValue) ?*anyopaque;
 extern "c" fn URLSearchParams__toString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
+extern "c" fn WebCore__DOMFormData__create(JSContextRef) EncodedValue;
+extern "c" fn WebCore__DOMFormData__createFromURLQuery(JSContextRef, *const ZigString) EncodedValue;
+extern "c" fn WebCore__DOMFormData__fromJS(EncodedValue) ?*anyopaque;
+extern "c" fn WebCore__DOMFormData__cast_(EncodedValue, ?*anyopaque) ?*anyopaque;
+extern "c" fn WebCore__DOMFormData__append(?*anyopaque, *const ZigString, *const ZigString) void;
+extern "c" fn WebCore__DOMFormData__appendBlob(?*anyopaque, JSContextRef, *const ZigString, *anyopaque, *const ZigString) void;
+extern "c" fn WebCore__DOMFormData__count(?*anyopaque) usize;
+extern "c" fn DOMFormData__toQueryString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
+extern "c" fn WebCore__DOMFormData__toQueryString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
+const DOMFormDataForEachCallback = *const fn (?*anyopaque, *const ZigString, *anyopaque, ?*const ZigString, u8) callconv(.c) void;
+extern "c" fn DOMFormData__forEach(?*anyopaque, ?*anyopaque, DOMFormDataForEachCallback) void;
 extern "c" fn URL__fromString(?*const BunString) ?*anyopaque;
 extern "c" fn URL__deinit(?*anyopaque) void;
 extern "c" fn URL__href(?*anyopaque) BunString;
@@ -804,6 +815,42 @@ fn uspToStringCallback(ctx: ?*anyopaque, str: *const ZigString) callconv(.c) voi
         const bytes: [*]const u8 = @ptrFromInt(pointer);
         @memcpy(state.bytes[0..str.len], bytes[0..str.len]);
     }
+}
+
+const DOMFormDataFixtureEntry = struct {
+    name: ZigString = .{ .tagged_ptr = 0, .len = 0 },
+    string: ZigString = .{ .tagged_ptr = 0, .len = 0 },
+    filename: ZigString = .{ .tagged_ptr = 0, .len = 0 },
+    blob: ?*anyopaque = null,
+    is_blob: bool = false,
+};
+
+const DOMFormDataFixtureState = struct {
+    entries: [16]DOMFormDataFixtureEntry = @splat(.{}),
+    calls: usize = 0,
+};
+
+fn domFormDataForEachCallback(
+    raw_state: ?*anyopaque,
+    name: *const ZigString,
+    raw_value: *anyopaque,
+    filename: ?*const ZigString,
+    is_blob: u8,
+) callconv(.c) void {
+    const state: *DOMFormDataFixtureState = @ptrCast(@alignCast(raw_state.?));
+    if (state.calls == state.entries.len or is_blob > 1) fail("private DOMFormData callback metadata mismatch");
+    const entry = &state.entries[state.calls];
+    entry.name = name.*;
+    entry.is_blob = is_blob != 0;
+    if (entry.is_blob) {
+        entry.blob = raw_value;
+        entry.filename = if (filename) |value| value.* else .{ .tagged_ptr = 0, .len = 0 };
+    } else {
+        if (filename != null) fail("private DOMFormData string callback carried a filename");
+        const string: *const ZigString = @ptrCast(@alignCast(raw_value));
+        entry.string = string.*;
+    }
+    state.calls += 1;
 }
 
 fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
@@ -3437,6 +3484,156 @@ pub fn main() void {
     URLSearchParams__toString(URLSearchParams__fromJS(usp_object), null, null);
     if (URLSearchParams__create(null, &usp_query) != .empty or usp_to_string_state.calls != 1)
         fail("private URLSearchParams null tolerance mismatch");
+
+    // DOMFormData boundary (#374): one branded JS entry list backs native and
+    // JS-created instances. URL-query parsing uses the URL Standard codec,
+    // string and filename inputs are USVStrings, Blob entries remain Files,
+    // and opaque native BlobImpl pointers round-trip without dereference.
+    const fd_empty = WebCore__DOMFormData__create(context);
+    const fd_vm = JSC__JSGlobalObject__vm(context);
+    const fd_empty_handle = WebCore__DOMFormData__fromJS(fd_empty) orelse fail("private DOMFormData create/fromJS mismatch");
+    exposeCell(context, "__private_fd_empty", fd_empty);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_fd_empty instanceof FormData")) or
+        WebCore__DOMFormData__cast_(fd_empty, fd_vm) != fd_empty_handle or
+        WebCore__DOMFormData__count(fd_empty_handle) != 0 or
+        WebCore__DOMFormData__fromJS(evaluate(context, "Object.create(FormData.prototype)")) != null or
+        WebCore__DOMFormData__fromJS(encoded_object) != null or
+        WebCore__DOMFormData__fromJS(encoded_text) != null or
+        WebCore__DOMFormData__fromJS(.undefined) != null or
+        WebCore__DOMFormData__fromJS(.empty) != null or
+        WebCore__DOMFormData__cast_(fd_empty, null) != null)
+        fail("private DOMFormData branding/downcast mismatch");
+
+    const foreign_fd = evaluate(foreign_context, "new FormData()");
+    if (WebCore__DOMFormData__fromJS(foreign_fd) == null or
+        WebCore__DOMFormData__cast_(foreign_fd, fd_vm) != null or
+        WebCore__DOMFormData__cast_(foreign_fd, JSC__JSGlobalObject__vm(foreign_context)) == null)
+        fail("private DOMFormData VM ownership mismatch");
+
+    const fd_query_bytes = "?lead=x&a=1&b=two+words&bad=%E0%A4&empty=&=blank";
+    const fd_query_input = ZigString{ .tagged_ptr = @intFromPtr(fd_query_bytes.ptr), .len = fd_query_bytes.len };
+    const fd_query = WebCore__DOMFormData__createFromURLQuery(context, &fd_query_input);
+    const fd_query_handle = WebCore__DOMFormData__fromJS(fd_query) orelse fail("private DOMFormData URL-query create mismatch");
+    exposeCell(context, "__private_fd_query", fd_query);
+    if (WebCore__DOMFormData__count(fd_query_handle) != 6 or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_fd_query.get('?lead') === 'x' && __private_fd_query.get('b') === 'two words' && __private_fd_query.get('bad') === '�' && __private_fd_query.get('') === 'blank'")))
+        fail("private DOMFormData URL-query parse mismatch");
+
+    const fd_query_expected = "%3Flead=x&a=1&b=two+words&bad=%EF%BF%BD&empty=&=blank";
+    usp_to_string_state = .{};
+    DOMFormData__toQueryString(fd_query_handle, &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or usp_to_string_state.utf16 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], fd_query_expected))
+        fail("private DOMFormData query serialization mismatch");
+    usp_to_string_state = .{};
+    WebCore__DOMFormData__toQueryString(fd_query_handle, &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], fd_query_expected))
+        fail("private DOMFormData query serialization alias mismatch");
+
+    const fd_name_units = [_]u16{ 0xD800, 'n' };
+    const fd_value_units = [_]u16{ 'v', 0xDC00 };
+    const fd_filename_units = [_]u16{ 'f', 0xD800 };
+    const fd_name = ZigString{ .tagged_ptr = @intFromPtr(&fd_name_units) | (@as(usize, 1) << 63), .len = fd_name_units.len };
+    const fd_value = ZigString{ .tagged_ptr = @intFromPtr(&fd_value_units) | (@as(usize, 1) << 63), .len = fd_value_units.len };
+    const fd_filename = ZigString{ .tagged_ptr = @intFromPtr(&fd_filename_units) | (@as(usize, 1) << 63), .len = fd_filename_units.len };
+    WebCore__DOMFormData__append(fd_query_handle, &fd_name, &fd_value);
+    var native_blob_sentinel: usize = 0xF04D_DA7A;
+    const native_blob_pointer: *anyopaque = @ptrCast(&native_blob_sentinel);
+    const native_blob_name_bytes = "native";
+    const native_blob_name = ZigString{ .tagged_ptr = @intFromPtr(native_blob_name_bytes.ptr), .len = native_blob_name_bytes.len };
+    WebCore__DOMFormData__appendBlob(fd_query_handle, context, &native_blob_name, native_blob_pointer, &fd_filename);
+    if (WebCore__DOMFormData__count(fd_query_handle) != 8 or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_fd_query.get('�n') === 'v�' && __private_fd_query.get('native') instanceof File && __private_fd_query.get('native').name === 'f�'")))
+        fail("private DOMFormData append/Blob JS integration mismatch");
+
+    _ = JSC__VM__runGC(fd_vm, true);
+    var fd_each: DOMFormDataFixtureState = .{};
+    DOMFormData__forEach(fd_query_handle, &fd_each, domFormDataForEachCallback);
+    if (fd_each.calls != 8 or
+        !zigStringUtf8Equals(fd_each.entries[0].name, "?lead") or
+        !zigStringUtf8Equals(fd_each.entries[0].string, "x") or
+        !zigStringUtf8Equals(fd_each.entries[6].name, "�n") or
+        !zigStringUtf8Equals(fd_each.entries[6].string, "v�") or
+        !fd_each.entries[7].is_blob or fd_each.entries[7].blob != native_blob_pointer or
+        !zigStringUtf8Equals(fd_each.entries[7].name, "native") or
+        !zigStringUtf8Equals(fd_each.entries[7].filename, "f�"))
+        fail("private DOMFormData forEach entry projection mismatch");
+    const fd_with_string_expected = fd_query_expected ++ "&%EF%BF%BDn=v%EF%BF%BD";
+    usp_to_string_state = .{};
+    DOMFormData__toQueryString(fd_query_handle, &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or
+        !std.mem.eql(u8, usp_to_string_state.bytes[0..usp_to_string_state.len], fd_with_string_expected))
+        fail("private DOMFormData Blob omission mismatch");
+
+    const js_fd = evaluate(context,
+        \\globalThis.__private_fd_file = new File(['file-body'], 'orig.txt', { type: 'text/plain', lastModified: 123 });
+        \\globalThis.__private_fd_blob = new Blob(['blob-body'], { type: 'application/test' });
+        \\globalThis.__private_fd_js = new FormData();
+        \\__private_fd_js.append('file', __private_fd_file);
+        \\__private_fd_js.append('blob', __private_fd_blob);
+        \\__private_fd_js.append('named', __private_fd_blob, 'renamed\uD800');
+        \\__private_fd_js;
+    );
+    const js_fd_handle = WebCore__DOMFormData__fromJS(js_fd) orelse fail("private DOMFormData rejected a JS-created instance");
+    if (WebCore__DOMFormData__count(js_fd_handle) != 3 or
+        !JSC__JSValue__toBoolean(evaluate(context,
+            \\__private_fd_js.get('file') === __private_fd_file &&
+            \\__private_fd_js.get('blob') !== __private_fd_blob &&
+            \\__private_fd_js.get('blob') instanceof File &&
+            \\__private_fd_js.get('blob').name === 'blob' &&
+            \\__private_fd_js.get('blob').type === 'application/test' &&
+            \\__private_fd_js.get('named') instanceof File &&
+            \\__private_fd_js.get('named').name === 'renamed\uFFFD'
+        )))
+        fail("private DOMFormData JS Blob/File entry semantics mismatch");
+    if (!JSC__JSValue__toBoolean(evaluate(context,
+        \\(() => {
+        \\  for (const filename of ['filename', undefined]) {
+        \\    try { new FormData().append('x', 'value', filename); return false; } catch (error) { if (!(error instanceof TypeError)) return false; }
+        \\  }
+        \\  return true;
+        \\})()
+    ))) fail("private DOMFormData overload discrimination mismatch");
+
+    var js_fd_each: DOMFormDataFixtureState = .{};
+    DOMFormData__forEach(js_fd_handle, &js_fd_each, domFormDataForEachCallback);
+    if (js_fd_each.calls != 3 or
+        !js_fd_each.entries[0].is_blob or !zigStringUtf8Equals(js_fd_each.entries[0].filename, "orig.txt") or
+        !js_fd_each.entries[1].is_blob or !zigStringUtf8Equals(js_fd_each.entries[1].filename, "blob") or
+        !js_fd_each.entries[2].is_blob or !zigStringUtf8Equals(js_fd_each.entries[2].filename, "renamed�") or
+        js_fd_each.entries[1].blob == null)
+        fail("private DOMFormData JS Blob callback projection mismatch");
+
+    const fd_roundtrip = WebCore__DOMFormData__create(context);
+    const fd_roundtrip_handle = WebCore__DOMFormData__fromJS(fd_roundtrip) orelse fail("private DOMFormData roundtrip create mismatch");
+    const fd_copy_name_bytes = "copy";
+    const fd_copy_filename_bytes = "copy.txt";
+    const fd_copy_name = ZigString{ .tagged_ptr = @intFromPtr(fd_copy_name_bytes.ptr), .len = fd_copy_name_bytes.len };
+    const fd_copy_filename = ZigString{ .tagged_ptr = @intFromPtr(fd_copy_filename_bytes.ptr), .len = fd_copy_filename_bytes.len };
+    WebCore__DOMFormData__appendBlob(fd_roundtrip_handle, context, &fd_copy_name, js_fd_each.entries[1].blob.?, &fd_copy_filename);
+    exposeCell(context, "__private_fd_roundtrip", fd_roundtrip);
+    var fd_roundtrip_each: DOMFormDataFixtureState = .{};
+    DOMFormData__forEach(fd_roundtrip_handle, &fd_roundtrip_each, domFormDataForEachCallback);
+    if (fd_roundtrip_each.calls != 1 or fd_roundtrip_each.entries[0].blob != js_fd_each.entries[1].blob or
+        !zigStringUtf8Equals(fd_roundtrip_each.entries[0].filename, "copy.txt") or
+        !JSC__JSValue__toBoolean(evaluate(context, "__private_fd_roundtrip.get('copy') instanceof File && __private_fd_roundtrip.get('copy').name === 'copy.txt' && __private_fd_roundtrip.get('copy').size === 9 && __private_fd_roundtrip.get('copy').type === 'application/test'")))
+        fail("private DOMFormData JS/native Blob identity roundtrip mismatch");
+
+    usp_to_string_state = .{};
+    DOMFormData__toQueryString(fd_roundtrip_handle, &usp_to_string_state, uspToStringCallback);
+    if (usp_to_string_state.calls != 1 or usp_to_string_state.len != 0)
+        fail("private DOMFormData Blob-only serialization mismatch");
+    DOMFormData__forEach(null, &fd_roundtrip_each, domFormDataForEachCallback);
+    DOMFormData__toQueryString(null, &usp_to_string_state, uspToStringCallback);
+    WebCore__DOMFormData__append(null, &fd_copy_name, &fd_copy_filename);
+    WebCore__DOMFormData__appendBlob(fd_empty_handle, foreign_context, &fd_copy_name, native_blob_pointer, &fd_copy_filename);
+    if (WebCore__DOMFormData__create(null) != .empty or
+        WebCore__DOMFormData__createFromURLQuery(null, &fd_query_input) != .empty or
+        WebCore__DOMFormData__count(null) != 0 or
+        WebCore__DOMFormData__count(fd_empty_handle) != 0 or
+        fd_roundtrip_each.calls != 1 or usp_to_string_state.calls != 1)
+        fail("private DOMFormData null/cross-VM tolerance mismatch");
 
     // URL native record boundary (#308): fromString parses through the
     // engine's WHATWG urlParse into an owned native record (no realm), and the
@@ -6479,5 +6676,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 352/352 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 362/362 symbols linked; runtime matrix passed\n", .{});
 }

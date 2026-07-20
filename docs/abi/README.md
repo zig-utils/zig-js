@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (365 implemented, 106 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (375 implemented, 96 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 365 are implemented and 106 remain pending
+Of the private entries, 375 are implemented and 96 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -717,6 +717,23 @@ because Bun's signature carries no global object. All three exports tolerate
 null handles, and the full WHATWG URL parser surface (`URL__*`, `DOMURL__*`,
 `BunString__toURL`/`toJSDOMURL`) stays deferred with the URL.zig cluster.
 
+The ten-symbol DOMFormData boundary (#374) has one canonical engine
+representation: every genuine FormData carries a branded `\x00fd` entry list
+of `[USVString, USVString|File]` pairs, whether constructed by JavaScript or a
+private export. `createFromURLQuery` performs percent decoding followed by the
+Encoding Standard UTF-8 replacement state machine; serialization applies the
+form-urlencoded percent set and omits File entries exactly like WebCore.
+JavaScript append/set follows the current create-an-entry algorithm: File
+identity is retained only when no replacement filename is supplied, while a
+plain Blob or explicit filename creates a new File over the same bytes.
+Native `BlobImpl*` values remain opaque identity tokens on engine-tagged File
+wrappers and round-trip byte-for-byte through `DOMFormData__forEach`; zig-js
+never dereferences them or invents an empty body. VM-scoped `cast_`, canonical
+`fromJS`, duplicate order/count, callback ZigString lifetimes, lone-surrogate
+replacement, plus/percent/invalid-UTF-8 parsing, JS-origin Blob-token
+roundtrips, and Blob omission are covered by both the 362-symbol Home fixture
+and Bun's focused 10-symbol fixture.
+
 The URL native-record boundary (#308, first URL-cluster sub-slice) maps Bun's
 context-free `WTF::URL*` exactly: because `URL__fromString` carries no global
 object, the parsed URL is a native heap record (c_allocator, magic-validated
@@ -1003,7 +1020,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (357 implemented, 104 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (367 implemented, 94 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1019,9 +1036,10 @@ zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
 zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
 zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
+zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 104
+not claim complete Bun runtime compatibility; #164 remains open for the 94
 pending core entries and later wider/generated profiles.

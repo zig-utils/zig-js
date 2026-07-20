@@ -1440,7 +1440,9 @@ pub const ObjectBehaviorFlags = packed struct(u16) {
     is_getter_setter: bool = false,
     is_custom_getter_setter: bool = false,
     is_abort_signal: bool = false,
-    _padding: u3 = 0,
+    is_form_data: bool = false,
+    is_blob: bool = false,
+    is_file: bool = false,
 };
 
 pub const ObjectPrivateDataTag = enum(u8) {
@@ -1453,6 +1455,10 @@ pub const ObjectPrivateDataTag = enum(u8) {
     jsthread_unlock_token,
     jsthread_release_state,
     abort_signal,
+    /// Foreign `BlobImpl*` carried by a File wrapper created at the private
+    /// DOMFormData boundary. The pointer is an opaque identity token: GC must
+    /// neither trace nor dereference it.
+    form_data_native_blob,
 };
 
 /// Type-erased bridge installed only on genuine engine-created AbortSignals.

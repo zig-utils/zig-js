@@ -9170,6 +9170,286 @@ export fn URLSearchParams__toString(params: ?*anyopaque, ctx: ?*anyopaque, callb
     cb(ctx, &view);
 }
 
+// ===== DOMFormData private boundary (#374) =====
+
+const PrivateDOMFormDataForEach = *const fn (
+    ?*anyopaque,
+    *const PrivateZigString,
+    *anyopaque,
+    ?*const PrivateZigString,
+    u8,
+) callconv(.c) void;
+
+fn privateFormDataBoxed(encoded: EncodedValue) ?*Boxed {
+    const boxed = privateBoxedFrom(encoded) orelse return null;
+    if (boxed.private_kind != .value or !interp.formDataIsInstance(boxed.value)) return null;
+    return boxed;
+}
+
+fn privateFormDataBoxFromCell(cell: ?*anyopaque) ?*Boxed {
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value or !interp.formDataIsInstance(boxed.value)) return null;
+    return boxed;
+}
+
+fn privateFormDataRootValue(machine: *interp.Interpreter, mark: usize, fallback: Value) Value {
+    if (machine.gc == null) return fallback;
+    return machine.gc_temp_roots.items[mark];
+}
+
+/// Resolve only tokens minted by `DOMFormData__forEach`. Membership is checked
+/// by pointer equality against the VM's canonical-box map before any
+/// dereference, so an arbitrary foreign `BlobImpl*` remains completely opaque.
+fn privateFormDataBlobSource(group: *CContextGroup, raw_blob: *anyopaque) ?Value {
+    var boxes = group.private_object_boxes.iterator();
+    while (boxes.next()) |entry| {
+        if (@intFromPtr(entry.value_ptr.*) != @intFromPtr(raw_blob)) continue;
+        const object = entry.key_ptr.*;
+        if (!object.behavior.is_blob) return null;
+        return Value.obj(object);
+    }
+    return null;
+}
+
+fn privateCreateFormData(global: JSContextRef, query: ?*const PrivateZigString) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const created = if (query) |input| query_form: {
+        const bytes = privateZigStringPropertyKey(context, input) orelse return .empty;
+        break :query_form interp.formDataCreateFromURLQuery(&machine, bytes) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    } else interp.formDataCreate(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodedFromValue(context, created);
+}
+
+/// `DOMFormData::create(scriptExecutionContext)` wrapped into the supplied
+/// realm. The JS object and its hidden entry list are the sole native state.
+export fn WebCore__DOMFormData__create(global: JSContextRef) callconv(.c) EncodedValue {
+    return privateCreateFormData(global, null);
+}
+
+/// Parse application/x-www-form-urlencoded input through the same scalar-value
+/// string entry path used by JavaScript FormData methods.
+export fn WebCore__DOMFormData__createFromURLQuery(global: JSContextRef, query: ?*const PrivateZigString) callconv(.c) EncodedValue {
+    return privateCreateFormData(global, query orelse return .empty);
+}
+
+/// Exact WebCore downcast: only genuine engine-created FormData instances
+/// qualify. The returned opaque pointer is the canonical VM cell handle.
+export fn WebCore__DOMFormData__fromJS(encoded: EncodedValue) callconv(.c) ?*anyopaque {
+    return @ptrCast(privateFormDataBoxed(encoded) orelse return null);
+}
+
+/// VM-scoped sibling of `fromJS`; sibling realms in one VM are accepted and a
+/// value from any other context group is rejected.
+export fn WebCore__DOMFormData__cast_(encoded: EncodedValue, vm_handle: ?*anyopaque) callconv(.c) ?*anyopaque {
+    const pointer = vm_handle orelse return null;
+    if (@intFromPtr(pointer) % @alignOf(CContextGroup) != 0) return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(pointer));
+    const primary = group.primary;
+    if (@intFromPtr(primary) % @alignOf(Context) != 0 or primary.c_api_group != pointer) return null;
+    const boxed = privateFormDataBoxed(encoded) orelse return null;
+    if (boxed.owner.c_api_group != pointer) return null;
+    return @ptrCast(boxed);
+}
+
+export fn WebCore__DOMFormData__append(
+    raw_form: ?*anyopaque,
+    raw_name: ?*const PrivateZigString,
+    raw_value: ?*const PrivateZigString,
+) callconv(.c) void {
+    const boxed = privateFormDataBoxFromCell(raw_form) orelse return;
+    const name_input = raw_name orelse return;
+    const value_input = raw_value orelse return;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const root_mark = machine.pushTempRoot(boxed.value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer machine.restoreTempRoots(root_mark);
+    const name = privateZigStringPropertyKey(context, name_input) orelse return;
+    const string = privateZigStringPropertyKey(context, value_input) orelse return;
+    const form = privateFormDataRootValue(&machine, root_mark, boxed.value);
+    interp.formDataAppendString(&machine, form, name, string) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+    };
+}
+
+export fn WebCore__DOMFormData__appendBlob(
+    raw_form: ?*anyopaque,
+    global: JSContextRef,
+    raw_name: ?*const PrivateZigString,
+    raw_blob: ?*anyopaque,
+    raw_filename: ?*const PrivateZigString,
+) callconv(.c) void {
+    const boxed = privateFormDataBoxFromCell(raw_form) orelse return;
+    const caller_context = ctxForEvaluation(global) orelse return;
+    if (caller_context.c_api_group == null or caller_context.c_api_group != boxed.owner.c_api_group) return;
+    const blob = raw_blob orelse return;
+    const name_input = raw_name orelse return;
+    const filename_input = raw_filename orelse return;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const root_mark = machine.pushTempRoot(boxed.value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer machine.restoreTempRoots(root_mark);
+    const name = privateZigStringPropertyKey(context, name_input) orelse return;
+    const filename = privateZigStringPropertyKey(context, filename_input) orelse return;
+    var source = privateFormDataBlobSource(group, blob);
+    var source_mark: ?usize = null;
+    if (source) |source_value| {
+        source_mark = machine.pushTempRoot(source_value) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return;
+        };
+        source = privateFormDataRootValue(&machine, source_mark.?, source_value);
+    }
+    const form = privateFormDataRootValue(&machine, root_mark, boxed.value);
+    interp.formDataAppendNativeBlob(&machine, form, name, blob, filename, source) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+    };
+}
+
+export fn WebCore__DOMFormData__count(raw_form: ?*anyopaque) callconv(.c) usize {
+    const boxed = privateFormDataBoxFromCell(raw_form) orelse return 0;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return 0;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return 0;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return 0;
+    defer context.popActiveInterpreter(&machine);
+    const root_mark = machine.pushTempRoot(boxed.value) catch return 0;
+    defer machine.restoreTempRoots(root_mark);
+    return interp.formDataCount(&machine, privateFormDataRootValue(&machine, root_mark, boxed.value)) catch 0;
+}
+
+fn privateDOMFormDataToQueryString(
+    raw_form: ?*anyopaque,
+    callback_context: ?*anyopaque,
+    callback: ?*const fn (?*anyopaque, *const PrivateZigString) callconv(.c) void,
+) void {
+    const cb = callback orelse return;
+    const boxed = privateFormDataBoxFromCell(raw_form) orelse return;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return;
+    defer context.popActiveInterpreter(&machine);
+    const root_mark = machine.pushTempRoot(boxed.value) catch return;
+    defer machine.restoreTempRoots(root_mark);
+    const encoded = interp.formDataSerialize(&machine, privateFormDataRootValue(&machine, root_mark, boxed.value)) catch return;
+    const view = privateBorrowedZigStringView(group, encoded) catch return;
+    cb(callback_context, &view);
+}
+
+export fn DOMFormData__toQueryString(raw_form: ?*anyopaque, ctx: ?*anyopaque, callback: ?*const fn (?*anyopaque, *const PrivateZigString) callconv(.c) void) callconv(.c) void {
+    privateDOMFormDataToQueryString(raw_form, ctx, callback);
+}
+
+export fn WebCore__DOMFormData__toQueryString(raw_form: ?*anyopaque, ctx: ?*anyopaque, callback: ?*const fn (?*anyopaque, *const PrivateZigString) callconv(.c) void) callconv(.c) void {
+    privateDOMFormDataToQueryString(raw_form, ctx, callback);
+}
+
+export fn DOMFormData__forEach(
+    raw_form: ?*anyopaque,
+    callback_context: ?*anyopaque,
+    callback: ?PrivateDOMFormDataForEach,
+) callconv(.c) void {
+    const cb = callback orelse return;
+    const boxed = privateFormDataBoxFromCell(raw_form) orelse return;
+    const context = boxed.owner;
+    const opaque_group = context.c_api_group orelse return;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch return;
+    defer context.popActiveInterpreter(&machine);
+    const root_mark = machine.pushTempRoot(boxed.value) catch return;
+    defer machine.restoreTempRoots(root_mark);
+    const initial_count = interp.formDataCount(&machine, privateFormDataRootValue(&machine, root_mark, boxed.value)) catch return;
+    for (0..initial_count) |index| {
+        const form = privateFormDataRootValue(&machine, root_mark, boxed.value);
+        const entry = (interp.formDataEntryAt(&machine, form, index) catch return) orelse continue;
+        const name_view = privateBorrowedZigStringView(group, entry.name) catch return;
+        if (entry.value.isString()) {
+            const string_view = privateBorrowedZigStringView(group, entry.value.asStr()) catch return;
+            cb(callback_context, &name_view, @ptrCast(@constCast(&string_view)), null, 0);
+            continue;
+        }
+        if (!entry.value.isObject() or !entry.value.asObj().behavior.is_blob) continue;
+        const value_mark = machine.pushTempRoot(entry.value) catch return;
+        defer machine.restoreTempRoots(value_mark);
+        const current_value = privateFormDataRootValue(&machine, value_mark, entry.value);
+        const blob_pointer: *anyopaque = interp.formDataNativeBlobPointer(current_value) orelse blob_token: {
+            const encoded = privateEncodedFromValue(context, current_value);
+            break :blob_token @ptrFromInt(encoded.asCellAddress() catch return);
+        };
+        const filename = interp.formDataFilename(current_value) orelse "";
+        const filename_view = privateBorrowedZigStringView(group, filename) catch return;
+        cb(callback_context, &name_view, blob_pointer, &filename_view, 1);
+    }
+}
+
 // ===== URL native record boundary (#308) =====
 // Bun's `WTF::URL*` is a context-free heap object: `URL__fromString` carries no
 // global object, so the zig-js mapping is a native parsed-URL record owning its

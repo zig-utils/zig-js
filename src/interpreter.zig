@@ -42695,7 +42695,76 @@ fn formUrlEncode(self: *Interpreter, s: []const u8) EvalError![]const u8 {
     }
     return out.items;
 }
-/// application/x-www-form-urlencoded decode: '+' → space, %XX → byte, rest as-is.
+/// Encoding Standard UTF-8 decoder with replacement. Invalid continuation
+/// bytes terminate one pending sequence and are then reprocessed as possible
+/// lead bytes, matching the standard's error-token consumption.
+fn utf8DecodeReplacing(self: *Interpreter, bytes: []const u8) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var code_point: u32 = 0;
+    var bytes_needed: u3 = 0;
+    var bytes_seen: u3 = 0;
+    var lower_boundary: u8 = 0x80;
+    var upper_boundary: u8 = 0xBF;
+    var index: usize = 0;
+    while (index < bytes.len) {
+        const byte = bytes[index];
+        if (bytes_needed == 0) {
+            if (byte <= 0x7F) {
+                try out.append(self.arena, byte);
+                index += 1;
+            } else if (byte >= 0xC2 and byte <= 0xDF) {
+                bytes_needed = 1;
+                code_point = byte & 0x1F;
+                index += 1;
+            } else if (byte >= 0xE0 and byte <= 0xEF) {
+                bytes_needed = 2;
+                code_point = byte & 0x0F;
+                if (byte == 0xE0) lower_boundary = 0xA0;
+                if (byte == 0xED) upper_boundary = 0x9F;
+                index += 1;
+            } else if (byte >= 0xF0 and byte <= 0xF4) {
+                bytes_needed = 3;
+                code_point = byte & 0x07;
+                if (byte == 0xF0) lower_boundary = 0x90;
+                if (byte == 0xF4) upper_boundary = 0x8F;
+                index += 1;
+            } else {
+                try out.appendSlice(self.arena, "\u{FFFD}");
+                index += 1;
+            }
+            continue;
+        }
+
+        if (byte < lower_boundary or byte > upper_boundary) {
+            code_point = 0;
+            bytes_needed = 0;
+            bytes_seen = 0;
+            lower_boundary = 0x80;
+            upper_boundary = 0xBF;
+            try out.appendSlice(self.arena, "\u{FFFD}");
+            continue;
+        }
+
+        lower_boundary = 0x80;
+        upper_boundary = 0xBF;
+        code_point = (code_point << 6) | (byte & 0x3F);
+        bytes_seen += 1;
+        index += 1;
+        if (bytes_seen != bytes_needed) continue;
+
+        var encoded: [4]u8 = undefined;
+        const encoded_len = std.unicode.utf8Encode(@intCast(code_point), &encoded) catch unreachable;
+        try out.appendSlice(self.arena, encoded[0..encoded_len]);
+        code_point = 0;
+        bytes_needed = 0;
+        bytes_seen = 0;
+    }
+    if (bytes_needed != 0) try out.appendSlice(self.arena, "\u{FFFD}");
+    return out.items;
+}
+
+/// application/x-www-form-urlencoded decode: '+' → space, percent-decode,
+/// then UTF-8 decode without BOM using replacement semantics.
 fn formUrlDecode(self: *Interpreter, s: []const u8) EvalError![]const u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
@@ -42719,7 +42788,7 @@ fn formUrlDecode(self: *Interpreter, s: []const u8) EvalError![]const u8 {
             i += 1;
         }
     }
-    return out.items;
+    return utf8DecodeReplacing(self, out.items);
 }
 /// The mutable `[[k,v],…]` pairs array backing a URLSearchParams instance.
 fn uspPairs(self: *Interpreter, this: Value) EvalError!*value.Object {
@@ -43276,83 +43345,150 @@ fn installHeaders(env: *Environment, rs: *Shape, object_proto: *value.Object) Ev
 }
 
 // ===== FormData ======================================================
-// Entries live in \x00fd as [name, value] pairs in insertion order; names are
-// case-sensitive and values are coerced to strings (no Blob support yet).
+// Entries live in \x00fd as [USVString name, USVString|File value] pairs in
+// insertion order. The ordinary Value edges are the canonical storage for both
+// JS-created and private-ABI-created instances, so GC traces Blob/File values
+// without a parallel native list. A File created for an opaque native BlobImpl
+// carries that pointer under the `form_data_native_blob` owner tag; it is an
+// identity token only and is never dereferenced by the engine.
 fn fdList(self: *Interpreter, this: Value) EvalError!*value.Object {
-    if (this.isObject()) if (this.asObj().getOwn("\x00fd")) |v| if (v.isObject()) return v.asObj();
-    const arr = (try self.newArray()).asObj();
-    if (this.isObject()) try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(arr));
-    return arr;
+    if (!this.isObject() or !this.asObj().behavior.is_form_data)
+        return self.throwError("TypeError", "FormData method called on an incompatible receiver");
+    const slot = this.asObj().getOwn("\x00fd") orelse
+        return self.throwError("TypeError", "FormData entry list is unavailable");
+    if (!slot.isObject()) return self.throwError("TypeError", "FormData entry list is unavailable");
+    return slot.asObj();
 }
-fn fdPush(self: *Interpreter, list: *value.Object, name: []const u8, val: []const u8) EvalError!void {
+
+const FormDataAllocation = struct { obj: *value.Object, list: *value.Object };
+
+fn fdAllocate(self: *Interpreter) EvalError!FormDataAllocation {
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{ .behavior = .{ .is_form_data = true } };
+    if (self.env.get("FormData")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+    };
+    const list = (try self.newArray()).asObj();
+    try obj.setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(list));
+    return .{ .obj = obj, .list = list };
+}
+
+fn fdUSVString(self: *Interpreter, input: Value) EvalError![]const u8 {
+    return wtf8ToUtf8Bytes(self.arena, try self.toStringV(input));
+}
+
+fn fdPair(pair: Value) struct { name: []const u8, value: Value } {
+    if (!pair.isObject()) return .{ .name = "", .value = Value.str("") };
+    const entry = pair.asObj();
+    const name_value = entry.elementAt(0) orelse Value.str("");
+    return .{
+        .name = if (name_value.isString()) name_value.asStr() else "",
+        .value = entry.elementAt(1) orelse Value.str(""),
+    };
+}
+
+fn fdPushValue(self: *Interpreter, list: *value.Object, name: []const u8, entry_value: Value) EvalError!void {
     const pair = (try self.newArray()).asObj();
     try pair.appendElement(self.arena, try Value.strAlloc(self.arena, name));
-    try pair.appendElement(self.arena, try Value.strAlloc(self.arena, val));
+    try pair.appendElement(self.arena, entry_value);
     try list.appendElement(self.arena, Value.obj(pair));
 }
+
+fn fdPushString(self: *Interpreter, list: *value.Object, name: []const u8, string: []const u8) EvalError!void {
+    try fdPushValue(self, list, name, try Value.strAlloc(self.arena, string));
+}
+
+fn fdRequireArgs(self: *Interpreter, args: []const Value, required: usize, method: []const u8) EvalError!void {
+    if (args.len >= required) return;
+    const message = try std.fmt.allocPrint(self.arena, "Failed to execute '{s}' on 'FormData': {d} arguments required", .{ method, required });
+    return self.throwError("TypeError", message);
+}
+
+fn fdEntryValue(
+    self: *Interpreter,
+    input: Value,
+    filename: ?[]const u8,
+) EvalError!Value {
+    if (!blobIsBlob(input)) return try Value.strAlloc(self.arena, try fdUSVString(self, input));
+    if (blobIsFile(input) and filename == null) return input;
+    return Value.obj(try blobCloneAsFile(self, input.asObj(), filename orelse "blob"));
+}
+
+fn fdMethodEntry(self: *Interpreter, args: []const Value, method: []const u8) EvalError!struct { name: []const u8, value: Value } {
+    try fdRequireArgs(self, args, 2, method);
+    const name = try fdUSVString(self, args[0]);
+    if (args.len > 2 and !blobIsBlob(args[1]))
+        return self.throwError("TypeError", "FormData filename is only valid for a Blob value");
+    const filename_given = args.len > 2 and !args[2].isUndefined();
+    const filename: ?[]const u8 = if (filename_given) try fdUSVString(self, args[2]) else null;
+    return .{ .name = name, .value = try fdEntryValue(self, args[1], filename) };
+}
+
 fn fdAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
-    try fdPush(self, try fdList(self, this), name, val);
+    const entry = try fdMethodEntry(self, args, "append");
+    try fdPushValue(self, try fdList(self, this), entry.name, entry.value);
     return Value.undef();
 }
 fn fdSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const entry = try fdMethodEntry(self, args, "set");
     // Replace the first occurrence in place, drop the rest; append if absent.
     const list = try fdList(self, this);
     const fresh = (try self.newArray()).asObj();
     var placed = false;
     for (try list.internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, name)) {
+        if (std.mem.eql(u8, fdPair(pair).name, entry.name)) {
             if (!placed) {
-                try fdPush(self, fresh, name, val);
+                try fdPushValue(self, fresh, entry.name, entry.value);
                 placed = true;
             }
             continue;
         }
         try fresh.appendElement(self.arena, pair);
     }
-    if (!placed) try fdPush(self, fresh, name, val);
+    if (!placed) try fdPushValue(self, fresh, entry.name, entry.value);
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(fresh));
     return Value.undef();
 }
 fn fdGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    try fdRequireArgs(self, args, 1, "get");
+    const name = try fdUSVString(self, args[0]);
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        if (std.mem.eql(u8, kv.k, name)) return try Value.strAlloc(self.arena, kv.v);
+        const entry = fdPair(pair);
+        if (std.mem.eql(u8, entry.name, name)) return entry.value;
     }
     return Value.nul();
 }
 fn fdGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    try fdRequireArgs(self, args, 1, "getAll");
+    const name = try fdUSVString(self, args[0]);
     const arr = (try self.newArray()).asObj();
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        if (std.mem.eql(u8, kv.k, name)) try arr.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
+        const entry = fdPair(pair);
+        if (std.mem.eql(u8, entry.name, name)) try arr.appendElement(self.arena, entry.value);
     }
     return Value.obj(arr);
 }
 fn fdHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    try fdRequireArgs(self, args, 1, "has");
+    const name = try fdUSVString(self, args[0]);
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, name)) return Value.boolVal(true);
+        if (std.mem.eql(u8, fdPair(pair).name, name)) return Value.boolVal(true);
     }
     return Value.boolVal(false);
 }
 fn fdDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    try fdRequireArgs(self, args, 1, "delete");
+    const name = try fdUSVString(self, args[0]);
     const list = try fdList(self, this);
     const fresh = (try self.newArray()).asObj();
     for (try list.internalElementsSnapshot(self.arena)) |pair| {
-        if (std.mem.eql(u8, uspPairKV(pair).k, name)) continue;
+        if (std.mem.eql(u8, fdPair(pair).name, name)) continue;
         try fresh.appendElement(self.arena, pair);
     }
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00fd", Value.obj(fresh));
@@ -43364,8 +43500,8 @@ fn fdForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "FormData.forEach callback is not a function");
     const this_arg = if (args.len > 1) args[1] else Value.undef();
     for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
-        _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
+        const entry = fdPair(pair);
+        _ = try self.callValueWithThis(cb, &.{ entry.value, try Value.strAlloc(self.arena, entry.name), this }, this_arg);
     }
     return Value.undef();
 }
@@ -43376,10 +43512,10 @@ fn fdIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const snap = (try self.newArray()).asObj();
             for (try (try fdList(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-                const kv = uspPairKV(pair);
+                const entry = fdPair(pair);
                 switch (which) {
-                    .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
-                    .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
+                    .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, entry.name)),
+                    .values => try snap.appendElement(self.arena, entry.value),
                     .entries => try snap.appendElement(self.arena, pair),
                 }
             }
@@ -43394,13 +43530,109 @@ fn fdConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     // A form argument (HTMLFormElement) is the only accepted init; there is no
     // DOM here, so a supplied non-undefined argument is a conversion failure.
     if (args.len > 0 and !args[0].isUndefined()) return self.throwError("TypeError", "Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
-    const obj = try gc_mod.allocObj(self.arena);
-    obj.* = .{};
-    if (self.env.get("FormData")) |c| if (c.isObject()) {
-        if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
-    };
-    _ = try fdList(self, Value.obj(obj));
-    return Value.obj(obj);
+    return Value.obj((try fdAllocate(self)).obj);
+}
+
+pub const FormDataEntry = struct {
+    name: []const u8,
+    value: Value,
+};
+
+pub fn formDataIsInstance(input: Value) bool {
+    return input.isObject() and input.asObj().behavior.is_form_data;
+}
+
+pub fn formDataCreate(self: *Interpreter) EvalError!Value {
+    return Value.obj((try fdAllocate(self)).obj);
+}
+
+pub fn formDataCreateFromURLQuery(self: *Interpreter, query: []const u8) EvalError!Value {
+    const allocation = try fdAllocate(self);
+    const input = query;
+    if (input.len != 0) {
+        var segments = std.mem.splitScalar(u8, input, '&');
+        while (segments.next()) |segment| {
+            if (segment.len == 0) continue;
+            const equal = std.mem.indexOfScalar(u8, segment, '=');
+            const raw_name = if (equal) |index| segment[0..index] else segment;
+            const raw_value = if (equal) |index| segment[index + 1 ..] else "";
+            const name = try formUrlDecode(self, raw_name);
+            const string = try formUrlDecode(self, raw_value);
+            try fdPushString(self, allocation.list, name, string);
+        }
+    }
+    return Value.obj(allocation.obj);
+}
+
+pub fn formDataAppendString(self: *Interpreter, form: Value, name: []const u8, string: []const u8) EvalError!void {
+    const normalized_name = try wtf8ToUtf8Bytes(self.arena, name);
+    const normalized_string = try wtf8ToUtf8Bytes(self.arena, string);
+    try fdPushString(self, try fdList(self, form), normalized_name, normalized_string);
+}
+
+pub fn formDataAppendNativeBlob(
+    self: *Interpreter,
+    form: Value,
+    name: []const u8,
+    raw_blob: *anyopaque,
+    filename: []const u8,
+    source: ?Value,
+) EvalError!void {
+    const normalized_name = try wtf8ToUtf8Bytes(self.arena, name);
+    const normalized_filename = try wtf8ToUtf8Bytes(self.arena, filename);
+    const file = if (source) |blob|
+        try blobCloneAsFile(self, blob.asObj(), normalized_filename)
+    else
+        try blobMakeNativeFile(self, raw_blob, normalized_filename);
+    file.private_data = raw_blob;
+    file.private_data_tag = .form_data_native_blob;
+    try fdPushValue(self, try fdList(self, form), normalized_name, Value.obj(file));
+}
+
+pub fn formDataCount(self: *Interpreter, form: Value) EvalError!usize {
+    return (try (try fdList(self, form)).internalElementsSnapshot(self.arena)).len;
+}
+
+pub fn formDataEntries(self: *Interpreter, form: Value) EvalError![]FormDataEntry {
+    const items = try (try fdList(self, form)).internalElementsSnapshot(self.arena);
+    const entries = try self.arena.alloc(FormDataEntry, items.len);
+    for (items, entries) |pair, *entry| {
+        const decoded = fdPair(pair);
+        entry.* = .{ .name = decoded.name, .value = decoded.value };
+    }
+    return entries;
+}
+
+pub fn formDataEntryAt(self: *Interpreter, form: Value, index: usize) EvalError!?FormDataEntry {
+    const list = try fdList(self, form);
+    const pair = list.elementAt(index) orelse return null;
+    const decoded = fdPair(pair);
+    return .{ .name = decoded.name, .value = decoded.value };
+}
+
+pub fn formDataSerialize(self: *Interpreter, form: Value) EvalError![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    var first = true;
+    for (try formDataEntries(self, form)) |entry| {
+        if (!entry.value.isString()) continue;
+        if (!first) try out.append(self.arena, '&');
+        first = false;
+        try out.appendSlice(self.arena, try formUrlEncode(self, entry.name));
+        try out.append(self.arena, '=');
+        try out.appendSlice(self.arena, try formUrlEncode(self, entry.value.asStr()));
+    }
+    return out.items;
+}
+
+pub fn formDataNativeBlobPointer(input: Value) ?*anyopaque {
+    if (!blobIsBlob(input) or input.asObj().private_data_tag != .form_data_native_blob) return null;
+    return input.asObj().private_data;
+}
+
+pub fn formDataFilename(input: Value) ?[]const u8 {
+    if (!blobIsFile(input)) return null;
+    const filename = input.asObj().getOwn("\x00filename") orelse return "";
+    return if (filename.isString()) filename.asStr() else "";
 }
 fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
@@ -43441,8 +43673,17 @@ fn installFormData(env: *Environment, rs: *Shape, object_proto: *value.Object) E
 // ===== Blob / File ===================================================
 // A Blob keeps its bytes in a hidden ArrayBuffer (\x00blobbuf) and its MIME type
 // in \x00blobtype. File adds \x00filename and \x00filemod (lastModified).
+// Private FormData can additionally expose a File whose backing BlobImpl is a
+// foreign opaque pointer. Such a File is correctly branded but byte-reading
+// APIs reject it instead of fabricating an empty payload.
 fn blobIsBlob(v: Value) bool {
-    return v.isObject() and v.asObj().getOwn("\x00blobbuf") != null;
+    return v.isObject() and v.asObj().behavior.is_blob;
+}
+fn blobIsFile(v: Value) bool {
+    return blobIsBlob(v) and v.asObj().behavior.is_file;
+}
+fn blobHasBytes(o: *value.Object) bool {
+    return o.getOwn("\x00blobbuf") != null;
 }
 fn blobBytesOf(o: *value.Object) []const u8 {
     if (o.getOwn("\x00blobbuf")) |bv| if (bv.isObject()) if (bv.asObj().arrayBuffer()) |ab| return ab.bytes();
@@ -43463,6 +43704,7 @@ fn blobConcatParts(self: *Interpreter, parts_v: Value) EvalError![]u8 {
     if (!parts_v.isObject()) return self.throwError("TypeError", "The provided value cannot be converted to a sequence");
     for (try collectIterable(self, parts_v)) |part| {
         if (blobIsBlob(part)) {
+            if (!blobHasBytes(part.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
             try out.appendSlice(self.arena, blobBytesOf(part.asObj()));
         } else if (bufferSourceBytes(part)) |b| {
             try out.appendSlice(self.arena, b);
@@ -43476,13 +43718,47 @@ fn blobMake(self: *Interpreter, proto_name: []const u8, bytes: []const u8, blob_
     const buf = try self.makeArrayBuffer(bytes.len);
     if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
     const obj = try gc_mod.allocObj(self.arena);
-    obj.* = .{};
+    const is_file = std.mem.eql(u8, proto_name, "File");
+    obj.* = .{ .behavior = .{ .is_blob = true, .is_file = is_file } };
     if (self.env.get(proto_name)) |c| if (c.isObject()) {
         if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
     };
     try obj.setOwn(self.arena, self.root_shape, "\x00blobbuf", Value.obj(buf));
     try obj.setOwn(self.arena, self.root_shape, "\x00blobtype", try Value.strAlloc(self.arena, blob_type));
     return obj;
+}
+fn blobMakeNativeFile(self: *Interpreter, raw_blob: *anyopaque, filename: []const u8) EvalError!*value.Object {
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{
+        .behavior = .{ .is_blob = true, .is_file = true },
+        .private_data = raw_blob,
+        .private_data_tag = .form_data_native_blob,
+    };
+    if (self.env.get("File")) |c| if (c.isObject()) {
+        if (c.asObj().getOwn("prototype")) |p| if (p.isObject()) obj.setProtoAtomic(p.asObj());
+    };
+    try obj.setOwn(self.arena, self.root_shape, "\x00blobtype", Value.str(""));
+    try obj.setOwn(self.arena, self.root_shape, "\x00filename", try Value.strAlloc(self.arena, filename));
+    try obj.setOwn(self.arena, self.root_shape, "\x00filemod", Value.num(0));
+    return obj;
+}
+fn blobCloneAsFile(self: *Interpreter, source: *value.Object, filename: []const u8) EvalError!*value.Object {
+    const normalized_name = try wtf8ToUtf8Bytes(self.arena, filename);
+    if (!blobHasBytes(source)) {
+        const raw = source.private_data orelse return self.throwError("TypeError", "Native Blob identity is unavailable");
+        return blobMakeNativeFile(self, raw, normalized_name);
+    }
+    const type_value = source.getOwn("\x00blobtype");
+    const blob_type = if (type_value != null and type_value.?.isString()) type_value.?.asStr() else "";
+    const clone = try blobMake(self, "File", blobBytesOf(source), blob_type);
+    try clone.setOwn(self.arena, self.root_shape, "\x00filename", try Value.strAlloc(self.arena, normalized_name));
+    const last_modified = if (source.behavior.is_file) source.getOwn("\x00filemod") orelse Value.num(0) else Value.num(0);
+    try clone.setOwn(self.arena, self.root_shape, "\x00filemod", last_modified);
+    if (source.private_data_tag == .form_data_native_blob) {
+        clone.private_data = source.private_data;
+        clone.private_data_tag = .form_data_native_blob;
+    }
+    return clone;
 }
 fn blobConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -43500,6 +43776,7 @@ fn blobSizeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobHasBytes(this.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
     return Value.num(@floatFromInt(blobBytesOf(this.asObj()).len));
 }
 fn blobTypeGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -43521,6 +43798,7 @@ fn blobClampIndex(x: f64, len: usize) usize {
 fn blobSliceFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobHasBytes(this.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
     const bytes = blobBytesOf(this.asObj());
     const len = bytes.len;
     const start: usize = if (args.len > 0 and !args[0].isUndefined()) blobClampIndex(try self.toNumberV(args[0]), len) else 0;
@@ -43534,6 +43812,7 @@ fn blobTextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobHasBytes(this.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
     // The stored bytes are UTF-8; expose them as a JS string.
     const s = try Value.strAlloc(self.arena, blobBytesOf(this.asObj()));
     return try promiseResolveValue(self, s);
@@ -43542,6 +43821,7 @@ fn blobArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobHasBytes(this.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
     const bytes = blobBytesOf(this.asObj());
     const buf = try self.makeArrayBuffer(bytes.len);
     if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
@@ -43551,6 +43831,7 @@ fn blobBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!blobIsBlob(this)) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobHasBytes(this.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
     const ta = try newTypedArray(self, .u8, blobBytesOf(this.asObj()).len);
     const bytes = blobBytesOf(this.asObj());
     if (bytes.len > 0) @memcpy(ta.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
@@ -43562,7 +43843,7 @@ fn fileConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'File': Please use the 'new' operator");
     if (args.len < 2) return self.throwError("TypeError", "Failed to construct 'File': 2 arguments required");
     const bytes = try blobConcatParts(self, args[0]);
-    const name = try self.toStringV(args[1]);
+    const name = try wtf8ToUtf8Bytes(self.arena, try self.toStringV(args[1]));
     var ty: []const u8 = "";
     var last_mod: f64 = 0;
     if (args.len > 2 and args[2].isObject()) {
@@ -43579,13 +43860,13 @@ fn fileConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
 fn fileNameGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobIsFile(this)) return self.throwError("TypeError", "Illegal invocation");
     return this.asObj().getOwn("\x00filename") orelse Value.str("");
 }
 fn fileLastModifiedGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
+    if (!blobIsFile(this)) return self.throwError("TypeError", "Illegal invocation");
     return this.asObj().getOwn("\x00filemod") orelse Value.num(0);
 }
 fn installBlob(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
@@ -43648,6 +43929,7 @@ const BodyExtract = struct { bytes: ?[]const u8, ctype: ?[]const u8 };
 fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
     if (body_v.isUndefined() or body_v.isNull()) return .{ .bytes = null, .ctype = null };
     if (blobIsBlob(body_v)) {
+        if (!blobHasBytes(body_v.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
         const tv = body_v.asObj().getOwn("\x00blobtype");
         const ct: ?[]const u8 = if (tv != null and tv.?.isString() and tv.?.asStr().len > 0) tv.?.asStr() else null;
         return .{ .bytes = blobBytesOf(body_v.asObj()), .ctype = ct };

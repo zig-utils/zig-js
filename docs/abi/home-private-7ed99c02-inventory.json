@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 424,
-      "pending": 106
+      "implemented": 434,
+      "pending": 96
     }
   },
   "declarations": [
@@ -1281,10 +1281,10 @@
       "line": 104,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn DOMFormData__forEach(*DOMFormData, ?*anyopaque, ForEachFunction) void;",
       "declaration_sha256": "f1767f4178d39296989fe0586a5d7cda833460aa66554838bba45eca20b5abf4",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "DOMFormData__toQueryString",
@@ -1292,10 +1292,10 @@
       "line": 49,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn DOMFormData__toQueryString( *DOMFormData, ctx: *anyopaque, callback: *const fn (ctx: *anyopaque, *ZigString) callconv(.c) void, ) void;",
       "declaration_sha256": "adb904402c90bebd0c9259be2540bf08a1f1e13f85e8609154eb5267356b1225",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Debugger__didCancelAsyncCall",
@@ -5164,10 +5164,10 @@
       "line": 33,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__append(arg0: *DOMFormData, arg1: *ZigString, arg2: *ZigString) void;",
       "declaration_sha256": "acafdb56adf0cb34c5dfea562dca3c15e1432c03b048058ffb522db75de318e8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__appendBlob",
@@ -5175,10 +5175,10 @@
       "line": 34,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__appendBlob(arg0: *DOMFormData, arg1: *JSGlobalObject, arg2: *ZigString, arg3: *anyopaque, arg4: *ZigString) void;",
       "declaration_sha256": "a87bef31df3fba876adfb23370a688f304e90226b0515fd8039baab51e9f5752",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__cast_",
@@ -5186,10 +5186,10 @@
       "line": 28,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__cast_(JSValue0: JSValue, arg1: *VM) ?*DOMFormData;",
       "declaration_sha256": "2c9bdec0f4a77e35c1306ba705c27cbb1f64159928ef6ce9024b47d91e14767e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__count",
@@ -5197,10 +5197,10 @@
       "line": 35,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__count(arg0: *DOMFormData) usize;",
       "declaration_sha256": "028abb589b9343edebf37c5fe9e31d02e326efb0a39e0cfc2f500b9d082f1f05",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__create",
@@ -5208,10 +5208,10 @@
       "line": 29,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__create(arg0: *JSGlobalObject) JSValue;",
       "declaration_sha256": "7ac5504a75d0ac78bc6e44cb6cd1744e62a97659f3f5a3ad8a1c8cabf0aef2dc",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__createFromURLQuery",
@@ -5219,10 +5219,10 @@
       "line": 30,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__createFromURLQuery(arg0: *JSGlobalObject, arg1: *ZigString) JSValue;",
       "declaration_sha256": "3baabca5a7d3c7599f12f405a7cc6605e1f6dba43121994f4ae7ce5addb8d523",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__fromJS",
@@ -5230,10 +5230,10 @@
       "line": 32,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__fromJS(JSValue0: JSValue) ?*DOMFormData;",
       "declaration_sha256": "542208fd3875a473a1963f2eaddc22aeec4840e05a3de3920fdff733fe4c5be5",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMFormData__toQueryString",
@@ -5241,10 +5241,10 @@
       "line": 31,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__DOMFormData__toQueryString(arg0: *DOMFormData, arg1: *anyopaque, arg2: *const fn (arg0: *anyopaque, *ZigString) callconv(.c) void) void;",
       "declaration_sha256": "50fdcdd1623ee0ae11168ce794ee87d1e3934b7065fdaaa1e63c46e1246bde8e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__DOMURL__cast_",
