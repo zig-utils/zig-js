@@ -14167,6 +14167,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     // not unrelated garbage reclaimed from evaluation setup.
     ctx.collectGarbage();
     const before = ctx.gc.?.accounting();
+    const verifications_before = gc_mod.relocationVerificationsForTesting();
     const old_root_address = @intFromPtr(boxed.asObj());
     const old_peer_address = @intFromPtr(boxed.asObj().getOwn("peer").?.asObj());
 
@@ -14197,6 +14198,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     try std.testing.expectEqual(before.live_cells, after_second.live_cells);
     try std.testing.expectEqual(before.live_bytes, after_second.live_bytes);
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+    try std.testing.expect(gc_mod.relocationVerificationsForTesting() > verifications_before);
 
     // These values were all created before either move. Running them only now
     // proves the Function/Environment/Promise/Generator/String representatives,
@@ -14214,6 +14216,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     // the first plan-capacity reservation while leaving cell backing available.
     ctx.collectGarbage();
     const before_failure = ctx.gc.?.accounting();
+    const verifications_before_failure = gc_mod.relocationVerificationsForTesting();
     const root_before_failure = boxed.asObj();
     var no_scratch: [1]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&no_scratch);
@@ -14226,6 +14229,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     const after_failure = ctx.gc.?.accounting();
     try std.testing.expectEqual(before_failure.live_cells, after_failure.live_cells);
     try std.testing.expectEqual(before_failure.live_bytes, after_failure.live_bytes);
+    try std.testing.expectEqual(verifications_before_failure, gc_mod.relocationVerificationsForTesting());
     try std.testing.expectEqual(
         boxed.asObj().getOwn("peer").?.asObj(),
         boxed.asObj().getOwn("alias").?.asObj(),

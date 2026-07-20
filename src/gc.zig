@@ -38,9 +38,14 @@ const Environment = interp.Environment;
 const StringCell = strcell.StringCell;
 
 var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
+var relocation_verifications_for_testing: std.atomic.Value(u64) = .init(0);
 
 pub fn objectBatchCellsForTesting() u64 {
     return object_batch_cells_for_testing.load(.monotonic);
+}
+
+pub fn relocationVerificationsForTesting() u64 {
+    return relocation_verifications_for_testing.load(.monotonic);
 }
 
 /// The engine's GC cell taxonomy. Each `Heap.create(T, kind)` tags its cell so
@@ -2628,6 +2633,61 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
     gc_relocation.rewriteOptionalValueSlot(v, &ctx.exception);
 }
 
+fn StalePointerVisitor(comptime PlanPointer: type) type {
+    return struct {
+        plan: PlanPointer,
+
+        fn check(self: *@This(), cell: ?*anyopaque) void {
+            const pointer = cell orelse return;
+            std.debug.assert(!self.plan.moved(pointer));
+        }
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            self.check(cell);
+        }
+        pub fn markWeak(self: *@This(), slot: *?*anyopaque) void {
+            self.check(slot.*);
+        }
+        pub fn markWeakAtomic(self: *@This(), slot: *std.atomic.Value(?*anyopaque)) void {
+            self.check(slot.load(.acquire));
+        }
+        pub fn isMarked(self: *@This(), cell: ?*anyopaque) bool {
+            self.check(cell);
+            return cell != null;
+        }
+        pub fn isManaged(self: *@This(), cell: ?*anyopaque) bool {
+            self.check(cell);
+            return cell != null;
+        }
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+        pub fn deferToFinish(self: *@This(), cell: *anyopaque) void {
+            self.check(cell);
+        }
+        pub fn markConservativeWord(_: *@This(), _: usize) void {}
+        pub fn markConservativeWords(_: *@This(), _: [*]const usize, _: usize) void {}
+    };
+}
+
+fn verifyObjectWeakRelocation(o: *Object, v: anytype) void {
+    const cold = o.coldState() orelse return;
+    if (o.is_weak and (o.is_map or o.is_set)) {
+        std.debug.assert(cold.weak_index.count() == 0);
+        for (cold.weak_entries.items) |entry| {
+            v.mark(entry.key);
+            markValue(v, entry.value);
+        }
+    }
+    if (o.behavior.is_finalization_registry) {
+        if (cold.finalization_records) |records| for (records.items) |record| {
+            v.mark(record.target);
+            markValue(v, record.held);
+            v.mark(record.token);
+        };
+    }
+}
+
 // ---- The binding the collector instantiates over -------------------------
 
 /// A tiny stateful binding the collector instantiates over: it just wraps the
@@ -2748,6 +2808,23 @@ pub const Binding = struct {
             .iter_helper => relocateIterHelper(@ptrCast(@alignCast(cell)), v),
             .module_ns => relocateModuleNs(@ptrCast(@alignCast(cell)), v),
         }
+    }
+
+    pub fn verifyRelocationRoots(self: *Binding, plan: anytype) void {
+        var verifier = StalePointerVisitor(@TypeOf(plan)){ .plan = plan };
+        self.traceRoots(&verifier);
+        if (builtin.is_test) _ = relocation_verifications_for_testing.fetchAdd(1, .monotonic);
+    }
+
+    pub fn verifyRelocationCell(_: *Binding, cell: *anyopaque, kind: Kind, plan: anytype) void {
+        var verifier = StalePointerVisitor(@TypeOf(plan)){ .plan = plan };
+        Binding.trace(cell, kind, &verifier);
+        if (kind == .object) {
+            const object: *Object = @ptrCast(@alignCast(cell));
+            traceObjectEphemeron(object, &verifier);
+            verifyObjectWeakRelocation(object, &verifier);
+        }
+        if (builtin.is_test) _ = relocation_verifications_for_testing.fetchAdd(1, .monotonic);
     }
 
     /// Persistent roots reachable from the realm plus registered active

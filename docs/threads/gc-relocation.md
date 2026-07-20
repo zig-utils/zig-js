@@ -46,7 +46,7 @@ failure-atomic movement (#334), complete root/edge rewriting (#335),
 concurrent/native/JIT barriers (#336), and terminal evidence (#337).
 
 The generic collector mechanism is now supplied by
-[`zig-gc@e6ea569`](https://github.com/zig-utils/zig-gc/commit/e6ea569). It
+[`zig-gc@5883b02`](https://github.com/zig-utils/zig-gc/commit/5883b02). It
 reserves the complete old-to-new plan before mutation, rolls every destination
 back on OOM, rewrites moved and pinned cells, and commits live storage without
 running finalizers. zig-js's owned `GcCellBacking` provides a matching
@@ -54,7 +54,9 @@ unpublished reserve/release/commit trio: relocation does not inflate mutator
 allocation pressure, publication swaps under one size-class lock, and live-slot
 accounting stays unchanged. The engine now invokes this mechanism only through
 the checked explicit stop-the-world policy; automatic and mid-script movement
-remain off.
+remain off. Paired post-commit verification hooks retain the forwarding map
+long enough to trace every current root/live cell and trap if any audited slot
+still contains an old payload address.
 
 The first engine rewrite slice is complete under
 [#338](https://github.com/zig-utils/zig-js/issues/338): `Function` marking and
@@ -141,6 +143,11 @@ live-cell/live-byte accounting, and deterministic scratch OOM proves the plan
 leaves its original graph and accounting untouched. The same witness executes
 pre-move Function/Environment/Promise/Generator/String representatives after
 two moves. Ordinary collection stays non-moving.
+
+[#351](https://github.com/zig-utils/zig-js/issues/351) adds that post-commit
+stale-address traversal to the engine. It reuses the non-mutating marker view,
+adds the weak-map/finalization-only surfaces that ordinary tracing omits, and
+runs only after all backing publication and heap indexes name destinations.
 
 ## Safepoint Rule
 

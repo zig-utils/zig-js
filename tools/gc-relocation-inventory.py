@@ -72,7 +72,13 @@ def main() -> int:
         require(entry.get("rewrite", "") in gc_source, f"{entry.get('kind')}: executable rewriter missing")
 
     context_source = (ROOT / "src/context.zig").read_text()
-    for hook in ("pub fn canRelocate", "pub fn relocateRoots", "pub fn relocateCell"):
+    for hook in (
+        "pub fn canRelocate",
+        "pub fn relocateRoots",
+        "pub fn relocateCell",
+        "pub fn verifyRelocationRoots",
+        "pub fn verifyRelocationCell",
+    ):
         require(hook in gc_source, f"collector binding hook missing: {hook}")
     require("pub fn compactGarbage" in context_source, "checked Context compaction entrypoint missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
