@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 SCRIPT_EXECUTION_CONTEXT_CONTRACT = ROOT / "docs/abi/home-script-execution-context-7ed99c02.json"
 CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
+READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
@@ -541,6 +542,56 @@ def validate_cpu_profile_contract(home_root: Path | None) -> None:
         fail("CPU profile semantic inventory is incomplete or duplicated")
 
 
+def validate_readable_stream_contract(home_root: Path | None) -> None:
+    if not READABLE_STREAM_CONTRACT.is_file():
+        fail(f"missing checked-in ReadableStream contract {READABLE_STREAM_CONTRACT}")
+    contract = json.loads(READABLE_STREAM_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "readable-stream-consumption"
+        or contract.get("issue") != 405
+        or contract.get("parent_issues") != [140, 143, 163, 164]
+        or contract.get("revisions") != {"home": REVISION, "bun": "4982b91e3702094330f3be3883354c52b8c01323"}
+    ):
+        fail("ReadableStream contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_home = {
+        "packages/runtime/src/jsc/JSGlobalObject.zig",
+        "packages/runtime/upstream/src/jsc/bindings/webcore/ReadableStream.cpp",
+        "packages/runtime/upstream/src/js/builtins/ReadableStream.ts",
+        "packages/runtime/upstream/src/js/builtins/ReadableStreamInternals.ts",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("ReadableStream contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(home_sources, dict) or set(home_sources) != expected_home or not isinstance(bun_sources, dict):
+        fail("ReadableStream contract Home source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid ReadableStream digest for {relative}")
+    if home_root is not None:
+        for relative, digest in home_sources.items():
+            path = home_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"ReadableStream source drift for {relative}")
+    expected_exports = {
+        "ZigGlobalObject__readableStreamToArrayBuffer",
+        "ZigGlobalObject__readableStreamToBytes",
+        "ZigGlobalObject__readableStreamToText",
+        "ZigGlobalObject__readableStreamToJSON",
+        "ZigGlobalObject__readableStreamToFormData",
+        "ZigGlobalObject__readableStreamToBlob",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("ReadableStream export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 14 or len(semantics) != len(set(semantics)):
+        fail("ReadableStream semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -571,6 +622,7 @@ def main() -> None:
     validate_stored(stored)
     validate_script_execution_context_contract(args.home_root.resolve() if args.home_root else None)
     validate_cpu_profile_contract(args.home_root.resolve() if args.home_root else None)
+    validate_readable_stream_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 446,
-      "pending": 37
+      "implemented": 452,
+      "pending": 31
     }
   },
   "home_comparison": {
@@ -5240,10 +5240,10 @@
       "line": 668,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToArrayBuffer(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "f7267d2721e28085822baaad964090215199371920dab583e6f9a8ed4ec2b886",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigGlobalObject__readableStreamToBlob",
@@ -5251,10 +5251,10 @@
       "line": 673,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToBlob(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "8d6fcfae530ffba505f4873c0ab6565b9e955f465cc76914025d5bfd1d45f3da",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigGlobalObject__readableStreamToBytes",
@@ -5262,10 +5262,10 @@
       "line": 669,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToBytes(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "9f4142ad0eee8f0a20f61b808f240a0f56438af2d191a0661acaa118100aa3d9",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigGlobalObject__readableStreamToFormData",
@@ -5273,10 +5273,10 @@
       "line": 672,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToFormData(*JSGlobalObject, JSValue, JSValue) JSValue;",
       "declaration_sha256": "204377e2b8d5a4fc96b77fb74d834549ed1c3cf0115f4ec5c18198a0cc2a502a",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigGlobalObject__readableStreamToJSON",
@@ -5284,10 +5284,10 @@
       "line": 671,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToJSON(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "a24b36c673b38f369ac02c6f8dce2b8c83aed348ff5e66121128217d3543fdd2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigGlobalObject__readableStreamToText",
@@ -5295,10 +5295,10 @@
       "line": 670,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn ZigGlobalObject__readableStreamToText(*JSGlobalObject, JSValue) JSValue;",
       "declaration_sha256": "a5d17a90bb3ca98ec5bf36750b81825089aab8b2618de9c16ff6fecba694f661",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "ZigString__external",

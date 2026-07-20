@@ -26,9 +26,10 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 433
-implemented and 38 pending private symbols; `zig build test-home-private-abi` and
-`zig build test-private-jstype` are their focused compile-link-runtime gates.
+or extension totals. The pinned Home inventory currently reports 439
+implemented and 32 pending private symbols; `zig build test-home-private-abi`,
+`zig build test-private-jstype`, and the feature-specific private ABI fixtures
+are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact

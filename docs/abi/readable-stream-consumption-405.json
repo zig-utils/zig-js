@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "contract": "readable-stream-consumption",
+  "issue": 405,
+  "parent_issues": [140, 143, 163, 164],
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "home": {
+      "packages/runtime/src/jsc/JSGlobalObject.zig": "b7f74131f8316ebce31fa65add121e73367e6c2d4bbe59eb8c53643a5e6189b2",
+      "packages/runtime/upstream/src/jsc/bindings/webcore/ReadableStream.cpp": "72ee89d96b2cfb5e578b7defe36465cbded4668b97376f17f609f582c6a2cf7c",
+      "packages/runtime/upstream/src/js/builtins/ReadableStream.ts": "6416fb2e379a2f06582d5101572d74fc94beb00c4d41704805da28eba289fbe1",
+      "packages/runtime/upstream/src/js/builtins/ReadableStreamInternals.ts": "a05d08f094ecaa5784a6284c770b397ffce054a32854b4bfe832a26c6ecc4f75"
+    },
+    "bun": {
+      "src/jsc/JSGlobalObject.zig": "acb3aba5a555edecf26a13c672b59a2c32554194b6b7d0e7fad38d8f4c2db1ab",
+      "src/jsc/bindings/webcore/ReadableStream.cpp": "bfe3a817ce3f909ff401cb1705eaf24a709086a3ebb9367c87a00cc12328a36d",
+      "src/js/builtins/ReadableStream.ts": "6416fb2e379a2f06582d5101572d74fc94beb00c4d41704805da28eba289fbe1",
+      "src/js/builtins/ReadableStreamInternals.ts": "c784271f5892f91f06eb8b1fe868f60dbd8cf8eea6cbfca45cc32fec24a6a1b6"
+    }
+  },
+  "exports": [
+    "ZigGlobalObject__readableStreamToArrayBuffer",
+    "ZigGlobalObject__readableStreamToBytes",
+    "ZigGlobalObject__readableStreamToText",
+    "ZigGlobalObject__readableStreamToJSON",
+    "ZigGlobalObject__readableStreamToFormData",
+    "ZigGlobalObject__readableStreamToBlob"
+  ],
+  "semantics": [
+    "Each realm installs a genuine default ReadableStream, ReadableStreamDefaultReader, and ReadableStreamDefaultController with hidden GC-traced state rather than treating arrays or iterables as streams.",
+    "Construction snapshots and validates the underlying start, pull, and cancel algorithms, observes the strategy high-water mark, and begins pulling only after start fulfillment.",
+    "Queued chunks and pending reads remain ordered; close drains an existing queue before done, while error rejects pending reads and the active reader's closed promise.",
+    "A stream exposes exact locked and disturbed transitions, supports direct and constructed default readers, rejects competing consumers, and releases the private consumer's reader after settlement.",
+    "Pull reentrancy is coalesced through pulling and pull-again state, and asynchronous pull rejection errors the stream without invoking user code under a native lock.",
+    "Cancellation clears the queue, fulfills pending reads as done, invokes the captured underlying cancel algorithm once, and adopts its return value or rejection.",
+    "Every private conversion returns an intrinsic realm-local Promise; non-stream brands throw synchronously while locked, stream-error, invalid-chunk, parse, and conversion failures reject.",
+    "ArrayBuffer and Uint8Array conversions preserve chunk order, check total-size overflow, reject detached views, snapshot views before later user code can mutate their backing stores, and fill the final destination without a temporary concatenation payload.",
+    "Text conversion incrementally-equivalent concatenates byte and string chunks, strips one leading UTF-8 BOM, preserves code points split across chunks, and applies Encoding Standard replacement semantics.",
+    "JSON conversion parses the completed realm-local text through that realm's JSON.parse and converts an abrupt parse into the returned Promise's rejection.",
+    "Blob conversion produces a realm-local byte-owning Blob; FormData supports both application/x-www-form-urlencoded and binary-safe multipart fields and File parts with boundary validation.",
+    "Same-VM sibling streams are consumable into the selected output realm, while foreign-VM handles fail synchronously and never expose their object graph.",
+    "All stream, reader, controller, queue, request, chunk, algorithm, and conversion-continuation edges are ordinary managed Values and therefore survive precise collection and relocation.",
+    "The Home and Bun declarations share identical encoded-value signatures, require no output ownership shim, and are audited against both exact pinned source revisions."
+  ]
+}

@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (433 implemented, 38 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (439 implemented, 32 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 433 are implemented and 38 remain pending
+Of the private entries, 439 are implemented and 32 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -558,6 +558,13 @@ emits Chrome CPU-profile JSON and a Markdown hot-function/call/file report from
 one sample set, with exact Home pointer and Bun by-value ownership. The pinned
 contract is [`cpu-profile-sampling-404.json`](cpu-profile-sampling-404.json);
 run `zig build test-private-cpu-profile`.
+
+The six ReadableStream consumers share a realm-local default stream,
+controller, reader, and pull-driven queue. They preserve asynchronous ordering,
+lock/error/cancel transitions, split UTF-8, byte ownership, JSON rejection,
+Blob creation, and URL-encoded or multipart FormData across same-VM realms.
+The exact Home/Bun source and behavior contract is
+[`readable-stream-consumption-405.json`](readable-stream-consumption-405.json).
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
@@ -1146,7 +1153,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (424 implemented, 37 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (430 implemented, 31 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
