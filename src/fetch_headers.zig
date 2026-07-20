@@ -275,6 +275,45 @@ pub const Record = struct {
         return self.append(knownName(index) orelse return error.InvalidName, value);
     }
 
+    /// Import a header row that has already been parsed by an HTTP parser.
+    /// Unlike the WebIDL mutation path, this deliberately preserves value
+    /// bytes without trimming or re-validating them. It matches the pinned
+    /// `HTTPHeaderMap` adapter semantics: known duplicates combine, Cookie
+    /// uses `; `, Set-Cookie stays multi-row, and uncommon duplicates replace
+    /// the value while retaining the first name spelling.
+    pub fn putParsed(self: *Record, name: []const u8, value: []const u8) Error!void {
+        const known_index = knownNameIndex(name);
+        const is_set_cookie = known_index == set_cookie_index;
+        var lower_stack: [64]u8 = undefined;
+        const lower = if (name.len <= lower_stack.len) lower_stack[0..name.len] else self.allocator.alloc(u8, name.len) catch return error.OutOfMemory;
+        defer if (name.len > lower_stack.len) self.allocator.free(lower);
+        for (name, lower) |char, *slot| slot.* = std.ascii.toLower(char);
+
+        self.lock();
+        defer self.mutex.unlock();
+
+        if (!is_set_cookie) {
+            if (self.findLocked(lower)) |index| {
+                const entry = &self.entries.items[index];
+                if (known_index != null) {
+                    const separator: []const u8 = if (known_index == cookie_index) "; " else ", ";
+                    const joined = std.mem.concat(self.allocator, u8, &.{ entry.value, separator, value }) catch return error.OutOfMemory;
+                    self.allocator.free(entry.value);
+                    entry.value = joined;
+                } else {
+                    const replacement = self.allocator.dupe(u8, value) catch return error.OutOfMemory;
+                    self.allocator.free(entry.value);
+                    entry.value = replacement;
+                }
+                return;
+            }
+        }
+
+        const entry = try self.makeEntry(name, value, known_index);
+        errdefer entry.deinit(self.allocator);
+        self.entries.append(self.allocator, entry) catch return error.OutOfMemory;
+    }
+
     pub fn set(self: *Record, name: []const u8, raw_value: []const u8) Error!void {
         if (!validName(name)) return error.InvalidName;
         const value = normalizeValue(raw_value);
@@ -501,4 +540,28 @@ test "FetchHeaders validates atomically and clones independently" {
     const unchanged = (try headers.getKnownCopy(std.testing.allocator, 0)).?;
     defer std.testing.allocator.free(unchanged);
     try std.testing.expectEqualStrings("text/plain", unchanged);
+}
+
+test "FetchHeaders imports parsed HTTP rows without WebIDL normalization" {
+    const headers = try Record.create();
+    defer headers.release();
+    try headers.putParsed("Accept", " one ");
+    try headers.putParsed("accept", "two");
+    try headers.putParsed("Cookie", "a=1");
+    try headers.putParsed("cookie", "b=2");
+    try headers.putParsed("X-Raw", "first");
+    try headers.putParsed("x-raw", "last");
+    try headers.putParsed("Set-Cookie", "a=1");
+    try headers.putParsed("set-cookie", "b=2");
+
+    const accept = (try headers.getCopy(std.testing.allocator, "accept")).?;
+    defer std.testing.allocator.free(accept);
+    try std.testing.expectEqualStrings(" one , two", accept);
+    const cookie = (try headers.getCopy(std.testing.allocator, "cookie")).?;
+    defer std.testing.allocator.free(cookie);
+    try std.testing.expectEqualStrings("a=1; b=2", cookie);
+    const raw = (try headers.getCopy(std.testing.allocator, "x-raw")).?;
+    defer std.testing.allocator.free(raw);
+    try std.testing.expectEqualStrings("last", raw);
+    try std.testing.expectEqual(@as(usize, 5), headers.count());
 }

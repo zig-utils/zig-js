@@ -9625,6 +9625,53 @@ export fn WebCore__FetchHeaders__createEmpty() callconv(.c) *fetch_headers.Recor
     return fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed");
 }
 
+// Exact plain-data layout copied by Bun 4982b91e's Pico parser adapter.
+// Every foreign span is copied before this function returns.
+const PrivatePicoSlice = extern struct {
+    ptr: [*c]const u8,
+    len: usize,
+};
+
+const PrivatePicoHTTPHeader = extern struct {
+    name: PrivatePicoSlice,
+    value: PrivatePicoSlice,
+};
+
+const PrivatePicoHTTPHeaders = extern struct {
+    ptr: [*c]const PrivatePicoHTTPHeader,
+    len: usize,
+};
+
+export fn WebCore__FetchHeaders__createFromPicoHeaders_(raw_headers: ?*const anyopaque) callconv(.c) *fetch_headers.Record {
+    const headers = fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed");
+    const pointer = raw_headers orelse return headers;
+    if (@intFromPtr(pointer) % @alignOf(PrivatePicoHTTPHeaders) != 0) return headers;
+    const source: *const PrivatePicoHTTPHeaders = @ptrCast(@alignCast(pointer));
+    if (source.len == 0) return headers;
+    if (source.len > std.math.maxInt(u32) or source.ptr == null) return headers;
+    if (@intFromPtr(source.ptr) % @alignOf(PrivatePicoHTTPHeader) != 0) return headers;
+    const rows_bytes = std.math.mul(usize, source.len, @sizeOf(PrivatePicoHTTPHeader)) catch return headers;
+    _ = std.math.add(usize, @intFromPtr(source.ptr), rows_bytes) catch return headers;
+    const rows = source.ptr[0..source.len];
+
+    // Validate every nullable span before importing anything so malformed
+    // plain-data records produce a deterministic empty handle atomically.
+    for (rows) |row| {
+        if (row.name.len > std.math.maxInt(u32) or row.value.len > std.math.maxInt(u32)) return headers;
+        if ((row.name.len != 0 and row.name.ptr == null) or (row.value.len != 0 and row.value.ptr == null)) return headers;
+        if (row.name.len != 0) _ = std.math.add(usize, @intFromPtr(row.name.ptr), row.name.len) catch return headers;
+        if (row.value.len != 0) _ = std.math.add(usize, @intFromPtr(row.value.ptr), row.value.len) catch return headers;
+    }
+    for (rows) |row| {
+        if (row.name.len == 0 or row.value.len == 0) continue;
+        headers.putParsed(row.name.ptr[0..row.name.len], row.value.ptr[0..row.value.len]) catch {
+            headers.release();
+            @panic("FetchHeaders allocation failed");
+        };
+    }
+    return headers;
+}
+
 export fn WebCore__FetchHeaders__deref(raw_headers: ?*fetch_headers.Record) callconv(.c) void {
     if (raw_headers) |headers| headers.release();
 }

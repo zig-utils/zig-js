@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 411,
-      "pending": 72
+      "implemented": 412,
+      "pending": 71
     }
   },
   "home_comparison": {
@@ -4910,10 +4910,10 @@
       "line": 9,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createFromPicoHeaders_(arg0: ?*const anyopaque) *FetchHeaders;",
       "declaration_sha256": "b9bf8d2ca96aa41ec1ce550c5a1a503cb43f9fb568cab68d6b0c52a9cb64595b",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createFromUWS",
