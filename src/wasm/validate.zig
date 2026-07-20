@@ -1305,11 +1305,12 @@ const FuncValidator = struct {
         if (branch_types.len == 0) return self.fail("type mismatch");
         const label_reference = branch_types[branch_types.len - 1].refType() orelse
             return self.fail("type mismatch");
-        if (label_reference.nullable) return self.fail("type mismatch");
-        try self.popExpect(types.ValType.fromRef(.{
-            .nullable = true,
-            .heap = label_reference.heap,
-        }));
+        const source_reference = try self.popReference();
+        if (source_reference) |source| {
+            const branch_reference: types.RefType = .{ .nullable = false, .heap = source.heap };
+            if (!refTypeMatches(self.mod, branch_reference, label_reference))
+                return self.fail("type mismatch");
+        }
         const prefix = branch_types[0 .. branch_types.len - 1];
         try self.popTypes(prefix);
         self.pushTypes(prefix);
@@ -1863,6 +1864,9 @@ const FuncValidator = struct {
                     self.push(selected);
                 },
                 .typed_select => {
+                    if (instr.imm.type.refType()) |reference|
+                        if (reference.heap.concreteIndex()) |index|
+                            if (index >= self.mod.types.len) return self.fail("unknown type");
                     try self.popExpect(.i32);
                     try self.popExpect(instr.imm.type);
                     try self.popExpect(instr.imm.type);
@@ -3304,7 +3308,11 @@ test "wasm.validate GC cast branches refine fallthrough types" {
 
     const nullable_label = comptime (hdr ++ type_void ++ func0 ++
         code1("\x02\x63\x6E\xD0\x6E\xD6\x00\x41\x00\xFB\x1C\x0B\x1A\x0B"));
-    try expectInvalidAtWithFeatures(nullable_label, gc_validation_features, 0, 2, "type mismatch");
+    try expectValidWithFeatures(nullable_label, gc_validation_features);
+
+    const select_unknown_heap = comptime (hdr ++ type_void ++ func0 ++
+        code1("\x00\x1C\x01\x64\x01\x1A\x0B"));
+    try expectInvalidAtWithFeatures(select_unknown_heap, gc_validation_features, 0, 1, "unknown type");
 
     // A conditional branch join retypes its preserved prefix to the label
     // signature. The concrete struct reference therefore becomes `anyref`
