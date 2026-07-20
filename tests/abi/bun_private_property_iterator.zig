@@ -7,6 +7,7 @@ const JSStringRef = ?*anyopaque;
 
 const EncodedValue = enum(i64) {
     empty = 0,
+    undefined = 10,
     _,
 
     fn fromRef(value: JSValueRef) EncodedValue {
@@ -55,6 +56,9 @@ extern "c" fn Bun__JSPropertyIterator__getLongestPropertyName(*JSPropertyIterato
 extern "c" fn Bun__JSPropertyIterator__getName(*JSPropertyIterator, *BunString, usize) void;
 extern "c" fn Bun__JSPropertyIterator__getNameAndValue(*JSPropertyIterator, JSContextRef, ?*anyopaque, *BunString, usize) EncodedValue;
 extern "c" fn Bun__JSPropertyIterator__getNameAndValueNonObservable(*JSPropertyIterator, JSContextRef, ?*anyopaque, *BunString, usize) EncodedValue;
+extern "c" fn JSC__JSValue__putBunString(EncodedValue, JSContextRef, *const BunString, EncodedValue) void;
+extern "c" fn JSC__JSValue__upsertBunStringArray(EncodedValue, JSContextRef, *const BunString, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__hasOwnPropertyValue(EncodedValue, JSContextRef, EncodedValue) bool;
 
 fn fail(message: []const u8) noreturn {
     std.debug.panic("{s}", .{message});
@@ -115,4 +119,26 @@ pub fn main() void {
     Bun__JSPropertyIterator__getName(iterator, &name, 1);
     if (!nameEquals(context, &name, "'alpha'"))
         fail("Bun property iterator snapshot changed after mutation");
+
+    const property_target = EncodedValue.fromRef(evaluate(context, "globalThis.__bun_property_ops_370 = {}; __bun_property_ops_370"));
+    const direct_bytes = "direct";
+    const direct = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(direct_bytes.ptr), .len = direct_bytes.len } },
+    };
+    const one = EncodedValue.fromRef(evaluate(context, "1"));
+    const two = EncodedValue.fromRef(evaluate(context, "2"));
+    JSC__JSValue__putBunString(property_target, context, &direct, one);
+    if (!JSC__JSValue__hasOwnPropertyValue(property_target, context, EncodedValue.fromRef(evaluate(context, "'direct'"))))
+        fail("Bun value-key own-property query mismatch");
+    const items_bytes = "items";
+    const items = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(items_bytes.ptr), .len = items_bytes.len } },
+    };
+    if (JSC__JSValue__upsertBunStringArray(property_target, context, &items, one) != .undefined or
+        JSC__JSValue__upsertBunStringArray(property_target, context, &items, two) != .undefined)
+        fail("Bun one-or-array upsert returned an invalid value");
+    if (JSValueToNumber(context, evaluate(context, "__bun_property_ops_370.items.length"), null) != 2)
+        fail("Bun one-or-array upsert mismatch");
 }

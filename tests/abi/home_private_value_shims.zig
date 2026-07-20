@@ -473,6 +473,9 @@ extern "c" fn JSC__JSValue__createObject2(JSContextRef, *const ZigString, *const
 extern "c" fn JSC__JSValue__putRecord(EncodedValue, JSContextRef, ?*const ZigString, [*c]const ZigString, usize) void;
 extern "c" fn JSC__JSValue__fromEntries(JSContextRef, [*c]const ZigString, [*c]const ZigString, usize, bool) EncodedValue;
 extern "c" fn JSC__JSValue__put(EncodedValue, JSContextRef, *const ZigString, EncodedValue) void;
+extern "c" fn JSC__JSValue__putBunString(EncodedValue, JSContextRef, *const BunString, EncodedValue) void;
+extern "c" fn JSC__JSValue__upsertBunStringArray(EncodedValue, JSContextRef, *const BunString, EncodedValue) EncodedValue;
+extern "c" fn JSC__JSValue__hasOwnPropertyValue(EncodedValue, JSContextRef, EncodedValue) bool;
 extern "c" fn JSC__JSValue__putToPropertyKey(EncodedValue, JSContextRef, EncodedValue, EncodedValue) void;
 extern "c" fn JSC__JSValue__deleteProperty(EncodedValue, JSContextRef, *const ZigString) bool;
 extern "c" fn JSC__JSValue__getIfPropertyExistsImpl(EncodedValue, JSContextRef, [*]const u8, u32) EncodedValue;
@@ -4300,7 +4303,7 @@ pub fn main() void {
 
     const direct_target = evaluate(context,
         \\globalThis.__private_direct_setter_hits = 0;
-        \\globalThis.__private_direct_target = Object.create({ set direct(value) { __private_direct_setter_hits++; } });
+        \\globalThis.__private_direct_target = Object.create({ set direct(value) { __private_direct_setter_hits++; }, set bunDirect(value) { __private_direct_setter_hits++; } });
         \\__private_direct_target;
     );
     const direct_key_bytes = "direct";
@@ -4308,6 +4311,21 @@ pub fn main() void {
     JSC__JSValue__put(direct_target, context, &direct_key, encoded_object);
     if (!JSC__JSValue__toBoolean(evaluate(context, "__private_direct_setter_hits === 0 && Object.hasOwn(__private_direct_target, 'direct') && __private_direct_target.direct === __private_aggregate_identity")))
         fail("private direct put invoked prototype setter or lost identity");
+    const bun_direct_key_bytes = "bunDirect";
+    const bun_direct_key = BunString{ .tag = .static_zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bun_direct_key_bytes.ptr), .len = bun_direct_key_bytes.len } } };
+    JSC__JSValue__putBunString(direct_target, context, &bun_direct_key, EncodedValue.fromInt32(370));
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_direct_setter_hits === 0 && __private_direct_target.bunDirect === 370")))
+        fail("private BunString direct put mismatch");
+    const bun_items_bytes = "items";
+    const bun_items = BunString{ .tag = .static_zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bun_items_bytes.ptr), .len = bun_items_bytes.len } } };
+    if (JSC__JSValue__upsertBunStringArray(direct_target, context, &bun_items, EncodedValue.fromInt32(1)) != .undefined or
+        JSC__JSValue__upsertBunStringArray(direct_target, context, &bun_items, EncodedValue.fromInt32(2)) != .undefined or
+        JSC__JSValue__upsertBunStringArray(direct_target, context, &bun_items, EncodedValue.fromInt32(3)) != .undefined or
+        !JSC__JSValue__toBoolean(evaluate(context, "Array.isArray(__private_direct_target.items) && __private_direct_target.items.join(',') === '1,2,3'")))
+        fail("private BunString one-or-array upsert mismatch");
+    if (!JSC__JSValue__hasOwnPropertyValue(direct_target, context, evaluate(context, "'items'")) or
+        JSC__JSValue__hasOwnPropertyValue(direct_target, context, evaluate(context, "'missing'")))
+        fail("private value-key own-property query mismatch");
     const record_key_bytes = "record";
     const record_key = ZigString{ .tagged_ptr = @intFromPtr(record_key_bytes.ptr), .len = record_key_bytes.len };
     const record_values = [_]ZigString{ entry_values[0], entry_values[1] };
@@ -6369,5 +6387,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 343/343 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 346/346 symbols linked; runtime matrix passed\n", .{});
 }

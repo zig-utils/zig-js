@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 415,
-      "pending": 115
+      "implemented": 418,
+      "pending": 112
     }
   },
   "declarations": [
@@ -2557,10 +2557,10 @@
       "line": 790,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn JSC__JSValue__hasOwnPropertyValue(JSValue, *JSGlobalObject, JSValue) bool;",
       "declaration_sha256": "31e110e215fe2b18940c13e982dded7e60010fce2ed9395f4b198a94ff5fc0e8",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__isAggregateError",
@@ -2777,10 +2777,10 @@
       "line": 352,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn JSC__JSValue__putBunString(value: JSValue, global: *JSGlobalObject, key: *const bun.String, result: jsc.JSValue) void;",
       "declaration_sha256": "8f925b09e2837692b26d7bdc77299cb8f384045b0ed89721fd91c50d8f1d580c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__putIndex",
@@ -2953,10 +2953,10 @@
       "line": 359,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn JSC__JSValue__upsertBunStringArray(value: JSValue, global: *JSGlobalObject, key: *const bun.String, result: jsc.JSValue) JSValue;",
       "declaration_sha256": "d8f7cdba14bb6a6451998b38a6f7d22c4ba5c0f029170ac6b9b30888fc856909",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__JSValue__values",

@@ -5242,6 +5242,29 @@ fn privateLatin1PropertyKey(context: *Context, bytes: [*]const u8, len: u32) ?[]
     };
 }
 
+fn privatePublishPropertyTypeError(context: *Context, message: []const u8) void {
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    privateSetPendingAbrupt(context, &machine, machine.throwError("TypeError", message));
+}
+
+fn privatePutDirectData(machine: *interp.Interpreter, object: *Object, property: []const u8, stored: Value) !void {
+    switch (try object.deleteAccessorOwn(machine.arena, property)) {
+        .blocked => return machine.throwError("TypeError", "Cannot replace non-configurable property"),
+        .absent, .removed_continue, .deleted => {},
+    }
+    try machine.setProp(object, property, stored);
+    try object.setAttr(machine.arena, property, .{});
+}
+
 fn privateGetBeforeObjectPrototype(
     machine: *interp.Interpreter,
     target: *Object,
@@ -5508,6 +5531,157 @@ export fn JSC__JSValue__put(
     // putDirect: an own raw write, not OrdinarySet (prototype setters are not run).
     machine.setProp(target.asObj(), property, stored) catch |err|
         privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__putBunString(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: *const PrivateBunString,
+    value_encoded: EncodedValue,
+) callconv(.c) void {
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const property = privateBunStringPropertyKey(context, key) orelse return;
+    const target = privateValueFrom(global, target_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Target belongs to another VM");
+        return;
+    };
+    const stored = privateValueFrom(global, value_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Property value belongs to another VM");
+        return;
+    };
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) {
+        privatePublishPropertyTypeError(context, "Target must be an object");
+        return;
+    }
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+    // JSC putDirect: define/replace an own data slot without invoking a Proxy
+    // trap or a setter inherited from the prototype.
+    privatePutDirectData(&machine, target.asObj(), property, stored) catch |err|
+        privateSetPendingAbrupt(context, &machine, err);
+}
+
+export fn JSC__JSValue__upsertBunStringArray(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key: *const PrivateBunString,
+    value_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const property = privateBunStringPropertyKey(context, key) orelse return .empty;
+    const target = privateValueFrom(global, target_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Target belongs to another VM");
+        return .empty;
+    };
+    const stored = privateValueFrom(global, value_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Property value belongs to another VM");
+        return .empty;
+    };
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) {
+        const err = machine.throwError("TypeError", "Target must be an object");
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    }
+
+    const existing = machine.getPropertyIfExists(target, property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    if (existing) |old| {
+        if (old.isObject() and old.asObj().is_array) {
+            machine.pushArrayDirect(old.asObj(), stored) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+        } else {
+            const array = machine.newArrayWithLength(2) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+            machine.putArrayDirectIndex(array.asObj(), 0, old) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+            machine.putArrayDirectIndex(array.asObj(), 1, stored) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+            privatePutDirectData(&machine, target.asObj(), property, array) catch |err| {
+                privateSetPendingAbrupt(context, &machine, err);
+                return .empty;
+            };
+        }
+    } else {
+        privatePutDirectData(&machine, target.asObj(), property, stored) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    return .undefined;
+}
+
+export fn JSC__JSValue__hasOwnPropertyValue(
+    target_encoded: EncodedValue,
+    global: JSContextRef,
+    key_encoded: EncodedValue,
+) callconv(.c) bool {
+    const context = ctxForEvaluation(global) orelse return false;
+    const group = privatePropertyBoundaryGroup(context) orelse return false;
+    if (group.pending_exception != null) return false;
+    const target = privateValueFrom(global, target_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Target belongs to another VM");
+        return false;
+    };
+    const key_value = privateValueFrom(global, key_encoded) orelse {
+        privatePublishPropertyTypeError(context, "Property key belongs to another VM");
+        return false;
+    };
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    defer context.popActiveInterpreter(&machine);
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) {
+        const err = machine.throwError("TypeError", "Target must be an object");
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    }
+    const property = machine.keyOf(key_value) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
+    return machine.hasOwnPropertyResult(target.asObj(), property) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return false;
+    };
 }
 
 export fn JSC__JSValue__putToPropertyKey(
@@ -23155,6 +23329,77 @@ test "private property path traversal preserves pinned string and array semantic
     try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(blocked_target, context, blocked_path));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(224), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private value-key property query and BunString upsert preserve direct and observable semantics" {
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn bunString(bytes: []const u8) PrivateBunString {
+            return .{
+                .tag = .static_zig_string,
+                .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
+            };
+        }
+
+        fn expect(context_: *Context, source: []const u8) !void {
+            const result = try context_.evaluate(source);
+            try std.testing.expect(result.toBoolean());
+        }
+    };
+
+    const target = try Probe.encoded(internal, "globalThis.__property_ops_370 = Object.create({ set direct(v) { globalThis.__property_setter_370 = v; }, inherited: 4 }); Object.defineProperty(__property_ops_370, 'ownAccessor', { configurable: true, get() { return 99; } }); __property_ops_370");
+    var direct = Probe.bunString("direct");
+    JSC__JSValue__putBunString(target, context, &direct, EncodedValue.fromInt32(1));
+    try Probe.expect(internal, "Object.hasOwn(__property_ops_370, 'direct') && __property_ops_370.direct === 1 && globalThis.__property_setter_370 === undefined");
+    var own_accessor = Probe.bunString("ownAccessor");
+    JSC__JSValue__putBunString(target, context, &own_accessor, EncodedValue.fromInt32(2));
+    try Probe.expect(internal, "__property_ops_370.ownAccessor === 2 && Object.getOwnPropertyDescriptor(__property_ops_370, 'ownAccessor').get === undefined");
+
+    var items = Probe.bunString("items");
+    try std.testing.expectEqual(EncodedValue.undefined, JSC__JSValue__upsertBunStringArray(target, context, &items, EncodedValue.fromInt32(1)));
+    try Probe.expect(internal, "__property_ops_370.items === 1");
+    try std.testing.expectEqual(EncodedValue.undefined, JSC__JSValue__upsertBunStringArray(target, context, &items, EncodedValue.fromInt32(2)));
+    try std.testing.expectEqual(EncodedValue.undefined, JSC__JSValue__upsertBunStringArray(target, context, &items, EncodedValue.fromInt32(3)));
+    try Probe.expect(internal, "Array.isArray(__property_ops_370.items) && __property_ops_370.items.join(',') === '1,2,3'");
+
+    var inherited = Probe.bunString("inherited");
+    try std.testing.expectEqual(EncodedValue.undefined, JSC__JSValue__upsertBunStringArray(target, context, &inherited, EncodedValue.fromInt32(5)));
+    try Probe.expect(internal, "Object.hasOwn(__property_ops_370, 'inherited') && __property_ops_370.inherited.join(',') === '4,5'");
+
+    try std.testing.expect(JSC__JSValue__hasOwnPropertyValue(target, context, try Probe.encoded(internal, "'items'")));
+    try std.testing.expect(!JSC__JSValue__hasOwnPropertyValue(target, context, try Probe.encoded(internal, "'missing'")));
+    const symbol_target = try Probe.encoded(internal, "globalThis.__property_symbol_370 = Symbol('own'); globalThis.__property_symbol_target_370 = { [__property_symbol_370]: 1 }; __property_symbol_target_370");
+    try std.testing.expect(JSC__JSValue__hasOwnPropertyValue(symbol_target, context, try Probe.encoded(internal, "__property_symbol_370")));
+
+    const coercing_key = try Probe.encoded(internal, "globalThis.__property_key_calls_370 = 0; ({ [Symbol.toPrimitive]() { __property_key_calls_370++; return 'items'; } })");
+    try std.testing.expect(JSC__JSValue__hasOwnPropertyValue(target, context, coercing_key));
+    try Probe.expect(internal, "__property_key_calls_370 === 1");
+
+    const proxy = try Probe.encoded(internal, "globalThis.__property_descriptor_calls_370 = 0; new Proxy({ own: 1 }, { getOwnPropertyDescriptor(t, k) { __property_descriptor_calls_370++; return Reflect.getOwnPropertyDescriptor(t, k); } })");
+    try std.testing.expect(JSC__JSValue__hasOwnPropertyValue(proxy, context, try Probe.encoded(internal, "'own'")));
+    try Probe.expect(internal, "__property_descriptor_calls_370 === 1");
+
+    const throwing_key = try Probe.encoded(internal, "({ [Symbol.toPrimitive]() { throw 3701; } })");
+    try std.testing.expect(!JSC__JSValue__hasOwnPropertyValue(target, context, throwing_key));
+    const pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3701), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_value = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ foreign: true })"));
+    JSC__JSValue__putBunString(target, context, &direct, foreign_value);
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+    try std.testing.expect(!JSC__JSValue__hasOwnPropertyValue(target, context, foreign_value));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
 }
 
 test "private property iterator preserves snapshots observability and VM inquiry" {

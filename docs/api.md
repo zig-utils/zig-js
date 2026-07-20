@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 356
-implemented and 115 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 359
+implemented and 112 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -84,6 +84,11 @@ direct insertion, duplicate/integer-key ordering, zero/one/many cardinality,
 all-true own descriptors, and caller-buffer independence without invoking
 inherited setters. Invalid pointers, oversized counts, foreign cells, OOM, and
 pre-existing exceptions cannot publish a partial result.
+The value-key/BunString property trio performs one observable `ToPropertyKey`
+own-property inquiry, direct own data writes, and Bun's scalar-to-array upsert
+progression. Direct writes bypass prototype setters and replace configurable
+accessors; Symbol/index/proxy behavior, foreign-value rejection, and first
+pending exceptions remain exact.
 The JSX element predicate performs one ordinary `$$typeof` read and accepts
 only `Symbol.for('react.element')` or
 `Symbol.for('react.transitional.element')` from the VM-wide registry. It keeps

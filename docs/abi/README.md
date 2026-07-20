@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (356 implemented, 115 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (359 implemented, 112 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 356 are implemented and 115 remain pending
+Of the private entries, 359 are implemented and 112 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -428,6 +428,14 @@ one, and multiple values to an empty array, scalar string, and ordered string
 array, then installs an all-true own data descriptor without invoking inherited
 setters. Null/oversized/foreign/OOM paths are failure-atomic and the shared
 pending-exception boundary remains first-wins.
+
+The three value-key/BunString property exports add observable one-shot
+`ToPropertyKey` own-property inquiry plus direct own writes. They preserve
+Symbol/index/proxy semantics, replace configurable accessors without invoking
+prototype setters, and implement Bun's missing/scalar/array upsert progression:
+`value`, then `[old, new]`, then direct array pushes. Foreign values, invalid
+targets, coercion failures, and pre-existing exceptions publish no partial
+mutation and retain first-exception identity.
 
 The JSX element predicate performs one ordinary `$$typeof` Get and compares
 only against the VM registry identities for `react.element` and
@@ -995,7 +1003,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (348 implemented, 113 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (351 implemented, 110 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1014,5 +1022,5 @@ zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 113
+not claim complete Bun runtime compatibility; #164 remains open for the 110
 pending core entries and later wider/generated profiles.
