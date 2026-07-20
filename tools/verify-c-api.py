@@ -22,6 +22,9 @@ PRIVATE_INVENTORIES = (
 # Rust consumer uses the full explicit trio. Keep this exception closed and
 # auditable instead of accepting arbitrary Bun__ exports.
 PRIVATE_SUPPORT_EXPORTS = {
+    # Versioned installer for the consumer-side UWS/H3 C++ adapter table. The
+    # pinned Zig profiles declare only the original opaque FetchHeaders calls.
+    "ZigJS__FetchHeadersBridge__installV1",
     "Bun__WTFStringImpl__ref",
     "Bun__WTFStringImpl__deref",
     "Bun__WTFStringImpl__destroy",

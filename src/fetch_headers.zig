@@ -489,6 +489,39 @@ pub const Record = struct {
         }.lessThan);
         return .{ .rows = rows };
     }
+
+    /// Snapshot in the order used by Bun 4982b91e's response adapters:
+    /// Set-Cookie rows first, then known/common headers in insertion order,
+    /// then uncommon headers in insertion order.
+    pub fn responseSnapshot(self: *Record, allocator: std.mem.Allocator) Error!Snapshot {
+        self.lock();
+        defer self.mutex.unlock();
+        const rows = allocator.alloc(Row, self.entries.items.len) catch return error.OutOfMemory;
+        var initialized: usize = 0;
+        errdefer {
+            for (rows[0..initialized]) |row| row.deinit(allocator);
+            allocator.free(rows);
+        }
+        for (0..3) |category| {
+            for (self.entries.items) |entry| {
+                const selected = switch (category) {
+                    0 => entry.known_index == set_cookie_index,
+                    1 => entry.known_index != null and entry.known_index != set_cookie_index,
+                    2 => entry.known_index == null,
+                    else => unreachable,
+                };
+                if (!selected) continue;
+                const name = allocator.dupe(u8, entry.display_name) catch return error.OutOfMemory;
+                const header_value = allocator.dupe(u8, entry.value) catch {
+                    allocator.free(name);
+                    return error.OutOfMemory;
+                };
+                rows[initialized] = .{ .name = name, .value = header_value };
+                initialized += 1;
+            }
+        }
+        return .{ .rows = rows };
+    }
 };
 
 test "FetchHeaders combines normal values and preserves Set-Cookie rows" {
@@ -564,4 +597,25 @@ test "FetchHeaders imports parsed HTTP rows without WebIDL normalization" {
     defer std.testing.allocator.free(raw);
     try std.testing.expectEqualStrings("last", raw);
     try std.testing.expectEqual(@as(usize, 5), headers.count());
+}
+
+test "FetchHeaders response snapshot uses pinned category order" {
+    const headers = try Record.create();
+    defer headers.release();
+    try headers.append("X-First", "x");
+    try headers.append("Set-Cookie", "a=1");
+    try headers.append("Date", "today");
+    try headers.append("set-cookie", "b=2");
+    try headers.append("Accept", "text/plain");
+
+    const snapshot = try headers.responseSnapshot(std.testing.allocator);
+    defer snapshot.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), snapshot.rows.len);
+    try std.testing.expectEqualStrings("Set-Cookie", snapshot.rows[0].name);
+    try std.testing.expectEqualStrings("a=1", snapshot.rows[0].value);
+    try std.testing.expectEqualStrings("Set-Cookie", snapshot.rows[1].name);
+    try std.testing.expectEqualStrings("b=2", snapshot.rows[1].value);
+    try std.testing.expectEqualStrings("Date", snapshot.rows[2].name);
+    try std.testing.expectEqualStrings("Accept", snapshot.rows[3].name);
+    try std.testing.expectEqualStrings("X-First", snapshot.rows[4].name);
 }

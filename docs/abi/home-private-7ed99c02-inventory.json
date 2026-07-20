@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 459,
-      "pending": 71
+      "implemented": 460,
+      "pending": 70
     }
   },
   "declarations": [
@@ -5560,10 +5560,10 @@
       "line": 23,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__toUWSResponse(arg0: *FetchHeaders, kind: bun.uws.ResponseKind, arg2: ?*anyopaque) void;",
       "declaration_sha256": "f55e1d6aca4f8420ba90aafe9eb71e449a61394add5f08fbe6051c48b0c17885",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebWorker__dispatchError",

@@ -22,10 +22,33 @@ const PicoSlice = extern struct { ptr: [*c]const u8, len: usize };
 const PicoHTTPHeader = extern struct { name: PicoSlice, value: PicoSlice };
 const PicoHTTPHeaders = extern struct { ptr: [*c]const PicoHTTPHeader, len: usize };
 const FetchHeadersBridgeVisitorV1 = *const fn (?*anyopaque, PicoSlice, PicoSlice) callconv(.c) bool;
+const FetchHeadersBridgeVisitRequestV1 = *const fn (?*anyopaque, ?*anyopaque, FetchHeadersBridgeVisitorV1) callconv(.c) bool;
+const FetchHeadersBridgeRowV1 = extern struct { name: PicoSlice, value: PicoSlice };
+const FetchHeadersBridgeWriteResponseV1 = *const fn (?*anyopaque, i32, [*c]const FetchHeadersBridgeRowV1, usize) callconv(.c) bool;
+const FetchHeadersBridgeV1 = extern struct {
+    abi_version: u32,
+    struct_size: u32,
+    visit_uws_request: ?FetchHeadersBridgeVisitRequestV1,
+    visit_h3_request: ?FetchHeadersBridgeVisitRequestV1,
+    write_response: ?FetchHeadersBridgeWriteResponseV1,
+};
 const FakeBridgeRequest = extern struct {
     rows: [*c]const PicoHTTPHeader,
     len: usize,
     fail_after: usize,
+};
+const CapturedResponseHeader = struct {
+    name: [64]u8 = @splat(0),
+    name_len: usize = 0,
+    value: [128]u8 = @splat(0),
+    value_len: usize = 0,
+};
+const FakeBridgeResponse = struct {
+    rows: [16]CapturedResponseHeader = @splat(.{}),
+    count: usize = 0,
+    state: u8 = 0,
+    marks: usize = 0,
+    kind: i32 = -1,
 };
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
@@ -36,6 +59,7 @@ extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringR
 extern "c" fn JSC__JSGlobalObject__vm(JSContextRef) ?*anyopaque;
 extern "c" fn JSGlobalObject__hasException(JSContextRef) bool;
 extern "c" fn JSGlobalObject__clearException(JSContextRef) void;
+extern "c" fn ZigJS__FetchHeadersBridge__installV1(?*const FetchHeadersBridgeV1) bool;
 
 // Exact declarations consumed by Bun's pinned src/jsc/FetchHeaders.zig.
 extern "c" fn WebCore__FetchHeaders__append(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
@@ -62,6 +86,7 @@ extern "c" fn WebCore__FetchHeaders__put(*FetchHeaders, u8, *const ZigString, JS
 extern "c" fn WebCore__FetchHeaders__put_(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
 extern "c" fn WebCore__FetchHeaders__remove(*FetchHeaders, *const ZigString, JSContextRef) void;
 extern "c" fn WebCore__FetchHeaders__toJS(*FetchHeaders, JSContextRef) EncodedValue;
+extern "c" fn WebCore__FetchHeaders__toUWSResponse(*FetchHeaders, i32, ?*anyopaque) void;
 
 fn fail(message: []const u8) noreturn {
     std.debug.panic("{s}", .{message});
@@ -112,6 +137,42 @@ export fn ZigJS__FetchHeadersBridge__visitH3RequestV1(
     visitor: FetchHeadersBridgeVisitorV1,
 ) callconv(.c) bool {
     return visitFakeBridgeRequest(raw_request, context, visitor);
+}
+
+export fn ZigJS__FetchHeadersBridge__writeResponseV1(
+    raw_response: ?*anyopaque,
+    kind: i32,
+    rows: [*c]const FetchHeadersBridgeRowV1,
+    count: usize,
+) callconv(.c) bool {
+    const response: *FakeBridgeResponse = @ptrCast(@alignCast(raw_response orelse return false));
+    if (kind < 0 or kind > 2 or count > response.rows.len or (count != 0 and rows == null)) return false;
+    response.* = .{ .kind = kind };
+    for (rows[0..count], 0..) |row, index| {
+        if (row.name.len > response.rows[index].name.len or row.value.len > response.rows[index].value.len or
+            (row.name.len != 0 and row.name.ptr == null) or (row.value.len != 0 and row.value.ptr == null)) return false;
+        if (row.name.len != 0) @memcpy(response.rows[index].name[0..row.name.len], row.name.ptr[0..row.name.len]);
+        if (row.value.len != 0) @memcpy(response.rows[index].value[0..row.value.len], row.value.ptr[0..row.value.len]);
+        response.rows[index].name_len = row.name.len;
+        response.rows[index].value_len = row.value.len;
+        const name = response.rows[index].name[0..row.name.len];
+        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            if (response.state & 1 == 0) {
+                response.state |= 1;
+                response.marks += 1;
+            }
+        } else if (std.ascii.eqlIgnoreCase(name, "date")) {
+            response.state |= 2;
+        } else if (kind != 2 and std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            response.state |= 4;
+        }
+        response.count += 1;
+    }
+    return true;
+}
+
+fn capturedName(response: *const FakeBridgeResponse, index: usize) []const u8 {
+    return response.rows[index].name[0..response.rows[index].name_len];
 }
 
 fn zigStringEquals(actual: ZigString, expected: []const u8) bool {
@@ -285,6 +346,32 @@ pub fn main() void {
     defer WebCore__FetchHeaders__deref(misaligned_pico);
     if (!WebCore__FetchHeaders__isEmpty(misaligned_pico)) fail("misaligned PicoHeaders record was not rejected");
 
+    const invalid_bridge = FetchHeadersBridgeV1{
+        .abi_version = 2,
+        .struct_size = @sizeOf(FetchHeadersBridgeV1),
+        .visit_uws_request = ZigJS__FetchHeadersBridge__visitUWSRequestV1,
+        .visit_h3_request = ZigJS__FetchHeadersBridge__visitH3RequestV1,
+        .write_response = ZigJS__FetchHeadersBridge__writeResponseV1,
+    };
+    if (ZigJS__FetchHeadersBridge__installV1(&invalid_bridge)) fail("invalid FetchHeaders bridge version was accepted");
+    const invalid_bridge_size = FetchHeadersBridgeV1{
+        .abi_version = 1,
+        .struct_size = @sizeOf(FetchHeadersBridgeV1) - 1,
+        .visit_uws_request = ZigJS__FetchHeadersBridge__visitUWSRequestV1,
+        .visit_h3_request = ZigJS__FetchHeadersBridge__visitH3RequestV1,
+        .write_response = ZigJS__FetchHeadersBridge__writeResponseV1,
+    };
+    if (ZigJS__FetchHeadersBridge__installV1(&invalid_bridge_size)) fail("invalid FetchHeaders bridge size was accepted");
+    const bridge = FetchHeadersBridgeV1{
+        .abi_version = 1,
+        .struct_size = @sizeOf(FetchHeadersBridgeV1),
+        .visit_uws_request = ZigJS__FetchHeadersBridge__visitUWSRequestV1,
+        .visit_h3_request = ZigJS__FetchHeadersBridge__visitH3RequestV1,
+        .write_response = ZigJS__FetchHeadersBridge__writeResponseV1,
+    };
+    if (!ZigJS__FetchHeadersBridge__installV1(&bridge)) fail("FetchHeaders bridge installation failed");
+    defer _ = ZigJS__FetchHeadersBridge__installV1(null);
+
     var bridge_last = [_]u8{ 'l', 'a', 's', 't' };
     const uws_rows = [_]PicoHTTPHeader{
         .{ .name = picoSlice("Accept"), .value = picoSlice(" raw ") },
@@ -321,7 +408,47 @@ pub fn main() void {
     defer WebCore__FetchHeaders__deref(failed_headers);
     if (!WebCore__FetchHeaders__isEmpty(failed_headers)) fail("aborted UWS bridge import was not atomic");
 
+    const response_headers = WebCore__FetchHeaders__createEmpty();
+    defer WebCore__FetchHeaders__deref(response_headers);
+    var response_x_name = zigString("X-Response");
+    var response_x_value = zigString("x");
+    var response_date_name = zigString("Date");
+    var response_date_value = zigString("today");
+    var response_length_name = zigString("Content-Length");
+    var response_length_value = zigString("3");
+    var response_transfer_name = zigString("Transfer-Encoding");
+    var response_transfer_value = zigString("chunked");
+    WebCore__FetchHeaders__append(response_headers, &response_x_name, &response_x_value, context);
+    WebCore__FetchHeaders__append(response_headers, &set_cookie, &cookie_a, context);
+    WebCore__FetchHeaders__append(response_headers, &response_date_name, &response_date_value, context);
+    WebCore__FetchHeaders__append(response_headers, &set_cookie, &cookie_b, context);
+    WebCore__FetchHeaders__append(response_headers, &response_length_name, &response_length_value, context);
+    WebCore__FetchHeaders__append(response_headers, &response_transfer_name, &response_transfer_value, context);
+
+    var tcp_response = FakeBridgeResponse{};
+    WebCore__FetchHeaders__toUWSResponse(response_headers, 0, &tcp_response);
+    if (tcp_response.kind != 0 or tcp_response.count != 6 or tcp_response.state != 7 or tcp_response.marks != 1 or
+        !std.mem.eql(u8, capturedName(&tcp_response, 0), "Set-Cookie") or
+        !std.mem.eql(u8, capturedName(&tcp_response, 1), "Set-Cookie") or
+        !std.mem.eql(u8, capturedName(&tcp_response, 2), "Date") or
+        !std.mem.eql(u8, capturedName(&tcp_response, 3), "Content-Length") or
+        !std.mem.eql(u8, capturedName(&tcp_response, 4), "Transfer-Encoding") or
+        !std.mem.eql(u8, capturedName(&tcp_response, 5), "X-Response"))
+        fail("TCP response bridge order/state mismatch");
+    var ssl_response = FakeBridgeResponse{};
+    WebCore__FetchHeaders__toUWSResponse(response_headers, 1, &ssl_response);
+    if (ssl_response.kind != 1 or ssl_response.count != 6 or ssl_response.state != 7 or ssl_response.marks != 1)
+        fail("SSL response bridge state mismatch");
+    var h3_response = FakeBridgeResponse{};
+    WebCore__FetchHeaders__toUWSResponse(response_headers, 2, &h3_response);
+    if (h3_response.kind != 2 or h3_response.count != 6 or h3_response.state != 3 or h3_response.marks != 1)
+        fail("H3 response bridge state mismatch");
+    var unknown_response = FakeBridgeResponse{};
+    WebCore__FetchHeaders__toUWSResponse(response_headers, 3, &unknown_response);
+    WebCore__FetchHeaders__toUWSResponse(response_headers, 0, null);
+    if (unknown_response.count != 0) fail("unknown response kind reached the bridge");
+
     WebCore__FetchHeaders__remove(headers, &custom_name, context);
     if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("FetchHeaders remove mismatch");
-    std.debug.print("Bun private FetchHeaders: 24/24 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Bun private FetchHeaders: 25/25 symbols linked; runtime matrix passed\n", .{});
 }

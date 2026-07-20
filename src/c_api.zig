@@ -9689,32 +9689,9 @@ const PrivateFetchHeadersBridgeVisitRequestV1 = *const fn (
     PrivateFetchHeadersBridgeVisitorV1,
 ) callconv(.c) bool;
 
-fn privateFetchHeadersAbsentRequestBridgeV1(
-    _: ?*anyopaque,
-    _: ?*anyopaque,
-    _: PrivateFetchHeadersBridgeVisitorV1,
-) callconv(.c) bool {
-    return false;
-}
-
-comptime {
-    @export(&privateFetchHeadersAbsentRequestBridgeV1, .{
-        .name = "ZigJS__FetchHeadersBridge__visitUWSRequestV1",
-        .linkage = .weak,
-    });
-    @export(&privateFetchHeadersAbsentRequestBridgeV1, .{
-        .name = "ZigJS__FetchHeadersBridge__visitH3RequestV1",
-        .linkage = .weak,
-    });
-}
-
-const private_fetch_headers_visit_uws_request_v1 = @extern(PrivateFetchHeadersBridgeVisitRequestV1, .{
-    .name = "ZigJS__FetchHeadersBridge__visitUWSRequestV1",
-});
-
-const private_fetch_headers_visit_h3_request_v1 = @extern(PrivateFetchHeadersBridgeVisitRequestV1, .{
-    .name = "ZigJS__FetchHeadersBridge__visitH3RequestV1",
-});
+var private_fetch_headers_visit_uws_request_v1: std.atomic.Value(usize) = .init(0);
+var private_fetch_headers_visit_h3_request_v1: std.atomic.Value(usize) = .init(0);
+var private_fetch_headers_write_response_v1: std.atomic.Value(usize) = .init(0);
 
 const PrivateFetchHeadersBridgeImport = struct {
     headers: *fetch_headers.Record,
@@ -9766,11 +9743,78 @@ fn privateFetchHeadersCreateFromRequest(
 }
 
 export fn WebCore__FetchHeaders__createFromUWS(request: ?*anyopaque) callconv(.c) *fetch_headers.Record {
-    return privateFetchHeadersCreateFromRequest(request, private_fetch_headers_visit_uws_request_v1);
+    const address = private_fetch_headers_visit_uws_request_v1.load(.acquire);
+    const visit: PrivateFetchHeadersBridgeVisitRequestV1 = if (address == 0)
+        return fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed")
+    else
+        @ptrFromInt(address);
+    return privateFetchHeadersCreateFromRequest(request, visit);
 }
 
 export fn WebCore__FetchHeaders__createFromH3(request: ?*anyopaque) callconv(.c) *fetch_headers.Record {
-    return privateFetchHeadersCreateFromRequest(request, private_fetch_headers_visit_h3_request_v1);
+    const address = private_fetch_headers_visit_h3_request_v1.load(.acquire);
+    const visit: PrivateFetchHeadersBridgeVisitRequestV1 = if (address == 0)
+        return fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed")
+    else
+        @ptrFromInt(address);
+    return privateFetchHeadersCreateFromRequest(request, visit);
+}
+
+const PrivateFetchHeadersBridgeRowV1 = extern struct {
+    name: PrivateFetchHeadersBridgeSpanV1,
+    value: PrivateFetchHeadersBridgeSpanV1,
+};
+
+const PrivateFetchHeadersBridgeWriteResponseV1 = *const fn (
+    ?*anyopaque,
+    i32,
+    [*c]const PrivateFetchHeadersBridgeRowV1,
+    usize,
+) callconv(.c) bool;
+
+const PrivateFetchHeadersBridgeV1 = extern struct {
+    abi_version: u32,
+    struct_size: u32,
+    visit_uws_request: ?PrivateFetchHeadersBridgeVisitRequestV1,
+    visit_h3_request: ?PrivateFetchHeadersBridgeVisitRequestV1,
+    write_response: ?PrivateFetchHeadersBridgeWriteResponseV1,
+};
+
+export fn ZigJS__FetchHeadersBridge__installV1(bridge: ?*const PrivateFetchHeadersBridgeV1) callconv(.c) bool {
+    const source = bridge orelse {
+        private_fetch_headers_visit_uws_request_v1.store(0, .release);
+        private_fetch_headers_visit_h3_request_v1.store(0, .release);
+        private_fetch_headers_write_response_v1.store(0, .release);
+        return true;
+    };
+    if (source.abi_version != 1 or source.struct_size != @sizeOf(PrivateFetchHeadersBridgeV1)) return false;
+    private_fetch_headers_visit_uws_request_v1.store(if (source.visit_uws_request) |function| @intFromPtr(function) else 0, .release);
+    private_fetch_headers_visit_h3_request_v1.store(if (source.visit_h3_request) |function| @intFromPtr(function) else 0, .release);
+    private_fetch_headers_write_response_v1.store(if (source.write_response) |function| @intFromPtr(function) else 0, .release);
+    return true;
+}
+
+export fn WebCore__FetchHeaders__toUWSResponse(
+    raw_headers: ?*fetch_headers.Record,
+    kind: i32,
+    response: ?*anyopaque,
+) callconv(.c) void {
+    const headers = raw_headers orelse return;
+    const raw_response = response orelse return;
+    if (kind < 0 or kind > 2) return;
+    const address = private_fetch_headers_write_response_v1.load(.acquire);
+    const write_response: PrivateFetchHeadersBridgeWriteResponseV1 = if (address == 0) return else @ptrFromInt(address);
+    const snapshot = headers.responseSnapshot(gpa) catch return;
+    defer snapshot.deinit(gpa);
+    const rows = gpa.alloc(PrivateFetchHeadersBridgeRowV1, snapshot.rows.len) catch return;
+    defer gpa.free(rows);
+    for (snapshot.rows, rows) |source, *row| {
+        row.* = .{
+            .name = .{ .ptr = source.name.ptr, .len = source.name.len },
+            .value = .{ .ptr = source.value.ptr, .len = source.value.len },
+        };
+    }
+    _ = write_response(raw_response, kind, rows.ptr, rows.len);
 }
 
 export fn WebCore__FetchHeaders__deref(raw_headers: ?*fetch_headers.Record) callconv(.c) void {
