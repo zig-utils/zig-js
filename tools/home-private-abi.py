@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 SCRIPT_EXECUTION_CONTEXT_CONTRACT = ROOT / "docs/abi/home-script-execution-context-7ed99c02.json"
+CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
@@ -504,6 +505,42 @@ def validate_script_execution_context_contract(home_root: Path | None) -> None:
         fail("ScriptExecutionContext semantic inventory is incomplete or duplicated")
 
 
+def validate_cpu_profile_contract(home_root: Path | None) -> None:
+    if not CPU_PROFILE_CONTRACT.is_file():
+        fail(f"missing checked-in CPU profile contract {CPU_PROFILE_CONTRACT}")
+    contract = json.loads(CPU_PROFILE_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "per-vm-cpu-sampling-profile"
+        or contract.get("issue") != 404
+        or contract.get("parent_issues") != [140, 143, 163, 164]
+        or contract.get("revisions") != {"home": REVISION, "bun": "4982b91e3702094330f3be3883354c52b8c01323"}
+    ):
+        fail("CPU profile contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "packages/runtime/src/jsc/BunCPUProfiler.zig",
+        "packages/runtime/upstream/src/jsc/BunCPUProfiler.zig",
+        "packages/runtime/upstream/src/jsc/bindings/BunCPUProfiler.cpp",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("CPU profile source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid CPU profile digest for {relative}")
+        if home_root is not None:
+            path = home_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"CPU profile source drift for {relative}")
+    expected_exports = {"Bun__setSamplingInterval", "Bun__startCPUProfiler", "Bun__stopCPUProfiler"}
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("CPU profile export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("CPU profile semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -533,6 +570,7 @@ def main() -> None:
         OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate_stored(stored)
     validate_script_execution_context_contract(args.home_root.resolve() if args.home_root else None)
+    validate_cpu_profile_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

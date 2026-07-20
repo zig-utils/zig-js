@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 430
-implemented and 41 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 433
+implemented and 38 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -381,7 +381,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 421 shims are implemented and 40 remain pending. Its
+of which 424 shims are implemented and 37 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
@@ -407,6 +407,15 @@ backing bytes and computes retained sizes from the graph's dominator tree.
 Stable IDs survive repeated arena snapshots and precise-GC compaction; Home and
 Bun retain their distinct pointer and by-value string ownership ABIs. Run
 `zig build test-private-heap-snapshot`.
+
+`Bun__setSamplingInterval`, `Bun__startCPUProfiler`, and
+`Bun__stopCPUProfiler` provide per-VM cooperative CPU sampling without a timer
+thread reading live frames. Chrome `.cpuprofile` output contains parent-sensitive
+nodes, samples, deltas, source positions, and position ticks; the Markdown form
+reports hot functions, call relationships, and files from the same samples.
+The interval is atomically published, restarting clears the prior session, and
+Home/Bun keep their distinct owned-string layouts. Run
+`zig build test-private-cpu-profile`.
 
 ## Objective-C bridge target
 

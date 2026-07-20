@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "contract": "per-vm-cpu-sampling-profile",
+  "issue": 404,
+  "parent_issues": [140, 143, 163, 164],
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "packages/runtime/src/jsc/BunCPUProfiler.zig": "431ca5bc96b11f15a0c1153017230bc56ecd3f7727d6addd0a6f09c80bbc5061",
+    "packages/runtime/upstream/src/jsc/BunCPUProfiler.zig": "cf7c6979efafbea2b18413a62fdf2cb675e6df5bd81a81cf7e400b12c3a80dfb",
+    "packages/runtime/upstream/src/jsc/bindings/BunCPUProfiler.cpp": "3a4bc0a51a9bc978e9e34fdb382d346da533cbe58bb1842d48543da042b3b82f"
+  },
+  "exports": [
+    "Bun__setSamplingInterval",
+    "Bun__startCPUProfiler",
+    "Bun__stopCPUProfiler"
+  ],
+  "semantics": [
+    "The VM-less interval setter atomically publishes a validated 1us to 60s interval; non-positive values restore the pinned 1000us default.",
+    "Every VM owns an independent running flag, start timestamp, schedule, dropped-sample count, and sample vector; no profile data is process-global.",
+    "Starting an already-started VM is a deliberate restart that clears the unconsumed session instead of merging timelines.",
+    "Sampling is cooperative at source statement checkpoints after the current location and always-on activation chain are published.",
+    "No timer or foreign thread reads a mutable interpreter frame, invokes JavaScript, or changes inspector, worker-checkpoint, exception, or pause behavior.",
+    "The Chrome output contains root and parent-sensitive call-tree nodes, samples, nonnegative timeDeltas, wall-clock microsecond bounds, hit counts, children, source positions, and positionTicks.",
+    "The Markdown output is derived from the identical sample set and contains hot self time, total-time call tree, caller/callee details, and file aggregation.",
+    "Anonymous, recursive, async, top-level, sibling-realm, idle, interval-change, restart, null-VM, and allocation-failure paths have bounded fixtures.",
+    "Home output slots receive owned StringImpl pointers while Bun slots receive owned by-value BunString wrappers; both release through Bun__WTFStringImpl__deref.",
+    "Stopping without requested outputs still consumes the session; repeated stop returns empty output slots and never republishes stale data."
+  ]
+}

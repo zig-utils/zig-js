@@ -21,6 +21,7 @@ HTTP_SERVER_INSPECTOR_CONTRACT = ROOT / "docs/abi/bun-http-server-inspector-4982
 PROCESS_SIGNAL_CONTRACT = ROOT / "docs/abi/bun-process-signal-4982b91e.json"
 MODULE_REGISTRY_SHIMS_CONTRACT = ROOT / "docs/abi/bun-module-registry-shims-4982b91e.json"
 HEAP_SNAPSHOT_CONTRACT = ROOT / "docs/abi/heap-snapshot-serialization-403.json"
+CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -521,6 +522,51 @@ def validate_heap_snapshot_contract(bun_root: Path | None) -> None:
         fail("heap snapshot semantic inventory is incomplete or duplicated")
 
 
+def validate_cpu_profile_contract(bun_root: Path | None) -> None:
+    if not CPU_PROFILE_CONTRACT.is_file():
+        fail(f"missing checked-in CPU profile contract {CPU_PROFILE_CONTRACT}")
+    contract = json.loads(CPU_PROFILE_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "per-vm-cpu-sampling-profile"
+        or contract.get("issue") != 404
+        or contract.get("parent_issues") != [140, 143, 163, 164]
+    ):
+        fail("CPU profile contract schema or issue lineage drift")
+    if contract.get("revisions") != {
+        "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+        "bun": REVISION,
+    }:
+        fail("CPU profile revision set drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "packages/runtime/src/jsc/BunCPUProfiler.zig",
+        "packages/runtime/upstream/src/jsc/BunCPUProfiler.zig",
+        "packages/runtime/upstream/src/jsc/bindings/BunCPUProfiler.cpp",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("CPU profile source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid CPU profile digest for {relative}")
+    if bun_root is not None:
+        bun_sources = {
+            "packages/runtime/upstream/src/jsc/BunCPUProfiler.zig": "src/jsc/BunCPUProfiler.zig",
+            "packages/runtime/upstream/src/jsc/bindings/BunCPUProfiler.cpp": "src/jsc/bindings/BunCPUProfiler.cpp",
+        }
+        for contract_path, bun_path in bun_sources.items():
+            path = bun_root / bun_path
+            if not path.is_file() or sha256(path) != sources[contract_path]:
+                fail(f"CPU profile source drift for {bun_path}")
+    expected_exports = {"Bun__setSamplingInterval", "Bun__startCPUProfiler", "Bun__stopCPUProfiler"}
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("CPU profile export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("CPU profile semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -550,6 +596,7 @@ def main() -> None:
     validate_process_signal_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_module_registry_shims_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_heap_snapshot_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_cpu_profile_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (430 implemented, 41 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (433 implemented, 38 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 430 are implemented and 41 remain pending
+Of the private entries, 433 are implemented and 38 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -549,6 +549,15 @@ retained sizes. Home receives an owned StringImpl pointer while Bun uses its
 by-value BunString. The pinned sources and cross-profile fixture are in
 [`heap-snapshot-serialization-403.json`](heap-snapshot-serialization-403.json);
 run `zig build test-private-heap-snapshot`.
+
+The CPU profiler keeps running state and samples per VM while the VM-less
+interval setter publishes a validated atomic default. A cooperative checkpoint
+copies the activation chain only after its source location is current, so it
+composes with debugger and worker hooks without a timer-thread frame race. Stop
+emits Chrome CPU-profile JSON and a Markdown hot-function/call/file report from
+one sample set, with exact Home pointer and Bun by-value ownership. The pinned
+contract is [`cpu-profile-sampling-404.json`](cpu-profile-sampling-404.json);
+run `zig build test-private-cpu-profile`.
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
@@ -1137,7 +1146,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (421 implemented, 40 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (424 implemented, 37 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |

@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 489,
-      "pending": 41
+      "implemented": 492,
+      "pending": 38
     }
   },
   "declarations": [
@@ -1193,10 +1193,10 @@
       "line": 35,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__setSamplingInterval(intervalMicroseconds: c_int) void;",
       "declaration_sha256": "7b0e1d89f7114780fef49447ab2e70f65f96875f2b0e59548b0013d2b4ea13c9",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__startCPUProfiler",
@@ -1204,10 +1204,10 @@
       "line": 33,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__startCPUProfiler(vm: *VM) void;",
       "declaration_sha256": "aa2547e5d957d0d8686edf58e187f08d45d9d47e0ac656a6b5525245f1eba09a",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__startJSDebuggerThread",
@@ -1226,10 +1226,10 @@
       "line": 34,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__stopCPUProfiler(vm: *VM, outJSON: ?*String, outText: ?*String) void;",
       "declaration_sha256": "2df596dd2d7b2f3265983779dd5ca970c74852d4f5ee6840c266b09f99212009",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__stripBOMFromTextCodec",
