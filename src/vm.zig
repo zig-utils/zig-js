@@ -3566,7 +3566,21 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
         return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     };
     if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
-    if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
+    if (vm.gc_safepoint_fn != null) {
+        // The compiler checkpoint island has published canonical frame slots,
+        // spilled every live operand, and retains only numeric managed state in
+        // registers. Declare that exact callback interval precise; generic VM,
+        // host, side-exit, and exception paths leave the flag false.
+        const saved_precise = vm.gc_precise_safepoint;
+        const saved_moving = vm.gc_moving_safepoint;
+        vm.gc_precise_safepoint = true;
+        vm.gc_moving_safepoint = true;
+        defer {
+            vm.gc_moving_safepoint = saved_moving;
+            vm.gc_precise_safepoint = saved_precise;
+        }
+        vm.serviceGcSafepoint();
+    }
     return 0;
 }
 

@@ -70,7 +70,7 @@ Run `zig build --help` for the full command list.
 
 - remaining JSC framework/private and Bun/Home ABI surfaces;
 - 24 dispositioned PR-249 shell/JIT/GC/Wasm cases ([inventory](docs/.data/pr249-reference-inventory.json));
-- automatic/concurrent or multi-age compaction, parallel minor GC, and an optimizing JIT; explicit quiescent compaction supports the current pointer-free baseline JIT.
+- automatic/concurrent or multi-age compaction, parallel minor GC, and an optimizing JIT; explicit compaction supports quiescent realms and the current precise baseline-JIT checkpoint.
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 

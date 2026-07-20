@@ -85,6 +85,7 @@ def main() -> int:
 
     context_source = (ROOT / "src/context.zig").read_text()
     jit_compiler_source = (ROOT / "src/jit/compiler.zig").read_text()
+    vm_source = (ROOT / "src/vm.zig").read_text()
     c_api_source = (ROOT / "src/c_api.zig").read_text()
     extension_header = (ROOT / "include/zig-js/Extensions.h").read_text()
     require("pub const ZJSGCCompactionStatus" in c_api_source, "C compaction status enum missing")
@@ -112,11 +113,23 @@ def main() -> int:
     require("self.gc_scan_native_stack" in compact_source, "conservative-stack fail-closed gate missing")
     require("self.gc_scan_parked_stacks" in compact_source, "parked-stack fail-closed gate missing")
     require("has_active_interpreter" in compact_source, "active-interpreter fail-closed gate missing")
+    require("compactGarbageAtMovingSafepoint" in compact_source, "moving-safepoint compaction entry missing")
+    require("allowed_active_interpreter" in compact_source, "narrow active-interpreter allowance missing")
+    require("gc_compaction_requested" in context_source, "explicit compaction request state missing")
+    native_checkpoint_start = vm_source.index("fn nativeCheckpoint")
+    native_checkpoint_end = vm_source.index("fn generatorStackAllocator", native_checkpoint_start)
+    native_checkpoint_source = vm_source[native_checkpoint_start:native_checkpoint_end]
+    require("vm.gc_precise_safepoint = true" in native_checkpoint_source, "native checkpoint precise declaration missing")
+    require("vm.gc_moving_safepoint = true" in native_checkpoint_source, "native checkpoint moving declaration missing")
+    require("vm.gc_moving_safepoint = saved_moving" in native_checkpoint_source, "native checkpoint moving restoration missing")
+    require("vm.gc_precise_safepoint = saved_precise" in native_checkpoint_source, "native checkpoint precise restoration missing")
     require(
         jit_compiler_source.count("if (result.isObject() or result.isString()) return null;") >= 2,
         "constant-result JIT movable-pointer rejection missing",
     )
     require(".string, .object => null" in jit_compiler_source, "numeric JIT managed-kind rejection missing")
+    require("Publish canonical frame words only at a" in jit_compiler_source, "native local materialization contract missing")
+    require("Spill live numeric operand values" in jit_compiler_source, "native operand materialization contract missing")
 
     surfaces = document.get("pointer_surfaces", [])
     ids = [entry.get("id") for entry in surfaces]
@@ -125,7 +138,7 @@ def main() -> int:
     native_jit_frame = next((entry for entry in surfaces if entry.get("id") == "native-jit-frame"), None)
     require(native_jit_frame is not None, "native JIT frame inventory missing")
     require(
-        native_jit_frame.get("disposition") == "allow_quiescent_pointer_free_tier_reject_live_native_frame",
+        native_jit_frame.get("disposition") == "allow_quiescent_or_declared_precise_checkpoint_reject_other_live_frames",
         "native JIT frame quiescent/rejection disposition drift",
     )
     all_tags: set[str] = set()

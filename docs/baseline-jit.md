@@ -134,12 +134,15 @@ The compiler emits a bytecode-to-native map for diagnostics and future stack
 maps. Until precise native stack maps exist, no GC pointer may be live only in
 a machine register across a safepoint.
 
-Explicit moving collection is permitted only between evaluations, after the
-active-interpreter registry proves that no `NativeFrame` exists. Published
-code, tier records, and bytecode chunks are non-moving, and the current tier
-embeds no managed pointer, so a ready tier remains valid when its owning
-Function/Object cells move. Mid-script movement still fails closed until every
-native frame has a precise rewrite or pinning protocol.
+Direct `Context.compactGarbage` movement is permitted between evaluations,
+after the active-interpreter registry proves that no `NativeFrame` exists.
+`Context.requestGarbageCompaction` may also be serviced inside the current
+AArch64 numeric tier's checkpoint island: it first publishes canonical locals,
+spills live operands, and retains only numeric managed state in registers.
+Published code, tier records, bytecode chunks, and the `NativeFrame` itself do
+not move, so the same entry resumes after its registered frame/realm roots are
+rewritten. Every generic VM, host-callback, side-exit, exception, other-thread,
+and conservative-stack boundary remains fail-closed.
 
 ## Executable memory
 

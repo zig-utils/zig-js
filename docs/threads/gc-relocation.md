@@ -1,11 +1,13 @@
 # GC Relocation Contract
 
-Moving collection is available only through explicit `Context.compactGarbage`
-on a quiescent precise-GC realm. The current pointer-free baseline JIT may stay
-enabled: published code, tier metadata, and bytecode chunks do not move, while
-the active-interpreter gate proves no `NativeFrame` is live. Running JS threads,
-conservative native-stack scans, and in-flight concurrent/parallel collections
-still fail closed. C and Objective-C embedders use
+Moving collection is available through explicit `Context.compactGarbage` on a
+quiescent precise-GC realm, or a `Context.requestGarbageCompaction` consumed at
+the current AArch64 numeric tier's declared precise checkpoint. Published code,
+tier metadata, bytecode chunks, and native-frame storage do not move; the
+checkpoint has already materialized every managed local/operand in registered
+roots. Running JS threads, generic/native-host checkpoints, conservative stack
+scans, and in-flight concurrent/parallel collections still fail closed. C and
+Objective-C embedders use
 `ZJSGlobalContextCreateGarbageCollected` and `ZJSContextCompactGarbage` for the
 same checked boundary.
 
@@ -189,16 +191,37 @@ contained `Value` is traced and rewritten; raw `Value` copies returned by
 flag rejection at that quiescent boundary. Its regression moves the rooted
 Function/Object graph around a ready numeric tier, proves the immutable native
 entry and arena-owned chunk stay stable, and enters the same tier afterward.
-Movement during native execution remains rejected by the active-interpreter
-gate until precise stack maps exist.
+
+[#359](https://github.com/zig-utils/zig-js/issues/359) admits exactly one active
+native boundary: an explicit pending request at the current AArch64 numeric
+checkpoint, after its compiler island publishes canonical frame locals, spills
+live operands, and records exact instruction/step state. Movement rewrites the
+active registered graph, clears the request only after a supported attempt, and
+resumes the same native entry. Other live native/interpreter boundaries remain
+rejected.
 
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
 and its forwarding record remains live. Long-lived embedding references must
 use stable handle storage whose contained value is rewritten; the handle's own
-address does not move. Live native frames without precise pointer stack maps
-and conservative stack scans reject compaction until #336 supplies a safe
-rewrite or per-cell pinning mechanism. A quiescent realm has no native frame to
-rewrite, so the current pointer-free baseline tier does not itself block
-movement.
+address does not move. A live frame may move only at a checkpoint whose compiler
+and runtime jointly declare complete materialization; the current AArch64
+numeric tier is the sole admitted path. Other native frames and conservative
+stack scans reject compaction until #336 supplies precise maps, rewriting, or
+per-cell pinning.
+
+## Focused Evidence
+
+```sh
+zig build test -Dtest-filter=compaction
+zig build test -Doptimize=ReleaseSafe -Dtest-filter=compaction
+zig build test -Dtsan=true -Dtest-filter=compaction
+zig build gc-relocation-inventory-check c-api-audit objc-api-audit test-c-api test-objc-api
+```
+
+The native-safepoint witness first offers the request to a marking-precise but
+movement-unsafe checkpoint and proves it remains pending. A warmed numeric tier
+then consumes it inside its compiler-generated checkpoint island, relocates the
+active Function/Object/protected graph, resumes the same immutable entry, and
+returns the exact loop result.

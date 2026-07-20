@@ -91,8 +91,12 @@
       "id": "moving_gc",
       "issue": 144,
       "status": "open",
-      "evidence": ["docs/threads/P7-gc-design.md"],
-      "blockers": ["implement moving and compacting collection"]
+      "evidence": [
+        "docs/threads/gc-relocation.md",
+        "docs/.data/gc-relocation-inventory.json",
+        "docs/.data/gc-compaction-2026-07-19.md"
+      ],
+      "blockers": ["complete the remaining concurrent/native barriers and terminal compatibility matrix in #336 and #337"]
     },
     {
       "id": "generational_gc",

@@ -1228,6 +1228,12 @@ pub const Interpreter = struct {
     /// The Context may then skip conservative native-stack scanning for that
     /// one private-mutator checkpoint; generic and parallel paths leave it false.
     gc_precise_safepoint: bool = false,
+    /// Stronger than `gc_precise_safepoint`: true only when the suspended engine
+    /// path can resume after every managed cell moves. The current baseline-JIT
+    /// checkpoint island owns this declaration; specialized Zig quick paths may
+    /// be precise for marking while retaining raw helper pointers, so they must
+    /// leave it false.
+    gc_moving_safepoint: bool = false,
     /// Root-publication generation this interpreter last published for, under the
     /// parallel mid-script collector (issue #1 M3). Written by this interpreter's
     /// own thread (at a safepoint or when parking), read by the collector to know

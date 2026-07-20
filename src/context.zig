@@ -2682,6 +2682,12 @@ pub const Context = struct {
     /// the next evaluate/evaluateModule entry rather than inside live Zig
     /// interpreter recursion.
     gc_requested: std.atomic.Value(bool) = .init(false),
+    /// Explicit moving-collection request. Unlike `gc_requested`, this may be
+    /// serviced mid-script only when the current engine path declares every
+    /// managed value materialized in registered precise roots and no raw helper
+    /// pointer needed after resumption. Unsupported checkpoints leave it pending
+    /// for a later declared safepoint or a direct quiescent `compactGarbage` call.
+    gc_compaction_requested: std.atomic.Value(bool) = .init(false),
     /// Set only for the duration of a guarded mid-script collection so the GC
     /// binding (`gc.zig` `traceRoots`) conservatively scans the collecting
     /// thread's live native stack + spilled registers. Quiescent collection
@@ -2852,6 +2858,8 @@ pub const Context = struct {
     /// Internal proof that private specialized VM checkpoints reached the
     /// precise-root path. Tests compare deltas; embedders do not observe it.
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
+    /// Supported moving attempts serviced while that precise path is active.
+    gc_moving_safepoint_compactions: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, public `timers`, `protected_values`, `c_api_handles`, and
     /// `finalization_cleanup_jobs` — so the
@@ -4598,6 +4606,17 @@ pub const Context = struct {
         if (self.gc != null) self.gc_requested.store(true, .release);
     }
 
+    /// Request one moving collection at the next engine checkpoint that has
+    /// published every managed value in precise registered roots and declared
+    /// it can resume without raw managed pointers. Generic interpreter/native/
+    /// host checkpoints leave the request pending. A direct quiescent
+    /// `compactGarbage` call also consumes it after a supported attempt. Raw
+    /// Values must not cross the requested movement boundary; use
+    /// `ProtectedValue` when the payload must survive it.
+    pub fn requestGarbageCompaction(self: *Context) void {
+        if (self.gc != null) self.gc_compaction_requested.store(true, .release);
+    }
+
     /// Root a managed Value in address-stable storage. Keep the returned handle
     /// rather than a raw Value copy across `compactGarbage`; call `get` after
     /// movement to read its rewritten payload.
@@ -4885,6 +4904,19 @@ pub const Context = struct {
     /// rejection below. Conservative native-stack modes still fail closed;
     /// ordinary `collectGarbage` remains the non-moving path.
     pub fn compactGarbage(self: *Context) GcHeap.CompactionResult {
+        return self.compactGarbageChecked(null);
+    }
+
+    /// Private moving entry used only by an engine checkpoint that has already
+    /// materialized all managed state. The public entry above never supplies an
+    /// interpreter and therefore retains its fully quiescent contract.
+    fn compactGarbageAtMovingSafepoint(self: *Context, machine: *interp.Interpreter) GcHeap.CompactionResult {
+        if (!machine.gc_precise_safepoint or !machine.gc_moving_safepoint)
+            return .{ .status = .unsupported };
+        return self.compactGarbageChecked(machine);
+    }
+
+    fn compactGarbageChecked(self: *Context, allowed_active_interpreter: ?*interp.Interpreter) GcHeap.CompactionResult {
         const h = self.gc orelse return .{ .status = .unsupported };
         if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
             return .{ .status = .unsupported };
@@ -4893,10 +4925,15 @@ pub const Context = struct {
 
         self.lockActiveInterpreters();
         const has_active_interpreter = self.active_interpreters.items.len != 0;
+        const active_interpreter_can_move = if (allowed_active_interpreter) |machine|
+            self.active_interpreters.items.len == 1 and self.active_interpreters.items[0] == machine and
+                machine.gc_precise_safepoint and machine.gc_moving_safepoint
+        else
+            !has_active_interpreter;
         self.unlockActiveInterpreters();
-        if (has_active_interpreter) return .{ .status = .unsupported };
+        if (!active_interpreter_can_move) return .{ .status = .unsupported };
 
-        self.finishConcurrentGCIfActive();
+        if (allowed_active_interpreter == null) self.finishConcurrentGCIfActive();
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire))
             return .{ .status = .unsupported };
 
@@ -4911,6 +4948,9 @@ pub const Context = struct {
         if (result.status == .compacted or result.status == .no_candidates)
             _ = backing.trimCompactedTailChunks();
         self.gc_requested.store(false, .monotonic);
+        self.gc_compaction_requested.store(false, .release);
+        if (builtin.is_test and allowed_active_interpreter != null)
+            _ = self.gc_moving_safepoint_compactions.fetchAdd(1, .monotonic);
         return result;
     }
 
@@ -5177,6 +5217,11 @@ pub const Context = struct {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
         const h = self.gc orelse return;
+        const precise_roots = machine.gc_precise_safepoint;
+        if (machine.gc_moving_safepoint and self.gc_compaction_requested.load(.acquire)) {
+            const result = self.compactGarbageAtMovingSafepoint(machine);
+            if (result.status != .unsupported) return;
+        }
         if (!stack_scan.supported) return;
         if (h.parallel and self.gc_cooperative_enabled) {
             self.serviceCooperativeYoungGc(h, machine);
@@ -5197,7 +5242,6 @@ pub const Context = struct {
         // mode is explicit/quiescent only (`collectGarbage`); skip the safepoint
         // collector so parallel execution never races a marker.
         if (h.parallel) return;
-        const precise_roots = machine.gc_precise_safepoint;
         if (builtin.is_test and precise_roots) _ = self.gc_precise_safepoints.fetchAdd(1, .monotonic);
         // The default cell nursery is useful only if allocation-heavy scripts
         // can reclaim it before returning to a host boundary. A single mutator
@@ -14527,6 +14571,88 @@ test "GC compaction preserves quiescent pointer-free baseline JIT tiers" {
     const second_result = try ctx.evaluate("compactJitSum(100)");
     try std.testing.expectEqual(@as(f64, 4950), second_result.asNum());
     try std.testing.expect(vm.nativeDirectCallHitsForTesting() > native_hits_before);
+}
+
+test "GC requested compaction resumes the same baseline tier from a precise native safepoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.preciseDiscardFunctions = [];
+        \\globalThis.preciseDiscardObjects = [];
+        \\for (var i = 0; i < 2048; i = i + 1) {
+        \\  preciseDiscardFunctions.push(function deadPreciseCell() { return i; });
+        \\  preciseDiscardObjects.push({ dead: i });
+        \\}
+    );
+    const warm_result = try ctx.evaluate(
+        \\preciseDiscardFunctions = null;
+        \\preciseDiscardObjects = null;
+        \\function preciseCompactSum(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\globalThis.preciseCompactWitness = { marker: 359 };
+        \\preciseCompactSum(4096);
+    );
+    try std.testing.expectEqual(@as(f64, 8_386_560), warm_result.asNum());
+
+    const function_object_before = ctx.global_object.getOwn("preciseCompactSum").?.asObj();
+    const function_before: *interp.Function = @ptrCast(@alignCast(function_object_before.jsFunction().?));
+    const chunk_before = function_before.chunk.?;
+    try std.testing.expectEqual(jit.TierState.ready, chunk_before.tier.loadState());
+    const native_before = chunk_before.tier.loadCode().?;
+    try std.testing.expect(native_before.manages_steps);
+
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("preciseCompactWitness").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    ctx.collectGarbage();
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    try std.testing.expect(backing_before.chunks > 1);
+    const function_object_address = @intFromPtr(function_object_before);
+    const function_record_address = @intFromPtr(function_before);
+    const witness_address = @intFromPtr(handle.get().asObj());
+
+    ctx.requestGarbageCompaction();
+    try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
+    // A checkpoint that is precise enough for marking still cannot consume the
+    // request when its Zig helper may resume with raw pointers. Only the native
+    // checkpoint's stronger moving declaration below can.
+    var marking_precise = ctx.interpreter();
+    marking_precise.gc_precise_safepoint = true;
+    try ctx.pushActiveInterpreter(&marking_precise);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
+    try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
+    Context.collectMidScript(ctx, &marking_precise);
+    ctx.popActiveInterpreter(&marking_precise);
+    try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
+
+    const precise_compactions_before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
+    const native_hits_before = vm.nativeDirectCallHitsForTesting();
+    const result = try ctx.evaluate("preciseCompactSum(20000)");
+    try std.testing.expectEqual(@as(f64, 199_990_000), result.asNum());
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expectEqual(precise_compactions_before + 1, ctx.gc_moving_safepoint_compactions.load(.monotonic));
+    try std.testing.expect(vm.nativeDirectCallHitsForTesting() > native_hits_before);
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+
+    try std.testing.expect(witness_address != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 359), handle.get().asObj().getOwn("marker").?.asNum());
+    const function_object_after = ctx.global_object.getOwn("preciseCompactSum").?.asObj();
+    const function_after: *interp.Function = @ptrCast(@alignCast(function_object_after.jsFunction().?));
+    try std.testing.expect(function_object_address != @intFromPtr(function_object_after));
+    try std.testing.expect(function_record_address != @intFromPtr(function_after));
+    try std.testing.expectEqual(chunk_before, function_after.chunk.?);
+    try std.testing.expectEqual(native_before, function_after.chunk.?.tier.loadCode().?);
+    try std.testing.expect(ctx.gc_cell_backing.?.stats().chunks < backing_before.chunks);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
 }
 
 test "GC compaction rewrites public Zig protected handles" {
