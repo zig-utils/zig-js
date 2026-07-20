@@ -193,10 +193,28 @@ references [#385](https://github.com/zig-utils/zig-js/issues/385), and relaxed
 SIMD [#386](https://github.com/zig-utils/zig-js/issues/386) are complete under
 [#366](https://github.com/zig-utils/zig-js/issues/366).
 
-Current upstream `main` is observed separately by the non-blocking
-[drift report](.data/wasm-core-3-upstream-drift.json). It compares Core test
-trees without advancing `wg-3.0` or changing the accepted score; CI refreshes
-the observation as informational output and tolerates network/report failures.
+Upstream `main` is a separate, non-release shadow profile. The current
+observation pins `d7b37e4170d8315f2f1283aed4e8076591a9a333`: all 21 files changed
+from WG3 pass 3,368/3,368 applicable commands, and the complete 258-file
+snapshot passes **64,055/64,055 applicable commands**, with 1,235 explained
+binary-API N/A commands and no failures or runner errors. See the exact
+[changed-file inventory](.data/wasm-core-main-shadow-changed-inventory.json),
+[complete inventory](.data/wasm-core-main-shadow-inventory.json), and
+[tree diff](.data/wasm-core-3-upstream-drift.json).
+
+Run the pinned observation from a detached checkout that contains both the
+shadow and WG3 commits:
+
+```sh
+zig build wasm-core-main-shadow \
+  -Dwasm-core-main-shadow-root=/path/to/spec-at-d7b37e4 \
+  -Dwasm-core-main-shadow-converter=/path/to/wasm-tools
+# Add -Dwasm-core-main-shadow-changed-only=true for the 21-file slice.
+```
+
+This never advances either submodule or changes the accepted WG1/WG3 scores.
+CI gates the exact changed-file slice, while a separate network-tolerant drift
+step reports newer upstream commits for the next deliberate observation.
 
 The accepted ReleaseFast audit reaches **63,964 / 63,964 applicable commands**
 with 1,235 binary-API-inapplicable text-format commands, zero failures, and zero

@@ -20,7 +20,9 @@ checkout of upstream `main`. Core 2 and proposal corpora are separate,
 exact-pin profiles in [the WebAssembly matrix](wasm.md). Stable Core 3 has its
 own `wasm-spec-wg3` submodule at official tag `wg-3.0`; [#366](https://github.com/zig-utils/zig-js/issues/366)
 tracks its terminal gate. Keeping the baselines separate makes published
-command counts reproducible.
+command counts reproducible. Newer upstream `main` snapshots run through the
+separate non-release [shadow profile](wasm.md#beyond-the-mvp), with their own
+exact inventories instead of moving either stable gitlink.
 
 ## Running
 

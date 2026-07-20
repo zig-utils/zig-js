@@ -21,6 +21,72 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"wasm-feature-profiles: {message}")
 
 
+def verify_core_main_shadow(
+    path: Path,
+    *,
+    selection: str,
+    expected_files: int,
+    expected_pass: int,
+    expected_not_applicable: int,
+    expected_paths: set[str] | None = None,
+) -> None:
+    document = json.loads(path.read_text())
+    label = f"Core upstream-main shadow ({selection})"
+    require(document.get("schema_version") == 2, f"{label}: unsupported schema version")
+    require(document.get("kind") == "webassembly_core_main_shadow_inventory", f"{label}: kind drift")
+    require(document.get("profile") == "core-main-shadow", f"{label}: profile drift")
+    require(document.get("accepted_score") is False, f"{label}: must not be an accepted score")
+    require(SHA.fullmatch(document.get("engine_commit", "")) is not None, f"{label}: invalid engine commit")
+    observation = document.get("observation", {})
+    require(observation == {
+        "baseline_commit": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+        "commit": "d7b37e4170d8315f2f1283aed4e8076591a9a333",
+        "ref": "main",
+        "selection": selection,
+    }, f"{label}: observation provenance drift")
+    spec = document.get("spec", {})
+    require(spec.get("repository") == "https://github.com/WebAssembly/spec.git", f"{label}: repository drift")
+    require(spec.get("commit") == observation["commit"], f"{label}: source pin drift")
+    require(spec.get("tag") is None, f"{label}: upstream main must not masquerade as a release tag")
+    require(spec.get("files_available") == spec.get("files_declared") == 258, f"{label}: declared corpus drift")
+    require(spec.get("files_scored") == expected_files, f"{label}: hidden file filtering")
+    converter = document.get("converter", {})
+    require(converter == {
+        "commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "kind": "wasm-tools",
+        "repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "version": "1.253.0",
+    }, f"{label}: converter provenance drift")
+    require(document.get("totals") == {
+        "fail": 0,
+        "not_applicable": expected_not_applicable,
+        "pass": expected_pass,
+        "runner_error": 0,
+        "total": expected_pass + expected_not_applicable,
+    }, f"{label}: aggregate totals are not exact and green")
+    files = document.get("files", [])
+    paths = [entry.get("path", "") for entry in files]
+    require(len(files) == len(set(paths)) == expected_files, f"{label}: per-file coverage drift")
+    require(all(path.startswith("test/core/") and path.endswith(".wast") for path in paths), f"{label}: path outside Core corpus")
+    if expected_paths is not None:
+        require(set(paths) == expected_paths, f"{label}: changed-file selection drift")
+    for entry in files:
+        commands = entry.get("commands", [])
+        counts = Counter(command.get("status") for command in commands)
+        require(entry.get("counts") == {
+            "fail": counts["fail"],
+            "not_applicable": counts["not_applicable"],
+            "pass": counts["pass"],
+            "runner_error": counts["runner_error"],
+            "total": len(commands),
+        }, f"{label}: per-file count drift in {entry.get('path')}")
+        require(counts["fail"] == counts["runner_error"] == 0, f"{label}: non-green command in {entry.get('path')}")
+        require(
+            all(command.get("detail") for command in commands if command.get("status") == "not_applicable"),
+            f"{label}: unexplained N/A command in {entry.get('path')}",
+        )
+
+
 def verify_terminal_inventory(
     path: Path,
     *,
@@ -221,6 +287,16 @@ def main() -> int:
         type=Path,
         default=ROOT / "docs/.data/wasm-core-3-inventory.json",
     )
+    parser.add_argument(
+        "--core-main-shadow-changed-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-core-main-shadow-changed-inventory.json",
+    )
+    parser.add_argument(
+        "--core-main-shadow-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-core-main-shadow-inventory.json",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -244,6 +320,8 @@ def main() -> int:
         "test/core/elem.wast",
         "test/core/linking.wast",
         "tools/wasm-core3-drift.py",
+        "core-main-shadow",
+        "d7b37e4170d8315f2f1283aed4e8076591a9a333",
     )
     require(
         all(token in ci_source for token in required_ci_tokens),
@@ -336,10 +414,13 @@ def main() -> int:
     require(core_3_drift.get("accepted", {}).get("tag") == "wg-3.0", "Core 3 drift report: accepted tag drift")
     require(core_3_drift.get("accepted", {}).get("commit") == relaxed_feature["commit"], "Core 3 drift report: accepted commit drift")
     require(core_3_drift.get("accepted", {}).get("corpus_files") == 258, "Core 3 drift report: accepted corpus drift")
-    require(SHA.fullmatch(core_3_drift.get("upstream", {}).get("commit", "")) is not None, "Core 3 drift report: invalid upstream commit")
+    require(core_3_drift.get("upstream", {}).get("commit") == "d7b37e4170d8315f2f1283aed4e8076591a9a333", "Core 3 drift report: upstream observation pin drift")
     require(core_3_drift.get("accepted_score_changed") is False, "Core 3 drift report must not alter accepted score")
     drift_entries = core_3_drift.get("core_test_diff", {}).get("entries", [])
     require(core_3_drift.get("core_test_diff", {}).get("changed_files") == len(drift_entries), "Core 3 drift report: changed-file count drift")
+    require(core_3_drift.get("core_test_diff", {}).get("changed_files") == 21, "Core 3 drift report: expected 21 observed changes")
+    require(core_3_drift.get("core_test_diff", {}).get("added_files") == 0, "Core 3 drift report: unexpected added file")
+    require(core_3_drift.get("core_test_diff", {}).get("removed_files") == 0, "Core 3 drift report: unexpected removed file")
     require(all(entry.get("path", "").startswith("test/core/") for entry in drift_entries), "Core 3 drift report: path outside Core corpus")
 
     core_3 = json.loads(args.core_3_terminal_inventory.read_text())
@@ -390,6 +471,23 @@ def main() -> int:
             "total": len(commands),
         }, f"Core 3 terminal inventory: per-file count drift in {entry.get('path')}")
         require(counts["fail"] == counts["runner_error"] == 0, f"Core 3 terminal inventory: non-green command in {entry.get('path')}")
+
+    changed_shadow_paths = {entry["path"] for entry in drift_entries}
+    verify_core_main_shadow(
+        args.core_main_shadow_changed_inventory,
+        selection="changed_files",
+        expected_files=21,
+        expected_pass=3368,
+        expected_not_applicable=135,
+        expected_paths=changed_shadow_paths,
+    )
+    verify_core_main_shadow(
+        args.core_main_shadow_inventory,
+        selection="complete_snapshot",
+        expected_files=258,
+        expected_pass=64055,
+        expected_not_applicable=1235,
+    )
 
     threads_feature = next(feature for feature in features if feature["id"] == "threads")
     atomic_inventory = json.loads(args.atomic_inventory.read_text())
