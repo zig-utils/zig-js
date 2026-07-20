@@ -12105,8 +12105,8 @@ export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
     return @ptrCast(ctx);
 }
 
-/// zig-js extension: create a standalone precise-GC context. Passing false is
-/// required for explicit movement until native JIT stack maps are available.
+/// zig-js extension: create a standalone precise-GC context. The current
+/// pointer-free baseline JIT may remain enabled across quiescent movement.
 export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) JSContextRef {
     const ctx = Context.createWith(gpa, .{ .enable_gc = true, .enable_jit = enable_jit }) catch return null;
     _ = createContextGroupForPrimary(ctx) orelse return null;
@@ -12115,7 +12115,8 @@ export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) 
 }
 
 /// zig-js extension: compact a quiescent precise-GC context. The Context gate
-/// fails closed for arena, JIT, active-interpreter, thread, or collector states.
+/// fails closed for arena, active-interpreter/native-frame, conservative-stack,
+/// thread, or collector states.
 pub const ZJSGCCompactionStatus = enum(c_uint) {
     unsupported = 0,
     no_candidates = 1,
@@ -24205,7 +24206,7 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     try std.testing.expect(!ZJSValueUnprotect(ctx, held));
 }
 
-test "C-API: native callback compaction fails closed before a protected handle moves quiescently" {
+test "C-API: JIT-enabled compaction fails closed in native callback then moves protected handle quiescently" {
     const State = struct {
         var calls: usize = 0;
         var status: ZJSGCCompactionStatus = .compacted;
@@ -24240,7 +24241,7 @@ test "C-API: native callback compaction fails closed before a protected handle m
     try std.testing.expectEqual(@as(usize, 0), invalid_bytes);
     try std.testing.expectEqual(ZJSGCCompactionStatus.out_of_memory, cCompactionStatus(.out_of_memory));
 
-    const ctx = ZJSGlobalContextCreateGarbageCollected(false) orelse return error.JSCInitFailed;
+    const ctx = ZJSGlobalContextCreateGarbageCollected(true) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
     const context = ctxFrom(ctx) orelse return error.JSCInitFailed;
     const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;

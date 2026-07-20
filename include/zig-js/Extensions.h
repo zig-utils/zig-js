@@ -11,7 +11,8 @@ extern "C" {
 JS_EXPORT bool ZJSValueProtect(JSContextRef ctx, JSValueRef value);
 JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
-/* Standalone precise-GC context and explicit quiescent compaction. */
+/* Standalone precise-GC context and explicit quiescent compaction. The current
+ * pointer-free baseline JIT may remain enabled; live native frames fail closed. */
 JS_EXPORT JSGlobalContextRef ZJSGlobalContextCreateGarbageCollected(bool enableJIT);
 typedef enum ZJSGCCompactionStatus {
     kZJSGCCompactionUnsupported = 0,

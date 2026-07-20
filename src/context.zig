@@ -4880,11 +4880,13 @@ pub const Context = struct {
     /// Explicit stop-the-world compaction for a fully quiescent, interpreter-
     /// free realm. Raw `Value`/cell pointers held outside the registered Context
     /// roots are not discoverable, so callers must use stable protected/private
-    /// handles across this boundary. JIT-enabled realms fail closed until native
-    /// stack maps exist; ordinary `collectGarbage` remains the non-moving path.
+    /// handles across this boundary. The current baseline JIT embeds no movable
+    /// pointers, and any live native frame is covered by the active-interpreter
+    /// rejection below. Conservative native-stack modes still fail closed;
+    /// ordinary `collectGarbage` remains the non-moving path.
     pub fn compactGarbage(self: *Context) GcHeap.CompactionResult {
         const h = self.gc orelse return .{ .status = .unsupported };
-        if (self.enable_jit or self.gc_scan_native_stack or self.gc_scan_parked_stacks)
+        if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
             return .{ .status = .unsupported };
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
             return .{ .status = .unsupported };
@@ -14339,11 +14341,8 @@ test "GC compaction is fail-closed, rewrites a protected graph, and reaches a de
     defer ctx.private_weak_roots.clearRetainingCapacity();
     const private_live_weak_address = @intFromPtr(&private_live_weak);
 
-    // Each unrewritable execution boundary refuses movement without even
+    // Each live or conservatively described execution boundary refuses movement without even
     // entering the collector's compaction phase.
-    ctx.enable_jit = true;
-    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
-    ctx.enable_jit = false;
     ctx.gc_scan_native_stack = true;
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
     ctx.gc_scan_native_stack = false;
@@ -14453,6 +14452,81 @@ test "GC compaction is fail-closed, rewrites a protected graph, and reaches a de
         boxed.asObj().getOwn("peer").?.asObj(),
         boxed.asObj().getOwn("alias").?.asObj(),
     );
+}
+
+test "GC compaction preserves quiescent pointer-free baseline JIT tiers" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+
+    // Keep dead Object and Function cells live until the next evaluation has
+    // started. The target function and witness are then allocated behind them,
+    // leaving both size classes with useful tail-evacuation work after sweep.
+    _ = try ctx.evaluate(
+        \\globalThis.compactJitDiscardFunctions = [];
+        \\globalThis.compactJitDiscardObjects = [];
+        \\for (var i = 0; i < 2048; i = i + 1) {
+        \\  compactJitDiscardFunctions.push(function deadJitCell() { return i; });
+        \\  compactJitDiscardObjects.push({ dead: i });
+        \\}
+    );
+    const first_result = try ctx.evaluate(
+        \\compactJitDiscardFunctions = null;
+        \\compactJitDiscardObjects = null;
+        \\function compactJitSum(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\globalThis.compactJitWitness = { marker: 358 };
+        \\compactJitSum(100);
+    );
+    try std.testing.expectEqual(@as(f64, 4950), first_result.asNum());
+
+    const function_value_before = ctx.global_object.getOwn("compactJitSum").?;
+    const function_object_before = function_value_before.asObj();
+    const function_before: *interp.Function = @ptrCast(@alignCast(function_object_before.jsFunction().?));
+    const chunk_before = function_before.chunk.?;
+    try std.testing.expectEqual(jit.TierState.ready, chunk_before.tier.loadState());
+    const native_before = chunk_before.tier.loadCode().?;
+    try std.testing.expect(native_before.manages_steps);
+
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("compactJitWitness").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const handle_address = @intFromPtr(handle);
+    const function_object_address = @intFromPtr(function_object_before);
+    const function_record_address = @intFromPtr(function_before);
+    const witness_address = @intFromPtr(handle.get().asObj());
+
+    ctx.collectGarbage();
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    try std.testing.expect(backing_before.chunks > 1);
+    const compacted = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, compacted.status);
+    try std.testing.expect(compacted.moved_cells > 0 and compacted.moved_bytes > 0);
+
+    try std.testing.expectEqual(handle_address, @intFromPtr(handle));
+    try std.testing.expect(witness_address != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 358), handle.get().asObj().getOwn("marker").?.asNum());
+
+    const function_value_after = ctx.global_object.getOwn("compactJitSum").?;
+    const function_object_after = function_value_after.asObj();
+    const function_after: *interp.Function = @ptrCast(@alignCast(function_object_after.jsFunction().?));
+    try std.testing.expect(function_object_address != @intFromPtr(function_object_after));
+    try std.testing.expect(function_record_address != @intFromPtr(function_after));
+    try std.testing.expectEqual(chunk_before, function_after.chunk.?);
+    try std.testing.expectEqual(jit.TierState.ready, function_after.chunk.?.tier.loadState());
+    try std.testing.expectEqual(native_before, function_after.chunk.?.tier.loadCode().?);
+
+    const native_hits_before = vm.nativeDirectCallHitsForTesting();
+    const second_result = try ctx.evaluate("compactJitSum(100)");
+    try std.testing.expectEqual(@as(f64, 4950), second_result.asNum());
+    try std.testing.expect(vm.nativeDirectCallHitsForTesting() > native_hits_before);
 }
 
 test "GC compaction rewrites public Zig protected handles" {

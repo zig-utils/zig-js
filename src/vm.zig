@@ -886,6 +886,12 @@ pub fn quickObjectAllocationReserveRefillsForTesting() u64 {
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
+
+pub fn nativeDirectCallHitsForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return quick_native_direct_call_hits.load(.monotonic);
+}
+
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);

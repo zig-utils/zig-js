@@ -532,7 +532,7 @@ int main(void)
                   82))
             return 82;
 
-        JSGlobalContextRef movingContextRef = ZJSGlobalContextCreateGarbageCollected(false);
+        JSGlobalContextRef movingContextRef = ZJSGlobalContextCreateGarbageCollected(true);
         JSContext *movingContext = [JSContext contextWithJSGlobalContextRef:movingContextRef];
         JSGlobalContextRelease(movingContextRef);
         movingContextRef = movingContext.JSGlobalContextRef;

@@ -1,15 +1,17 @@
 # GC Relocation Contract
 
 Moving collection is available only through explicit `Context.compactGarbage`
-on a quiescent GC realm created with JIT disabled. The checked policy refuses
-active interpreters, running JS threads, conservative native-stack scans, and
-in-flight concurrent/parallel collections. C and Objective-C embedders can use
-`ZJSGlobalContextCreateGarbageCollected(false)` and
-`ZJSContextCompactGarbage` for the same checked boundary.
+on a quiescent precise-GC realm. The current pointer-free baseline JIT may stay
+enabled: published code, tier metadata, and bytecode chunks do not move, while
+the active-interpreter gate proves no `NativeFrame` is live. Running JS threads,
+conservative native-stack scans, and in-flight concurrent/parallel collections
+still fail closed. C and Objective-C embedders use
+`ZJSGlobalContextCreateGarbageCollected` and `ZJSContextCompactGarbage` for the
+same checked boundary.
 
 The checked-in
 [`gc-relocation-inventory.json`](../.data/gc-relocation-inventory.json) covers
-all nine production cell kinds and 26 pointer surfaces across runtime edges,
+all nine production cell kinds and 27 pointer surfaces across runtime edges,
 realm and interpreter roots, C and Objective-C handles, private ABI references,
 inspector frames, threads/workers, promises/modules/timers, WebAssembly, native
 stack scanning, and the existing native JIT frame. Every entry names its current
@@ -23,8 +25,10 @@ zig build gc-relocation-inventory-check
 
 The verifier derives the live `CellKind` enum from `src/gc.zig`, requires exact
 ordered coverage and an executable rewriter for each kind, validates every
-source anchor/boundary tag, and checks the fail-closed activation gates. It is
-deliberately cheap enough for ordinary CI.
+source anchor/boundary tag, and checks the fail-closed activation gates. It also
+pins the current JIT compiler's object/string-constant rejection so the
+quiescent allowance cannot silently outlive its pointer-free premise. The gate
+is deliberately cheap enough for ordinary CI.
 
 ## Code Contract
 
@@ -181,11 +185,20 @@ same safe lifetime model through `Context.protectValue` and
 contained `Value` is traced and rewritten; raw `Value` copies returned by
 `get()` are valid only until the next compaction boundary.
 
+[#358](https://github.com/zig-utils/zig-js/issues/358) removes the blanket JIT
+flag rejection at that quiescent boundary. Its regression moves the rooted
+Function/Object graph around a ready numeric tier, proves the immutable native
+entry and arena-owned chunk stay stable, and enters the same tier afterward.
+Movement during native execution remains rejected by the active-interpreter
+gate until precise stack maps exist.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
 and its forwarding record remains live. Long-lived embedding references must
 use stable handle storage whose contained value is rewritten; the handle's own
-address does not move. Native frames without precise pointer stack maps and
-conservative stack scans reject compaction until #336 supplies a safe rewrite
-or per-cell pinning mechanism.
+address does not move. Live native frames without precise pointer stack maps
+and conservative stack scans reject compaction until #336 supplies a safe
+rewrite or per-cell pinning mechanism. A quiescent realm has no native frame to
+rewrite, so the current pointer-free baseline tier does not itself block
+movement.

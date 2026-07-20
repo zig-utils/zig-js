@@ -134,6 +134,13 @@ The compiler emits a bytecode-to-native map for diagnostics and future stack
 maps. Until precise native stack maps exist, no GC pointer may be live only in
 a machine register across a safepoint.
 
+Explicit moving collection is permitted only between evaluations, after the
+active-interpreter registry proves that no `NativeFrame` exists. Published
+code, tier records, and bytecode chunks are non-moving, and the current tier
+embeds no managed pointer, so a ready tier remains valid when its owning
+Function/Object cells move. Mid-script movement still fails closed until every
+native frame has a precise rewrite or pinning protocol.
+
 ## Executable memory
 
 Code memory follows write-xor-execute policy. The currently emitted backend is

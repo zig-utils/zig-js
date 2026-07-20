@@ -84,6 +84,7 @@ def main() -> int:
         require(entry.get("rewrite", "") in gc_source, f"{entry.get('kind')}: executable rewriter missing")
 
     context_source = (ROOT / "src/context.zig").read_text()
+    jit_compiler_source = (ROOT / "src/jit/compiler.zig").read_text()
     c_api_source = (ROOT / "src/c_api.zig").read_text()
     extension_header = (ROOT / "include/zig-js/Extensions.h").read_text()
     require("pub const ZJSGCCompactionStatus" in c_api_source, "C compaction status enum missing")
@@ -98,20 +99,35 @@ def main() -> int:
         "pub fn verifyRelocationCell",
     ):
         require(hook in gc_source, f"collector binding hook missing: {hook}")
-    require("pub fn compactGarbage" in context_source, "checked Context compaction entrypoint missing")
+    compact_start = context_source.index("pub fn compactGarbage")
+    compact_end = context_source.index("fn collectQuiescentGarbage", compact_start)
+    compact_source = context_source[compact_start:compact_end]
+    require("pub fn compactGarbage" in compact_source, "checked Context compaction entrypoint missing")
     require("shouldRelocateCell" in context_source, "dense-prefix candidate policy missing")
     require("trimCompactedTailChunks" in context_source, "compacted-tail release policy missing")
     require("pub fn protectValue" in context_source, "Zig protected-value API missing")
     require("pub fn unprotectValue" in context_source, "Zig protected-value release API missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
-    require("self.enable_jit" in context_source, "JIT fail-closed gate missing")
-    require("self.gc_scan_native_stack" in context_source, "conservative-stack fail-closed gate missing")
-    require("has_active_interpreter" in context_source, "active-interpreter fail-closed gate missing")
+    require("self.enable_jit" not in compact_source, "quiescent pointer-free JIT is still rejected")
+    require("self.gc_scan_native_stack" in compact_source, "conservative-stack fail-closed gate missing")
+    require("self.gc_scan_parked_stacks" in compact_source, "parked-stack fail-closed gate missing")
+    require("has_active_interpreter" in compact_source, "active-interpreter fail-closed gate missing")
+    require(
+        jit_compiler_source.count("if (result.isObject() or result.isString()) return null;") >= 2,
+        "constant-result JIT movable-pointer rejection missing",
+    )
+    require(".string, .object => null" in jit_compiler_source, "numeric JIT managed-kind rejection missing")
 
     surfaces = document.get("pointer_surfaces", [])
     ids = [entry.get("id") for entry in surfaces]
     require(len(ids) >= 25, "pointer inventory unexpectedly small")
     require(len(set(ids)) == len(ids), "duplicate pointer surface")
+    native_jit_frame = next((entry for entry in surfaces if entry.get("id") == "native-jit-frame"), None)
+    require(native_jit_frame is not None, "native JIT frame inventory missing")
+    require(
+        native_jit_frame.get("disposition") == "allow_quiescent_pointer_free_tier_reject_live_native_frame",
+        "native JIT frame quiescent/rejection disposition drift",
+    )
     all_tags: set[str] = set()
     categories: set[str] = set()
     for entry in surfaces:
