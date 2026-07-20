@@ -17,7 +17,7 @@ const value = try ctx.evaluate("let x = 40; x + 2");
 | --- | ---: | --- |
 | configured test262 | **53,175 / 53,175** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
 | ten-profile WebAssembly matrix | **151,802 / 151,802 applicable** | Core 3: 63,964/63,964 · [matrix](docs/.data/wasm-conformance-matrix.json) · [upstream-main shadow](docs/.data/wasm-core-main-shadow-inventory.json) · [reproduce](docs/wasm.md) |
-| pinned private ABI | **Home 423/471 · Bun 415/461** | [inventories, exact contracts, and reproduction](docs/abi/README.md) |
+| pinned private ABI | **Home 424/471 · Bun 416/461** | [inventories, exact contracts, and reproduction](docs/abi/README.md) |
 
 ## Performance
 

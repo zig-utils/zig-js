@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 423
-implemented and 48 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 424
+implemented and 47 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -143,6 +143,9 @@ pinned origins and handled return codes, and constructs the exact
 `UnhandledPromiseRejection` wrapper. Promise checkpoints suppress early-handled
 and duplicate notifications while retaining the original reason and Promise.
 The same realm-local event storage drives `beforeExit` and one-shot `exit`.
+Native signal delivery maps the pinned platform signal table to canonical
+`SIG*` event names and synchronously emits `(name, number)` on only the selected
+realm's process object; unknown signals and pending exceptions are inert.
 The private process next-tick calls enqueue into a separate realm FIFO with
 exact one- or two-argument invocation. Host checkpoints drain it before Promise
 jobs and repeat after the Promise phase when needed; precise roots cover queued
@@ -378,7 +381,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 415 shims are implemented and 46 remain pending. Its
+of which 416 shims are implemented and 45 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

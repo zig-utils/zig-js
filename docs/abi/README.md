@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (423 implemented, 48 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (424 implemented, 47 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 423 are implemented and 48 remain pending
+Of the private entries, 424 are implemented and 47 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -558,6 +558,11 @@ code, and message. Promise checkpoints cover early-handler suppression, one
 unhandled notification, one identity-preserving late-handled notification, and
 duplicate-checkpoint suppression. The same realm-local store backs repeatable
 `beforeExit` and one-shot `exit` dispatch.
+
+`Bun__onSignalForJS` synchronously emits the canonical `SIG*` name and native
+number through only the selected realm's process EventEmitter. The pinned
+platform map, alias order, listener semantics, and failure boundaries are in
+[`bun-process-signal-4982b91e.json`](bun-process-signal-4982b91e.json).
 
 The two process next-tick exports feed a distinct realm-owned FIFO rather than
 the PromiseJobs queue. One- and two-argument calls retain their exact arity and
@@ -1113,7 +1118,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (415 implemented, 46 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (416 implemented, 45 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1138,5 +1143,5 @@ zig build test-private-inspector-agents
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 46
+not claim complete Bun runtime compatibility; #164 remains open for the 45
 pending core entries and later wider/generated profiles.
