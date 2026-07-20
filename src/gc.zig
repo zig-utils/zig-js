@@ -736,14 +736,20 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
             gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_memory.owner_obj);
         },
         .wasm_table => {
-            for (@constCast(cold.rare.wasm_table.refs)) |*reference|
+            const state = &cold.rare.wasm_table;
+            for (@constCast(state.refs)) |*reference|
                 gc_relocation.rewriteAtomicValueSlot(v, reference);
-            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_table.owner_obj);
+            gc_relocation.rewriteOptionalSlot(v, Object, &state.owner_obj);
+            if (state.gc_relocate) |relocate| if (state.gc_context) |gc_context|
+                relocate(gc_context, @ptrCast(@constCast(v)), Rewriter.rewrite);
         },
         .wasm_global => {
-            if (cold.rare.wasm_global.ref) |reference|
+            const state = &cold.rare.wasm_global;
+            if (state.ref) |reference|
                 gc_relocation.rewriteAtomicValueSlot(v, reference);
-            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_global.owner_obj);
+            gc_relocation.rewriteOptionalSlot(v, Object, &state.owner_obj);
+            if (state.gc_relocate) |relocate| if (state.gc_context) |gc_context|
+                relocate(gc_context, @ptrCast(@constCast(v)), Rewriter.rewrite);
         },
         .wasm_function => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_function.owner_obj),
         .wasm_tag => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_tag.owner_obj),
@@ -2688,6 +2694,28 @@ fn verifyObjectWeakRelocation(o: *Object, v: anytype) void {
     }
 }
 
+fn verifyObjectWasmRelocation(o: *Object, v: anytype) void {
+    const cold = o.coldState() orelse return;
+    const Verifier = struct {
+        fn verify(gc_context: ?*anyopaque, callback: ?value.WasmGcTraceRootsFn, visitor: @TypeOf(v)) void {
+            const context = gc_context orelse return;
+            const verify_callback = callback orelse return;
+            const Marker = struct {
+                fn mark(raw: *anyopaque, child: Value) void {
+                    const stale_visitor: @TypeOf(visitor) = @ptrCast(@alignCast(raw));
+                    markValue(stale_visitor, child);
+                }
+            };
+            verify_callback(context, @ptrCast(visitor), Marker.mark);
+        }
+    };
+    switch (cold.rare_tag.load(.acquire)) {
+        .wasm_table => Verifier.verify(cold.rare.wasm_table.gc_context, cold.rare.wasm_table.gc_verify, v),
+        .wasm_global => Verifier.verify(cold.rare.wasm_global.gc_context, cold.rare.wasm_global.gc_verify, v),
+        else => {},
+    }
+}
+
 // ---- The binding the collector instantiates over -------------------------
 
 /// A tiny stateful binding the collector instantiates over: it just wraps the
@@ -2823,6 +2851,7 @@ pub const Binding = struct {
             const object: *Object = @ptrCast(@alignCast(cell));
             traceObjectEphemeron(object, &verifier);
             verifyObjectWeakRelocation(object, &verifier);
+            verifyObjectWasmRelocation(object, &verifier);
         }
         if (builtin.is_test) _ = relocation_verifications_for_testing.fetchAdd(1, .monotonic);
     }

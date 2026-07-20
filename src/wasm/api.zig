@@ -194,6 +194,36 @@ const TableOwner = struct {
     }
 };
 
+fn traceGlobalOwnerGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: value.WasmGcMarkValueFn) void {
+    const owner: *GlobalOwner = @ptrCast(@alignCast(raw));
+    exec.traceGcRootSlot(owner.glob.value, visitor, mark_value);
+}
+
+fn relocateGlobalOwnerGcRoots(raw: *anyopaque, visitor: *anyopaque, rewrite_value: value.WasmGcRewriteValueFn) void {
+    const owner: *GlobalOwner = @ptrCast(@alignCast(raw));
+    exec.relocateGcRootSlot(&owner.glob.value, visitor, rewrite_value);
+}
+
+fn traceTableOwnerGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: value.WasmGcMarkValueFn) void {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    var index: usize = 0;
+    while (true) : (index += 1) {
+        owner.table.lockTable();
+        if (index >= owner.table.elems.len) {
+            owner.table.unlockTable();
+            break;
+        }
+        const slot = owner.table.elems[index];
+        owner.table.unlockTable();
+        exec.traceGcRootSlot(slot, visitor, mark_value);
+    }
+}
+
+fn relocateTableOwnerGcRoots(raw: *anyopaque, visitor: *anyopaque, rewrite_value: value.WasmGcRewriteValueFn) void {
+    const owner: *TableOwner = @ptrCast(@alignCast(raw));
+    for (owner.table.elems) |*slot| exec.relocateGcRootSlot(slot, visitor, rewrite_value);
+}
+
 fn tableHostLock(raw: *anyopaque) void {
     const owner: *TableOwner = @ptrCast(@alignCast(raw));
     owner.lockOwner();
@@ -765,6 +795,9 @@ fn tableConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostEr
     const state = try object.wasmTableState(self.arena);
     state.table = @ptrCast(owner);
     state.refs = refs;
+    state.gc_context = @ptrCast(owner);
+    state.gc_verify = traceTableOwnerGcRoots;
+    state.gc_relocate = relocateTableOwnerGcRoots;
     try store.appendWasmOwned(.{ .table = @ptrCast(owner) });
     gc.barrierValueFrom(object, fill.value);
     return Value.obj(object);
@@ -1265,6 +1298,9 @@ fn globalConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     const state = try object.wasmGlobalState(self.arena);
     state.glob = @ptrCast(owner);
     state.ref = &glob.ref_root;
+    state.gc_context = @ptrCast(owner);
+    state.gc_verify = traceGlobalOwnerGcRoots;
+    state.gc_relocate = relocateGlobalOwnerGcRoots;
     glob.barrier_ctx = @ptrCast(object);
     glob.barrier = barrierGlobalReference;
     try store.appendWasmOwned(.{ .global = @ptrCast(owner) });
@@ -1748,6 +1784,9 @@ fn wrapDefinedGlobal(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     state.glob = @ptrCast(owner);
     state.ref = &glob.ref_root;
     state.owner_obj = instance_object;
+    state.gc_context = @ptrCast(owner);
+    state.gc_verify = traceGlobalOwnerGcRoots;
+    state.gc_relocate = relocateGlobalOwnerGcRoots;
     try store.appendWasmOwned(.{ .global = @ptrCast(owner) });
     return Value.obj(object);
 }
@@ -1800,6 +1839,9 @@ fn wrapDefinedTable(
     state.table = @ptrCast(owner);
     state.refs = refs;
     state.owner_obj = instance_object;
+    state.gc_context = @ptrCast(owner);
+    state.gc_verify = traceTableOwnerGcRoots;
+    state.gc_relocate = relocateTableOwnerGcRoots;
     try store.appendWasmOwned(.{ .table = @ptrCast(owner) });
     installTableHost(owner);
     return Value.obj(object);

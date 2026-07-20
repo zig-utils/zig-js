@@ -148,6 +148,12 @@ two moves. Ordinary collection stays non-moving.
 stale-address traversal to the engine. It reuses the non-mutating marker view,
 adds the weak-map/finalization-only surfaces that ordinary tracing omits, and
 runs only after all backing publication and heap indexes name destinations.
+The repeated-move witness also covers stable C/private handle addresses, live
+and dead weak embedding roots, WeakRef/WeakMap/WeakSet/finalization behavior,
+and standalone WebAssembly table/global identity. Table and global owners use
+paired native-slot audit/relocate callbacks, so their atomic JS root mirrors
+and the slots WebAssembly actually executes are rewritten together without
+adding plain native reads to concurrent marking.
 
 ## Safepoint Rule
 

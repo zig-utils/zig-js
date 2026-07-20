@@ -426,7 +426,7 @@ fn relocateGcReference(
     }
 }
 
-fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
+pub fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
     switch (slot) {
         .gcref => |reference| if (reference) |root| root.trace(root, visitor, mark_value),
         .externref, .hostref => |root| mark_value(visitor, root),
@@ -439,7 +439,7 @@ fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.Wa
     }
 }
 
-fn relocateGcRootSlot(slot: *ValueSlot, visitor: *anyopaque, rewrite_value: js_value.WasmGcRewriteValueFn) void {
+pub fn relocateGcRootSlot(slot: *ValueSlot, visitor: *anyopaque, rewrite_value: js_value.WasmGcRewriteValueFn) void {
     switch (slot.*) {
         .gcref => |reference| if (reference) |root| root.relocate(root, visitor, rewrite_value),
         .externref, .hostref => |*root| rewrite_value(visitor, root),

@@ -1241,8 +1241,22 @@ pub const ObjectRareState = union(ObjectRareTag) {
     wasm_module: struct { mod: ?*anyopaque = null }, // *wasm/types.Module
     wasm_instance: struct { inst: ?*anyopaque = null, module_obj: ?*Object = null, import_vals: []const Value = &.{}, exports_obj: ?*Object = null, gc_state: ?*WasmInstanceGcState = null },
     wasm_memory: struct { mem: ?*anyopaque = null, buffer_obj: ?*Object = null, owner_obj: ?*Object = null }, // *wasm/api.MemoryOwner
-    wasm_table: struct { table: ?*anyopaque = null, refs: []const std.atomic.Value(u64) = &.{}, owner_obj: ?*Object = null }, // *wasm/api.TableOwner
-    wasm_global: struct { glob: ?*anyopaque = null, ref: ?*std.atomic.Value(u64) = null, owner_obj: ?*Object = null }, // *wasm/api.GlobalOwner
+    wasm_table: struct {
+        table: ?*anyopaque = null,
+        refs: []const std.atomic.Value(u64) = &.{},
+        owner_obj: ?*Object = null,
+        gc_context: ?*anyopaque = null,
+        gc_verify: ?WasmGcTraceRootsFn = null,
+        gc_relocate: ?WasmGcRelocateRootsFn = null,
+    }, // *wasm/api.TableOwner
+    wasm_global: struct {
+        glob: ?*anyopaque = null,
+        ref: ?*std.atomic.Value(u64) = null,
+        owner_obj: ?*Object = null,
+        gc_context: ?*anyopaque = null,
+        gc_verify: ?WasmGcTraceRootsFn = null,
+        gc_relocate: ?WasmGcRelocateRootsFn = null,
+    }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
     wasm_tag: struct { tag: ?*anyopaque = null, store: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.TagInst
     wasm_exception: struct { exception: ?*WasmException = null, payload_values: []const Value = &.{}, owner_obj: ?*Object = null },
@@ -2022,7 +2036,10 @@ pub const Object = struct {
                 .buffer_obj = cold.rare.wasm_memory.buffer_obj,
                 .owner_obj = cold.rare.wasm_memory.owner_obj,
             },
-            .wasm_table => .{ .table_refs = cold.rare.wasm_table.refs, .owner_obj = cold.rare.wasm_table.owner_obj },
+            .wasm_table => .{
+                .table_refs = cold.rare.wasm_table.refs,
+                .owner_obj = cold.rare.wasm_table.owner_obj,
+            },
             .wasm_global => .{
                 .global_ref = cold.rare.wasm_global.ref,
                 .owner_obj = cold.rare.wasm_global.owner_obj,

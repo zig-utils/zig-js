@@ -14126,6 +14126,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = false,
+        .wasm_features = .{ .reference_types = true },
     });
     defer ctx.destroy();
 
@@ -14138,6 +14139,24 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
         \\  globalThis.compactPromise = Promise.resolve(9);
         \\  globalThis.compactGenerator = (function* () { yield 7; })();
         \\  globalThis.compactDynamicString = "move".repeat(25);
+        \\  globalThis.compactWeakKey = { weak: "key" };
+        \\  globalThis.compactWeakValue = { weak: "value" };
+        \\  globalThis.compactWeakMap = new WeakMap([[compactWeakKey, compactWeakValue]]);
+        \\  globalThis.compactWeakSet = new WeakSet([compactWeakKey]);
+        \\  globalThis.compactLiveWeakRef = new WeakRef(compactWeakKey);
+        \\  globalThis.compactFinalized = [];
+        \\  globalThis.compactRegistry = new FinalizationRegistry(
+        \\    held => compactFinalized.push(held)
+        \\  );
+        \\  let deadWeakTarget = { weak: "dead" };
+        \\  globalThis.compactDeadWeakRef = new WeakRef(deadWeakTarget);
+        \\  compactRegistry.register(deadWeakTarget, "held");
+        \\  deadWeakTarget = null;
+        \\  globalThis.compactWasmTable = new WebAssembly.Table({ element: "externref", initial: 1 });
+        \\  compactWasmTable.set(0, compactWeakKey);
+        \\  globalThis.compactWasmGlobal = new WebAssembly.Global(
+        \\    { value: "externref", mutable: true }, compactWeakValue
+        \\  );
         \\  const root = { name: "root" };
         \\  const peer = { name: "peer" };
         \\  root.peer = peer;
@@ -14149,6 +14168,22 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     try ctx.reserveCApiHandlesLocked(1);
     ctx.c_api_handles.appendAssumeCapacity(.{ .ref = &boxed, .count = 1 });
     defer ctx.c_api_handles.clearRetainingCapacity();
+    const c_handle_address = @intFromPtr(&ctx.c_api_handles.items[0]);
+
+    var private_strong = Context.PrivateStrongRoot{ .value = boxed };
+    try ctx.private_strong_roots.append(ctx.gpa, &private_strong);
+    defer ctx.private_strong_roots.clearRetainingCapacity();
+    const private_strong_address = @intFromPtr(&private_strong);
+    var private_live_weak = Context.PrivateWeakRoot{};
+    private_live_weak.target.store(boxed.asObj().getOwn("peer").?.asObj(), .release);
+    var orphan = try ctx.evaluate("({ orphan: true })");
+    var private_dead_weak = Context.PrivateWeakRoot{};
+    private_dead_weak.target.store(orphan.asObj(), .release);
+    orphan = Value.undef();
+    try ctx.private_weak_roots.append(ctx.gpa, &private_live_weak);
+    try ctx.private_weak_roots.append(ctx.gpa, &private_dead_weak);
+    defer ctx.private_weak_roots.clearRetainingCapacity();
+    const private_live_weak_address = @intFromPtr(&private_live_weak);
 
     // Each unrewritable execution boundary refuses movement without even
     // entering the collector's compaction phase.
@@ -14166,6 +14201,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     // Stabilize liveness first so before/after accounting measures relocation,
     // not unrelated garbage reclaimed from evaluation setup.
     ctx.collectGarbage();
+    try std.testing.expectEqual(@as(?*anyopaque, null), private_dead_weak.target.load(.acquire));
     const before = ctx.gc.?.accounting();
     const verifications_before = gc_mod.relocationVerificationsForTesting();
     const old_root_address = @intFromPtr(boxed.asObj());
@@ -14181,6 +14217,11 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     try std.testing.expect(old_peer_address != @intFromPtr(first_peer));
     try std.testing.expectEqual(first_peer, first_root.getOwn("alias").?.asObj());
     try std.testing.expectEqual(first_root, first_peer.getOwn("root").?.asObj());
+    try std.testing.expectEqual(c_handle_address, @intFromPtr(&ctx.c_api_handles.items[0]));
+    try std.testing.expectEqual(private_strong_address, @intFromPtr(ctx.private_strong_roots.items[0]));
+    try std.testing.expectEqual(first_root, private_strong.value.asObj());
+    try std.testing.expectEqual(private_live_weak_address, @intFromPtr(ctx.private_weak_roots.items[0]));
+    try std.testing.expectEqual(@as(?*anyopaque, first_peer), private_live_weak.target.load(.acquire));
     const after_first = ctx.gc.?.accounting();
     try std.testing.expectEqual(before.live_cells, after_first.live_cells);
     try std.testing.expectEqual(before.live_bytes, after_first.live_bytes);
@@ -14194,6 +14235,8 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     const second_peer = second_root.getOwn("peer").?.asObj();
     try std.testing.expectEqual(second_peer, second_root.getOwn("alias").?.asObj());
     try std.testing.expectEqual(second_root, second_peer.getOwn("root").?.asObj());
+    try std.testing.expectEqual(second_root, private_strong.value.asObj());
+    try std.testing.expectEqual(@as(?*anyopaque, second_peer), private_live_weak.target.load(.acquire));
     const after_second = ctx.gc.?.accounting();
     try std.testing.expectEqual(before.live_cells, after_second.live_cells);
     try std.testing.expectEqual(before.live_bytes, after_second.live_bytes);
@@ -14210,6 +14253,17 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
         "compactClosure() + compactGenerator.next().value + compactDynamicString.length + compactPromiseValue",
     );
     try std.testing.expectEqual(@as(f64, 158), representatives.asNum());
+    _ = try ctx.evaluate("0"); // drain the ready FinalizationRegistry cleanup job
+    const boundaries = try ctx.evaluate(
+        \\+(compactLiveWeakRef.deref() === compactWeakKey) * 1 +
+        \\+(compactDeadWeakRef.deref() === undefined) * 2 +
+        \\+(compactWeakMap.get(compactWeakKey) === compactWeakValue) * 4 +
+        \\+(compactWeakSet.has(compactWeakKey)) * 8 +
+        \\+(compactFinalized.length === 1 && compactFinalized[0] === "held") * 16 +
+        \\+(compactWasmTable.get(0) === compactWeakKey) * 32 +
+        \\+(compactWasmGlobal.value === compactWeakValue) * 64
+    );
+    try std.testing.expectEqual(@as(f64, 127), boundaries.asNum());
 
     // Planning scratch must succeed before any destination/root/edge mutation.
     // Replacing only the collector scratch allocator deterministically fails
