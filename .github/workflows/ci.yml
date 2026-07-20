@@ -376,8 +376,8 @@ jobs:
         continue-on-error: true
         working-directory: zig-js
         run: |
-          git -C wasm-spec-wg3 fetch --depth=1 origin main
-          python3 tools/wasm-core3-drift.py --upstream-ref FETCH_HEAD --output "$RUNNER_TEMP/wasm-core-3-upstream-drift.json"
+          git -C wasm-spec-wg3 fetch --depth=1 origin main:refs/remotes/origin/main refs/tags/wg-3.0:refs/tags/wg-3.0
+          python3 tools/wasm-core3-drift.py --upstream-ref origin/main --output "$RUNNER_TEMP/wasm-core-3-upstream-drift.json"
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}

@@ -736,10 +736,10 @@ fn parseExportSection(r: *Reader, a: Allocator) DecodeError![]const types.Export
 }
 
 fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
-    // Core 3 refines only the flag-0 shorthand to `(ref func)`. Earlier
-    // profiles decode it as `funcref`, while the explicit elemkind carried by
-    // flag forms 1..3 remains `funcref` in every profile.
-    const implicit_active_func_type = if (r.features.typed_function_references)
+    // Core 3 refines the active function-index shorthands (flags 0 and 2) to
+    // `(ref func)`. Earlier profiles decode them as `funcref`; the passive and
+    // declarative elemkind forms (flags 1 and 3) remain `funcref`.
+    const active_func_index_type = if (r.features.typed_function_references)
         types.ValType.fromRef(.{ .nullable = false, .heap = .func })
     else
         types.ValType.funcref;
@@ -750,7 +750,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
         const kind = try r.readU32Leb();
         e.* = switch (kind) {
             0 => .{
-                .type = implicit_active_func_type,
+                .type = active_func_index_type,
                 .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr(a) } },
                 .init = try readFuncElemInit(r, a),
             },
@@ -769,7 +769,7 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
                 const offset = try r.readConstExpr(a);
                 try readElemKind(r);
                 break :blk .{
-                    .type = .funcref,
+                    .type = active_func_index_type,
                     .mode = .{ .active = .{ .table = table, .offset = offset } },
                     .init = try readFuncElemInit(r, a),
                 };
@@ -2225,7 +2225,12 @@ test "wasm.decode bulk memory segment forms DataCount order and immediates" {
         types.ValType.fromRef(.{ .nullable = false, .heap = .func }),
         core3_mod.elems[0].type,
     );
-    for (core3_mod.elems[1..4]) |elem| try std.testing.expectEqual(types.ValType.funcref, elem.type);
+    try std.testing.expectEqual(types.ValType.funcref, core3_mod.elems[1].type);
+    try std.testing.expectEqual(
+        types.ValType.fromRef(.{ .nullable = false, .heap = .func }),
+        core3_mod.elems[2].type,
+    );
+    try std.testing.expectEqual(types.ValType.funcref, core3_mod.elems[3].type);
 
     const code_only = comptime testCode("\x0B");
     const out_of_order = comptime hdr ++ code_only ++ testSection(12, "\x00");
