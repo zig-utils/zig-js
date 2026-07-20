@@ -12125,7 +12125,7 @@ pub const Interpreter = struct {
     /// uninitialized. This is only for private native boundaries whose callers
     /// immediately overwrite the full view; ECMAScript constructors continue
     /// to route through `makeArrayBuffer` and remain zero-filled.
-    fn makeUninitializedArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
+    pub fn makeUninitializedArrayBuffer(self: *Interpreter, len: usize) EvalError!*value.Object {
         return self.makeArrayBufferWithInitialization(len, false);
     }
 

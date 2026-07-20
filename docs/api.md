@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 352
-implemented and 119 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 356
+implemented and 115 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -239,6 +239,13 @@ owner unmaps the complete extent exactly once on failed construction, precise
 collection, or context teardown. Invalid descriptors, undersized files,
 ranges, and result tags return empty without publishing a partial value or
 pending exception.
+The private copy/allocation boundary creates isolated ArrayBuffers, allocates
+uninitialized Uint8Array storage for direct native filling, and preserves Bun's
+historical `Bun__allocArrayBufferForCopy` behavior: that name returns a
+Buffer-identified Uint8Array view. Its output pointer is written only after the
+view is complete. Default-allocator Uint8Array and ArrayBuffer constructors
+adopt non-empty mimalloc storage without copying and release it exactly once;
+zero-length sentinel pointers are never adopted.
 Private ToNumber performs the complete number-hint object coercion path,
 including user hooks and thrown conversions, preserves primitive and ordinary
 NaN behavior, throws for Symbol/BigInt, and retains the first VM exception.

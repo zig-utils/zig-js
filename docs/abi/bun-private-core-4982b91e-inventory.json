@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 366,
-      "pending": 117
+      "implemented": 370,
+      "pending": 113
     }
   },
   "home_comparison": {
@@ -954,10 +954,10 @@
       "line": 179,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__allocArrayBufferForCopy(*jsc.JSGlobalObject, usize, **anyopaque) jsc.JSValue;",
       "declaration_sha256": "f8f463560bbb1034c9f80923922d1a557f257a4dc06d9a557203123f131812ad",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__allocUint8ArrayForCopy",
@@ -965,10 +965,10 @@
       "line": 178,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__allocUint8ArrayForCopy(*jsc.JSGlobalObject, usize, **anyopaque) jsc.JSValue;",
       "declaration_sha256": "03e44e0e48b20a8b7840c0dd3dc834dc19ea5ec4d0ccc865d34e149df1bf60b8",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__attachAsyncStackFromPromise",
@@ -998,10 +998,10 @@
       "line": 192,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__createArrayBufferForCopy(*jsc.JSGlobalObject, ptr: ?*const anyopaque, len: usize) jsc.JSValue;",
       "declaration_sha256": "01c73d3a5d11e7993febe609b510c8a791d99ef937feab3e453d7e1d3289aad2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__createJSDebugger",
@@ -1446,10 +1446,10 @@
       "line": 198,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn JSArrayBuffer__fromDefaultAllocator(*jsc.JSGlobalObject, ptr: [*]u8, len: usize) jsc.JSValue;",
       "declaration_sha256": "5dc3341bf5b9f8e2a913721f5fb4ce3f42d759323bacb9e01eb2c0d731fd4571",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSArray__constructArray",

@@ -422,7 +422,11 @@ extern "c" fn WTF__numberOfProcessorCores() c_int;
 extern "c" fn WTF__releaseFastMallocFreeMemoryForThisThread() void;
 extern "c" fn Bun__writeHTTPDate(*[32]u8, usize, u64) c_int;
 extern "c" fn Bun__createUint8ArrayForCopy(JSContextRef, ?*const anyopaque, usize, bool) EncodedValue;
+extern "c" fn Bun__createArrayBufferForCopy(JSContextRef, ?*const anyopaque, usize) EncodedValue;
+extern "c" fn Bun__allocUint8ArrayForCopy(JSContextRef, usize, **anyopaque) EncodedValue;
+extern "c" fn Bun__allocArrayBufferForCopy(JSContextRef, usize, **anyopaque) EncodedValue;
 extern "c" fn JSUint8Array__fromDefaultAllocator(JSContextRef, [*]u8, usize) EncodedValue;
+extern "c" fn JSArrayBuffer__fromDefaultAllocator(JSContextRef, [*]u8, usize) EncodedValue;
 extern "c" fn JSBuffer__isBuffer(JSContextRef, EncodedValue) bool;
 extern "c" fn JSBuffer__bufferFromLength(JSContextRef, i64) EncodedValue;
 extern "c" fn JSBuffer__bufferFromPointerAndLengthAndDeinit(JSContextRef, [*]u8, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
@@ -2010,6 +2014,39 @@ pub fn main() void {
     uint8_source[0] = 99;
     if (copied_bytes[0] != 1) fail("Uint8Array copy aliases its source");
 
+    var array_buffer_source = [_]u8{ 11, 12, 13, 14 };
+    const copied_array_buffer = Bun__createArrayBufferForCopy(context, &array_buffer_source, array_buffer_source.len);
+    const copied_array_buffer_raw = JSObjectGetArrayBufferBytesPtr(context, copied_array_buffer.cellPointer(), &typed_exception) orelse
+        fail("ArrayBuffer copy bytes lookup failed");
+    const copied_array_buffer_bytes = @as([*]u8, @ptrCast(copied_array_buffer_raw))[0..array_buffer_source.len];
+    if (typed_exception != null or
+        JSObjectGetArrayBufferByteLength(context, copied_array_buffer.cellPointer(), &typed_exception) != array_buffer_source.len or
+        !std.mem.eql(u8, copied_array_buffer_bytes, &array_buffer_source))
+        fail("ArrayBuffer copy constructor mismatch");
+    array_buffer_source[0] = 99;
+    if (copied_array_buffer_bytes[0] != 11) fail("ArrayBuffer copy aliases its source");
+
+    var allocated_uint8_raw: *anyopaque = @ptrFromInt(1);
+    const allocated_uint8 = Bun__allocUint8ArrayForCopy(context, 4, &allocated_uint8_raw);
+    const allocated_uint8_bytes = JSObjectGetTypedArrayBytesPtr(context, allocated_uint8.cellPointer(), &typed_exception) orelse
+        fail("allocated Uint8Array bytes lookup failed");
+    if (typed_exception != null or allocated_uint8_bytes != allocated_uint8_raw or
+        JSObjectGetTypedArrayLength(context, allocated_uint8.cellPointer(), &typed_exception) != 4 or
+        JSBuffer__isBuffer(context, allocated_uint8))
+        fail("allocated Uint8Array pointer/result mismatch");
+    @as([*]u8, @ptrCast(allocated_uint8_raw))[2] = 77;
+    if (@as([*]const u8, @ptrCast(allocated_uint8_bytes))[2] != 77)
+        fail("allocated Uint8Array pointer did not expose its backing");
+
+    var allocated_private_buffer_raw: *anyopaque = @ptrFromInt(1);
+    const allocated_private_buffer = Bun__allocArrayBufferForCopy(context, 3, &allocated_private_buffer_raw);
+    const allocated_private_buffer_bytes = JSObjectGetTypedArrayBytesPtr(context, allocated_private_buffer.cellPointer(), &typed_exception) orelse
+        fail("allocated Buffer bytes lookup failed");
+    if (typed_exception != null or allocated_private_buffer_bytes != allocated_private_buffer_raw or
+        JSObjectGetTypedArrayLength(context, allocated_private_buffer.cellPointer(), &typed_exception) != 3 or
+        !JSBuffer__isBuffer(context, allocated_private_buffer))
+        fail("historically named ArrayBuffer allocator did not return a Buffer view");
+
     const private_buffer = Bun__createUint8ArrayForCopy(context, null, 3, true);
     const private_buffer_bytes_raw = JSObjectGetTypedArrayBytesPtr(context, private_buffer.cellPointer(), &typed_exception) orelse
         fail("Buffer bytes lookup failed");
@@ -2032,6 +2069,28 @@ pub fn main() void {
     const empty_uint8 = JSUint8Array__fromDefaultAllocator(context, @ptrCast(&empty_sentinel), 0);
     if (JSObjectGetTypedArrayLength(context, empty_uint8.cellPointer(), &typed_exception) != 0 or typed_exception != null)
         fail("empty default-allocator Uint8Array mismatch");
+
+    const adopted_default_array_buffer_raw = std.c.malloc(3) orelse fail("default-allocator ArrayBuffer fixture allocation failed");
+    const adopted_array_buffer_input = @as([*]u8, @ptrCast(adopted_default_array_buffer_raw))[0..3];
+    @memcpy(adopted_array_buffer_input, &[_]u8{ 31, 32, 33 });
+    const adopted_default_array_buffer = JSArrayBuffer__fromDefaultAllocator(
+        context,
+        adopted_array_buffer_input.ptr,
+        adopted_array_buffer_input.len,
+    );
+    const adopted_default_array_buffer_bytes = JSObjectGetArrayBufferBytesPtr(
+        context,
+        adopted_default_array_buffer.cellPointer(),
+        &typed_exception,
+    ) orelse fail("adopted ArrayBuffer bytes lookup failed");
+    if (typed_exception != null or adopted_default_array_buffer_bytes != adopted_default_array_buffer_raw or
+        JSObjectGetArrayBufferByteLength(context, adopted_default_array_buffer.cellPointer(), &typed_exception) != 3 or
+        !std.mem.eql(u8, @as([*]const u8, @ptrCast(adopted_default_array_buffer_bytes))[0..3], adopted_array_buffer_input))
+        fail("default-allocator ArrayBuffer did not adopt its bytes");
+
+    const empty_default_array_buffer = JSArrayBuffer__fromDefaultAllocator(context, @ptrCast(&empty_sentinel), 0);
+    if (JSObjectGetArrayBufferByteLength(context, empty_default_array_buffer.cellPointer(), &typed_exception) != 0 or typed_exception != null)
+        fail("empty default-allocator ArrayBuffer mismatch");
 
     const allocated_buffer = JSBuffer__bufferFromLength(context, 5);
     if (!JSBuffer__isBuffer(context, allocated_buffer) or
@@ -6310,5 +6369,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 339/339 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 343/343 symbols linked; runtime matrix passed\n", .{});
 }
