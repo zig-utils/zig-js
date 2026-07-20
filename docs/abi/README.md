@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (418 implemented, 53 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (423 implemented, 48 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 418 are implemented and 53 remain pending
+Of the private entries, 423 are implemented and 48 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -513,6 +513,12 @@ reentrantly released handles. Both profile libraries run the same external
 consumer via `zig build test-private-inspector-agents`; the upstream source,
 protocol hashes, and semantic checklist are pinned in
 [`bun-inspector-agents-4982b91e.json`](bun-inspector-agents-4982b91e.json).
+The same consumer also exercises the five HTTPServer request-lifecycle exports:
+per-session domain gates, parsed flat header/parameter arrays, exact nested
+request/response/chunk/error payloads, optional fields, invalid input, OOM, and
+reentrant release. Bun 4982b91e, its WebKit cd821fec protocol, and the complete
+contract are pinned in
+[`bun-http-server-inspector-4982b91e.json`](bun-http-server-inspector-4982b91e.json).
 
 The proxy internal-field projection returns exact live target/handler cells
 without ordinary property access or userland traps. Revoked fields become
@@ -1107,7 +1113,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (410 implemented, 51 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (415 implemented, 46 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1132,5 +1138,5 @@ zig build test-private-inspector-agents
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 51
+not claim complete Bun runtime compatibility; #164 remains open for the 46
 pending core entries and later wider/generated profiles.
