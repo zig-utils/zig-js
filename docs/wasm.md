@@ -213,8 +213,10 @@ zig build wasm-core-main-shadow \
 ```
 
 This never advances either submodule or changes the accepted WG1/WG3 scores.
-CI gates the exact changed-file slice, while a separate network-tolerant drift
-step reports newer upstream commits for the next deliberate observation.
+The checked-in inventory records the complete exact changed-file slice. CI
+keeps the shadow runtime gate bounded with the changed `binary-leb128.wast`
+witness, while a network-tolerant drift step reports newer upstream commits for
+the next deliberate observation.
 
 The accepted ReleaseFast audit reaches **63,964 / 63,964 applicable commands**
 with 1,235 binary-API-inapplicable text-format commands, zero failures, and zero
