@@ -257,6 +257,57 @@ pub fn relocateObjectProperties(o: *Object, v: anytype) void {
         for (o.elementsItems()) |*element| gc_relocation.rewriteValueSlot(v, element);
 }
 
+/// Rewrite the actual cold/rare union storage, never `TraceColdSnapshot` (which
+/// is a by-value marker view). Weak/finalization and native/Wasm callbacks have
+/// ordered semantics and remain isolated for #345.
+pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
+    if (o.behavior.is_getter_setter and !o.behavior.is_custom_getter_setter) {
+        gc_relocation.rewriteValueSlot(v, &o.inline_slots[0]);
+        gc_relocation.rewriteValueSlot(v, &o.inline_slots[1]);
+    }
+    const cold = o.coldState() orelse return;
+    gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.arg_map_env);
+    switch (cold.rare_tag.load(.acquire)) {
+        .boxed_primitive => gc_relocation.rewriteValueSlot(v, &cold.rare.boxed_primitive.value),
+        .module_ns => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.module_ns.ptr),
+        .generator => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.generator.ptr),
+        .iter_helper => gc_relocation.rewriteOptionalSlot(v, value.IterHelper, &cold.rare.iter_helper.ptr),
+        .bound_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.bound_function.ptr),
+        .proxy => {
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.proxy.target);
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.proxy.handler);
+        },
+        .buffer_view => {
+            if (cold.rare.buffer_view.typed_array) |typed|
+                gc_relocation.rewriteRequiredSlot(v, Object, &typed.buffer);
+            if (cold.rare.buffer_view.data_view) |data_view|
+                gc_relocation.rewriteRequiredSlot(v, Object, &data_view.buffer);
+        },
+        .promise => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.promise.ptr),
+        .constructor => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.constructor.ptr),
+        .js_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.js_function.ptr),
+        .none,
+        .primitive,
+        .error_state,
+        .date,
+        .weak_ref,
+        .host_callback,
+        .temporal,
+        .sparse_array,
+        .regex,
+        .wasm_module,
+        .wasm_instance,
+        .wasm_memory,
+        .wasm_table,
+        .wasm_global,
+        .wasm_function,
+        .wasm_tag,
+        .wasm_exception,
+        .wasm_gc_ref,
+        => {},
+    }
+}
+
 test "Object property relocation covers inline external accessor and dense storage" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -353,6 +404,133 @@ test "Object property relocation covers inline external accessor and dense stora
     try std.testing.expectEqual(element_storage, external.elementsState());
     try std.testing.expectEqual(&owner, external.cApiObjectOwner().?);
     try std.testing.expectEqual(inline_shape_pointer, inline_object.shape);
+}
+
+test "Object rare strong relocation mutates every active managed payload" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var old_objects: [8]Object = undefined;
+    var new_objects: [8]Object = undefined;
+    var rare_objects: [11]Object = undefined;
+    for (&rare_objects) |*object| object.* = .{};
+    var old_environment: Environment = undefined;
+    var new_environment: Environment = undefined;
+    var old_module_namespace: interp.ModuleNs = undefined;
+    var new_module_namespace: interp.ModuleNs = undefined;
+    var old_generator: vm.Generator = undefined;
+    var new_generator: vm.Generator = undefined;
+    var old_helper: value.IterHelper = undefined;
+    var new_helper: value.IterHelper = undefined;
+    var old_bound: interp.Interpreter.BoundFn = undefined;
+    var new_bound: interp.Interpreter.BoundFn = undefined;
+    var old_promise: promise.Promise = undefined;
+    var new_promise: promise.Promise = undefined;
+    var old_function: interp.Function = undefined;
+    var new_function: interp.Function = undefined;
+
+    try rare_objects[0].setBoxedPrimitive(allocator, Value.obj(&old_objects[0]));
+    rare_objects[0].coldState().?.arg_map_env = @ptrCast(&old_environment);
+    try rare_objects[1].setModuleNs(allocator, @ptrCast(&old_module_namespace));
+    try rare_objects[2].setGenerator(allocator, @ptrCast(&old_generator));
+    try rare_objects[3].setIteratorHelper(allocator, &old_helper);
+    try rare_objects[4].setBoundFunction(allocator, @ptrCast(&old_bound));
+    try rare_objects[5].setProxyState(allocator, &old_objects[1], &old_objects[2]);
+    var array_buffer: value.ArrayBufferData = undefined;
+    var typed_array = value.TypedArrayData{
+        .buffer = &old_objects[3],
+        .byte_offset = 0,
+        .length = 0,
+        .kind = .u8,
+    };
+    var data_view = value.DataViewData{
+        .buffer = &old_objects[4],
+        .byte_offset = 0,
+        .byte_length = 0,
+    };
+    try rare_objects[6].setArrayBuffer(allocator, &array_buffer);
+    try rare_objects[6].setTypedArray(allocator, &typed_array);
+    try rare_objects[6].setDataView(allocator, &data_view);
+    try rare_objects[7].setPromiseData(allocator, @ptrCast(&old_promise));
+    try rare_objects[8].setCtorRef(allocator, &old_objects[5]);
+    try rare_objects[9].setJsFunction(allocator, @ptrCast(&old_function));
+    rare_objects[10].setGetterSetterCellData(.ordinary(
+        Value.obj(&old_objects[6]),
+        Value.obj(&old_objects[7]),
+    ));
+
+    const Plan = struct {
+        old_objects: *[8]Object,
+        new_objects: *[8]Object,
+        old_environment: *Environment,
+        new_environment: *Environment,
+        old_module_namespace: *interp.ModuleNs,
+        new_module_namespace: *interp.ModuleNs,
+        old_generator: *vm.Generator,
+        new_generator: *vm.Generator,
+        old_helper: *value.IterHelper,
+        new_helper: *value.IterHelper,
+        old_bound: *interp.Interpreter.BoundFn,
+        new_bound: *interp.Interpreter.BoundFn,
+        old_promise: *promise.Promise,
+        new_promise: *promise.Promise,
+        old_function: *interp.Function,
+        new_function: *interp.Function,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            inline for (.{
+                .{ self.old_environment, self.new_environment },
+                .{ self.old_module_namespace, self.new_module_namespace },
+                .{ self.old_generator, self.new_generator },
+                .{ self.old_helper, self.new_helper },
+                .{ self.old_bound, self.new_bound },
+                .{ self.old_promise, self.new_promise },
+                .{ self.old_function, self.new_function },
+            }) |pair|
+                if (old == @as(*anyopaque, @ptrCast(pair[0]))) return @ptrCast(pair[1]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+        .old_module_namespace = &old_module_namespace,
+        .new_module_namespace = &new_module_namespace,
+        .old_generator = &old_generator,
+        .new_generator = &new_generator,
+        .old_helper = &old_helper,
+        .new_helper = &new_helper,
+        .old_bound = &old_bound,
+        .new_bound = &new_bound,
+        .old_promise = &old_promise,
+        .new_promise = &new_promise,
+        .old_function = &old_function,
+        .new_function = &new_function,
+    };
+    for (&rare_objects) |*object| relocateObjectRareStrong(object, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], rare_objects[0].boxedPrimitive().?.asObj());
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&new_environment)), rare_objects[0].coldState().?.arg_map_env);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_module_namespace)), rare_objects[1].moduleNs().?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generator)), rare_objects[2].generator().?);
+    try std.testing.expectEqual(&new_helper, rare_objects[3].iteratorHelper().?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_bound)), rare_objects[4].boundFunction().?);
+    try std.testing.expectEqual(&new_objects[1], rare_objects[5].proxyTarget().?);
+    try std.testing.expectEqual(&new_objects[2], rare_objects[5].proxyHandler().?);
+    try std.testing.expectEqual(&array_buffer, rare_objects[6].arrayBuffer().?);
+    try std.testing.expectEqual(&new_objects[3], rare_objects[6].typedArray().?.buffer);
+    try std.testing.expectEqual(&new_objects[4], rare_objects[6].dataView().?.buffer);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), rare_objects[7].promiseData().?);
+    try std.testing.expectEqual(&new_objects[5], rare_objects[8].ctorRef().?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_function)), rare_objects[9].jsFunction().?);
+    const getter_setter = rare_objects[10].getterSetterCellData().?;
+    try std.testing.expectEqual(&new_objects[6], getter_setter.getterValue().?.asObj());
+    try std.testing.expectEqual(&new_objects[7], getter_setter.setterValue().?.asObj());
 }
 
 fn traceWasmException(v: anytype, exception: *const value.WasmException) void {

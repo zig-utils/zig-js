@@ -97,6 +97,12 @@ C API custom-accessor cells move while Shape and backing-container addresses
 stay stable. Weak collection elements are intentionally deferred to their
 ordered weak-processing slice.
 
+[#344](https://github.com/zig-utils/zig-js/issues/344) extends Object rewriting
+to actual cold/rare union storage: boxed and getter/setter Values,
+constructor/proxy links, callable side cells, arguments-map Environment, and
+TypedArray/DataView buffer owners. Marker snapshots are never mutated, and
+native ArrayBuffer/arena metadata remains address-stable.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
