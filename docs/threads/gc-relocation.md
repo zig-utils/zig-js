@@ -124,6 +124,12 @@ imports, atomic globals/tables, execution roots, exceptions/wrappers, nested
 externref/hostref slots, and cyclic GC aggregates all rewrite. Numeric,
 funcref, i31, native-owner, and aggregate identities remain stable.
 
+Root-registry rewriting begins in
+[#349](https://github.com/zig-utils/zig-js/issues/349): every microtask variant,
+module graph edge, active interpreter operand/frame/environment root, cache,
+debug frame, `import.meta`, and parked Wasm execution root now has a mutating
+world-stopped traversal. Queue/container addresses and ordering remain stable.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

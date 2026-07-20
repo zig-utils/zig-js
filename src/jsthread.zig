@@ -1445,6 +1445,11 @@ pub fn traceHoldJobRoot(raw: *anyopaque, v: anytype) void {
     traceHoldJob(job, v);
 }
 
+pub fn relocateHoldJobRoot(raw: *anyopaque, v: anytype) void {
+    const job: *HoldJob = @ptrCast(@alignCast(raw));
+    relocateHoldJob(job, v);
+}
+
 fn barrierHoldJob(job: *HoldJob) void {
     const owner: ?*anyopaque = if (job.lock.owner) |o| @ptrCast(o) else null;
     gc_mod.barrierCellFrom(owner, @ptrCast(job.outer));

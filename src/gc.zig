@@ -1544,6 +1544,32 @@ inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
     }
 }
 
+inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
+    switch (mt.kind) {
+        .reaction => {
+            relocateReaction(&mt.reaction, v);
+            gc_relocation.rewriteValueSlot(v, &mt.argument);
+        },
+        .thenable => {
+            gc_relocation.rewriteValueSlot(v, &mt.thenable);
+            gc_relocation.rewriteValueSlot(v, &mt.then_fn);
+            gc_relocation.rewriteOptionalSlot(v, promise.Promise, &mt.promise);
+        },
+        .callback => gc_relocation.rewriteValueSlot(v, &mt.callback),
+        .native_callback => {},
+        .job => {
+            gc_relocation.rewriteValueSlot(v, &mt.job);
+            gc_relocation.rewriteValueSlot(v, &mt.job_first);
+            gc_relocation.rewriteValueSlot(v, &mt.job_second);
+        },
+        .next_tick => {
+            gc_relocation.rewriteValueSlot(v, &mt.job);
+            for (@constCast(mt.job_args)) |*argument|
+                gc_relocation.rewriteValueSlot(v, argument);
+        },
+    }
+}
+
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.env);
     for (g.exec.stack.items) |s| markValue(v, s);
@@ -1853,6 +1879,145 @@ pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.M
     }
 }
 
+pub fn relocateModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.Module), v: anytype) void {
+    var it = cache.valueIterator();
+    while (it.next()) |module_pointer| {
+        const module = module_pointer.*;
+        gc_relocation.rewriteRequiredSlot(v, Environment, &module.env);
+        gc_relocation.rewriteOptionalSlot(v, Object, &module.ns);
+        gc_relocation.rewriteOptionalSlot(v, Object, &module.deferred_ns);
+        gc_relocation.rewriteOptionalSlot(v, Object, &module.import_meta_slot.obj);
+        gc_relocation.rewriteOptionalValueSlot(v, &module.eval_error);
+        gc_relocation.rewriteOptionalSlot(v, promise.Promise, &module.completion_promise);
+        for (module.dynamic_waiters.items) |*waiter| {
+            gc_relocation.rewriteRequiredSlot(v, promise.Promise, &waiter.capability);
+            gc_relocation.rewriteRequiredSlot(v, Object, &waiter.namespace);
+        }
+    }
+}
+
+test "realm root relocation rewrites microtask variants and module graph" {
+    var old_objects: [16]Object = undefined;
+    var new_objects: [16]Object = undefined;
+    var old_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
+    var new_promises: [4]promise.Promise = .{ .{}, .{}, .{}, .{} };
+    var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var next_tick_args = [_]Value{ Value.obj(&old_objects[9]), Value.obj(&old_objects[10]) };
+    var tasks = [_]promise.Microtask{
+        .{
+            .reaction = .{ .handler = Value.obj(&old_objects[0]), .result = &old_promises[0] },
+            .argument = Value.obj(&old_objects[1]),
+            .fulfilled = true,
+        },
+        .{
+            .kind = .thenable,
+            .reaction = undefined,
+            .argument = Value.undef(),
+            .fulfilled = true,
+            .thenable = Value.obj(&old_objects[2]),
+            .then_fn = Value.obj(&old_objects[3]),
+            .promise = &old_promises[1],
+        },
+        .{
+            .kind = .callback,
+            .reaction = undefined,
+            .argument = Value.undef(),
+            .fulfilled = true,
+            .callback = Value.obj(&old_objects[4]),
+        },
+        .{
+            .kind = .job,
+            .reaction = undefined,
+            .argument = Value.undef(),
+            .fulfilled = true,
+            .job = Value.obj(&old_objects[5]),
+            .job_first = Value.obj(&old_objects[6]),
+            .job_second = Value.obj(&old_objects[7]),
+        },
+        .{
+            .kind = .next_tick,
+            .reaction = undefined,
+            .argument = Value.undef(),
+            .fulfilled = true,
+            .job = Value.obj(&old_objects[8]),
+            .job_args = &next_tick_args,
+        },
+    };
+
+    var module = ContextMod.Context.Module{
+        .path = "entry.js",
+        .items = &.{},
+        .env = &old_environment,
+        .ns = &old_objects[11],
+        .deferred_ns = &old_objects[12],
+        .import_meta_slot = .{ .obj = &old_objects[13] },
+        .eval_error = Value.obj(&old_objects[14]),
+        .completion_promise = &old_promises[2],
+    };
+    defer module.dynamic_waiters.deinit(std.testing.allocator);
+    try module.dynamic_waiters.append(std.testing.allocator, .{
+        .capability = &old_promises[3],
+        .namespace = &old_objects[15],
+    });
+    var modules: std.StringHashMapUnmanaged(*ContextMod.Context.Module) = .{};
+    defer modules.deinit(std.testing.allocator);
+    try modules.put(std.testing.allocator, "entry.js", &module);
+
+    const Plan = struct {
+        old_objects: *[16]Object,
+        new_objects: *[16]Object,
+        old_promises: *[4]promise.Promise,
+        new_promises: *[4]promise.Promise,
+        old_environment: *Environment,
+        new_environment: *Environment,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            for (self.old_promises, 0..) |*state, index|
+                if (old == @as(*anyopaque, @ptrCast(state)))
+                    return @ptrCast(&self.new_promises[index]);
+            if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
+                return @ptrCast(self.new_environment);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_promises = &old_promises,
+        .new_promises = &new_promises,
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+    };
+    for (&tasks) |*task| relocateMicrotask(task, &plan);
+    relocateModuleGraph(&modules, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], tasks[0].reaction.handler.?.asObj());
+    try std.testing.expectEqual(&new_promises[0], tasks[0].reaction.result.?);
+    try std.testing.expectEqual(&new_objects[1], tasks[0].argument.asObj());
+    try std.testing.expectEqual(&new_objects[2], tasks[1].thenable.asObj());
+    try std.testing.expectEqual(&new_objects[3], tasks[1].then_fn.asObj());
+    try std.testing.expectEqual(&new_promises[1], tasks[1].promise.?);
+    try std.testing.expectEqual(&new_objects[4], tasks[2].callback.asObj());
+    try std.testing.expectEqual(&new_objects[5], tasks[3].job.asObj());
+    try std.testing.expectEqual(&new_objects[6], tasks[3].job_first.asObj());
+    try std.testing.expectEqual(&new_objects[7], tasks[3].job_second.asObj());
+    try std.testing.expectEqual(&new_objects[8], tasks[4].job.asObj());
+    try std.testing.expectEqual(&new_objects[9], next_tick_args[0].asObj());
+    try std.testing.expectEqual(&new_objects[10], next_tick_args[1].asObj());
+    try std.testing.expectEqual(&new_environment, module.env);
+    try std.testing.expectEqual(&new_objects[11], module.ns.?);
+    try std.testing.expectEqual(&new_objects[12], module.deferred_ns.?);
+    try std.testing.expectEqual(&new_objects[13], module.import_meta_slot.obj.?);
+    try std.testing.expectEqual(&new_objects[14], module.eval_error.?.asObj());
+    try std.testing.expectEqual(&new_promises[2], module.completion_promise.?);
+    try std.testing.expectEqual(&new_promises[3], module.dynamic_waiters.items[0].capability);
+    try std.testing.expectEqual(&new_objects[15], module.dynamic_waiters.items[0].namespace);
+}
+
 pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markManaged(v, machine.env);
     traceEnv(machine.env, v);
@@ -1958,6 +2123,171 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     if (machine.home_object) |o| v.mark(o);
     if (machine.super_ctor) |o| v.mark(o);
     for (machine.with_stack.items) |o| v.mark(o);
+}
+
+/// Mutating companion to `traceInterpreterRoots`. The collector calls this
+/// only after all interpreters have published and parked, so queue/frame/root
+/// containers are stable and no mutator lock is taken here.
+pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
+    gc_relocation.rewriteRequiredSlot(v, Environment, &machine.env);
+    relocateEnv(machine.env, v);
+    for (machine.gc_execs.items) |exec| {
+        for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+        gc_relocation.rewriteValueSlot(v, &exec.acc);
+        var frame = exec.frame;
+        while (frame) |current| : (frame = current.parent)
+            for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    }
+    for (machine.gc_wasm_roots.items) |roots| relocateWasmExecutionRoots(roots, v);
+    if (machine.microtasks) |queue|
+        for (@constCast(queue.pendingItems())) |*task| relocateMicrotask(task, v);
+    if (machine.next_ticks) |queue|
+        for (@constCast(queue.pendingItems())) |*task| relocateMicrotask(task, v);
+    if (machine.current_microtask) |*task| relocateMicrotask(task, v);
+    for (@constCast(machine.current_microtask_batch)) |*task| relocateMicrotask(task, v);
+    for (machine.current_hold_jobs) |job| jsthread.relocateHoldJobRoot(job, v);
+    if (machine.async_waiters) |waiters|
+        for (waiters.items) |*waiter| gc_relocation.rewriteValueSlot(v, &waiter.promise);
+    for (machine.gc_env_roots.items) |*environment| {
+        gc_relocation.rewriteRequiredSlot(v, Environment, environment);
+        relocateEnv(environment.*, v);
+    }
+    for (machine.gc_temp_roots.items) |*root| gc_relocation.rewriteValueSlot(v, root);
+    for (machine.gc_object_reserve.items) |*object|
+        gc_relocation.rewriteRequiredSlot(v, Object, object);
+    var literal_it = machine.string_literal_cache.valueIterator();
+    while (literal_it.next()) |literal| gc_relocation.rewriteValueSlot(v, literal);
+    var template_it = machine.template_cache.valueIterator();
+    while (template_it.next()) |template| gc_relocation.rewriteValueSlot(v, template);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.tdz_marker);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.global_object);
+    var symbol_it = machine.symbols.valueIterator();
+    while (symbol_it.next()) |symbol|
+        gc_relocation.rewriteRequiredSlot(v, Object, symbol);
+    if (machine.import_meta_slot) |slot| {
+        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+    } else {
+        gc_relocation.rewriteOptionalSlot(v, Object, &machine.import_meta_obj);
+    }
+    gc_relocation.rewriteValueSlot(v, &machine.ret_value);
+    gc_relocation.rewriteValueSlot(v, &machine.this_value);
+    gc_relocation.rewriteValueSlot(v, &machine.exception);
+    gc_relocation.rewriteValueSlot(v, &machine.new_target);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.active_native);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.active_function);
+    var call_frame = machine.active_call_frame;
+    while (call_frame) |frame| : (call_frame = frame.caller) {
+        gc_relocation.rewriteRequiredSlot(v, Object, &frame.func_obj);
+        gc_relocation.rewriteOptionalValueSlot(v, &frame.arguments);
+    }
+    var debug_frame = machine.debug_call_frame;
+    while (debug_frame) |frame| : (debug_frame = frame.caller) {
+        gc_relocation.rewriteRequiredSlot(v, Environment, &frame.environment);
+        relocateEnv(frame.environment, v);
+        gc_relocation.rewriteValueSlot(v, &frame.this_value);
+    }
+    gc_relocation.rewriteOptionalSlot(v, Environment, &machine.debug_top_level_environment);
+    if (machine.debug_top_level_environment) |environment| relocateEnv(environment, v);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &machine.super_ctor);
+    for (machine.with_stack.items) |*object|
+        gc_relocation.rewriteRequiredSlot(v, Object, object);
+}
+
+test "realm root relocation rewrites active interpreter containers" {
+    const context = try ContextMod.Context.create(std.testing.allocator);
+    defer context.destroy();
+    var machine = context.interpreter();
+    var old_objects: [21]Object = undefined;
+    var new_objects: [21]Object = undefined;
+    var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+
+    machine.ret_value = Value.obj(&old_objects[0]);
+    machine.this_value = Value.obj(&old_objects[1]);
+    machine.exception = Value.obj(&old_objects[2]);
+    machine.new_target = Value.obj(&old_objects[3]);
+    machine.tdz_marker = &old_objects[4];
+    machine.global_object = &old_objects[5];
+    machine.active_native = &old_objects[6];
+    machine.active_function = &old_objects[7];
+    machine.home_object = &old_objects[8];
+    machine.super_ctor = &old_objects[9];
+    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[10] };
+    machine.import_meta_slot = &import_meta;
+    try machine.gc_temp_roots.append(machine.arena, Value.obj(&old_objects[11]));
+    try machine.gc_object_reserve.append(machine.arena, &old_objects[12]);
+    try machine.with_stack.append(machine.arena, &old_objects[13]);
+    var literal_node: ast.Node = .undefined_lit;
+    try machine.string_literal_cache.put(machine.arena, &literal_node, Value.obj(&old_objects[14]));
+    try machine.symbols.put(machine.arena, "root-symbol", &old_objects[15]);
+
+    var operand_stack = [_]Value{ Value.obj(&old_objects[16]), Value.obj(&old_objects[17]) };
+    var frame_slots = [_]Value{Value.obj(&old_objects[19])};
+    var frame = vm.Frame{ .slots = &frame_slots, .parent = null };
+    var execution = vm.Exec{
+        .stack = .{ .items = &operand_stack, .capacity = operand_stack.len },
+        .acc = Value.obj(&old_objects[18]),
+        .frame = &frame,
+    };
+    try machine.gc_execs.append(machine.arena, &execution);
+    try machine.gc_env_roots.append(machine.arena, &old_environment);
+    var debug_frame = interp.DebugCallFrame{
+        .function_name = "debug",
+        .environment = &old_environment,
+        .this_value = Value.obj(&old_objects[20]),
+        .strict = true,
+    };
+    machine.debug_call_frame = &debug_frame;
+    machine.debug_top_level_environment = &old_environment;
+
+    const Plan = struct {
+        old_objects: *[21]Object,
+        new_objects: *[21]Object,
+        old_environment: *Environment,
+        new_environment: *Environment,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
+                return @ptrCast(self.new_environment);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+    };
+    relocateInterpreterRoots(&machine, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], machine.ret_value.asObj());
+    try std.testing.expectEqual(&new_objects[1], machine.this_value.asObj());
+    try std.testing.expectEqual(&new_objects[2], machine.exception.asObj());
+    try std.testing.expectEqual(&new_objects[3], machine.new_target.asObj());
+    try std.testing.expectEqual(&new_objects[4], machine.tdz_marker.?);
+    try std.testing.expectEqual(&new_objects[5], machine.global_object.?);
+    try std.testing.expectEqual(&new_objects[6], machine.active_native.?);
+    try std.testing.expectEqual(&new_objects[7], machine.active_function.?);
+    try std.testing.expectEqual(&new_objects[8], machine.home_object.?);
+    try std.testing.expectEqual(&new_objects[9], machine.super_ctor.?);
+    try std.testing.expectEqual(&new_objects[10], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[11], machine.gc_temp_roots.items[0].asObj());
+    try std.testing.expectEqual(&new_objects[12], machine.gc_object_reserve.items[0]);
+    try std.testing.expectEqual(&new_objects[13], machine.with_stack.items[0]);
+    try std.testing.expectEqual(&new_objects[14], machine.string_literal_cache.get(&literal_node).?.asObj());
+    try std.testing.expectEqual(&new_objects[15], machine.symbols.get("root-symbol").?);
+    try std.testing.expectEqual(&new_objects[16], operand_stack[0].asObj());
+    try std.testing.expectEqual(&new_objects[17], operand_stack[1].asObj());
+    try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());
+    try std.testing.expectEqual(&new_objects[19], frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);
+    try std.testing.expectEqual(&new_environment, debug_frame.environment);
+    try std.testing.expectEqual(&new_objects[20], debug_frame.this_value.asObj());
+    try std.testing.expectEqual(&new_environment, machine.debug_top_level_environment.?);
 }
 
 fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
