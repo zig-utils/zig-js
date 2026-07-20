@@ -90,6 +90,13 @@ all rewrite through the same plan. Each reaction preserves the tracer's
 result-Promise versus resolve/reject branch, and the world-stopped commit takes
 no Promise lock.
 
+Object rewriting starts with the hot/property graph in
+[#343](https://github.com/zig-utils/zig-js/issues/343): prototype, inline and
+external named slots, dense elements, accessor payloads/descriptor cells, and
+C API custom-accessor cells move while Shape and backing-container addresses
+stay stable. Weak collection elements are intentionally deferred to their
+ordered weak-processing slice.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

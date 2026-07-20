@@ -232,6 +232,129 @@ pub fn traceObject(o: *Object, v: anytype) void {
     };
 }
 
+/// Rewrite the hot Object graph and property backing stores. Relocation is a
+/// world-stopped commit: the backing, property, and element containers cannot
+/// grow while this runs, and taking their mutator locks would be both redundant
+/// and unsafe if a parked thread owned one. Weak collection elements are not
+/// ordinary strong edges and are handled by #345 after weak liveness is final.
+pub fn relocateObjectProperties(o: *Object, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, Object, &o.proto);
+    for (o.slotsItems()) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    if (o.accessorsMap()) |accessors| {
+        var it = accessors.valueIterator();
+        while (it.next()) |accessor| {
+            gc_relocation.rewriteOptionalValueSlot(v, &accessor.get);
+            gc_relocation.rewriteOptionalValueSlot(v, &accessor.set);
+            gc_relocation.rewriteOptionalSlot(v, Object, &accessor.descriptor_cell);
+        }
+    }
+    if (o.cApiObjectOwner()) |owner| {
+        var it = owner.custom_accessor_cells.valueIterator();
+        while (it.next()) |cell|
+            gc_relocation.rewriteRequiredSlot(v, Object, cell);
+    }
+    if (!(o.is_weak and (o.is_map or o.is_set)))
+        for (o.elementsItems()) |*element| gc_relocation.rewriteValueSlot(v, element);
+}
+
+test "Object property relocation covers inline external accessor and dense storage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const root_shape = try Shape.createRoot(allocator);
+    var old_objects: [16]Object = undefined;
+    var new_objects: [16]Object = undefined;
+
+    var external = Object{ .proto = &old_objects[5] };
+    for ([_][]const u8{ "a", "b", "c", "d", "e" }, 0..) |name, index|
+        try external.setOwn(allocator, root_shape, name, Value.obj(&old_objects[index]));
+    try external.appendElement(allocator, Value.obj(&old_objects[6]));
+    try external.appendElement(allocator, Value.obj(&old_objects[7]));
+    try external.setAccessor(
+        allocator,
+        "accessor",
+        Value.obj(&old_objects[8]),
+        Value.obj(&old_objects[9]),
+    );
+    _ = external.installAccessorDescriptorCell(
+        "accessor",
+        Value.obj(&old_objects[8]),
+        Value.obj(&old_objects[9]),
+        &old_objects[10],
+    );
+    const Owner = value.CApiObjectOwner;
+    const finishOwner = struct {
+        fn finish(_: *Owner) void {}
+    }.finish;
+    var owner = Owner{
+        .allocator = allocator,
+        .class_ref = null,
+        .finish_fn = finishOwner,
+    };
+    try external.setCApiObjectOwner(allocator, &owner);
+    _ = try external.installCustomAccessorDescriptorCell("custom", &old_objects[11]);
+
+    var inline_shape = Shape{
+        .parent = null,
+        .name = "b",
+        .slot = 1,
+        .count = 2,
+        .arena = allocator,
+    };
+    var inline_object = Object{
+        .shape = &inline_shape,
+        .proto = &old_objects[14],
+    };
+    inline_object.inline_slots[0] = Value.obj(&old_objects[12]);
+    inline_object.inline_slots[1] = Value.obj(&old_objects[13]);
+
+    var weak_map = Object{ .is_weak = true, .is_map = true };
+    try weak_map.appendElement(allocator, Value.obj(&old_objects[15]));
+
+    const external_shape = external.shape;
+    const external_storage = external.storageState();
+    const accessor_storage = external.accessorsMap();
+    const element_storage = external.elementsState();
+    const inline_shape_pointer = inline_object.shape;
+
+    const Plan = struct {
+        old_objects: *[16]Object,
+        new_objects: *[16]Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    const plan = Plan{ .old_objects = &old_objects, .new_objects = &new_objects };
+    relocateObjectProperties(&external, &plan);
+    relocateObjectProperties(&inline_object, &plan);
+    relocateObjectProperties(&weak_map, &plan);
+
+    try std.testing.expectEqual(&new_objects[5], external.proto.?);
+    for (external.slotsItems(), 0..) |slot, index|
+        try std.testing.expectEqual(&new_objects[index], slot.asObj());
+    try std.testing.expectEqual(&new_objects[6], external.elementsItems()[0].asObj());
+    try std.testing.expectEqual(&new_objects[7], external.elementsItems()[1].asObj());
+    const accessor = external.getAccessor("accessor").?;
+    try std.testing.expectEqual(&new_objects[8], accessor.get.?.asObj());
+    try std.testing.expectEqual(&new_objects[9], accessor.set.?.asObj());
+    try std.testing.expectEqual(&new_objects[10], accessor.descriptor_cell.?);
+    try std.testing.expectEqual(&new_objects[11], external.customAccessorDescriptorCell("custom").?);
+    try std.testing.expectEqual(&new_objects[14], inline_object.proto.?);
+    try std.testing.expectEqual(&new_objects[12], inline_object.slotsItems()[0].asObj());
+    try std.testing.expectEqual(&new_objects[13], inline_object.slotsItems()[1].asObj());
+    try std.testing.expectEqual(&old_objects[15], weak_map.elementsItems()[0].asObj());
+    try std.testing.expectEqual(external_shape, external.shape);
+    try std.testing.expectEqual(external_storage, external.storageState());
+    try std.testing.expectEqual(accessor_storage, external.accessorsMap());
+    try std.testing.expectEqual(element_storage, external.elementsState());
+    try std.testing.expectEqual(&owner, external.cApiObjectOwner().?);
+    try std.testing.expectEqual(inline_shape_pointer, inline_object.shape);
+}
+
 fn traceWasmException(v: anytype, exception: *const value.WasmException) void {
     const Marker = struct {
         fn mark(raw: *anyopaque, child: Value) void {
