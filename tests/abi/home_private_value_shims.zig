@@ -6310,5 +6310,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 333/333 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 339/339 symbols linked; runtime matrix passed\n", .{});
 }
