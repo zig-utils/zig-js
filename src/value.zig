@@ -1250,17 +1250,13 @@ pub const ObjectRareState = union(ObjectRareTag) {
         table: ?*anyopaque = null,
         refs: []const std.atomic.Value(u64) = &.{},
         owner_obj: ?*Object = null,
-        gc_context: ?*anyopaque = null,
-        gc_verify: ?WasmGcTraceRootsFn = null,
-        gc_relocate: ?WasmGcRelocateRootsFn = null,
+        gc_state: ?*WasmOwnerGcState = null,
     }, // *wasm/api.TableOwner
     wasm_global: struct {
         glob: ?*anyopaque = null,
         ref: ?*std.atomic.Value(u64) = null,
         owner_obj: ?*Object = null,
-        gc_context: ?*anyopaque = null,
-        gc_verify: ?WasmGcTraceRootsFn = null,
-        gc_relocate: ?WasmGcRelocateRootsFn = null,
+        gc_state: ?*WasmOwnerGcState = null,
     }, // *wasm/api.GlobalOwner
     wasm_function: struct { func: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/api.FunctionOwner
     wasm_tag: struct { tag: ?*anyopaque = null, store: ?*anyopaque = null, owner_obj: ?*Object = null }, // *wasm/exec.TagInst
@@ -1319,6 +1315,21 @@ pub const GetterSetterCellData = struct {
     }
 };
 
+/// Collection-only indexes and entry storage live behind one allocation. Maps,
+/// Sets, WeakMaps, and WeakSets already require a cold sidecar, but ordinary
+/// objects must not pay for three growable container headers. The pointer is
+/// published under `backing_lock`; all contents remain guarded by
+/// `elements_lock`.
+pub const ObjectCollectionState = struct {
+    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
+    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Strong Map/Set acceleration index: content-hash(key) → position in the
+    /// ordered `elements` list. It contains no managed pointers and therefore
+    /// survives moving collection without tracing.
+    coll_index: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    coll_unindexed: bool = false,
+};
+
 pub const ObjectColdState = struct {
     /// One-time publication tag for `rare`. Exotic state is initialized while
     /// `Object.backing_lock` is held, then this tag is released. Unlocked
@@ -1349,15 +1360,7 @@ pub const ObjectColdState = struct {
     arg_map_env: ?*anyopaque = null,
     arg_map_names: [][]const u8 = &.{},
     arg_map_severed: []std.atomic.Value(bool) = &.{},
-    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
-    weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-    /// Strong Map/Set acceleration index: content-hash(key) → position in the
-    /// ordered `elements` list. Holds only hashes and positions (no object
-    /// pointers), so it survives a moving GC and needs no tracing. Authoritative
-    /// for primitive keys; `coll_unindexed` turns it off (linear fallback) once a
-    /// non-indexable key (object/symbol) or a hash collision appears.
-    coll_index: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    coll_unindexed: bool = false,
+    collection_state: ?*ObjectCollectionState = null,
     finalization_callback: Value = Value.undef(),
     /// FinalizationRegistry is uncommon, so keep its 24-byte list header behind
     /// the backing flag instead of charging every cold object for it.
@@ -1409,6 +1412,15 @@ pub const WasmInstanceGcState = struct {
     relocate: ?WasmGcRelocateRootsFn = null,
 };
 
+/// Table/Global owner tracing callbacks are uncommon and owner-lifetime data.
+/// Keeping their triplet behind the existing native owner prevents either rare
+/// variant from widening every Object cold sidecar.
+pub const WasmOwnerGcState = struct {
+    context: ?*anyopaque = null,
+    verify: ?WasmGcTraceRootsFn = null,
+    relocate: ?WasmGcRelocateRootsFn = null,
+};
+
 pub const ObjectBackingFlags = packed struct {
     allocator_active: bool = false,
     storage_state: bool = false,
@@ -1420,6 +1432,7 @@ pub const ObjectBackingFlags = packed struct {
     key_order: bool = false,
     attrs: bool = false,
     holes: bool = false,
+    collection_state: bool = false,
     weak_entries: bool = false,
     coll_index: bool = false,
     finalization_records: bool = false,
@@ -1878,6 +1891,29 @@ pub const Object = struct {
     pub inline fn coldState(self: *const Object) ?*ObjectColdState {
         const storage = self.storageState() orelse return null;
         return storage.cold.load(.acquire);
+    }
+
+    /// Install the collection-only state under the same publication lock as the
+    /// cold sidecar. Callers already hold `elements_lock`, which continues to
+    /// guard every map and list inside the state.
+    pub fn ensureCollectionState(self: *Object, fallback: std.mem.Allocator) std.mem.Allocator.Error!*ObjectCollectionState {
+        const cold = try self.ensureCold(fallback);
+        const backing_locked = self.lockBacking();
+        defer self.unlockBacking(backing_locked);
+        if (cold.collection_state) |state| return state;
+        const backing = self.backingForTrackedLocked(fallback, "collection_state");
+        const state = backing.allocator.create(ObjectCollectionState) catch |err| {
+            if (backing.activated) self.deactivateBackingLocked("collection_state");
+            return err;
+        };
+        state.* = .{};
+        cold.collection_state = state;
+        return state;
+    }
+
+    pub inline fn collectionState(self: *const Object) ?*ObjectCollectionState {
+        const cold = self.coldState() orelse return null;
+        return cold.collection_state;
     }
 
     pub inline fn cApiObjectOwner(self: *const Object) ?*CApiObjectOwner {
@@ -3131,7 +3167,7 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         const i = self.weakEntryIndexUnlocked(key) orelse return null;
-        return self.coldState().?.weak_entries.items[i].value;
+        return self.collectionState().?.weak_entries.items[i].value;
     }
 
     /// WeakMap/WeakSet `[[Has]]`.
@@ -3144,8 +3180,8 @@ pub const Object = struct {
     pub fn weakEntryCount(self: *Object) usize {
         self.lockElements();
         defer self.unlockElements();
-        const cold = self.coldState() orelse return 0;
-        return cold.weak_entries.items.len;
+        const state = self.collectionState() orelse return 0;
+        return state.weak_entries.items.len;
     }
 
     /// WeakMap `[[Set]]` upsert: update the entry for `key` or append a new one.
@@ -3154,15 +3190,15 @@ pub const Object = struct {
         gcBarrier(self, v);
         self.lockElements();
         defer self.unlockElements();
-        const cold = try self.ensureCold(fallback);
+        const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
-            cold.weak_entries.items[i].value = v;
+            state.weak_entries.items[i].value = v;
             self.weakIndexPut(alloc, key, i);
             return;
         }
-        const i = cold.weak_entries.items.len;
-        try cold.weak_entries.append(alloc, .{ .key = key, .value = v });
+        const i = state.weak_entries.items.len;
+        try state.weak_entries.append(alloc, .{ .key = key, .value = v });
         self.weakIndexPut(alloc, key, i);
     }
 
@@ -3171,14 +3207,14 @@ pub const Object = struct {
         gc_runtime.barrierWeak(@ptrCast(self));
         self.lockElements();
         defer self.unlockElements();
-        const cold = try self.ensureCold(fallback);
+        const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
             self.weakIndexPut(alloc, key, i);
             return;
         }
-        const i = cold.weak_entries.items.len;
-        try cold.weak_entries.append(alloc, .{ .key = key });
+        const i = state.weak_entries.items.len;
+        try state.weak_entries.append(alloc, .{ .key = key });
         self.weakIndexPut(alloc, key, i);
     }
 
@@ -3198,36 +3234,36 @@ pub const Object = struct {
     /// Stored position for `hash`, or null. Null is authoritative ("absent")
     /// only while `collUnindexed()` is false.
     pub fn collIndexGet(self: *Object, hash: u64) ?u32 {
-        const cold = self.coldState() orelse return null;
-        return cold.coll_index.get(hash);
+        const state = self.collectionState() orelse return null;
+        return state.coll_index.get(hash);
     }
     /// Record hash→position. Ensures cold state and the backing allocator first
     /// (like the weak path). Returns false if it could not be recorded (OOM); the
     /// caller must then `collDisableIndex` so lookups stay correct.
     pub fn collIndexPut(self: *Object, fallback: std.mem.Allocator, hash: u64, pos: u32) bool {
-        const cold = self.ensureCold(fallback) catch return false;
+        const state = self.ensureCollectionState(fallback) catch return false;
         const alloc = self.ensureBackingFor(fallback, "coll_index") catch return false;
-        cold.coll_index.put(alloc, hash, pos) catch return false;
+        state.coll_index.put(alloc, hash, pos) catch return false;
         return true;
     }
     pub fn collIndexRemove(self: *Object, hash: u64) void {
-        if (self.coldState()) |c| _ = c.coll_index.remove(hash);
+        if (self.collectionState()) |state| _ = state.coll_index.remove(hash);
     }
     pub fn collUnindexed(self: *Object) bool {
-        return if (self.coldState()) |c| c.coll_unindexed else false;
+        return if (self.collectionState()) |state| state.coll_unindexed else false;
     }
     /// Permanently drop to linear scanning (a non-indexable key or hash
     /// collision appeared). Needs cold state so the flag persists.
     pub fn collDisableIndex(self: *Object, fallback: std.mem.Allocator) void {
-        const c = self.ensureCold(fallback) catch return;
-        c.coll_unindexed = true;
-        c.coll_index.clearRetainingCapacity();
+        const state = self.ensureCollectionState(fallback) catch return;
+        state.coll_unindexed = true;
+        state.coll_index.clearRetainingCapacity();
     }
     /// `clear()` empties the collection: wipe the index and re-enable it.
     pub fn collIndexReset(self: *Object) void {
-        if (self.coldState()) |c| {
-            c.coll_index.clearRetainingCapacity();
-            c.coll_unindexed = false;
+        if (self.collectionState()) |state| {
+            state.coll_index.clearRetainingCapacity();
+            state.coll_unindexed = false;
         }
     }
 
@@ -3236,30 +3272,30 @@ pub const Object = struct {
     }
 
     fn weakEntryIndexUnlocked(self: *Object, key: ?*anyopaque) ?usize {
-        const cold = self.coldState() orelse return null;
+        const state = self.collectionState() orelse return null;
         const k = weakIndexKey(key);
-        if (cold.weak_index.get(k)) |i| {
-            if (i < cold.weak_entries.items.len and cold.weak_entries.items[i].key == key) return i;
+        if (state.weak_index.get(k)) |i| {
+            if (i < state.weak_entries.items.len and state.weak_entries.items[i].key == key) return i;
         }
-        for (cold.weak_entries.items, 0..) |entry, i| {
+        for (state.weak_entries.items, 0..) |entry, i| {
             if (entry.key == key) return i;
         }
         return null;
     }
 
     fn weakIndexPut(self: *Object, alloc: std.mem.Allocator, key: ?*anyopaque, i: usize) void {
-        self.coldState().?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
+        self.collectionState().?.weak_index.put(alloc, weakIndexKey(key), i) catch {};
     }
 
     pub fn weakEntrySwapRemoveAtUnlocked(self: *Object, i: usize) void {
-        const cold = self.coldState().?;
-        const removed_key = cold.weak_entries.items[i].key;
-        const last_i = cold.weak_entries.items.len - 1;
-        const moved_key = cold.weak_entries.items[last_i].key;
-        _ = cold.weak_entries.swapRemove(i);
-        _ = cold.weak_index.remove(weakIndexKey(removed_key));
+        const state = self.collectionState().?;
+        const removed_key = state.weak_entries.items[i].key;
+        const last_i = state.weak_entries.items.len - 1;
+        const moved_key = state.weak_entries.items[last_i].key;
+        _ = state.weak_entries.swapRemove(i);
+        _ = state.weak_index.remove(weakIndexKey(removed_key));
         if (i != last_i) {
-            if (cold.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
+            if (state.weak_index.getPtr(weakIndexKey(moved_key))) |slot| slot.* = i;
         }
     }
 
@@ -5255,10 +5291,12 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     const a = std.testing.allocator;
     var o = Object{ .is_weak = true, .is_map = true };
     const cold = try o.ensureCold(a);
+    const collection = try o.ensureCollectionState(a);
     defer a.destroy(o.storageState().?);
     defer a.destroy(cold);
-    defer cold.weak_entries.deinit(a);
-    defer cold.weak_index.deinit(a);
+    defer a.destroy(collection);
+    defer collection.weak_entries.deinit(a);
+    defer collection.weak_index.deinit(a);
 
     var key1: u8 = 1;
     var key2: u8 = 2;
@@ -5268,11 +5306,11 @@ test "WeakMap and WeakSet entry delete is unordered tail removal" {
     try o.weakEntrySet(a, @ptrCast(&key3), Value.num(3));
 
     try std.testing.expect(o.weakEntryDelete(@ptrCast(&key1)));
-    try std.testing.expectEqual(@as(usize, 2), cold.weak_entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), collection.weak_entries.items.len);
     try std.testing.expect(!o.weakEntryHas(@ptrCast(&key1)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key2)));
     try std.testing.expect(o.weakEntryHas(@ptrCast(&key3)));
-    try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(cold.weak_entries.items[0].key.?));
+    try std.testing.expectEqual(@intFromPtr(&key3), @intFromPtr(collection.weak_entries.items[0].key.?));
 }
 
 test "FinalizationRegistry unregister stable-compacts matching records" {

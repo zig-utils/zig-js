@@ -107,6 +107,7 @@ inline fn hasObjectBacking(flags: value.ObjectBackingFlags) bool {
         flags.key_order or
         flags.attrs or
         flags.holes or
+        flags.collection_state or
         flags.weak_entries or
         flags.coll_index or
         flags.finalization_records or
@@ -755,16 +756,18 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
             for (@constCast(state.refs)) |*reference|
                 gc_relocation.rewriteAtomicValueSlot(v, reference);
             gc_relocation.rewriteOptionalSlot(v, Object, &state.owner_obj);
-            if (state.gc_relocate) |relocate| if (state.gc_context) |gc_context|
-                relocate(gc_context, @ptrCast(@constCast(v)), Rewriter.rewrite);
+            if (state.gc_state) |gc_state|
+                if (gc_state.relocate) |relocate| if (gc_state.context) |context|
+                    relocate(context, @ptrCast(@constCast(v)), Rewriter.rewrite);
         },
         .wasm_global => {
             const state = &cold.rare.wasm_global;
             if (state.ref) |reference|
                 gc_relocation.rewriteAtomicValueSlot(v, reference);
             gc_relocation.rewriteOptionalSlot(v, Object, &state.owner_obj);
-            if (state.gc_relocate) |relocate| if (state.gc_context) |gc_context|
-                relocate(gc_context, @ptrCast(@constCast(v)), Rewriter.rewrite);
+            if (state.gc_state) |gc_state|
+                if (gc_state.relocate) |relocate| if (gc_state.context) |context|
+                    relocate(context, @ptrCast(@constCast(v)), Rewriter.rewrite);
         },
         .wasm_function => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_function.owner_obj),
         .wasm_tag => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_tag.owner_obj),
@@ -804,8 +807,8 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
     if (!(o.is_weak and o.is_map)) return;
-    const cold = o.coldState() orelse return;
-    for (cold.weak_entries.items) |entry| {
+    const collection = o.collectionState() orelse return;
+    for (collection.weak_entries.items) |entry| {
         if (v.isMarked(entry.key)) markValue(v, entry.value);
     }
 }
@@ -824,10 +827,10 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
 
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {
-        const cold = o.coldState() orelse return false;
+        const collection = o.collectionState() orelse return false;
         var i: usize = 0;
-        while (i < cold.weak_entries.items.len) {
-            if (!heap.isLive(cold.weak_entries.items[i].key)) {
+        while (i < collection.weak_entries.items.len) {
+            if (!heap.isLive(collection.weak_entries.items[i].key)) {
                 o.weakEntrySwapRemoveAtUnlocked(i);
             } else {
                 i += 1;
@@ -862,10 +865,12 @@ pub fn relocateObjectWeakState(o: *Object, v: anytype) void {
     if (o.is_weak and (o.is_map or o.is_set)) {
         // The pointer-keyed lookup table is only a cache; clear its old-address
         // keys. Linear lookup remains correct and later mutations repopulate it.
-        cold.weak_index.clearRetainingCapacity();
-        for (cold.weak_entries.items) |*entry| {
-            gc_relocation.rewriteOptionalSlot(v, anyopaque, &entry.key);
-            gc_relocation.rewriteValueSlot(v, &entry.value);
+        if (cold.collection_state) |collection| {
+            collection.weak_index.clearRetainingCapacity();
+            for (collection.weak_entries.items) |*entry| {
+                gc_relocation.rewriteOptionalSlot(v, anyopaque, &entry.key);
+                gc_relocation.rewriteValueSlot(v, &entry.value);
+            }
         }
     }
     if (!o.behavior.is_finalization_registry) return;
@@ -918,7 +923,7 @@ test "weak and finalization relocation never resolves dead targets" {
         @ptrCast(&old_objects[1]),
         Value.obj(&old_objects[2]),
     );
-    try std.testing.expect(weak_map.coldState().?.weak_index.count() > 0);
+    try std.testing.expect(weak_map.collectionState().?.weak_index.count() > 0);
 
     var registry = Object{ .behavior = .{ .is_finalization_registry = true } };
     try registry.finRecordAppend(allocator, .{
@@ -981,10 +986,10 @@ test "weak and finalization relocation never resolves dead targets" {
     relocateObjectWeakState(&registry, &plan);
 
     try std.testing.expectEqual(&new_objects[0], weak_ref.weakRefTarget().?);
-    const weak_entry = weak_map.coldState().?.weak_entries.items[0];
+    const weak_entry = weak_map.collectionState().?.weak_entries.items[0];
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[1])), weak_entry.key.?);
     try std.testing.expectEqual(&new_objects[2], weak_entry.value.asObj());
-    try std.testing.expectEqual(@as(usize, 0), weak_map.coldState().?.weak_index.count());
+    try std.testing.expectEqual(@as(usize, 0), weak_map.collectionState().?.weak_index.count());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[3])), records.items[0].target.?);
     try std.testing.expectEqual(&new_objects[4], records.items[0].held.asObj());
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[5])), records.items[0].token.?);
@@ -1210,17 +1215,25 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
         released += 1;
     }
     if (flags.weak_entries) {
-        const cold = o.coldState().?;
-        cold.weak_entries.deinit(a);
-        cold.weak_entries = .empty;
-        cold.weak_index.deinit(a);
-        cold.weak_index = .empty;
+        const collection = o.collectionState().?;
+        collection.weak_entries.deinit(a);
+        collection.weak_entries = .empty;
+        collection.weak_index.deinit(a);
+        collection.weak_index = .empty;
         released += 1;
     }
     if (flags.coll_index) {
+        const collection = o.collectionState().?;
+        collection.coll_index.deinit(a);
+        collection.coll_index = .empty;
+        released += 1;
+    }
+    if (flags.collection_state) {
         const cold = o.coldState().?;
-        cold.coll_index.deinit(a);
-        cold.coll_index = .empty;
+        if (cold.collection_state) |collection| {
+            a.destroy(collection);
+            cold.collection_state = null;
+        }
         released += 1;
     }
     if (flags.finalization_records) {
@@ -2708,10 +2721,12 @@ fn StalePointerVisitor(comptime PlanPointer: type) type {
 fn verifyObjectWeakRelocation(o: *Object, v: anytype) void {
     const cold = o.coldState() orelse return;
     if (o.is_weak and (o.is_map or o.is_set)) {
-        std.debug.assert(cold.weak_index.count() == 0);
-        for (cold.weak_entries.items) |entry| {
-            v.mark(entry.key);
-            markValue(v, entry.value);
+        if (cold.collection_state) |collection| {
+            std.debug.assert(collection.weak_index.count() == 0);
+            for (collection.weak_entries.items) |entry| {
+                v.mark(entry.key);
+                markValue(v, entry.value);
+            }
         }
     }
     if (o.behavior.is_finalization_registry) {
@@ -2739,8 +2754,8 @@ fn verifyObjectWasmRelocation(o: *Object, v: anytype) void {
         }
     };
     switch (cold.rare_tag.load(.acquire)) {
-        .wasm_table => Verifier.verify(cold.rare.wasm_table.gc_context, cold.rare.wasm_table.gc_verify, v),
-        .wasm_global => Verifier.verify(cold.rare.wasm_global.gc_context, cold.rare.wasm_global.gc_verify, v),
+        .wasm_table => if (cold.rare.wasm_table.gc_state) |state| Verifier.verify(state.context, state.verify, v),
+        .wasm_global => if (cold.rare.wasm_global.gc_state) |state| Verifier.verify(state.context, state.verify, v),
         else => {},
     }
 }
@@ -3612,13 +3627,15 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     var dead_key_b: u8 = 3;
 
     var cold = value.ObjectColdState{};
+    var collection = value.ObjectCollectionState{};
+    cold.collection_state = &collection;
     var storage = value.ObjectStorageState{ .owner_allocator = a };
     storage.cold.store(&cold, .monotonic);
     var o = Object{ .is_weak = true, .is_map = true, .storage = .init(&storage) };
-    defer cold.weak_entries.deinit(a);
-    try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
-    try cold.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });
-    try cold.weak_entries.append(a, .{ .key = @ptrCast(&live_key), .value = Value.num(30) });
+    defer collection.weak_entries.deinit(a);
+    try collection.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_a), .value = Value.num(10) });
+    try collection.weak_entries.append(a, .{ .key = @ptrCast(&dead_key_b), .value = Value.num(20) });
+    try collection.weak_entries.append(a, .{ .key = @ptrCast(&live_key), .value = Value.num(30) });
 
     const FakeHeap = struct {
         live: ?*anyopaque,
@@ -3629,8 +3646,8 @@ test "gc pruneDeadWeakEntries removes dead weak keys with unordered tail removal
     const heap = FakeHeap{ .live = @ptrCast(&live_key) };
 
     try std.testing.expect(!pruneDeadWeakEntries(&o, &heap));
-    try std.testing.expectEqual(@as(usize, 1), cold.weak_entries.items.len);
-    try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(cold.weak_entries.items[0].key.?));
+    try std.testing.expectEqual(@as(usize, 1), collection.weak_entries.items.len);
+    try std.testing.expectEqual(@intFromPtr(&live_key), @intFromPtr(collection.weak_entries.items[0].key.?));
 }
 
 test "gc traces only the active microtask variant" {
