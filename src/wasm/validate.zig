@@ -793,6 +793,12 @@ fn isExtendedConstInstruction(instr: types.Instr) bool {
         .global_get,
         .ref_null,
         .ref_func,
+        .i32_add,
+        .i32_sub,
+        .i32_mul,
+        .i64_add,
+        .i64_sub,
+        .i64_mul,
         .end,
         => true,
         .simd => switch (instr.imm) {

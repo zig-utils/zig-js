@@ -1120,6 +1120,26 @@ fn evalExtendedConstExpr(inst: *Instance, instrs: []const types.Instr) error{Out
         .global_get => try stack.append(inst.gpa, inst.globals[instr.imm.idx].value),
         .ref_null => try stack.append(inst.gpa, zeroSlotIn(inst.module, instr.imm.type)),
         .ref_func => try stack.append(inst.gpa, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
+        .i32_add, .i32_sub, .i32_mul => {
+            const right: u32 = @truncate(stack.pop().?.numericBits());
+            const left: u32 = @truncate(stack.pop().?.numericBits());
+            try stack.append(inst.gpa, .{ .numeric = switch (instr.op) {
+                .i32_add => left +% right,
+                .i32_sub => left -% right,
+                .i32_mul => left *% right,
+                else => unreachable,
+            } });
+        },
+        .i64_add, .i64_sub, .i64_mul => {
+            const right = stack.pop().?.numericBits();
+            const left = stack.pop().?.numericBits();
+            try stack.append(inst.gpa, .{ .numeric = switch (instr.op) {
+                .i64_add => left +% right,
+                .i64_sub => left -% right,
+                .i64_mul => left *% right,
+                else => unreachable,
+            } });
+        },
         .gc => {
             const op = switch (instr.imm) {
                 .gc => |value| value,
@@ -7493,17 +7513,22 @@ test "wasm.exec GC extended constant expressions initialize aggregates" {
             "\x5F\x01\x7F\x00", // type 0: immutable i32 struct
             "\x5E\x7F\x00", // type 1: immutable i32 array
             ft("", I32),
+            ft("", I64),
         }) ++
-        funcSec(&.{ 2, 2, 2 }) ++
+        funcSec(&.{ 2, 2, 2, 2, 3 }) ++
         globalSec(&.{
             glob("\x64\x6C", false, i32c(42) ++ "\xFB\x1C"),
             glob("\x64\x00", false, i32c(7) ++ "\xFB\x00\x00"),
             glob("\x64\x01", false, i32c(9) ++ i32c(2) ++ "\xFB\x06\x01"),
+            glob(I32, false, i32c(6) ++ i32c(7) ++ "\x6C" ++ i32c(1) ++ "\x6A"),
+            glob(I64, false, i64c(10) ++ i64c(3) ++ "\x7D" ++ i64c(2) ++ "\x7E"),
         }) ++
         codeSec(&.{
             "\x23\x00\xFB\x1E",
             "\x23\x01\xFB\x02\x00\x00",
             "\x23\x02" ++ i32c(1) ++ "\xFB\x0B\x01",
+            "\x23\x03",
+            "\x23\x04",
         }));
     var diag: types.Diagnostic = .{};
     const mod = try buildModuleWithFeatures(bytes, features, &diag);
@@ -7514,6 +7539,8 @@ test "wasm.exec GC extended constant expressions initialize aggregates" {
     try std.testing.expectEqual(@as(u64, 42), try run1(inst, 0, &.{}));
     try std.testing.expectEqual(@as(u64, 7), try run1(inst, 1, &.{}));
     try std.testing.expectEqual(@as(u64, 9), try run1(inst, 2, &.{}));
+    try std.testing.expectEqual(@as(u64, 43), try run1(inst, 3, &.{}));
+    try std.testing.expectEqual(@as(u64, 14), try run1(inst, 4, &.{}));
     try std.testing.expectEqual(@as(usize, 2), inst.gc_object_count);
 }
 
