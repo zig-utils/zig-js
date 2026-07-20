@@ -2300,6 +2300,111 @@ fn asyncInstantiateBytesJob(ctx: *anyopaque, _: Value, _: []const Value) value.H
     return Value.undef();
 }
 
+const StreamingMode = enum { compile, instantiate };
+
+fn streamingHandler(self: *Interpreter, native: value.NativeFn, descriptor: *AsyncDescriptor, name: []const u8) value.HostError!Value {
+    const handler = try gc.allocObj(self.arena);
+    handler.* = .{ .native = native, .private_data = @ptrCast(descriptor) };
+    try interpreter.installNativeProps(self.arena, self.root_shape, handler, name, 2);
+    return Value.obj(handler);
+}
+
+fn streamingState(args: []const Value) ?*Object {
+    if (args.len < 2 or !args[1].isObject()) return null;
+    return args[1].asObj();
+}
+
+fn streamingOutput(state: *Object) ?*promise.Promise {
+    const output = state.elementAt(0) orelse return null;
+    return promise.promiseOf(output);
+}
+
+fn rejectStreamingState(self: *Interpreter, state: *Object, reason: Value) value.HostError!void {
+    if (streamingOutput(state)) |output| try promise.reject(self, output, reason);
+}
+
+fn rejectStreamingFailure(self: *Interpreter, state: *Object, failure: value.HostError) value.HostError!void {
+    if (failure != error.Throw) return failure;
+    const reason = self.exception;
+    self.exception = Value.undef();
+    try rejectStreamingState(self, state, reason);
+}
+
+fn streamingRejected(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const state = streamingState(args) orelse return Value.undef();
+    try rejectStreamingState(self, state, if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
+}
+
+fn streamingBodyFulfilled(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const state = streamingState(args) orelse return Value.undef();
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const stable = stableBufferSource(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+        try rejectStreamingFailure(self, state, failure);
+        return Value.undef();
+    };
+    const output = state.elementAt(0) orelse return Value.undef();
+    const mode_value = state.elementAt(2) orelse Value.undef();
+    if (mode_value.toBoolean()) {
+        const imports = state.elementAt(1) orelse Value.undef();
+        try queueAsyncJob(self, asyncInstantiateBytesJob, descriptor, &.{ output, stable, imports });
+    } else {
+        try queueAsyncJob(self, asyncCompileJob, descriptor, &.{ output, stable });
+    }
+    return Value.undef();
+}
+
+fn streamingSourceFulfilled(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const state = streamingState(args) orelse return Value.undef();
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    const body = interpreter.wasmStreamingResponseBytes(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+        try rejectStreamingFailure(self, state, failure);
+        return Value.undef();
+    };
+    const body_promise = promise.promiseOf(body) orelse {
+        const reason = try self.makeError("TypeError", "WebAssembly streaming body conversion did not return a Promise");
+        try rejectStreamingState(self, state, reason);
+        return Value.undef();
+    };
+    const fulfilled = try streamingHandler(self, streamingBodyFulfilled, descriptor, "WebAssembly streaming body fulfilled");
+    const rejected = try streamingHandler(self, streamingRejected, descriptor, "WebAssembly streaming body rejected");
+    try promise.performThenDetached(self, body_promise, fulfilled, rejected, Value.obj(state));
+    return Value.undef();
+}
+
+fn asyncStreaming(self: *Interpreter, descriptor: *AsyncDescriptor, args: []const Value, mode: StreamingMode) value.HostError!Value {
+    const output = try promise.newPromise(self);
+    const target = promise.promiseOf(Value.obj(output)).?;
+    const state = try gc.allocObj(self.arena);
+    state.* = .{ .proto = null, .proto_explicit_null = true };
+    try state.appendInternalElement(self.arena, Value.obj(output));
+    try state.appendInternalElement(self.arena, if (args.len > 1) args[1] else Value.undef());
+    try state.appendInternalElement(self.arena, Value.boolVal(mode == .instantiate));
+    const source = interpreter.promiseResolveValue(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+        try rejectAsyncFailure(self, target, failure);
+        return Value.obj(output);
+    };
+    const fulfilled = try streamingHandler(self, streamingSourceFulfilled, descriptor, "WebAssembly streaming source fulfilled");
+    const rejected = try streamingHandler(self, streamingRejected, descriptor, "WebAssembly streaming source rejected");
+    try promise.performThenDetached(self, promise.promiseOf(source).?, fulfilled, rejected, Value.obj(state));
+    return Value.obj(output);
+}
+
+fn asyncCompileStreaming(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    return asyncStreaming(self, descriptor, args, .compile);
+}
+
+fn asyncInstantiateStreaming(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
+    const self = activeInterpreter(ctx);
+    const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
+    return asyncStreaming(self, descriptor, args, .instantiate);
+}
+
 pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     const object_ctor = env.get("Object").?.asObj();
     const object_proto = object_ctor.getOwn("prototype").?.asObj();
@@ -2420,6 +2525,8 @@ pub fn installWebAssembly(env: *Environment, rs: *Shape) value.HostError!void {
     async_descriptor.* = .{ .module = module_descriptor, .instance = instance_descriptor };
     try installMethodWithData(env.arena, rs, namespace, "compile", 1, asyncCompile, async_descriptor);
     try installMethodWithData(env.arena, rs, namespace, "instantiate", 1, asyncInstantiate, async_descriptor);
+    try installMethodWithData(env.arena, rs, namespace, "compileStreaming", 1, asyncCompileStreaming, async_descriptor);
+    try installMethodWithData(env.arena, rs, namespace, "instantiateStreaming", 1, asyncInstantiateStreaming, async_descriptor);
     try installMethod(env.arena, rs, namespace, "validate", 1, validate);
 
     if (env.get("Symbol")) |symbol| if (symbol.isObject()) {
@@ -3255,6 +3362,122 @@ test "wasm api instantiate supports Module and byte Promise overloads" {
         \\primitive && missing;
     );
     try std.testing.expect(constructor_boundary.isBoolean() and constructor_boundary.asBool());
+}
+
+test "wasm api streaming compilation consumes Response bodies and rejects boundaries" {
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.streamingWasm408 = { order: ["before"] };
+        \\const addBytes408 = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+        \\function response408(bytes, options) {
+        \\  let sent = false;
+        \\  return new Response(new ReadableStream({ pull(c) {
+        \\    if (sent) return;
+        \\    sent = true;
+        \\    return Promise.resolve().then(function () {
+        \\      const middle = Math.floor(bytes.length / 2);
+        \\      c.enqueue(bytes.subarray(0, middle));
+        \\      c.enqueue(bytes.subarray(middle));
+        \\      c.close();
+        \\    });
+        \\  } }), Object.assign({ headers: { "content-type": "application/wasm" } }, options));
+        \\}
+        \\const compileResponse408 = response408(addBytes408);
+        \\const compilePromise408 = WebAssembly.compileStreaming(Promise.resolve(compileResponse408));
+        \\streamingWasm408.promise = compilePromise408 instanceof Promise;
+        \\compilePromise408.then(function (module) {
+        \\  const instance = new WebAssembly.Instance(module);
+        \\  streamingWasm408.compile = module instanceof WebAssembly.Module && instance.exports.add(20, 22) === 42;
+        \\  streamingWasm408.compileUsed = compileResponse408.bodyUsed;
+        \\});
+        \\WebAssembly.instantiateStreaming(response408(addBytes408)).then(function (result) {
+        \\  streamingWasm408.instantiate = result.module instanceof WebAssembly.Module &&
+        \\    result.instance instanceof WebAssembly.Instance && result.instance.exports.add(19, 23) === 42;
+        \\});
+        \\const importBytes408 = new Uint8Array([0,97,115,109,1,0,0,0,1,5,1,96,0,1,127,2,14,1,3,101,110,118,6,97,110,115,119,101,114,0,0,7,10,1,6,97,110,115,119,101,114,0,0]);
+        \\WebAssembly.instantiateStreaming(response408(importBytes408), { env: { answer() { return 42; } } }).then(function (result) {
+        \\  streamingWasm408.imports = result.instance.exports.answer() === 42;
+        \\});
+        \\WebAssembly.instantiateStreaming(response408(importBytes408)).then(
+        \\  function () { streamingWasm408.missingImports = false; },
+        \\  function (error) { streamingWasm408.missingImports = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.instantiateStreaming(response408(importBytes408), { env: { answer: 1 } }).then(
+        \\  function () { streamingWasm408.linkError = false; },
+        \\  function (error) { streamingWasm408.linkError = error instanceof WebAssembly.LinkError; }
+        \\);
+        \\WebAssembly.compileStreaming(new Response(addBytes408, { headers: { "content-type": "text/plain" } })).then(
+        \\  function () { streamingWasm408.mime = false; },
+        \\  function (error) { streamingWasm408.mime = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.compileStreaming(new Response(addBytes408, { headers: { "content-type": "application/wasm;" } })).then(
+        \\  function () { streamingWasm408.parameters = false; },
+        \\  function (error) { streamingWasm408.parameters = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.compileStreaming(new Response(addBytes408, { headers: { "content-type": "APPLICATION/WASM" } })).then(
+        \\  function (module) { streamingWasm408.mimeCase = module instanceof WebAssembly.Module; },
+        \\  function () { streamingWasm408.mimeCase = false; }
+        \\);
+        \\WebAssembly.compileStreaming(response408(addBytes408, { status: 404 })).then(
+        \\  function () { streamingWasm408.status = false; },
+        \\  function (error) { streamingWasm408.status = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.compileStreaming(408).then(
+        \\  function () { streamingWasm408.brand = false; },
+        \\  function (error) { streamingWasm408.brand = error instanceof TypeError; }
+        \\);
+        \\const lockedResponse408 = response408(addBytes408);
+        \\lockedResponse408.body.getReader();
+        \\WebAssembly.compileStreaming(lockedResponse408).then(
+        \\  function () { streamingWasm408.locked = false; },
+        \\  function (error) { streamingWasm408.locked = error instanceof TypeError && !lockedResponse408.bodyUsed; }
+        \\);
+        \\const usedResponse408 = response408(addBytes408);
+        \\usedResponse408.bytes();
+        \\WebAssembly.compileStreaming(usedResponse408).then(
+        \\  function () { streamingWasm408.used = false; },
+        \\  function (error) { streamingWasm408.used = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.compileStreaming(response408(new Uint8Array([0]))).then(
+        \\  function () { streamingWasm408.compileError = false; },
+        \\  function (error) { streamingWasm408.compileError = error instanceof WebAssembly.CompileError; }
+        \\);
+        \\const pullMarker408 = { pull: 408 };
+        \\const abruptResponse408 = new Response(new ReadableStream({ pull() { throw pullMarker408; } }),
+        \\  { headers: { "content-type": "application/wasm" } });
+        \\WebAssembly.compileStreaming(abruptResponse408).then(
+        \\  function () { streamingWasm408.abruptBody = false; },
+        \\  function (error) { streamingWasm408.abruptBody = error === pullMarker408 && abruptResponse408.bodyUsed; }
+        \\);
+        \\const sibling408 = $262.createRealm();
+        \\sibling408.global.streamingBytes408 = addBytes408;
+        \\sibling408.evalScript('globalThis.streamingResponse408 = new Response(streamingBytes408, { headers: { "content-type": "application/wasm" } })');
+        \\WebAssembly.compileStreaming(sibling408.global.streamingResponse408).then(
+        \\  function (module) { streamingWasm408.sibling = module instanceof WebAssembly.Module; },
+        \\  function () { streamingWasm408.sibling = false; }
+        \\);
+        \\const thenMarker408 = { marker: 408 };
+        \\WebAssembly.compileStreaming({ get then() { throw thenMarker408; } }).then(
+        \\  function () { streamingWasm408.thenable = false; },
+        \\  function (error) { streamingWasm408.thenable = error === thenMarker408; }
+        \\);
+        \\const rejection408 = { rejection: 408 };
+        \\WebAssembly.compileStreaming(Promise.reject(rejection408)).then(
+        \\  function () { streamingWasm408.rejection = false; },
+        \\  function (error) { streamingWasm408.rejection = error === rejection408; }
+        \\);
+        \\streamingWasm408.shape = WebAssembly.compileStreaming.length === 1 &&
+        \\  WebAssembly.instantiateStreaming.length === 1 &&
+        \\  Object.getOwnPropertyDescriptor(WebAssembly, "compileStreaming").enumerable === false;
+        \\streamingWasm408.order.push("after");
+    );
+    const result = try store.evaluate(
+        \\Object.keys(streamingWasm408).length === 21 &&
+        \\Object.values(streamingWasm408).every(Boolean) &&
+        \\streamingWasm408.order.join(",") === "before,after";
+    );
+    try std.testing.expect(result.isBoolean() and result.asBool());
 }
 
 test "wasm api Memory grows failure-atomically and detaches the old buffer" {

@@ -45444,6 +45444,30 @@ fn fetchBodyUsedGet(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     return Value.boolVal(fetchBodyIsUsed(try fetchBodyObject(self, this)));
 }
+
+/// Validate and consume the Fetch `Response` required by WebAssembly streaming
+/// compilation. The returned intrinsic Promise fulfills with a Uint8Array;
+/// all response/body failures are raised for the caller to reject its outer
+/// compile Promise without switching parsers or exposing partial bytes.
+pub fn wasmStreamingResponseBytes(self: *Interpreter, response: Value) EvalError!Value {
+    if (!response.isObject() or response.asObj().getOwn("\x00Rstatus") == null)
+        return self.throwError("TypeError", "WebAssembly streaming source must resolve to a Response");
+    const object = response.asObj();
+    const status_value = object.getOwn("\x00Rstatus") orelse Value.num(0);
+    const status = if (status_value.isNumber()) status_value.asNum() else 0;
+    if (status < 200 or status > 299)
+        return self.throwError("TypeError", "WebAssembly streaming response has an unsuccessful status");
+    const content_type_value = try fetchBodyContentType(self, object);
+    const content_type = if (content_type_value.isString()) content_type_value.asStr() else "";
+    const normalized_type = std.mem.trim(u8, content_type, " \t\r\n");
+    if (!std.ascii.eqlIgnoreCase(normalized_type, "application/wasm"))
+        return self.throwError("TypeError", "WebAssembly streaming response has an unsupported MIME type");
+    if (fetchBodyIsUsed(object)) return self.throwError("TypeError", "WebAssembly streaming response body has already been used");
+    const body = fetchBodyValue(object);
+    if (rsIsStream(body) and rsReader(body.asObj()) != null)
+        return self.throwError("TypeError", "WebAssembly streaming response body is locked");
+    return fetchConsumeBody(self, response, .bytes);
+}
 fn fetchSlotStrGetter(comptime slot: []const u8, comptime dflt: []const u8) value.NativeFn {
     return struct {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
