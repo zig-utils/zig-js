@@ -165,6 +165,7 @@
     "ZJSContextRequestGarbageCompaction", "ZJSContextCompactGarbage",
     "ZJSValueProtect", "ZJSValueUnprotect",
     "ZJSContextGetCollectionEpoch", "ZJSValueIsReachable",
+    "ScriptExecutionContextIdentifier__getGlobalObject",
     "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",
     "JSWorkerPostMessage", "JSWorkerReceive", "JSWorkerTerminate", "JSWorkerRelease",
