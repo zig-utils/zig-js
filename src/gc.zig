@@ -611,6 +611,13 @@ pub fn traceBoundFn(b: *interp.Interpreter.BoundFn, v: anytype) void {
     for (b.args) |a| markValue(v, a);
 }
 
+pub fn relocateBoundFn(b: *interp.Interpreter.BoundFn, v: anytype) void {
+    gc_relocation.rewriteValueSlot(v, &b.target);
+    gc_relocation.rewriteValueSlot(v, &b.this);
+    for (@constCast(b.args)) |*argument|
+        gc_relocation.rewriteValueSlot(v, argument);
+}
+
 pub fn tracePromise(p: *promise.Promise, v: anytype) void {
     p.lockState();
     defer p.unlockState();
@@ -717,6 +724,85 @@ pub fn traceIterHelper(h: *value.IterHelper, v: anytype) void {
 
 pub fn traceModuleNs(m: *interp.ModuleNs, v: anytype) void {
     for (m.envs) |e| v.mark(e);
+}
+
+pub fn relocateModuleNs(m: *interp.ModuleNs, v: anytype) void {
+    for (m.envs) |*environment|
+        gc_relocation.rewriteRequiredSlot(v, Environment, environment);
+}
+
+test "BoundFunction and module namespace relocation rewrites every managed slot" {
+    var old_objects: [4]Object = undefined;
+    var new_objects: [4]Object = undefined;
+    var old_environments = [_]Environment{
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+    };
+    var new_environments = [_]Environment{
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+    };
+    var bound_arguments = [_]Value{
+        Value.obj(&old_objects[2]),
+        Value.obj(&old_objects[3]),
+    };
+    var bound = interp.Interpreter.BoundFn{
+        .target = Value.obj(&old_objects[0]),
+        .this = Value.obj(&old_objects[1]),
+        .args = &bound_arguments,
+    };
+    var namespace_environments = [_]*Environment{
+        &old_environments[0],
+        &old_environments[1],
+    };
+    var namespace_names = [_][]const u8{ "first", "second" };
+    var namespace_locals = [_][]const u8{ "localFirst", "localSecond" };
+    var namespace = interp.ModuleNs{
+        .names = &namespace_names,
+        .envs = &namespace_environments,
+        .locals = &namespace_locals,
+        .tag_key = "Symbol.toStringTag",
+        .deferred = true,
+        .defer_module = @ptrFromInt(@alignOf(usize)),
+    };
+    const names_pointer = namespace.names.ptr;
+    const locals_pointer = namespace.locals.ptr;
+    const deferred_module = namespace.defer_module;
+
+    const Plan = struct {
+        old_objects: *[4]Object,
+        new_objects: *[4]Object,
+        old_environments: *[2]Environment,
+        new_environments: *[2]Environment,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            for (self.old_environments, 0..) |*environment, index|
+                if (old == @as(*anyopaque, @ptrCast(environment)))
+                    return @ptrCast(&self.new_environments[index]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_environments = &old_environments,
+        .new_environments = &new_environments,
+    };
+    relocateBoundFn(&bound, &plan);
+    relocateModuleNs(&namespace, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], bound.target.asObj());
+    try std.testing.expectEqual(&new_objects[1], bound.this.asObj());
+    try std.testing.expectEqual(&new_objects[2], bound_arguments[0].asObj());
+    try std.testing.expectEqual(&new_objects[3], bound_arguments[1].asObj());
+    try std.testing.expectEqual(&new_environments[0], namespace_environments[0]);
+    try std.testing.expectEqual(&new_environments[1], namespace_environments[1]);
+    try std.testing.expectEqual(names_pointer, namespace.names.ptr);
+    try std.testing.expectEqual(locals_pointer, namespace.locals.ptr);
+    try std.testing.expectEqual(deferred_module, namespace.defer_module);
 }
 
 pub fn traceModuleGraph(cache: *std.StringHashMapUnmanaged(*ContextMod.Context.Module), v: anytype) void {

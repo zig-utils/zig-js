@@ -64,6 +64,12 @@ because `super()` can initialize the shared `this` cell after publication.
 Movement is still disabled until every cell kind and root surface has the same
 complete treatment.
 
+[#339](https://github.com/zig-utils/zig-js/issues/339) also completes the two
+small immutable side-cell graphs: bound functions rewrite their target,
+captured `this`, and every bound argument, while module namespaces rewrite each
+environment pointer and preserve their arena-owned name/deferred-module
+metadata.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
