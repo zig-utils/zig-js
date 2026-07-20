@@ -10831,9 +10831,9 @@ pub const Interpreter = struct {
                 // Accessing a private member the object doesn't carry is a brand
                 // violation — a TypeError, not `undefined`.
                 if (value.isPrivateKey(key)) return self.throwError("TypeError", "Cannot read private member from an object whose class did not declare it");
-                // `.constructor` falls back to the kind's global constructor
-                // (we don't wire instance prototypes yet).
-                if (std.mem.eql(u8, key, "constructor")) {
+                // Legacy intrinsic gaps may still use a kind constructor fallback,
+                // but an explicit null prototype must terminate lookup exactly.
+                if (std.mem.eql(u8, key, "constructor") and !o.protoExplicitNull()) {
                     if (self.constructorOf(recv)) |ctor| return ctor;
                 }
                 if (found) |slot| slot.* = false;
@@ -46779,6 +46779,7 @@ test "interpreter JSON, Object, Number builtins" {
     )).asNum());
     // Object.create + getPrototypeOf
     try std.testing.expectEqual(@as(f64, 7), (try evalSource(a, "let p = { x: 7 }; let o = Object.create(p); o.x")).asNum());
+    try std.testing.expect((try evalSource(a, "let o = Object.create(null); Object.getPrototypeOf(o) === null && o.constructor === undefined && !('constructor' in o)")).asBool());
     // Object.defineProperty (data + accessor)
     try std.testing.expectEqual(@as(f64, 5), (try evalSource(a, "let o = {}; Object.defineProperty(o, 'k', { value: 5 }); o.k")).asNum());
     try std.testing.expectEqual(@as(f64, 9), (try evalSource(a, "let o = { _v: 9 }; Object.defineProperty(o, 'v', { get: function () { return this._v; } }); o.v")).asNum());
