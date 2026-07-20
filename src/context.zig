@@ -15407,6 +15407,9 @@ test "enable_gc concurrent (M3): generators and iterator helpers are safe under 
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
     defer ctx.destroy();
+    // Keep the stress witness about concurrent old-space tracing rather than
+    // letting the production multi-age nursery satisfy its bounded pressure.
+    ctx.gc.?.setNurseryEnabled(false);
 
     const result = try ctx.evaluate(
         \\function* range(n) { for (let i = 0; i < n; i++) yield i; }
@@ -15444,6 +15447,11 @@ test "enable_gc concurrent (M3): mixed-workload stress amplifier stays correct +
     if (builtin.single_threaded) return error.SkipZigTest;
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .concurrent_gc = true });
     defer ctx.destroy();
+    // Isolate the concurrent old-space marker. The production age-three
+    // nursery deliberately handles this bounded workload before old-space
+    // pressure accumulates, which is correct but would not exercise the path
+    // this test exists to validate.
+    ctx.gc.?.setNurseryEnabled(false);
 
     const result = try ctx.evaluate(
         \\function* gen(n) { for (let i = 0; i < n; i++) yield i; }
