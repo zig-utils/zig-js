@@ -170,6 +170,11 @@ is active. At the next quiescent host boundary, the same counted
 `JSValueProtect` wrapper survives while its managed payload moves and remains
 fully usable.
 
+[#356](https://github.com/zig-utils/zig-js/issues/356) makes that C boundary
+diagnostic instead of boolean: embedders receive the exact unsupported,
+already-dense, planning-OOM, or compacted status plus optional exact moved-cell
+and moved-byte totals. Every non-moving outcome deterministically reports zero.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

@@ -44,6 +44,14 @@ def main() -> int:
         document.get("placement_policy") == "dense_size_class_prefix_tail_evacuation",
         "compaction placement policy drift",
     )
+    c_api = document.get("c_api", {})
+    require(c_api.get("entrypoint") == "ZJSContextCompactGarbage", "C compaction entrypoint drift")
+    require(
+        c_api.get("statuses") == ["unsupported", "no_candidates", "out_of_memory", "compacted"],
+        "C compaction status contract drift",
+    )
+    require(c_api.get("optional_outputs") == ["moved_cells", "moved_bytes"], "C movement outputs drift")
+    require(c_api.get("non_moving_outputs") == "zero", "C non-moving outputs must remain deterministic")
 
     identity = document.get("identity", {})
     require(identity.get("forwarding_state") == "executable", "forwarding contract status drift")
@@ -76,6 +84,12 @@ def main() -> int:
         require(entry.get("rewrite", "") in gc_source, f"{entry.get('kind')}: executable rewriter missing")
 
     context_source = (ROOT / "src/context.zig").read_text()
+    c_api_source = (ROOT / "src/c_api.zig").read_text()
+    extension_header = (ROOT / "include/zig-js/Extensions.h").read_text()
+    require("pub const ZJSGCCompactionStatus" in c_api_source, "C compaction status enum missing")
+    require("export fn ZJSContextCompactGarbage" in c_api_source, "C compaction export missing")
+    require("typedef enum ZJSGCCompactionStatus" in extension_header, "C compaction status header missing")
+    require("size_t* movedCells, size_t* movedBytes" in extension_header, "C movement output ABI missing")
     for hook in (
         "pub fn canRelocate",
         "pub fn relocateRoots",

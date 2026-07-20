@@ -12116,9 +12116,34 @@ export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) 
 
 /// zig-js extension: compact a quiescent precise-GC context. The Context gate
 /// fails closed for arena, JIT, active-interpreter, thread, or collector states.
-export fn ZJSContextCompactGarbage(ctx: JSContextRef) callconv(.c) bool {
-    const context = ctxFrom(ctx) orelse return false;
-    return context.compactGarbage().status == .compacted;
+pub const ZJSGCCompactionStatus = enum(c_uint) {
+    unsupported = 0,
+    no_candidates = 1,
+    out_of_memory = 2,
+    compacted = 3,
+};
+
+fn cCompactionStatus(status: Context.GcHeap.CompactionStatus) ZJSGCCompactionStatus {
+    return switch (status) {
+        .unsupported => .unsupported,
+        .no_candidates => .no_candidates,
+        .out_of_memory => .out_of_memory,
+        .compacted => .compacted,
+    };
+}
+
+export fn ZJSContextCompactGarbage(
+    ctx: JSContextRef,
+    moved_cells: ?*usize,
+    moved_bytes: ?*usize,
+) callconv(.c) ZJSGCCompactionStatus {
+    if (moved_cells) |out| out.* = 0;
+    if (moved_bytes) |out| out.* = 0;
+    const context = ctxFrom(ctx) orelse return .unsupported;
+    const result = context.compactGarbage();
+    if (moved_cells) |out| out.* = result.moved_cells;
+    if (moved_bytes) |out| out.* = result.moved_bytes;
+    return cCompactionStatus(result.status);
 }
 
 export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
@@ -24183,7 +24208,9 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
 test "C-API: native callback compaction fails closed before a protected handle moves quiescently" {
     const State = struct {
         var calls: usize = 0;
-        var accepted: bool = false;
+        var status: ZJSGCCompactionStatus = .compacted;
+        var moved_cells: usize = 1;
+        var moved_bytes: usize = 1;
 
         fn compact(
             ctx: JSContextRef,
@@ -24194,12 +24221,24 @@ test "C-API: native callback compaction fails closed before a protected handle m
             _: ExceptionRef,
         ) callconv(.c) JSValueRef {
             calls += 1;
-            accepted = ZJSContextCompactGarbage(ctx);
-            return JSValueMakeBoolean(ctx, !accepted);
+            status = ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes);
+            return JSValueMakeBoolean(ctx, status == .unsupported and moved_cells == 0 and moved_bytes == 0);
         }
     };
     State.calls = 0;
-    State.accepted = false;
+    State.status = .compacted;
+    State.moved_cells = 1;
+    State.moved_bytes = 1;
+
+    var invalid_cells: usize = 1;
+    var invalid_bytes: usize = 1;
+    try std.testing.expectEqual(
+        ZJSGCCompactionStatus.unsupported,
+        ZJSContextCompactGarbage(null, &invalid_cells, &invalid_bytes),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_cells);
+    try std.testing.expectEqual(@as(usize, 0), invalid_bytes);
+    try std.testing.expectEqual(ZJSGCCompactionStatus.out_of_memory, cCompactionStatus(.out_of_memory));
 
     const ctx = ZJSGlobalContextCreateGarbageCollected(false) orelse return error.JSCInitFailed;
     defer JSGlobalContextRelease(ctx);
@@ -24225,7 +24264,9 @@ test "C-API: native callback compaction fails closed before a protected handle m
     try std.testing.expect(exception == null);
     try std.testing.expect(JSValueToBoolean(ctx, callback_result));
     try std.testing.expectEqual(@as(usize, 1), State.calls);
-    try std.testing.expect(!State.accepted);
+    try std.testing.expectEqual(ZJSGCCompactionStatus.unsupported, State.status);
+    try std.testing.expectEqual(@as(usize, 0), State.moved_cells);
+    try std.testing.expectEqual(@as(usize, 0), State.moved_bytes);
     try std.testing.expect(!context.gc_relocation_active.load(.acquire));
 
     const survivor_name = JSStringCreateWithUTF8CString("compactSurvivor") orelse return error.StringInitFailed;
@@ -24236,15 +24277,56 @@ test "C-API: native callback compaction fails closed before a protected handle m
     defer std.debug.assert(ZJSValueUnprotect(ctx, survivor));
     const old_payload = valueFromContext(context, survivor).?.asObj();
 
-    try std.testing.expect(ZJSContextCompactGarbage(ctx));
+    var moved_cells: usize = 0;
+    var moved_bytes: usize = 0;
+    try std.testing.expectEqual(
+        ZJSGCCompactionStatus.compacted,
+        ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes),
+    );
+    try std.testing.expect(moved_cells > 0);
+    try std.testing.expect(moved_bytes > 0);
     const new_payload = valueFromContext(context, survivor).?.asObj();
     try std.testing.expect(old_payload != new_payload);
+    try std.testing.expectEqual(
+        ZJSGCCompactionStatus.no_candidates,
+        ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes),
+    );
+    try std.testing.expectEqual(@as(usize, 0), moved_cells);
+    try std.testing.expectEqual(@as(usize, 0), moved_bytes);
     const tag_name = JSStringCreateWithUTF8CString("tag") orelse return error.StringInitFailed;
     defer JSStringRelease(tag_name);
     const tag = JSObjectGetProperty(ctx, survivor, tag_name, &exception) orelse return error.PropFailed;
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(@as(f64, 355), JSValueToNumber(ctx, tag, &exception));
     try std.testing.expect(exception == null);
+
+    const oom_setup = JSStringCreateWithUTF8CString(
+        \\globalThis.compactOomDiscard = [];
+        \\for (let i = 0; i < 4096; i++)
+        \\  compactOomDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\globalThis.compactOomTail = { still: 'live' };
+        \\compactOomDiscard = null;
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(oom_setup);
+    _ = JSEvaluateScript(ctx, oom_setup, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    // Grow all reusable mark scratch with its owning allocator before swapping
+    // only the relocation-plan allocator to the deterministic failure source.
+    context.collectGarbage();
+    var no_scratch: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&no_scratch);
+    const saved_aux = context.gc.?.aux;
+    context.gc.?.aux = fixed.allocator();
+    moved_cells = 1;
+    moved_bytes = 1;
+    const oom_status = ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes);
+    context.gc.?.aux = saved_aux;
+    try std.testing.expectEqual(ZJSGCCompactionStatus.out_of_memory, oom_status);
+    try std.testing.expectEqual(@as(usize, 0), moved_cells);
+    try std.testing.expectEqual(@as(usize, 0), moved_bytes);
+    const tag_after_oom = JSObjectGetProperty(ctx, survivor, tag_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 355), JSValueToNumber(ctx, tag_after_oom, &exception));
 }
 
 test "C-API: protected handles trace managed StringCells" {

@@ -4,6 +4,12 @@
   "status": "explicit_stop_the_world",
   "movement_enabled": true,
   "placement_policy": "dense_size_class_prefix_tail_evacuation",
+  "c_api": {
+    "entrypoint": "ZJSContextCompactGarbage",
+    "statuses": ["unsupported", "no_candidates", "out_of_memory", "compacted"],
+    "optional_outputs": ["moved_cells", "moved_bytes"],
+    "non_moving_outputs": "zero"
+  },
   "identity": {
     "rule": "JavaScript identity is the logical allocation, never its current payload address.",
     "forwarding_state": "executable",

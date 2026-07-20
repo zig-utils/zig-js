@@ -542,13 +542,22 @@ int main(void)
         NSObject *movingOwner = [NSObject new];
         __block JSManagedValue *movingManaged = nil;
         @autoreleasepool {
+            [movingContext evaluateScript:
+                               @"globalThis.__movingDiscard = []; "
+                                @"for (let i = 0; i < 4096; i++) "
+                                @"  __movingDiscard.push({ dead: i, child: { value: i + 1 } });"];
             JSValue *target = [movingContext evaluateScript:@"({ tag: 'moving-managed' })"];
             movingManaged = [JSManagedValue managedValueWithValue:target andOwner:movingOwner];
+            [movingContext evaluateScript:@"__movingDiscard = null;"];
         }
         @autoreleasepool {
             JSValue *beforeMove = movingManaged.value;
             JSValueRef stableHandle = beforeMove.JSValueRef;
-            if (check(ZJSContextCompactGarbage(movingContextRef) &&
+            size_t movedCells = 0;
+            size_t movedBytes = 0;
+            if (check(ZJSContextCompactGarbage(movingContextRef, &movedCells, &movedBytes) ==
+                              kZJSGCCompactionCompacted &&
+                          movedCells > 0 && movedBytes > 0 &&
                           movingManaged.value == beforeMove &&
                           movingManaged.value.JSValueRef == stableHandle &&
                           [movingManaged.value[@"tag"].toString isEqualToString:@"moving-managed"],
@@ -556,7 +565,12 @@ int main(void)
                 return 89;
         }
         [movingVM removeManagedReference:movingManaged withOwner:movingOwner];
-        if (check(ZJSContextCompactGarbage(movingContextRef) && movingManaged.value == nil, 90))
+        ZJSGCCompactionStatus finalStatus =
+            ZJSContextCompactGarbage(movingContextRef, NULL, NULL);
+        if (check((finalStatus == kZJSGCCompactionCompacted ||
+                   finalStatus == kZJSGCCompactionNoCandidates) &&
+                      movingManaged.value == nil,
+                  90))
             return 90;
     }
     return 0;

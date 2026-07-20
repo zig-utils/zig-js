@@ -13,7 +13,14 @@ JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
 /* Standalone precise-GC context and explicit quiescent compaction. */
 JS_EXPORT JSGlobalContextRef ZJSGlobalContextCreateGarbageCollected(bool enableJIT);
-JS_EXPORT bool ZJSContextCompactGarbage(JSContextRef ctx);
+typedef enum ZJSGCCompactionStatus {
+    kZJSGCCompactionUnsupported = 0,
+    kZJSGCCompactionNoCandidates = 1,
+    kZJSGCCompactionOutOfMemory = 2,
+    kZJSGCCompactionCompacted = 3,
+} ZJSGCCompactionStatus;
+JS_EXPORT ZJSGCCompactionStatus ZJSContextCompactGarbage(
+    JSContextRef ctx, size_t* movedCells, size_t* movedBytes);
 
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
