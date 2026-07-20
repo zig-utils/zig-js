@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 427
-implemented and 44 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 430
+implemented and 41 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -381,7 +381,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 416 shims are implemented and 45 remain pending. Its
+of which 421 shims are implemented and 40 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
@@ -397,6 +397,14 @@ boundary even though physical storage remains allocated until VM teardown.
 root in the group, including sibling realms, closures, environments, promises,
 and microtasks; WeakRef and weak-collection edges do not retain the queried
 value. It reports semantic reachability and does not reclaim storage.
+
+`JSC__JSGlobalObject__generateHeapSnapshot`,
+`Bun__generateHeapSnapshotV8`, and `Bun__generateHeapProfile` reuse that exact
+VM-wide strong graph with property, index, variable, and internal edge labels.
+They publish WebKit GCDebugging v3, Chrome/V8 `.heapsnapshot`, and a complete
+Markdown cell/edge inventory respectively. Stable IDs survive repeated arena
+snapshots and precise-GC compaction; Home and Bun retain their distinct pointer
+and by-value string ownership ABIs. Run `zig build test-private-heap-snapshot`.
 
 ## Objective-C bridge target
 

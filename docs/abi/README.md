@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (427 implemented, 44 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (430 implemented, 41 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 424 are implemented and 47 remain pending
+Of the private entries, 430 are implemented and 41 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -538,6 +538,16 @@ The two retired module-registry snapshot exports exactly preserve pinned JSC's
 documented no-caller shims: get returns null and reset returns false without
 inspecting either argument or VM state. Their immutable contract is
 [`bun-module-registry-shims-4982b91e.json`](bun-module-registry-shims-4982b91e.json).
+
+The three heap-profiler exports share one VM-wide strong graph across sibling
+realms. The graph preserves cycles, follows property/index/variable/internal
+edges, omits weak-only targets, and uses relocation-stable zig-gc identities or
+VM-lifetime arena identities. It is emitted as WebKit GCDebugging JSON parsed
+into a genuine JS object, Chrome/V8 heap-snapshot JSON, or a complete Markdown
+cell/edge inventory. Home receives an owned StringImpl pointer while Bun uses
+its by-value BunString. The pinned sources and cross-profile fixture are in
+[`heap-snapshot-serialization-403.json`](heap-snapshot-serialization-403.json);
+run `zig build test-private-heap-snapshot`.
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
@@ -1126,7 +1136,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (418 implemented, 43 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (421 implemented, 40 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
