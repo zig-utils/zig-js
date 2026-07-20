@@ -1022,11 +1022,7 @@ def main() -> int:
                             closure.add(dependency)
                             changed = True
         require(closure == set(selected), f"{profile_id}: missing dependency closure {sorted(closure - set(selected))}")
-        if profile.get("status") == "implemented":
-            require(
-                profile_id in {"mvp", "core_3_0_selected"},
-                f"{profile_id}: implementation status is ahead of terminal evidence",
-            )
+        require(profile.get("status") == "implemented", f"{profile_id}: terminal profile status drift")
 
     print(f"WebAssembly feature registry: {len(profiles)} profiles, {len(features)} pinned features")
     return 0

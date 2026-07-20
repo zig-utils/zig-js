@@ -207,8 +207,8 @@ The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 14 selected proposal/spec revisions by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
-keeps MVP as the only default profile while recording Core 3 as implemented.
-Validate registry drift with:
+keeps MVP as the only default while recording every named profile as
+implemented. Validate registry drift with:
 
 ```sh
 zig build wasm-feature-profiles-check

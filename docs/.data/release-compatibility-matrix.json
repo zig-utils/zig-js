@@ -76,9 +76,9 @@
     {
       "id": "webassembly_profiles",
       "issue": 142,
-      "status": "open",
+      "status": "green",
       "evidence": ["docs/.data/wasm-conformance-matrix.json"],
-      "blockers": ["complete the remaining profile-wide CI and supported-host gates"]
+      "blockers": []
     },
     {
       "id": "shell_and_reference_hooks",
