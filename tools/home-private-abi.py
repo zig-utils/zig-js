@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
+SCRIPT_EXECUTION_CONTEXT_CONTRACT = ROOT / "docs/abi/home-script-execution-context-7ed99c02.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
@@ -464,6 +465,45 @@ def validate_stored(data: dict[str, object]) -> None:
         fail("stored source-file total drift")
 
 
+def validate_script_execution_context_contract(home_root: Path | None) -> None:
+    if not SCRIPT_EXECUTION_CONTEXT_CONTRACT.is_file():
+        fail(f"missing checked-in ScriptExecutionContext contract {SCRIPT_EXECUTION_CONTEXT_CONTRACT}")
+    contract = json.loads(SCRIPT_EXECUTION_CONTEXT_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "script-execution-context-registry-lifecycle"
+        or contract.get("revision") != REVISION
+        or contract.get("issue") != 401
+        or contract.get("parent_issue") != 140
+    ):
+        fail("ScriptExecutionContext contract schema, revision, or issue drift")
+    expected_sources = {
+        "packages/runtime/src/native/napi_weak_home_dups.cpp",
+        "packages/runtime/upstream/src/jsc/bindings/ScriptExecutionContext.cpp",
+    }
+    sources = contract.get("sources")
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("ScriptExecutionContext contract source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid ScriptExecutionContext digest for {relative}")
+        if home_root is not None:
+            path = home_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"ScriptExecutionContext source drift for {relative}")
+    expected_exports = {
+        "ScriptExecutionContextIdentifier__forGlobalObject",
+        "ScriptExecutionContextIdentifier__getGlobalObject",
+        "Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("ScriptExecutionContext export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 8 or len(semantics) != len(set(semantics)):
+        fail("ScriptExecutionContext semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -492,6 +532,7 @@ def main() -> None:
         refresh_implementation_status(stored)
         OUTPUT.write_text(json.dumps(stored, indent=2) + "\n")
     validate_stored(stored)
+    validate_script_execution_context_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

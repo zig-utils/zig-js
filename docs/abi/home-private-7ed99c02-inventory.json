@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 483,
-      "pending": 47
+      "implemented": 484,
+      "pending": 46
     }
   },
   "declarations": [
@@ -657,10 +657,10 @@
       "line": 144,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(identifier: u32) void;",
       "declaration_sha256": "011623fa85690453607f0f94b492839599e73233656d92bf5f35ac615ecd4768",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__SecretsJobOptions__deinit",

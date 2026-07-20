@@ -2530,6 +2530,10 @@ pub const Context = struct {
     /// the pinned private ABI. Zero means not assigned; published IDs are never
     /// changed or recycled during the process lifetime.
     c_api_script_execution_context_id: std.atomic.Value(u32) = .init(0),
+    /// Installed alongside the first private ScriptExecutionContextIdentifier.
+    /// Keeping the callback type-erased lets every destruction path retire the
+    /// process registry entry without making the engine core depend on c_api.
+    c_api_script_execution_context_unregister: ?*const fn (*Context) void = null,
     /// Opaque owner installed by the C API for grouped contexts. Kept opaque so
     /// the engine core does not depend on the public ABI wrapper type.
     c_api_group: ?*anyopaque = null,
@@ -3746,6 +3750,10 @@ pub const Context = struct {
 
     pub fn destroy(self: *Context) void {
         std.debug.assert(self.c_api_inspector_state == null);
+        if (self.c_api_script_execution_context_unregister) |unregister| {
+            self.c_api_script_execution_context_unregister = null;
+            unregister(self);
+        }
         const host_gpa = self.host_gpa;
         const context_gpa = self.gpa;
         const budget_allocator = self.budget_allocator;
@@ -3880,6 +3888,10 @@ pub const Context = struct {
         std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
         std.debug.assert(self.shared_jit_owner != null);
         std.debug.assert(self.c_api_inspector_state == null);
+        if (self.c_api_script_execution_context_unregister) |unregister| {
+            self.c_api_script_execution_context_unregister = null;
+            unregister(self);
+        }
         self.js_threads.deinit(self.gpa);
         self.active_interpreters.deinit(self.gpa);
         self.cancelAllTimers();

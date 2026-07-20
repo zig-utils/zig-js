@@ -419,6 +419,8 @@ const PrivateRemoteInspectorProcessState = struct {
 var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
 var private_inspector_sessions_lock: std.atomic.Mutex = .unlocked;
 var private_inspector_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty;
+var private_script_execution_contexts_lock: std.atomic.Mutex = .unlocked;
+var private_script_execution_contexts: std.AutoHashMapUnmanaged(u32, *Context) = .empty;
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
 var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
 var private_serialized_script_handles: std.AutoHashMapUnmanaged(usize, PrivateSerializedScriptOwned) = .empty;
@@ -449,20 +451,35 @@ fn takePrivateSerializedScript(raw: ?*anyopaque) ?PrivateSerializedScriptOwned {
     return removed.value;
 }
 
+fn lockPrivateScriptExecutionContexts() void {
+    var spins: usize = 0;
+    while (!private_script_execution_contexts_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn unregisterPrivateScriptExecutionContext(context: *Context) void {
+    const identifier = context.c_api_script_execution_context_id.load(.acquire);
+    if (identifier == 0) return;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    if (private_script_execution_contexts.get(identifier) == context)
+        _ = private_script_execution_contexts.remove(identifier);
+}
+
 fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     const existing = context.c_api_script_execution_context_id.load(.acquire);
     if (existing != 0) return existing;
-    var current = next_private_script_execution_context_id.load(.monotonic);
-    while (true) {
-        if (current == 0 or current == std.math.maxInt(u32)) return 0;
-        if (next_private_script_execution_context_id.cmpxchgWeak(current, current + 1, .acq_rel, .monotonic)) |observed| {
-            current = observed;
-            continue;
-        }
-        break;
-    }
-    if (context.c_api_script_execution_context_id.cmpxchgStrong(0, current, .release, .acquire)) |winner|
-        return winner;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    const winner = context.c_api_script_execution_context_id.load(.acquire);
+    if (winner != 0) return winner;
+    const current = next_private_script_execution_context_id.load(.monotonic);
+    if (current == 0 or current == std.math.maxInt(u32)) return 0;
+    private_script_execution_contexts.putNoClobber(gpa, current, context) catch return 0;
+    next_private_script_execution_context_id.store(current + 1, .monotonic);
+    context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
+    context.c_api_script_execution_context_id.store(current, .release);
     return current;
 }
 
@@ -14734,6 +14751,26 @@ export fn ScriptExecutionContextIdentifier__forGlobalObject(global: JSContextRef
     return privateScriptExecutionContextIdentifier(context);
 }
 
+/// Resolve a live private execution-context identifier. The returned global is
+/// borrowed and remains subject to the same host lifetime synchronization as
+/// JavaScriptCore's process-wide ScriptExecutionContext map.
+export fn ScriptExecutionContextIdentifier__getGlobalObject(identifier: u32) callconv(.c) JSContextRef {
+    if (identifier == 0) return null;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    return @ptrCast(private_script_execution_contexts.get(identifier) orelse return null);
+}
+
+/// Home removes a worker from the process registry before freeing its event
+/// loop/VM. Unknown and already-retired identifiers are intentionally inert so
+/// teardown can race with ordinary destruction without a double-remove trap.
+export fn Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(identifier: u32) callconv(.c) void {
+    if (identifier == 0) return;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    _ = private_script_execution_contexts.remove(identifier);
+}
+
 fn inspectorState(c: *Context) ?*CInspectorState {
     return @ptrCast(@alignCast(c.c_api_inspector_state orelse return null));
 }
@@ -20153,6 +20190,7 @@ test "private remote inspector controls preserve process-wide atomic state" {
 
 test "private script execution context identifiers are stable and process unique" {
     try std.testing.expectEqual(@as(u32, 0), ScriptExecutionContextIdentifier__forGlobalObject(null));
+    try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(0));
 
     const group = JSContextGroupCreate() orelse return error.GroupCreateFailed;
     defer JSContextGroupRelease(group);
@@ -20165,28 +20203,49 @@ test "private script execution context identifiers are stable and process unique
     try std.testing.expect(first_id != 0 and second_id != 0 and first_id != second_id);
     try std.testing.expectEqual(first_id, ScriptExecutionContextIdentifier__forGlobalObject(first));
     try std.testing.expectEqual(second_id, ScriptExecutionContextIdentifier__forGlobalObject(second));
+    try std.testing.expectEqual(first, ScriptExecutionContextIdentifier__getGlobalObject(first_id));
+    try std.testing.expectEqual(second, ScriptExecutionContextIdentifier__getGlobalObject(second_id));
 
     JSC__VM__throwError(JSC__JSGlobalObject__vm(first), first, EncodedValue.fromInt32(234));
     try std.testing.expectEqual(first_id, ScriptExecutionContextIdentifier__forGlobalObject(first));
     const pending = JSGlobalObject__tryTakeException(first);
     try std.testing.expectEqual(EncodedValue.fromInt32(234), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 
+    Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(first_id);
+    Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(first_id);
+    Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(0);
+    Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier(std.math.maxInt(u32));
+    try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(first_id));
+    try std.testing.expectEqual(first_id, ScriptExecutionContextIdentifier__forGlobalObject(first));
+    try std.testing.expectEqual(second, ScriptExecutionContextIdentifier__getGlobalObject(second_id));
+
+    const retired = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    const retired_id = ScriptExecutionContextIdentifier__forGlobalObject(retired);
+    try std.testing.expectEqual(retired, ScriptExecutionContextIdentifier__getGlobalObject(retired_id));
+    JSGlobalContextRelease(retired);
+    try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(retired_id));
+
     const Worker = struct {
-        fn run(slot: *u32) void {
+        const Result = struct { id: u32 = 0, live_before_release: bool = false, retired_after_release: bool = false };
+
+        fn run(result: *Result) void {
             const context = JSGlobalContextCreate(null) orelse return;
-            defer JSGlobalContextRelease(context);
             const id = ScriptExecutionContextIdentifier__forGlobalObject(context);
-            if (id != 0 and ScriptExecutionContextIdentifier__forGlobalObject(context) == id)
-                slot.* = id;
+            result.id = id;
+            result.live_before_release = id != 0 and ScriptExecutionContextIdentifier__getGlobalObject(id) == context;
+            JSGlobalContextRelease(context);
+            result.retired_after_release = ScriptExecutionContextIdentifier__getGlobalObject(id) == null;
         }
     };
-    var ids: [8]u32 = @splat(0);
+    var results: [8]Worker.Result = @splat(.{});
     var threads: [8]std.Thread = undefined;
-    for (&threads, &ids) |*thread, *slot| thread.* = try std.Thread.spawn(.{}, Worker.run, .{slot});
+    for (&threads, &results) |*thread, *result| thread.* = try std.Thread.spawn(.{}, Worker.run, .{result});
     for (&threads) |*thread| thread.join();
-    for (ids, 0..) |id, index| {
+    for (results, 0..) |result, index| {
+        const id = result.id;
         try std.testing.expect(id != 0 and id != first_id and id != second_id);
-        for (ids[0..index]) |prior| try std.testing.expect(id != prior);
+        try std.testing.expect(result.live_before_release and result.retired_after_release);
+        for (results[0..index]) |prior| try std.testing.expect(id != prior.id);
     }
 }
 

@@ -504,6 +504,23 @@ pub fn build(b: *std.Build) void {
     private_process_signal_test_step.dependOn(&run_home_private_process_signal_fixture.step);
     private_process_signal_test_step.dependOn(&run_bun_private_process_signal_fixture.step);
 
+    const home_private_script_execution_context_fixture = b.addExecutable(.{
+        .name = "home-private-script-execution-context",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_private_script_execution_context.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    home_private_script_execution_context_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_script_execution_context_fixture = b.addRunArtifact(home_private_script_execution_context_fixture);
+    run_home_private_script_execution_context_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+    const home_private_script_execution_context_test_step = b.step(
+        "test-home-private-script-execution-context",
+        "Compile, link, and run Home's ScriptExecutionContext registry boundary",
+    );
+    home_private_script_execution_context_test_step.dependOn(&run_home_private_script_execution_context_fixture.step);
+
     const home_private_error_code_fixture = b.addExecutable(.{
         .name = "home-private-error-code",
         .root_module = b.createModule(.{

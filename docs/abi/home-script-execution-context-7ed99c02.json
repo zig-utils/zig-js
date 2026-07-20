@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "contract": "script-execution-context-registry-lifecycle",
+  "revision": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+  "issue": 401,
+  "parent_issue": 140,
+  "sources": {
+    "packages/runtime/src/native/napi_weak_home_dups.cpp": "cd0a2d50d7dd8d4ad8f8f38cff18f1322390fbb64bb7ffbf9328b2f736e4fd34",
+    "packages/runtime/upstream/src/jsc/bindings/ScriptExecutionContext.cpp": "96ef714123e049be522deb7204063da22dd44909fbd83c98f707415e55764910"
+  },
+  "exports": [
+    "ScriptExecutionContextIdentifier__forGlobalObject",
+    "ScriptExecutionContextIdentifier__getGlobalObject",
+    "Bun__ScriptExecutionContext__removeFromContextsMapByIdentifier"
+  ],
+  "semantics": [
+    "Each registered global receives one stable nonzero process-wide 32-bit identifier, and identifiers are never recycled.",
+    "Independent contexts and sibling realms receive distinct identifiers, including during parallel creation.",
+    "A live registered identifier resolves to its borrowed global context; zero and unknown identifiers resolve to null.",
+    "Explicit removal makes the identifier immediately unresolvable without changing the global's stable identifier.",
+    "Removal is context-isolated and idempotent for zero, unknown, and already-retired identifiers.",
+    "Every C-API context destruction path unregisters its identifier before freeing context-owned state.",
+    "The registry and identifier allocator are serialized across host threads.",
+    "The exact Home-profile library compiles, links, and runs a consumer covering explicit removal, natural teardown, sibling isolation, and parallel lifetimes."
+  ]
+}
