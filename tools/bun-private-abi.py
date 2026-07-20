@@ -23,6 +23,7 @@ MODULE_REGISTRY_SHIMS_CONTRACT = ROOT / "docs/abi/bun-module-registry-shims-4982
 HEAP_SNAPSHOT_CONTRACT = ROOT / "docs/abi/heap-snapshot-serialization-403.json"
 CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
+FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -618,6 +619,45 @@ def validate_readable_stream_contract(bun_root: Path | None) -> None:
         fail("ReadableStream semantic inventory is incomplete or duplicated")
 
 
+def validate_fetch_body_contract(bun_root: Path | None) -> None:
+    if not FETCH_BODY_CONTRACT.is_file():
+        fail(f"missing checked-in Fetch Body contract {FETCH_BODY_CONTRACT}")
+    contract = json.loads(FETCH_BODY_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "fetch-body-lifecycle"
+        or contract.get("issue") != 407
+        or contract.get("parent_issues") != [405, 406]
+        or contract.get("revisions") != {"home": "7ed99c02e50034f869d0db6d487115bb44332fe4", "bun": REVISION}
+    ):
+        fail("Fetch Body contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_bun = {
+        "src/runtime/webcore/Body.zig",
+        "src/runtime/webcore/Response.zig",
+        "src/js/builtins/ReadableStream.ts",
+        "src/js/builtins/ReadableStreamInternals.ts",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("Fetch Body contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(bun_sources, dict) or set(bun_sources) != expected_bun or not isinstance(home_sources, dict):
+        fail("Fetch Body contract Bun source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid Fetch Body digest for {relative}")
+    if bun_root is not None:
+        for relative, digest in bun_sources.items():
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"Fetch Body source drift for {relative}")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 12 or len(semantics) != len(set(semantics)):
+        fail("Fetch Body semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -649,6 +689,7 @@ def main() -> None:
     validate_heap_snapshot_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_cpu_profile_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_readable_stream_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_fetch_body_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

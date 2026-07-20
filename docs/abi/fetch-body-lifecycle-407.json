@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "contract": "fetch-body-lifecycle",
+  "issue": 407,
+  "parent_issues": [405, 406],
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "home": {
+      "packages/runtime/src/runtime/webcore/Body.zig": "51b05af87ee778347c923d85ad7c1e854ce46f3795d0ec7ac492f0734a66a4d1",
+      "packages/runtime/src/runtime/webcore/Response.zig": "3d2768e35509956da075e4ac39757b588f691f78dbe3643e3448c213fe2825c6",
+      "packages/runtime/upstream/src/js/builtins/ReadableStream.ts": "6416fb2e379a2f06582d5101572d74fc94beb00c4d41704805da28eba289fbe1",
+      "packages/runtime/upstream/src/js/builtins/ReadableStreamInternals.ts": "a05d08f094ecaa5784a6284c770b397ffce054a32854b4bfe832a26c6ecc4f75"
+    },
+    "bun": {
+      "src/runtime/webcore/Body.zig": "51b05af87ee778347c923d85ad7c1e854ce46f3795d0ec7ac492f0734a66a4d1",
+      "src/runtime/webcore/Response.zig": "458f4daa3a1559b63fb7c32574c4d935d96bad775a2b62f134b4fee3694598af",
+      "src/js/builtins/ReadableStream.ts": "6416fb2e379a2f06582d5101572d74fc94beb00c4d41704805da28eba289fbe1",
+      "src/js/builtins/ReadableStreamInternals.ts": "c784271f5892f91f06eb8b1fe868f60dbd8cf8eea6cbfca45cc32fec24a6a1b6"
+    }
+  },
+  "semantics": [
+    "Response and Request retain an input ReadableStream as a managed body edge instead of coercing it to text or consuming it eagerly.",
+    "Buffered bodies lazily project one engine-native ReadableStream and keep that identity stable for subsequent body access and consumption.",
+    "A null body projects null, remains reusable, and resolves each Body conversion with the appropriate empty representation without becoming disturbed.",
+    "bodyUsed is derived from explicit transfer state or the underlying stream disturbed state and therefore changes as soon as consumption begins.",
+    "Locked or already-disturbed non-null bodies reject conversion and cloning without falsely changing bodyUsed.",
+    "text, JSON, ArrayBuffer, bytes, Blob, and FormData methods share the same reader, queue, cancellation, error, UTF-8, and multipart machinery as the private stream consumers.",
+    "Blob conversion carries the normalized Content-Type header while FormData dispatches between URL-encoded and multipart parsing using that header.",
+    "Response.clone and Request.clone tee a live stream once, preserve metadata and headers, and give each clone an independently consumable branch.",
+    "ReadableStream.tee duplicates ordered chunks without coercion, propagates source errors to both branches, and combines two cancellation reasons before cancelling the source.",
+    "Constructing a Request from another Request transfers the body, marks the source used, and rejects consumed or locked source bodies.",
+    "All response, request, tee-state, reader, branch, callback, and queued-chunk links are managed Value edges that survive collection and relocation.",
+    "Focused Debug, ReleaseSafe, and TSan evidence exercises asynchronous streams, repeated reads, locking, cloning, cancellation, content types, null bodies, and Request transfer."
+  ]
+}

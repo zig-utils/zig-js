@@ -566,6 +566,12 @@ Blob creation, and URL-encoded or multipart FormData across same-VM realms.
 The exact Home/Bun source and behavior contract is
 [`readable-stream-consumption-405.json`](readable-stream-consumption-405.json).
 
+Fetch `Response` and `Request` bodies retain those streams as managed edges;
+buffered bodies project a stable stream lazily, every Body conversion uses the
+same consumer machinery, and cloning tees live streams with combined
+cancellation. The pinned lifecycle contract is
+[`fetch-body-lifecycle-407.json`](fetch-body-lifecycle-407.json).
+
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
 described/undescribed Symbols. Strings retain their original encoded identity;

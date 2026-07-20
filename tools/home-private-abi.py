@@ -17,6 +17,7 @@ OUTPUT = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 SCRIPT_EXECUTION_CONTEXT_CONTRACT = ROOT / "docs/abi/home-script-execution-context-7ed99c02.json"
 CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
+FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
 PROFILE_ID = "home-private-7ed99c02"
@@ -592,6 +593,45 @@ def validate_readable_stream_contract(home_root: Path | None) -> None:
         fail("ReadableStream semantic inventory is incomplete or duplicated")
 
 
+def validate_fetch_body_contract(home_root: Path | None) -> None:
+    if not FETCH_BODY_CONTRACT.is_file():
+        fail(f"missing checked-in Fetch Body contract {FETCH_BODY_CONTRACT}")
+    contract = json.loads(FETCH_BODY_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "fetch-body-lifecycle"
+        or contract.get("issue") != 407
+        or contract.get("parent_issues") != [405, 406]
+        or contract.get("revisions") != {"home": REVISION, "bun": "4982b91e3702094330f3be3883354c52b8c01323"}
+    ):
+        fail("Fetch Body contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_home = {
+        "packages/runtime/src/runtime/webcore/Body.zig",
+        "packages/runtime/src/runtime/webcore/Response.zig",
+        "packages/runtime/upstream/src/js/builtins/ReadableStream.ts",
+        "packages/runtime/upstream/src/js/builtins/ReadableStreamInternals.ts",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("Fetch Body contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(home_sources, dict) or set(home_sources) != expected_home or not isinstance(bun_sources, dict):
+        fail("Fetch Body contract Home source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid Fetch Body digest for {relative}")
+    if home_root is not None:
+        for relative, digest in home_sources.items():
+            path = home_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"Fetch Body source drift for {relative}")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 12 or len(semantics) != len(set(semantics)):
+        fail("Fetch Body semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -623,6 +663,7 @@ def main() -> None:
     validate_script_execution_context_contract(args.home_root.resolve() if args.home_root else None)
     validate_cpu_profile_contract(args.home_root.resolve() if args.home_root else None)
     validate_readable_stream_contract(args.home_root.resolve() if args.home_root else None)
+    validate_fetch_body_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]
