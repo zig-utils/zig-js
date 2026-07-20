@@ -13,12 +13,19 @@
     "operations": [
       "ForwardingRecord",
       "StableCellId",
+      "rewriteAtomicPointerSlot",
       "rewriteAtomicValue",
+      "rewriteAtomicValueSlot",
       "rewriteInterior",
+      "rewriteInteriorSlot",
       "rewriteOptional",
+      "rewriteOptionalSlot",
+      "rewriteOptionalValueSlot",
       "rewriteRequired",
+      "rewriteRequiredSlot",
       "rewriteStrongAtomic",
       "rewriteValue",
+      "rewriteValueSlot",
       "rewriteWeak",
       "rewriteWeakAtomic"
     ]

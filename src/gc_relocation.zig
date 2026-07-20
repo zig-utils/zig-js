@@ -5,42 +5,14 @@
 //! and records the stable logical identity carried across an address change.
 
 const std = @import("std");
-const gc = @import("gc.zig");
+const gc_core = @import("gc");
 const value = @import("value.zig");
 const strcell = @import("strcell.zig");
 
-pub const CellKind = gc.CellKind;
 pub const Value = value.Value;
-
-/// Address-independent identity assigned by a relocation plan. It is never
-/// observable as JavaScript data; host identity tables will key by this value
-/// while a compaction is active instead of treating a payload address as the
-/// identity itself.
-pub const StableCellId = enum(u64) {
-    _,
-
-    pub fn init(raw: u64) StableCellId {
-        std.debug.assert(raw != 0);
-        return @enumFromInt(raw);
-    }
-};
-
-pub const ForwardingState = enum {
-    planned,
-    copied,
-    rewritten,
-};
-
-/// Failure-atomic compaction first builds these records without touching the
-/// old heap. The stable ID and old address remain valid until the rewrite phase
-/// commits; #334 will own allocation, copy, rollback, and publication.
-pub const ForwardingRecord = struct {
-    id: StableCellId,
-    kind: CellKind,
-    old_payload: *anyopaque,
-    new_payload: *anyopaque,
-    state: ForwardingState = .planned,
-};
+pub const StableCellId = gc_core.StableCellId;
+pub const ForwardingState = gc_core.RelocationState;
+pub const ForwardingRecord = gc_core.RelocationRecord;
 
 pub const EdgeKind = enum {
     strong,
@@ -160,6 +132,53 @@ pub const Relocator = struct {
     }
 };
 
+/// Slot operations used by the actual zig-gc relocation visitor. Unlike the
+/// standalone contract-test `Relocator` above, zig-gc's complete plan always
+/// resolves a non-null live pointer: moved cells map to their destination and
+/// pinned cells map to themselves.
+pub fn rewriteRequiredSlot(v: anytype, comptime T: type, slot: **T) void {
+    slot.* = @ptrCast(@alignCast(v.resolve(slot.*)));
+}
+
+pub fn rewriteOptionalSlot(v: anytype, comptime T: type, slot: *?*T) void {
+    const old = slot.* orelse return;
+    slot.* = @ptrCast(@alignCast(v.resolve(old)));
+}
+
+pub fn rewriteAtomicPointerSlot(v: anytype, slot: *std.atomic.Value(?*anyopaque)) void {
+    const old = slot.load(.acquire) orelse return;
+    slot.store(v.resolve(old), .release);
+}
+
+pub fn rewriteValueSlot(v: anytype, slot: *Value) void {
+    if (slot.isObject()) {
+        slot.* = Value.obj(@ptrCast(@alignCast(v.resolve(slot.asObj()))));
+        return;
+    }
+    if (slot.isString()) {
+        const old = slot.asStringCell();
+        if (!old.isGcManaged()) return;
+        const relocated: *strcell.StringCell = @ptrCast(@alignCast(v.resolve(@constCast(old))));
+        slot.* = Value.strCell(relocated);
+    }
+}
+
+pub fn rewriteOptionalValueSlot(v: anytype, slot: *?Value) void {
+    if (slot.*) |*current| rewriteValueSlot(v, current);
+}
+
+pub fn rewriteAtomicValueSlot(v: anytype, slot: *std.atomic.Value(u64)) void {
+    var rewritten = Value.fromRawBits(slot.load(.acquire));
+    rewriteValueSlot(v, &rewritten);
+    slot.store(rewritten.rawBits(), .release);
+}
+
+pub fn rewriteInteriorSlot(v: anytype, old_base: *anyopaque, address: *usize) void {
+    const old_address = @intFromPtr(old_base);
+    std.debug.assert(address.* >= old_address);
+    address.* = @intFromPtr(v.resolve(old_base)) + (address.* - old_address);
+}
+
 test "gc relocation contract rewrites strong weak atomic Value and interior edges" {
     var old_object_storage: [@sizeOf(value.Object)]u8 align(@alignOf(value.Object)) = undefined;
     var new_object_storage: [@sizeOf(value.Object)]u8 align(@alignOf(value.Object)) = undefined;
@@ -196,6 +215,15 @@ test "gc relocation contract rewrites strong weak atomic Value and interior edge
     };
     const relocator = Relocator{ .context = &map, .resolve_fn = Map.resolve };
 
+    const Plan = struct {
+        map: *Map,
+
+        fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            return Map.resolve(self.map, old, .strong) orelse old;
+        }
+    };
+    const plan = Plan{ .map = &map };
+
     var required = old_object;
     relocator.rewriteRequired(value.Object, &required);
     try std.testing.expectEqual(new_object, required);
@@ -227,14 +255,29 @@ test "gc relocation contract rewrites strong weak atomic Value and interior edge
     var interior = @intFromPtr(old_object) + 7;
     relocator.rewriteInterior(old_object, &interior);
     try std.testing.expectEqual(@intFromPtr(new_object) + 7, interior);
+
+    var plan_required = old_object;
+    rewriteRequiredSlot(&plan, value.Object, &plan_required);
+    try std.testing.expectEqual(new_object, plan_required);
+    var plan_value = Value.strCell(old_string);
+    rewriteValueSlot(&plan, &plan_value);
+    try std.testing.expectEqual(new_string, plan_value.asStringCell());
+    var plan_atomic = std.atomic.Value(u64).init(Value.obj(old_object).rawBits());
+    rewriteAtomicValueSlot(&plan, &plan_atomic);
+    try std.testing.expectEqual(new_object, Value.fromRawBits(plan_atomic.load(.acquire)).asObj());
+    var plan_interior = @intFromPtr(old_object) + 9;
+    rewriteInteriorSlot(&plan, old_object, &plan_interior);
+    try std.testing.expectEqual(@intFromPtr(new_object) + 9, plan_interior);
 }
 
 test "gc relocation forwarding records preserve logical identity across address changes" {
+    const Kind = enum { object };
     var old: u64 = 1;
     var new: u64 = 2;
-    var record = ForwardingRecord{
+    var record = ForwardingRecord(Kind){
         .id = .init(7),
         .kind = .object,
+        .size = @sizeOf(u64),
         .old_payload = &old,
         .new_payload = &new,
     };
