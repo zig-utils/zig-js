@@ -3902,6 +3902,553 @@ fn privateSpecificTypeFunctionName(object: *Object) []const u8 {
     return privateCalculatedDisplayName(object);
 }
 
+const PrivateDiagnosticQuoteStyle = enum {
+    json,
+    inspect,
+};
+
+/// Presentation-only formatter used by Bun's invalid-argument diagnostics.
+/// It mirrors the no-color `ConsoleObject.Formatter` path used by `Bun__inspect`:
+/// own accessors are described rather than invoked, Proxies expose their target,
+/// and the active recursion path (not every previously seen object) determines
+/// `[Circular]`.
+const PrivateDiagnosticInspector = struct {
+    allocator: std.mem.Allocator,
+    machine: *interp.Interpreter,
+    output: std.ArrayListUnmanaged(u8) = .empty,
+    active: std.AutoHashMapUnmanaged(*Object, void) = .empty,
+    indent: usize = 0,
+    depth: usize = 0,
+    max_depth: usize = 8,
+    single_line: bool = false,
+    quote_style: PrivateDiagnosticQuoteStyle = .json,
+
+    fn deinit(self: *PrivateDiagnosticInspector) void {
+        self.active.deinit(self.allocator);
+        self.output.deinit(self.allocator);
+    }
+
+    fn append(self: *PrivateDiagnosticInspector, bytes: []const u8) !void {
+        try self.output.appendSlice(self.allocator, bytes);
+    }
+
+    fn appendByte(self: *PrivateDiagnosticInspector, byte: u8) !void {
+        try self.output.append(self.allocator, byte);
+    }
+
+    fn writeIndent(self: *PrivateDiagnosticInspector) !void {
+        try self.output.appendNTimes(self.allocator, ' ', self.indent * 2);
+    }
+
+    fn writeParentIndent(self: *PrivateDiagnosticInspector) !void {
+        try self.output.appendNTimes(self.allocator, ' ', (self.indent -| 1) * 2);
+    }
+
+    fn appendUnsigned(self: *PrivateDiagnosticInspector, integer: usize) !void {
+        var buffer: [32]u8 = undefined;
+        try self.append(try std.fmt.bufPrint(&buffer, "{d}", .{integer}));
+    }
+
+    fn appendEscapedUTF16(self: *PrivateDiagnosticInspector, units: []align(1) const u16, quote: u16) !void {
+        var start: usize = 0;
+        var index: usize = 0;
+        while (index < units.len) : (index += 1) {
+            const unit = units[index];
+            const paired_surrogate = unit >= 0xd800 and unit <= 0xdbff and index + 1 < units.len and
+                units[index + 1] >= 0xdc00 and units[index + 1] <= 0xdfff;
+            const lone_surrogate = (unit >= 0xd800 and unit <= 0xdfff) and !paired_surrogate and
+                !(unit >= 0xdc00 and unit <= 0xdfff and index > 0 and units[index - 1] >= 0xd800 and units[index - 1] <= 0xdbff);
+            const escaped: ?[]const u8 = if (unit == quote)
+                if (quote == '\'') "\\'" else "\\\""
+            else switch (unit) {
+                '\\' => "\\\\",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => null,
+            };
+            if (escaped == null and unit >= 0x20 and !lone_surrogate) continue;
+            try privateSpecificTypeAppendUTF16(&self.output, self.allocator, units[start..index]);
+            if (escaped) |sequence| {
+                try self.append(sequence);
+            } else {
+                var buffer: [6]u8 = undefined;
+                try self.append(try std.fmt.bufPrint(&buffer, "\\u{x:0>4}", .{unit}));
+            }
+            start = index + 1;
+        }
+        try privateSpecificTypeAppendUTF16(&self.output, self.allocator, units[start..]);
+    }
+
+    fn formatString(self: *PrivateDiagnosticInspector, bytes: []const u8) !void {
+        const units = try privateWTF8ToUTF16(self.allocator, bytes);
+        defer self.allocator.free(units);
+        var quote: u16 = '"';
+        if (self.quote_style == .inspect) {
+            quote = '\'';
+            if (std.mem.indexOfScalar(u16, units, '\'') != null and std.mem.indexOfScalar(u16, units, '"') == null)
+                quote = '"';
+        }
+        try self.appendByte(@intCast(quote));
+        try self.appendEscapedUTF16(units, quote);
+        try self.appendByte(@intCast(quote));
+    }
+
+    fn formatNumber(self: *PrivateDiagnosticInspector, number: f64) !void {
+        if (number == 0 and std.math.signbit(number)) {
+            try self.append("-0");
+            return;
+        }
+        try self.append(try value.numberToString(self.machine.arena, number));
+    }
+
+    fn formatFunction(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        const name = privateSpecificTypeFunctionName(object);
+        if (interp.Interpreter.funcOf(Value.obj(object))) |function| {
+            if (function.is_class_constructor) {
+                try self.append("[class");
+                if (name.len > 0) {
+                    try self.append(" ");
+                    try self.append(name);
+                }
+                try self.append("]");
+                return;
+            }
+            if (function.is_async) {
+                try self.append(if (function.is_generator) "[AsyncGeneratorFunction" else "[AsyncFunction");
+                if (name.len > 0) {
+                    try self.append(": ");
+                    try self.append(name);
+                }
+                try self.append("]");
+                return;
+            }
+            if (function.is_generator) {
+                try self.append("[GeneratorFunction");
+                if (name.len > 0) {
+                    try self.append(": ");
+                    try self.append(name);
+                }
+                try self.append("]");
+                return;
+            }
+        }
+        try self.append("[Function");
+        if (name.len > 0) {
+            try self.append(": ");
+            try self.append(name);
+        }
+        try self.append("]");
+    }
+
+    fn formatSymbol(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        try self.append("Symbol(");
+        if (object.symbolDescription()) |description| try self.append(description);
+        try self.append(")");
+    }
+
+    fn propertyKeyIsIdentifier(key: []const u8) bool {
+        if (key.len == 0) return false;
+        if (!(std.ascii.isAlphabetic(key[0]) or key[0] == '_' or key[0] == '$')) return false;
+        for (key[1..]) |byte|
+            if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '$')) return false;
+        return true;
+    }
+
+    fn formatPropertyKey(self: *PrivateDiagnosticInspector, key: []const u8) !void {
+        if (value.isRealSymbolKey(key)) {
+            const symbol = try self.machine.keyToValue(key);
+            try self.append("[");
+            if (symbol.isObject() and symbol.asObj().is_symbol)
+                try self.formatSymbol(symbol.asObj())
+            else
+                try self.append("Symbol()");
+            try self.append("]");
+        } else if (propertyKeyIsIdentifier(key)) {
+            try self.append(key);
+        } else {
+            const saved = self.quote_style;
+            self.quote_style = .json;
+            defer self.quote_style = saved;
+            try self.formatString(key);
+        }
+    }
+
+    fn objectName(self: *PrivateDiagnosticInspector, object: *Object) []const u8 {
+        const raw = privateStaticClassInfoName(Value.obj(object)) orelse "Object";
+        return privateCalculatedClassName(self.machine, object, raw);
+    }
+
+    fn beginCircular(self: *PrivateDiagnosticInspector, object: *Object) !bool {
+        const entry = try self.active.getOrPut(self.allocator, object);
+        if (entry.found_existing) {
+            try self.append("[Circular]");
+            return false;
+        }
+        return true;
+    }
+
+    fn endCircular(self: *PrivateDiagnosticInspector, object: *Object) void {
+        _ = self.active.remove(object);
+    }
+
+    fn formatAccessor(self: *PrivateDiagnosticInspector, accessor: value.Accessor) !void {
+        if (accessor.get != null and accessor.set != null)
+            try self.append("[Getter/Setter]")
+        else if (accessor.get != null)
+            try self.append("[Getter]")
+        else if (accessor.set != null)
+            try self.append("[Setter]")
+        else
+            try self.append("undefined");
+    }
+
+    fn customInspect(self: *PrivateDiagnosticInspector, input: Value) !bool {
+        const object = input.asObj();
+        if (object.proxyHandler() != null or object.proxy_revoked) return false;
+        const symbol = try interp.symbolForKey(self.machine, "nodejs.util.inspect.custom");
+        const key = try self.machine.keyOf(symbol);
+        const callback = try self.machine.getProperty(input, key);
+        if (!callback.isCallable()) return false;
+        const result = try privateCallCustomInspectFunction(
+            self.machine,
+            callback,
+            input,
+            @intCast(self.max_depth -| self.depth),
+            @intCast(self.max_depth),
+            false,
+        );
+        if (result.isString()) {
+            try self.append(result.asStr());
+        } else {
+            try self.formatValue(result);
+        }
+        return true;
+    }
+
+    fn formatArray(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        if (!try self.beginCircular(object)) return;
+        defer self.endCircular(object);
+        const length = object.arrayLength();
+        if (length == 0) {
+            try self.append("[]");
+            return;
+        }
+        try self.append("[ ");
+        self.depth += 1;
+        self.indent += 1;
+        defer {
+            self.depth -= 1;
+            self.indent -= 1;
+        }
+        var hole_start: ?usize = null;
+        var emitted = false;
+        var index: usize = 0;
+        while (index < length and index < 100) : (index += 1) {
+            if (object.isHole(index) or object.elementAt(index) == null) {
+                if (hole_start == null) hole_start = index;
+                continue;
+            }
+            if (hole_start) |start| {
+                if (emitted) try self.append(", ");
+                const count = index - start;
+                if (count == 1) try self.append("empty item") else {
+                    try self.appendUnsigned(count);
+                    try self.append(" x empty items");
+                }
+                emitted = true;
+                hole_start = null;
+            }
+            if (emitted) try self.append(", ");
+            try self.formatValue(object.elementAt(index).?);
+            emitted = true;
+        }
+        if (hole_start) |start| {
+            if (emitted) try self.append(", ");
+            const count = length - start;
+            if (count == 1) try self.append("empty item") else {
+                try self.appendUnsigned(count);
+                try self.append(" x empty items");
+            }
+            emitted = true;
+        }
+        if (index < length) {
+            if (emitted) try self.append(", ");
+            try self.append("... ");
+            try self.appendUnsigned(length - index);
+            try self.append(" more items");
+        }
+        try self.append(" ]");
+    }
+
+    fn formatTypedArray(self: *PrivateDiagnosticInspector, typed: *value.TypedArrayData) !void {
+        const length = typed.currentLength() orelse {
+            try self.append(typed.kind.ctorName());
+            try self.append("(0) []");
+            return;
+        };
+        try self.append(typed.kind.ctorName());
+        try self.append("(");
+        try self.appendUnsigned(length);
+        try self.append(") [");
+        if (length == 0) {
+            try self.append("]");
+            return;
+        }
+        try self.append(" ");
+        const shown = @min(length, 513);
+        for (0..shown) |index| {
+            if (index > 0) try self.append(", ");
+            if (typed.kind.isBigInt()) {
+                var buffer: [64]u8 = undefined;
+                try self.append(try std.fmt.bufPrint(&buffer, "{d}n", .{value.taReadBig(typed, index)}));
+            } else {
+                try self.formatNumber(value.taRead(typed, index).asNum());
+            }
+        }
+        if (shown < length) {
+            try self.append(", ... ");
+            try self.appendUnsigned(length - shown);
+            try self.append(" more");
+        }
+        try self.append(" ]");
+    }
+
+    fn formatMap(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        if (!try self.beginCircular(object)) return;
+        defer self.endCircular(object);
+        const entries = try privateDeepElementSnapshot(self.machine, object);
+        var count: usize = 0;
+        for (entries) |entry| {
+            if (privateDeepMapEntry(entry) != null) count += 1;
+        }
+        try self.append(if (object.is_weak) "WeakMap(" else "Map(");
+        try self.appendUnsigned(count);
+        try self.append(")");
+        if (count == 0) {
+            try self.append(" {}");
+            return;
+        }
+        try self.append(if (self.single_line) " { " else " {\n");
+        self.depth += 1;
+        self.indent += 1;
+        defer {
+            self.depth -= 1;
+            self.indent -= 1;
+        }
+        var emitted: usize = 0;
+        for (entries) |raw| {
+            const entry = privateDeepMapEntry(raw) orelse continue;
+            if (self.single_line) {
+                if (emitted > 0) try self.append(", ");
+            } else try self.writeIndent();
+            try self.formatValue(entry.key);
+            try self.append(": ");
+            try self.formatValue(entry.value_);
+            emitted += 1;
+            if (!self.single_line) try self.append(",\n");
+        }
+        if (self.single_line) try self.append(" }") else {
+            try self.writeParentIndent();
+            try self.append("}");
+        }
+    }
+
+    fn formatSet(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        if (!try self.beginCircular(object)) return;
+        defer self.endCircular(object);
+        const entries = try privateDeepElementSnapshot(self.machine, object);
+        var count: usize = 0;
+        for (entries) |entry| {
+            if (privateDeepSetEntry(entry) != null) count += 1;
+        }
+        try self.append(if (object.is_weak) "WeakSet(" else "Set(");
+        try self.appendUnsigned(count);
+        try self.append(")");
+        if (count == 0) {
+            try self.append(" {}");
+            return;
+        }
+        try self.append(if (self.single_line) " { " else " {\n");
+        self.depth += 1;
+        self.indent += 1;
+        defer {
+            self.depth -= 1;
+            self.indent -= 1;
+        }
+        var emitted: usize = 0;
+        for (entries) |raw| {
+            const entry = privateDeepSetEntry(raw) orelse continue;
+            if (self.single_line) {
+                if (emitted > 0) try self.append(", ");
+            } else try self.writeIndent();
+            try self.formatValue(entry);
+            emitted += 1;
+            if (!self.single_line) try self.append(",\n");
+        }
+        if (self.single_line) try self.append(" }") else {
+            try self.writeParentIndent();
+            try self.append("}");
+        }
+    }
+
+    fn formatObject(self: *PrivateDiagnosticInspector, object: *Object) !void {
+        if (object.proxy_revoked) {
+            try self.append("<Revoked Proxy>");
+            return;
+        }
+        if (object.proxyTarget()) |target| {
+            try self.formatValue(Value.obj(target));
+            return;
+        }
+        if (try self.customInspect(Value.obj(object))) return;
+        if (object.isCallableObject()) {
+            try self.formatFunction(object);
+            return;
+        }
+        if (object.is_array) {
+            try self.formatArray(object);
+            return;
+        }
+        if (object.typedArray()) |typed| {
+            try self.formatTypedArray(typed);
+            return;
+        }
+        if (object.is_map) {
+            try self.formatMap(object);
+            return;
+        }
+        if (object.is_set) {
+            try self.formatSet(object);
+            return;
+        }
+        if (object.behavior.is_date) {
+            var buffer: [28]u8 = undefined;
+            if (interp.Interpreter.writeDateISOString(object.dateMs(), &buffer)) |length|
+                try self.append(buffer[0..length])
+            else
+                try self.append("Invalid Date");
+            return;
+        }
+        if (object.behavior.is_regex) {
+            try self.append("/");
+            try self.append(object.regexSource());
+            try self.append("/");
+            try self.append(object.regexFlags());
+            return;
+        }
+        if (object.boxedPrimitive()) |boxed| {
+            try self.append("[");
+            try self.append(switch (boxed.kind()) {
+                .number => "Number: ",
+                .string => "String: ",
+                .boolean => "Boolean: ",
+                else => "Object: ",
+            });
+            try self.formatValue(boxed);
+            try self.append("]");
+            return;
+        }
+        if (self.depth > self.max_depth) {
+            try self.append("[");
+            try self.append(self.objectName(object));
+            try self.append(" ...]");
+            return;
+        }
+        if (!try self.beginCircular(object)) return;
+        defer self.endCircular(object);
+        const keys = try self.machine.objectOwnKeysList(object);
+        var visible: usize = 0;
+        for (keys) |key| {
+            if (value.isPrivateKey(key) or (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) or
+                std.mem.eql(u8, key, "constructor")) continue;
+            visible += 1;
+        }
+        const name = self.objectName(object);
+        if (object.protoExplicitNull()) {
+            try self.append("[Object: null prototype] ");
+        } else if (!std.mem.eql(u8, name, "Object")) {
+            try self.append(name);
+            try self.append(" ");
+        }
+        if (visible == 0) {
+            try self.append("{}");
+            return;
+        }
+        try self.append(if (self.single_line) "{ " else "{\n");
+        self.depth += 1;
+        self.indent += 1;
+        defer {
+            self.depth -= 1;
+            self.indent -= 1;
+        }
+        var emitted: usize = 0;
+        for (keys) |key| {
+            if (value.isPrivateKey(key) or (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) or
+                std.mem.eql(u8, key, "constructor")) continue;
+            if (self.single_line) {
+                if (emitted > 0) try self.append(", ");
+            } else try self.writeIndent();
+            try self.formatPropertyKey(key);
+            try self.append(": ");
+            if (object.getAccessor(key)) |accessor|
+                try self.formatAccessor(accessor)
+            else if (object.getOwn(key)) |property|
+                try self.formatValue(property)
+            else
+                try self.append("undefined");
+            emitted += 1;
+            if (!self.single_line) try self.append(",\n");
+        }
+        if (self.single_line) try self.append(" }") else {
+            try self.writeParentIndent();
+            try self.append("}");
+        }
+    }
+
+    fn formatValue(self: *PrivateDiagnosticInspector, input: Value) anyerror!void {
+        switch (input.kind()) {
+            .undefined => try self.append("undefined"),
+            .null => try self.append("null"),
+            .boolean => try self.append(if (input.asBool()) "true" else "false"),
+            .number => try self.formatNumber(input.asNum()),
+            .string => try self.formatString(input.asStr()),
+            .object => {
+                const object = input.asObj();
+                if (object.is_symbol)
+                    try self.formatSymbol(object)
+                else if (object.is_bigint) {
+                    try self.append(try value.bigIntToString(object, self.machine.arena));
+                    try self.append("n");
+                } else try self.formatObject(object);
+            },
+        }
+    }
+
+    fn take(self: *PrivateDiagnosticInspector) ![]u8 {
+        return self.output.toOwnedSlice(self.allocator);
+    }
+};
+
+fn privateDiagnosticInspectBytes(
+    allocator: std.mem.Allocator,
+    machine: *interp.Interpreter,
+    input: Value,
+    single_line: bool,
+) ![]u8 {
+    var formatter = PrivateDiagnosticInspector{
+        .allocator = allocator,
+        .machine = machine,
+        .single_line = single_line,
+        .quote_style = if (single_line) .inspect else .json,
+    };
+    defer formatter.deinit();
+    try formatter.formatValue(input);
+    return formatter.take();
+}
+
 fn privateDetermineSpecificTypeBytes(
     allocator: std.mem.Allocator,
     machine: *interp.Interpreter,
@@ -3974,11 +4521,9 @@ fn privateDetermineSpecificTypeBytes(
                     try output.appendSlice(allocator, "an instance of ");
                     try output.appendSlice(allocator, name_string);
                 } else {
-                    // JSValueToStringSafe delegates this rare, falsy-constructor
-                    // case to Bun's inspector. The engine's no-side-effect
-                    // projection is the stable fallback until that broader
-                    // presentation-only inspector surface is itself targeted.
-                    try output.appendSlice(allocator, try input.toString(machine.arena));
+                    const inspected = try privateDiagnosticInspectBytes(allocator, machine, input, false);
+                    defer allocator.free(inspected);
+                    try output.appendSlice(allocator, inspected);
                 }
             }
         },
@@ -7707,51 +8252,50 @@ fn privateInspectStylizeColor(ctx: *anyopaque, _: Value, args: []const Value) va
 fn privateInspectRecursive(ctx: *anyopaque, _: Value, args: []const Value) value.HostError!Value {
     const machine: *interp.Interpreter = @ptrCast(@alignCast(ctx));
     const input = if (args.len == 0) Value.undef() else args[0];
-    var style: []const u8 = "special";
-    const rendered = switch (input.kind()) {
-        .undefined => blk: {
-            style = "undefined";
-            break :blk "undefined";
-        },
-        .null => blk: {
-            style = "null";
-            break :blk "null";
-        },
-        .boolean => blk: {
-            style = "boolean";
-            break :blk if (input.asBool()) "true" else "false";
-        },
-        .number => blk: {
-            style = "number";
-            break :blk try value.numberToString(machine.arena, input.asNum());
-        },
-        .string => blk: {
-            style = "string";
-            break :blk try std.fmt.allocPrint(machine.arena, "'{s}'", .{input.asStr()});
-        },
-        .object => blk: {
-            const object = input.asObj();
-            if (object.is_symbol) {
-                style = "symbol";
-                const description = object.symbolDescription() orelse "";
-                break :blk try std.fmt.allocPrint(machine.arena, "Symbol({s})", .{description});
-            }
-            if (object.is_bigint) {
-                style = "bigint";
-                break :blk try std.fmt.allocPrint(machine.arena, "{s}n", .{try value.bigIntToString(object, machine.arena)});
-            }
-            break :blk "[object Object]";
-        },
+    const rendered = privateDiagnosticInspectBytes(machine.arena, machine, input, true) catch |err| switch (err) {
+        error.Throw => return error.Throw,
+        error.OptShortCircuit => return error.OptShortCircuit,
+        else => return error.OutOfMemory,
     };
-
     var colors = false;
     if (args.len > 1 and args[1].isObject()) {
         const candidate = try machine.getProperty(args[1], "colors");
         colors = candidate.toBoolean();
     }
-    const rendered_value = try Value.strAlloc(machine.arena, rendered);
+    const rendered_value = try Value.strOwned(machine.arena, rendered);
     if (!colors) return rendered_value;
-    return privateInspectStylizeColor(ctx, Value.undef(), &.{ rendered_value, try Value.strAlloc(machine.arena, style) });
+    return privateInspectStylizeColor(ctx, Value.undef(), &.{ rendered_value, Value.str("special") });
+}
+
+fn privateCallCustomInspectFunction(
+    machine: *interp.Interpreter,
+    function: Value,
+    this_value: Value,
+    depth: u32,
+    max_depth: u32,
+    colors: bool,
+) interp.EvalError!Value {
+    const stylize = try privateInspectNativeFunction(
+        machine,
+        if (colors) "stylizeWithColor" else "stylizeWithNoColor",
+        2,
+        if (colors) privateInspectStylizeColor else privateInspectStylizeNoColor,
+    );
+    const inspect_roots_mark = try machine.pushTempRoot(stylize);
+    defer machine.restoreTempRoots(inspect_roots_mark);
+    const inspect_function = try privateInspectNativeFunction(machine, "inspect", 2, privateInspectRecursive);
+    _ = try machine.pushTempRoot(inspect_function);
+    const options_value = try machine.newObject();
+    _ = try machine.pushTempRoot(options_value);
+    const options = options_value.asObj();
+    try options.setOwn(machine.arena, machine.root_shape, "stylize", stylize);
+    try options.setOwn(machine.arena, machine.root_shape, "depth", Value.num(@floatFromInt(max_depth)));
+    try options.setOwn(machine.arena, machine.root_shape, "colors", Value.boolVal(colors));
+    return machine.callValueWithThis(
+        function,
+        &.{ Value.num(@floatFromInt(depth)), options_value, inspect_function },
+        this_value,
+    );
 }
 
 /// Exact Bun/Home custom-inspect call frame: `(depth, options, inspect)` with
@@ -7796,55 +8340,7 @@ export fn JSC__JSValue__callCustomInspectFunction(
         return .empty;
     }
 
-    const stylize = privateInspectNativeFunction(
-        &machine,
-        if (colors) "stylizeWithColor" else "stylizeWithNoColor",
-        2,
-        if (colors) privateInspectStylizeColor else privateInspectStylizeNoColor,
-    ) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    const inspect_roots_mark = machine.pushTempRoot(stylize) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    defer machine.restoreTempRoots(inspect_roots_mark);
-    const inspect_function = privateInspectNativeFunction(&machine, "inspect", 2, privateInspectRecursive) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    _ = machine.pushTempRoot(inspect_function) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    const options_value = machine.newObject() catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    _ = machine.pushTempRoot(options_value) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    const options = options_value.asObj();
-    options.setOwn(machine.arena, machine.root_shape, "stylize", stylize) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    options.setOwn(machine.arena, machine.root_shape, "depth", Value.num(@floatFromInt(max_depth))) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-    options.setOwn(machine.arena, machine.root_shape, "colors", Value.boolVal(colors)) catch |err| {
-        privateSetPendingAbrupt(context, &machine, err);
-        return .empty;
-    };
-
-    const result = machine.callValueWithThis(
-        function,
-        &.{ Value.num(@floatFromInt(depth)), options_value, inspect_function },
-        this_value,
-    ) catch |err| {
+    const result = privateCallCustomInspectFunction(&machine, function, this_value, depth, max_depth, colors) catch |err| {
         privateSetPendingAbrupt(context, &machine, err);
         return .empty;
     };
@@ -25825,6 +26321,117 @@ test "private received-value diagnostics preserve exact types and abrupt complet
     try std.testing.expectEqualStrings("an instance of Observed", try Probe.run(internal, context, observable));
     try std.testing.expectEqualStrings("cns", (try internal.evaluate("__diagnostic_order_393")).asStr());
 
+    try std.testing.expectEqualStrings(
+        "[Object: null prototype] {}",
+        try Probe.run(internal, context, try Probe.encoded(internal, "Object.create(null)")),
+    );
+    const graph = try Probe.encoded(
+        internal,
+        "(() => { const root = Object.create(null); root.alpha = 1; " ++
+            "root.nested = { text: 'x', big: 2n, sym: Symbol('s'), fn: function named() {} }; " ++
+            "Object.defineProperty(root, 'getter', { enumerable: true, get() { throw 3940; } }); " ++
+            "Object.defineProperty(root, 'setter', { enumerable: true, set(value) {} }); " ++
+            "Object.defineProperty(root, 'both', { enumerable: true, get() { return 1; }, set(value) {} }); " ++
+            "root.self = root; root[Symbol('key')] = 9; return root; })()",
+    );
+    try std.testing.expectEqualStrings(
+        "[Object: null prototype] {\n" ++
+            "  alpha: 1,\n" ++
+            "  nested: {\n" ++
+            "    text: \"x\",\n" ++
+            "    big: 2n,\n" ++
+            "    sym: Symbol(s),\n" ++
+            "    fn: [Function: named],\n" ++
+            "  },\n" ++
+            "  getter: [Getter],\n" ++
+            "  setter: [Setter],\n" ++
+            "  both: [Getter/Setter],\n" ++
+            "  self: [Circular],\n" ++
+            "  [Symbol(key)]: 9,\n" ++
+            "}",
+        try Probe.run(internal, context, graph),
+    );
+    try std.testing.expectEqualStrings(
+        "{\n  a: 1,\n}",
+        try Probe.run(internal, context, try Probe.encoded(internal, "({ constructor: 0, a: 1 })")),
+    );
+    try std.testing.expectEqualStrings(
+        "[Object: null prototype] {\n" ++
+            "  valid_key: 1,\n" ++
+            "  \"has-dash\": 2,\n" ++
+            "  \"with space\": 3,\n" ++
+            "  \"9lead\": 4,\n" ++
+            "  lone: \"\\ud800\",\n" ++
+            "}",
+        try Probe.run(
+            internal,
+            context,
+            try Probe.encoded(internal, "Object.assign(Object.create(null), { valid_key: 1, 'has-dash': 2, 'with space': 3, '9lead': 4, lone: '\\uD800' })"),
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        "[ empty item, 1, 2 x empty items ]",
+        try Probe.run(internal, context, try Probe.encoded(internal, "(() => { const value = []; value.length = 4; value[1] = 1; value.constructor = 0; return value; })()")),
+    );
+    try std.testing.expectEqualStrings(
+        "[Object: null prototype] {\n" ++
+            "  next: {\n" ++
+            "    next: {\n" ++
+            "      next: {\n" ++
+            "        next: {\n" ++
+            "          next: {\n" ++
+            "            next: {\n" ++
+            "              next: {\n" ++
+            "                next: {\n" ++
+            "                  next: [Object ...],\n" ++
+            "                },\n" ++
+            "              },\n" ++
+            "            },\n" ++
+            "          },\n" ++
+            "        },\n" ++
+            "      },\n" ++
+            "    },\n" ++
+            "  },\n" ++
+            "}",
+        try Probe.run(
+            internal,
+            context,
+            try Probe.encoded(internal, "(() => { const root = Object.create(null); let current = root; for (let i = 0; i < 11; i++) { current.next = {}; current = current.next; } return root; })()"),
+        ),
+    );
+
+    const proxy = try Probe.encoded(
+        internal,
+        "(() => { globalThis.__diagnostic_proxy_get_394 = 0; globalThis.__diagnostic_proxy_own_394 = 0; " ++
+            "const target = Object.assign(Object.create(null), { a: 1 }); return new Proxy(target, { " ++
+            "get(t, key, receiver) { __diagnostic_proxy_get_394++; return Reflect.get(t, key, receiver); }, " ++
+            "ownKeys(t) { __diagnostic_proxy_own_394++; return Reflect.ownKeys(t); } }); })()",
+    );
+    try std.testing.expectEqualStrings(
+        "[Object: null prototype] {\n  a: 1,\n}",
+        try Probe.run(internal, context, proxy),
+    );
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__diagnostic_proxy_get_394")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__diagnostic_proxy_own_394")).asNum());
+
+    const custom = try Probe.encoded(
+        internal,
+        "(() => { globalThis.__diagnostic_custom_get_394 = 0; const value = Object.create(null); " ++
+            "Object.defineProperty(value, Symbol.for('nodejs.util.inspect.custom'), { get() { " ++
+            "__diagnostic_custom_get_394++; return function(depth, options, inspect) { " ++
+            "return 'CUSTOM:' + depth + ':' + inspect({ x: 'quoted' }, options); }; } }); return value; })()",
+    );
+    try std.testing.expectEqualStrings("CUSTOM:8:{ x: 'quoted' }", try Probe.run(internal, context, custom));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__diagnostic_custom_get_394")).asNum());
+    try std.testing.expectEqualStrings(
+        "{\n  x: 2,\n}",
+        try Probe.run(
+            internal,
+            context,
+            try Probe.encoded(internal, "(() => { const value = Object.create(null); value[Symbol.for('nodejs.util.inspect.custom')] = function() { return { x: 2 }; }; return value; })()"),
+        ),
+    );
+
     var abrupt = Bun__ErrorCode__determineSpecificType(
         context,
         try Probe.encoded(internal, "({ get constructor() { throw 3931; } })"),
@@ -25840,6 +26447,28 @@ test "private received-value diagnostics preserve exact types and abrupt complet
     try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(3932), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    abrupt = Bun__ErrorCode__determineSpecificType(
+        context,
+        try Probe.encoded(
+            internal,
+            "(() => { const value = Object.create(null); value[Symbol.for('nodejs.util.inspect.custom')] = function() { throw 3941; }; return value; })()",
+        ),
+    );
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3941), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    abrupt = Bun__ErrorCode__determineSpecificType(
+        context,
+        try Probe.encoded(
+            internal,
+            "(() => { const value = Object.create(null); Object.defineProperty(value, Symbol.for('nodejs.util.inspect.custom'), { get() { throw 3942; } }); return value; })()",
+        ),
+    );
+    try std.testing.expectEqual(PrivateBunStringTag.dead, abrupt.tag);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3942), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
 
     const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
     defer JSGlobalContextRelease(foreign);
@@ -25876,6 +26505,22 @@ test "private received-value diagnostics preserve exact types and abrupt complet
         var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
         const allocator = failing.allocator();
         const result = privateDetermineSpecificTypeBytes(allocator, &machine, Value.str("allocation'failure\"preview-abcdefghijklmnopqrstuvwxyz"));
+        if (result) |bytes| {
+            allocator.free(bytes);
+            saw_allocation_success = true;
+            break;
+        } else |err| {
+            if (err == error.OutOfMemory) saw_allocation_failure = true else return err;
+        }
+    }
+    try std.testing.expect(saw_allocation_failure and saw_allocation_success);
+
+    saw_allocation_failure = false;
+    saw_allocation_success = false;
+    for (0..64) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        const allocator = failing.allocator();
+        const result = privateDetermineSpecificTypeBytes(allocator, &machine, privateValueFrom(context, graph) orelse return error.ValueInitFailed);
         if (result) |bytes| {
             allocator.free(bytes);
             saw_allocation_success = true;
