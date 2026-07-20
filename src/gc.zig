@@ -736,6 +736,132 @@ inline fn traceReaction(r: promise.Reaction, v: anytype) void {
     }
 }
 
+inline fn relocateReaction(r: *promise.Reaction, v: anytype) void {
+    gc_relocation.rewriteOptionalValueSlot(v, &r.handler);
+    gc_relocation.rewriteOptionalValueSlot(v, &r.extra_argument);
+    gc_relocation.rewriteOptionalSlot(v, anyopaque, &r.retained_async_activation);
+    if (r.detached) return;
+    if (r.result) |_| {
+        gc_relocation.rewriteOptionalSlot(v, promise.Promise, &r.result);
+    } else {
+        gc_relocation.rewriteValueSlot(v, &r.resolve);
+        gc_relocation.rewriteValueSlot(v, &r.reject);
+    }
+}
+
+/// Promise relocation happens after all mutators are stopped. Taking the
+/// Promise state lock here could deadlock on a parked owner and is unnecessary:
+/// the state and both reaction buffers are stable for the entire commit.
+pub fn relocatePromise(p: *promise.Promise, v: anytype) void {
+    gc_relocation.rewriteValueSlot(v, &p.value);
+    gc_relocation.rewriteOptionalSlot(v, Object, &p.wrapper);
+    gc_relocation.rewriteOptionalSlot(v, anyopaque, &p.awaiting_async_activation);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &p.async_forward_to);
+    if (p.on_fulfill_inline) |*reaction| relocateReaction(reaction, v);
+    if (p.on_reject_inline) |*reaction| relocateReaction(reaction, v);
+    for (p.on_fulfill.items) |*reaction| relocateReaction(reaction, v);
+    for (p.on_reject.items) |*reaction| relocateReaction(reaction, v);
+}
+
+test "Promise relocation rewrites inline and overflow reaction graphs" {
+    var old_objects: [14]Object = undefined;
+    var new_objects: [14]Object = undefined;
+    var old_promises: [3]promise.Promise = .{ .{}, .{}, .{} };
+    var new_promises: [3]promise.Promise = .{ .{}, .{}, .{} };
+    var old_generators: [5]vm.Generator = undefined;
+    var new_generators: [5]vm.Generator = undefined;
+    var fulfill_overflow = [_]promise.Reaction{.{
+        .handler = Value.obj(&old_objects[8]),
+        .extra_argument = Value.obj(&old_objects[9]),
+        .retained_async_activation = &old_generators[3],
+        .result = &old_promises[2],
+    }};
+    var reject_overflow = [_]promise.Reaction{.{
+        .handler = Value.obj(&old_objects[10]),
+        .extra_argument = Value.obj(&old_objects[11]),
+        .retained_async_activation = &old_generators[4],
+        .resolve = Value.obj(&old_objects[12]),
+        .reject = Value.obj(&old_objects[13]),
+    }};
+    var state = promise.Promise{
+        .value = Value.obj(&old_objects[0]),
+        .wrapper = &old_objects[1],
+        .awaiting_async_activation = &old_generators[0],
+        .async_forward_to = &old_promises[0],
+        .on_fulfill_inline = .{
+            .handler = Value.obj(&old_objects[2]),
+            .extra_argument = Value.obj(&old_objects[3]),
+            .retained_async_activation = &old_generators[1],
+            .result = &old_promises[1],
+        },
+        .on_reject_inline = .{
+            .handler = Value.obj(&old_objects[4]),
+            .extra_argument = Value.obj(&old_objects[5]),
+            .retained_async_activation = &old_generators[2],
+            .resolve = Value.obj(&old_objects[6]),
+            .reject = Value.obj(&old_objects[7]),
+        },
+        .on_fulfill = .{ .items = &fulfill_overflow, .capacity = fulfill_overflow.len },
+        .on_reject = .{ .items = &reject_overflow, .capacity = reject_overflow.len },
+    };
+
+    const Plan = struct {
+        old_objects: *[14]Object,
+        new_objects: *[14]Object,
+        old_promises: *[3]promise.Promise,
+        new_promises: *[3]promise.Promise,
+        old_generators: *[5]vm.Generator,
+        new_generators: *[5]vm.Generator,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            for (self.old_promises, 0..) |*candidate, index|
+                if (old == @as(*anyopaque, @ptrCast(candidate)))
+                    return @ptrCast(&self.new_promises[index]);
+            for (self.old_generators, 0..) |*candidate, index|
+                if (old == @as(*anyopaque, @ptrCast(candidate)))
+                    return @ptrCast(&self.new_generators[index]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_promises = &old_promises,
+        .new_promises = &new_promises,
+        .old_generators = &old_generators,
+        .new_generators = &new_generators,
+    };
+    relocatePromise(&state, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], state.value.asObj());
+    try std.testing.expectEqual(&new_objects[1], state.wrapper.?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[0])), state.awaiting_async_activation.?);
+    try std.testing.expectEqual(&new_promises[0], state.async_forward_to.?);
+    const fulfill_inline = state.on_fulfill_inline.?;
+    try std.testing.expectEqual(&new_objects[2], fulfill_inline.handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[3], fulfill_inline.extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[1])), fulfill_inline.retained_async_activation.?);
+    try std.testing.expectEqual(&new_promises[1], fulfill_inline.result.?);
+    const reject_inline = state.on_reject_inline.?;
+    try std.testing.expectEqual(&new_objects[4], reject_inline.handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[5], reject_inline.extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[2])), reject_inline.retained_async_activation.?);
+    try std.testing.expectEqual(&new_objects[6], reject_inline.resolve.asObj());
+    try std.testing.expectEqual(&new_objects[7], reject_inline.reject.asObj());
+    try std.testing.expectEqual(&new_objects[8], fulfill_overflow[0].handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[9], fulfill_overflow[0].extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[3])), fulfill_overflow[0].retained_async_activation.?);
+    try std.testing.expectEqual(&new_promises[2], fulfill_overflow[0].result.?);
+    try std.testing.expectEqual(&new_objects[10], reject_overflow[0].handler.?.asObj());
+    try std.testing.expectEqual(&new_objects[11], reject_overflow[0].extra_argument.?.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generators[4])), reject_overflow[0].retained_async_activation.?);
+    try std.testing.expectEqual(&new_objects[12], reject_overflow[0].resolve.asObj());
+    try std.testing.expectEqual(&new_objects[13], reject_overflow[0].reject.asObj());
+}
+
 inline fn traceMicrotask(mt: promise.Microtask, v: anytype) void {
     switch (mt.kind) {
         .reaction => {

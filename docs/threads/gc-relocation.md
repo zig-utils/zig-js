@@ -83,6 +83,13 @@ realm prototype, parent scope, and `with` object. Binding names, declaration
 sets, allocator/accounting fields, and arena-owned containers stay in place;
 the world-stopped rewrite deliberately takes no binding lock.
 
+Promise state follows in
+[#342](https://github.com/zig-utils/zig-js/issues/342): the settled value,
+wrapper, awaiting/forwarding links, inline reactions, and overflow reactions
+all rewrite through the same plan. Each reaction preserves the tracer's
+result-Promise versus resolve/reject branch, and the world-stopped commit takes
+no Promise lock.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
