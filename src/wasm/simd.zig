@@ -1,11 +1,12 @@
-//! Fixed-width SIMD opcode surface pinned by docs/.data/wasm-simd-opcodes.json.
+//! SIMD opcode surface pinned by docs/.data/wasm-simd-opcodes.json and
+//! docs/.data/wasm-relaxed-simd-opcodes.json.
 //! Keep this enum synchronized with the machine-readable inventory verifier.
 
 const std = @import("std");
 
 pub const Immediate = enum { none, memarg, v128, lane16, lane, memarg_lane };
 
-pub const Op = enum(u8) {
+pub const Op = enum(u16) {
     v128_load = 0x00,
     v128_load8x8_s = 0x01,
     v128_load8x8_u = 0x02,
@@ -242,10 +243,34 @@ pub const Op = enum(u8) {
     i32x4_trunc_sat_f64x2_u_zero = 0xFD,
     f64x2_convert_low_i32x4_s = 0xFE,
     f64x2_convert_low_i32x4_u = 0xFF,
+    i8x16_relaxed_swizzle = 0x100,
+    i32x4_relaxed_trunc_f32x4_s = 0x101,
+    i32x4_relaxed_trunc_f32x4_u = 0x102,
+    i32x4_relaxed_trunc_f64x2_s_zero = 0x103,
+    i32x4_relaxed_trunc_f64x2_u_zero = 0x104,
+    f32x4_relaxed_madd = 0x105,
+    f32x4_relaxed_nmadd = 0x106,
+    f64x2_relaxed_madd = 0x107,
+    f64x2_relaxed_nmadd = 0x108,
+    i8x16_relaxed_laneselect = 0x109,
+    i16x8_relaxed_laneselect = 0x10A,
+    i32x4_relaxed_laneselect = 0x10B,
+    i64x2_relaxed_laneselect = 0x10C,
+    f32x4_relaxed_min = 0x10D,
+    f32x4_relaxed_max = 0x10E,
+    f64x2_relaxed_min = 0x10F,
+    f64x2_relaxed_max = 0x110,
+    i16x8_relaxed_q15mulr_s = 0x111,
+    i16x8_relaxed_dot_i8x16_i7x16_s = 0x112,
+    i32x4_relaxed_dot_i8x16_i7x16_add_s = 0x113,
 
     pub fn fromSubopcode(value: u32) ?Op {
-        if (value > 0xFF) return null;
-        return std.enums.fromInt(Op, @as(u8, @intCast(value)));
+        if (value > 0x113) return null;
+        return std.enums.fromInt(Op, @as(u16, @intCast(value)));
+    }
+
+    pub fn isRelaxed(self: Op) bool {
+        return @intFromEnum(self) >= 0x100;
     }
 
     pub fn immediate(self: Op) Immediate {
@@ -259,3 +284,11 @@ pub const Op = enum(u8) {
         };
     }
 };
+
+test "relaxed SIMD subopcode range is exact" {
+    try std.testing.expectEqual(Op.i8x16_relaxed_swizzle, Op.fromSubopcode(0x100).?);
+    try std.testing.expectEqual(Op.i32x4_relaxed_dot_i8x16_i7x16_add_s, Op.fromSubopcode(0x113).?);
+    try std.testing.expect(Op.i8x16_relaxed_swizzle.isRelaxed());
+    try std.testing.expect(!Op.f64x2_convert_low_i32x4_u.isRelaxed());
+    try std.testing.expectEqual(@as(?Op, null), Op.fromSubopcode(0x114));
+}

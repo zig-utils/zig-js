@@ -126,6 +126,11 @@ def main() -> int:
         default=ROOT / "src/wasm/simd.zig",
     )
     parser.add_argument(
+        "--relaxed-simd-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-relaxed-simd-opcodes.json",
+    )
+    parser.add_argument(
         "--atomic-inventory",
         type=Path,
         default=ROOT / "docs/.data/wasm-atomic-opcodes.json",
@@ -211,18 +216,20 @@ def main() -> int:
     ci_source = args.ci_workflow.read_text()
     required_ci_tokens = (
         "wasm-post-mvp-smoke",
-        "wasm-memory64-gc-smoke",
+        "wasm-core-3-memory64-gc-smoke",
         "a6003d06aefef41e20a3e36fe2e500062555c895",
         "af287a73d8f3bf7ea216c10592f9e350b947c4f2",
         "cf8b5aa27257311b8eac80ae83f4ba22ee308064",
         "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1",
         "756060f5816c7e2159f4817fbdee76cf52f9c923",
+        "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
         "4e2898f7ca3bd0536218ed9b7b36ff7b86954c57ae0e6272fde69728cbe01088",
         "--profile tail-calls",
         "--profile exception-handling",
         "--profile multi-memory",
         "--profile memory64",
         "--profile gc",
+        "test/core/relaxed-simd/",
     )
     require(
         all(token in ci_source for token in required_ci_tokens),
@@ -275,13 +282,39 @@ def main() -> int:
     require(all(isinstance(value, int) and 0 <= value <= 255 for value in subopcodes), "SIMD inventory: invalid subopcode")
     require(all(entry.get("immediate") in {"none", "memarg", "v128", "lane16", "lane", "memarg_lane"} for entry in simd_opcodes), "SIMD inventory: invalid immediate kind")
     simd_source = args.simd_source.read_text()
-    enum_body = simd_source.split("pub const Op = enum(u8) {", 1)[1].split("pub fn fromSubopcode", 1)[0]
+    enum_body = simd_source.split("pub const Op = enum(u16) {", 1)[1].split("pub fn fromSubopcode", 1)[0]
     runtime_simd = {
         (name, int(value, 16))
         for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{2}),$", enum_body, re.MULTILINE)
     }
     inventoried_simd = {(name.replace(".", "_"), subopcode) for name, subopcode in zip(names, subopcodes)}
     require(runtime_simd == inventoried_simd, "SIMD inventory/runtime opcode drift")
+
+    relaxed_feature = next(feature for feature in features if feature["id"] == "relaxed_simd")
+    relaxed_inventory = json.loads(args.relaxed_simd_inventory.read_text())
+    require(relaxed_inventory.get("schema_version") == 1, "relaxed SIMD inventory: unsupported schema version")
+    require(relaxed_inventory.get("kind") == "webassembly_relaxed_simd_opcode_inventory", "relaxed SIMD inventory: invalid kind")
+    require(relaxed_inventory.get("prefix") == "0xfd", "relaxed SIMD inventory: invalid opcode prefix")
+    require(relaxed_inventory.get("source", {}).get("repository") == relaxed_feature["repository"], "relaxed SIMD inventory/registry repository drift")
+    require(relaxed_inventory.get("source", {}).get("commit") == relaxed_feature["commit"], "relaxed SIMD inventory/registry commit drift")
+    require(relaxed_inventory.get("source", {}).get("tag") == "wg-3.0", "relaxed SIMD inventory: expected wg-3.0 tag")
+    require(relaxed_inventory.get("source", {}).get("corpus_files") == 7, "relaxed SIMD inventory: expected 7 corpus files")
+    relaxed_opcodes = relaxed_inventory.get("opcodes", [])
+    require(relaxed_inventory.get("opcode_count") == len(relaxed_opcodes) == 20, "relaxed SIMD inventory: expected 20 opcodes")
+    relaxed_subopcodes = [entry.get("subopcode") for entry in relaxed_opcodes]
+    relaxed_names = [entry.get("name") for entry in relaxed_opcodes]
+    require(relaxed_subopcodes == list(range(0x100, 0x114)), "relaxed SIMD inventory: unexpected subopcode range")
+    require(len(relaxed_names) == len(set(relaxed_names)), "relaxed SIMD inventory: duplicate instruction name")
+    require(all(entry.get("immediate") == "none" for entry in relaxed_opcodes), "relaxed SIMD inventory: unexpected immediate")
+    runtime_relaxed_simd = {
+        (name, int(value, 16))
+        for name, value in re.findall(r"^    ([a-z][a-z0-9_]*?) = 0x([0-9A-F]{3}),$", enum_body, re.MULTILINE)
+    }
+    inventoried_relaxed_simd = {
+        (name.replace(".", "_"), subopcode)
+        for name, subopcode in zip(relaxed_names, relaxed_subopcodes)
+    }
+    require(runtime_relaxed_simd == inventoried_relaxed_simd, "relaxed SIMD inventory/runtime opcode drift")
 
     threads_feature = next(feature for feature in features if feature["id"] == "threads")
     atomic_inventory = json.loads(args.atomic_inventory.read_text())

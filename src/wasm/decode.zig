@@ -1193,6 +1193,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
                 const subopcode_off = r.offset();
                 const simd_op = @import("simd.zig").Op.fromSubopcode(try r.readU32Leb()) orelse
                     return r.failAt(subopcode_off, "invalid 0xfd subopcode", .{});
+                if (simd_op.isRelaxed() and !r.features.relaxed_simd)
+                    return r.unsupportedFeature(subopcode_off, .relaxed_simd);
                 switch (simd_op.immediate()) {
                     .none => instr.imm = .{ .simd = simd_op },
                     .memarg => instr.imm = .{ .simd_memarg = .{ .op = simd_op, .memarg = try r.readMemArg() } },
@@ -2054,10 +2056,41 @@ test "wasm.decode fixed-width SIMD rejects reserved and oversized subopcodes" {
         "invalid 0xfd subopcode",
     );
     try expectMalformedWithFeatures(
-        comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x80\x02")),
+        comptime (hdr ++ func_sec_1 ++ testCode("\xFD\x94\x02")),
         .{ .fixed_width_simd = true },
         18,
         "invalid 0xfd subopcode",
+    );
+}
+
+test "wasm.decode relaxed SIMD inventory and feature gate" {
+    const bytes = comptime (hdr ++ func_sec_1 ++ testCode(
+        "\xFD\x80\x02" ++ // i8x16.relaxed_swizzle (0x100)
+            "\xFD\x93\x02" ++ // i32x4.relaxed_dot_i8x16_i7x16_add_s (0x113)
+            "\x0B",
+    ));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(
+        std.testing.allocator,
+        bytes,
+        .{ .fixed_width_simd = true, .relaxed_simd = true },
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, mod);
+    try std.testing.expectEqual(@import("simd.zig").Op.i8x16_relaxed_swizzle, mod.code[0].instrs[0].imm.simd);
+    try std.testing.expectEqual(@import("simd.zig").Op.i32x4_relaxed_dot_i8x16_i7x16_add_s, mod.code[0].instrs[1].imm.simd);
+
+    try expectMalformedWithFeatures(
+        bytes,
+        .{ .fixed_width_simd = true },
+        18,
+        "WebAssembly feature relaxed-simd is disabled",
+    );
+    try expectMalformedWithFeatures(
+        hdr,
+        .{ .relaxed_simd = true },
+        0,
+        "WebAssembly feature relaxed-simd requires fixed-width-simd",
     );
 }
 

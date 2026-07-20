@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "kind": "webassembly_relaxed_simd_opcode_inventory",
+  "source": {
+    "repository": "https://github.com/WebAssembly/spec.git",
+    "commit": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+    "tag": "wg-3.0",
+    "table": "interpreter/binary/decode.ml",
+    "corpus": "test/core/relaxed-simd/*.wast",
+    "corpus_files": 7
+  },
+  "prefix": "0xfd",
+  "opcode_count": 20,
+  "opcodes": [
+    { "subopcode": 256, "hex": "0x100", "name": "i8x16.relaxed_swizzle", "immediate": "none" },
+    { "subopcode": 257, "hex": "0x101", "name": "i32x4.relaxed_trunc_f32x4_s", "immediate": "none" },
+    { "subopcode": 258, "hex": "0x102", "name": "i32x4.relaxed_trunc_f32x4_u", "immediate": "none" },
+    { "subopcode": 259, "hex": "0x103", "name": "i32x4.relaxed_trunc_f64x2_s_zero", "immediate": "none" },
+    { "subopcode": 260, "hex": "0x104", "name": "i32x4.relaxed_trunc_f64x2_u_zero", "immediate": "none" },
+    { "subopcode": 261, "hex": "0x105", "name": "f32x4.relaxed_madd", "immediate": "none" },
+    { "subopcode": 262, "hex": "0x106", "name": "f32x4.relaxed_nmadd", "immediate": "none" },
+    { "subopcode": 263, "hex": "0x107", "name": "f64x2.relaxed_madd", "immediate": "none" },
+    { "subopcode": 264, "hex": "0x108", "name": "f64x2.relaxed_nmadd", "immediate": "none" },
+    { "subopcode": 265, "hex": "0x109", "name": "i8x16.relaxed_laneselect", "immediate": "none" },
+    { "subopcode": 266, "hex": "0x10a", "name": "i16x8.relaxed_laneselect", "immediate": "none" },
+    { "subopcode": 267, "hex": "0x10b", "name": "i32x4.relaxed_laneselect", "immediate": "none" },
+    { "subopcode": 268, "hex": "0x10c", "name": "i64x2.relaxed_laneselect", "immediate": "none" },
+    { "subopcode": 269, "hex": "0x10d", "name": "f32x4.relaxed_min", "immediate": "none" },
+    { "subopcode": 270, "hex": "0x10e", "name": "f32x4.relaxed_max", "immediate": "none" },
+    { "subopcode": 271, "hex": "0x10f", "name": "f64x2.relaxed_min", "immediate": "none" },
+    { "subopcode": 272, "hex": "0x110", "name": "f64x2.relaxed_max", "immediate": "none" },
+    { "subopcode": 273, "hex": "0x111", "name": "i16x8.relaxed_q15mulr_s", "immediate": "none" },
+    { "subopcode": 274, "hex": "0x112", "name": "i16x8.relaxed_dot_i8x16_i7x16_s", "immediate": "none" },
+    { "subopcode": 275, "hex": "0x113", "name": "i32x4.relaxed_dot_i8x16_i7x16_add_s", "immediate": "none" }
+  ]
+}

@@ -2672,12 +2672,16 @@ fn binaryFloatLanes(comptime width: u8, left: u128, right: u128, comptime op: si
 
 fn executeSimdConversion(s: *State, op: simd.Op) ExecError!void {
     switch (op) {
-        .i32x4_trunc_sat_f32x4_s, .i32x4_trunc_sat_f32x4_u => {
+        .i32x4_trunc_sat_f32x4_s,
+        .i32x4_trunc_sat_f32x4_u,
+        .i32x4_relaxed_trunc_f32x4_s,
+        .i32x4_relaxed_trunc_f32x4_u,
+        => {
             const source = popVector(s);
             var result: u128 = 0;
             for (0..4) |lane| {
                 const value = f32Lane(source, @intCast(lane));
-                const converted: u32 = if (op == .i32x4_trunc_sat_f32x4_s)
+                const converted: u32 = if (op == .i32x4_trunc_sat_f32x4_s or op == .i32x4_relaxed_trunc_f32x4_s)
                     @bitCast(truncSatI32S(value))
                 else
                     truncSatI32U(value);
@@ -2712,12 +2716,16 @@ fn executeSimdConversion(s: *State, op: simd.Op) ExecError!void {
                 result = replaceF64Lane(result, @intCast(lane), f32Lane(source, @intCast(lane)));
             try pushVector(s, result);
         },
-        .i32x4_trunc_sat_f64x2_s_zero, .i32x4_trunc_sat_f64x2_u_zero => {
+        .i32x4_trunc_sat_f64x2_s_zero,
+        .i32x4_trunc_sat_f64x2_u_zero,
+        .i32x4_relaxed_trunc_f64x2_s_zero,
+        .i32x4_relaxed_trunc_f64x2_u_zero,
+        => {
             const source = popVector(s);
             var result: u128 = 0;
             for (0..2) |lane| {
                 const value = f64Lane(source, @intCast(lane));
-                const converted: u32 = if (op == .i32x4_trunc_sat_f64x2_s_zero)
+                const converted: u32 = if (op == .i32x4_trunc_sat_f64x2_s_zero or op == .i32x4_relaxed_trunc_f64x2_s_zero)
                     @bitCast(truncSatI32S(value))
                 else
                     truncSatI32U(value);
@@ -2828,6 +2836,72 @@ fn q15MulRoundSaturate(left: u128, right: u128) u128 {
     return fromVec(@as(@Vector(8, u16), @truncate(@as(@Vector(8, u32), @bitCast(clamped)))));
 }
 
+fn relaxedDotI16x8(left: u128, right: u128) u128 {
+    const a: [16]i8 = @bitCast(left);
+    const b: [16]i8 = @bitCast(right);
+    var result: [8]i16 = undefined;
+    for (0..8) |lane| {
+        const first = @as(i16, a[lane * 2]) * @as(i16, b[lane * 2]);
+        const second = @as(i16, a[lane * 2 + 1]) * @as(i16, b[lane * 2 + 1]);
+        result[lane] = first +% second;
+    }
+    return @bitCast(result);
+}
+
+fn relaxedDotAddI32x4(left: u128, right: u128, addend: u128) u128 {
+    const a: [16]i8 = @bitCast(left);
+    const b: [16]i8 = @bitCast(right);
+    const c: [4]i32 = @bitCast(addend);
+    var result: [4]i32 = undefined;
+    for (0..4) |lane| {
+        var sum = c[lane];
+        for (0..4) |part|
+            sum +%= @as(i32, a[lane * 4 + part]) * @as(i32, b[lane * 4 + part]);
+        result[lane] = sum;
+    }
+    return @bitCast(result);
+}
+
+fn relaxedMulAdd(comptime width: u8, left: u128, right: u128, addend: u128, negate: bool) u128 {
+    var result: u128 = 0;
+    for (0..128 / width) |lane| {
+        if (width == 32) {
+            const a = f32Lane(left, @intCast(lane));
+            const b = f32Lane(right, @intCast(lane));
+            const c = f32Lane(addend, @intCast(lane));
+            result = replaceF32Lane(result, @intCast(lane), @mulAdd(f32, if (negate) -a else a, b, c));
+        } else {
+            const a = f64Lane(left, @intCast(lane));
+            const b = f64Lane(right, @intCast(lane));
+            const c = f64Lane(addend, @intCast(lane));
+            result = replaceF64Lane(result, @intCast(lane), @mulAdd(f64, if (negate) -a else a, b, c));
+        }
+    }
+    return result;
+}
+
+test "relaxed SIMD portable arithmetic choices are spec-permitted" {
+    const bytes = [16]i8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    try std.testing.expectEqual(
+        @as(u128, @bitCast([8]i16{ 1, 13, 41, 85, 145, 221, 313, 421 })),
+        relaxedDotI16x8(@bitCast(bytes), @bitCast(bytes)),
+    );
+    try std.testing.expectEqual(
+        @as(u128, @bitCast([4]i32{ 14, 127, 368, 737 })),
+        relaxedDotAddI32x4(@bitCast(bytes), @bitCast(bytes), @bitCast([4]i32{ 0, 1, 2, 3 })),
+    );
+    try std.testing.expectEqual(
+        @as(u128, @bitCast([4]f32{ 10, 10, 10, 10 })),
+        relaxedMulAdd(
+            32,
+            @bitCast([4]f32{ 2, 2, 2, 2 }),
+            @bitCast([4]f32{ 3, 3, 3, 3 }),
+            @bitCast([4]f32{ 4, 4, 4, 4 }),
+            false,
+        ),
+    );
+}
+
 fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
     const op = simdOp(instr);
     switch (op) {
@@ -2934,7 +3008,7 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             for (instr.imm.simd_shuffle.lanes, 0..) |source, lane| result[lane] = bytes[source];
             try pushVector(s, @as(u128, @bitCast(result)));
         },
-        .i8x16_swizzle => {
+        .i8x16_swizzle, .i8x16_relaxed_swizzle => {
             const indices = popVector(s);
             const source = popVector(s);
             const table: [16]u8 = @bitCast(source);
@@ -2966,6 +3040,52 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
             const left = popVector(s);
             try pushVector(s, (left & mask) | (right & ~mask));
         },
+        .i8x16_relaxed_laneselect,
+        .i16x8_relaxed_laneselect,
+        .i32x4_relaxed_laneselect,
+        .i64x2_relaxed_laneselect,
+        => {
+            const mask = popVector(s);
+            const right = popVector(s);
+            const left = popVector(s);
+            try pushVector(s, (left & mask) | (right & ~mask));
+        },
+        .f32x4_relaxed_min, .f32x4_relaxed_max, .f64x2_relaxed_min, .f64x2_relaxed_max => {
+            const right = popVector(s);
+            const left = popVector(s);
+            try pushVector(s, switch (op) {
+                .f32x4_relaxed_min => binaryFloatLanes(32, left, right, .f32x4_pmin),
+                .f32x4_relaxed_max => binaryFloatLanes(32, left, right, .f32x4_pmax),
+                .f64x2_relaxed_min => binaryFloatLanes(64, left, right, .f64x2_pmin),
+                .f64x2_relaxed_max => binaryFloatLanes(64, left, right, .f64x2_pmax),
+                else => unreachable,
+            });
+        },
+        .f32x4_relaxed_madd, .f32x4_relaxed_nmadd, .f64x2_relaxed_madd, .f64x2_relaxed_nmadd => {
+            const addend = popVector(s);
+            const right = popVector(s);
+            const left = popVector(s);
+            try pushVector(s, switch (op) {
+                .f32x4_relaxed_madd => relaxedMulAdd(32, left, right, addend, false),
+                .f32x4_relaxed_nmadd => relaxedMulAdd(32, left, right, addend, true),
+                .f64x2_relaxed_madd => relaxedMulAdd(64, left, right, addend, false),
+                .f64x2_relaxed_nmadd => relaxedMulAdd(64, left, right, addend, true),
+                else => unreachable,
+            });
+        },
+        .i16x8_relaxed_q15mulr_s => {
+            const right = popVector(s);
+            try pushVector(s, q15MulRoundSaturate(popVector(s), right));
+        },
+        .i16x8_relaxed_dot_i8x16_i7x16_s => {
+            const right = popVector(s);
+            try pushVector(s, relaxedDotI16x8(popVector(s), right));
+        },
+        .i32x4_relaxed_dot_i8x16_i7x16_add_s => {
+            const addend = popVector(s);
+            const right = popVector(s);
+            try pushVector(s, relaxedDotAddI32x4(popVector(s), right, addend));
+        },
         .v128_any_true => try pushBool(s, popVector(s) != 0),
         .i8x16_all_true => try pushBool(s, allLanesTrue(8, popVector(s))),
         .i16x8_all_true => try pushBool(s, allLanesTrue(16, popVector(s))),
@@ -2983,6 +3103,10 @@ fn executeSimd(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
         .f64x2_promote_low_f32x4,
         .i32x4_trunc_sat_f64x2_s_zero,
         .i32x4_trunc_sat_f64x2_u_zero,
+        .i32x4_relaxed_trunc_f32x4_s,
+        .i32x4_relaxed_trunc_f32x4_u,
+        .i32x4_relaxed_trunc_f64x2_s_zero,
+        .i32x4_relaxed_trunc_f64x2_u_zero,
         .f64x2_convert_low_i32x4_s,
         .f64x2_convert_low_i32x4_u,
         => try executeSimdConversion(s, op),

@@ -36,6 +36,8 @@
       "status": "planned",
       "features": [
         "reference_types",
+        "fixed_width_simd",
+        "relaxed_simd",
         "tail_calls",
         "typed_function_references",
         "gc",
@@ -121,6 +123,16 @@
       "dependencies": [],
       "issue": 265,
       "hosts": ["threaded-context"]
+    },
+    {
+      "id": "relaxed_simd",
+      "repository": "https://github.com/WebAssembly/spec.git",
+      "commit": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+      "standardization": "finished",
+      "edition": "3.0",
+      "dependencies": ["fixed_width_simd"],
+      "issue": 386,
+      "hosts": ["portable-interpreter"]
     },
     {
       "id": "tail_calls",

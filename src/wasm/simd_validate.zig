@@ -29,6 +29,32 @@ pub const Shape = enum {
 };
 
 pub fn shape(op: simd.Op) Shape {
+    if (op.isRelaxed()) return switch (op) {
+        .i8x16_relaxed_swizzle,
+        .f32x4_relaxed_min,
+        .f32x4_relaxed_max,
+        .f64x2_relaxed_min,
+        .f64x2_relaxed_max,
+        .i16x8_relaxed_q15mulr_s,
+        .i16x8_relaxed_dot_i8x16_i7x16_s,
+        => .binary,
+        .i32x4_relaxed_trunc_f32x4_s,
+        .i32x4_relaxed_trunc_f32x4_u,
+        .i32x4_relaxed_trunc_f64x2_s_zero,
+        .i32x4_relaxed_trunc_f64x2_u_zero,
+        => .unary,
+        .f32x4_relaxed_madd,
+        .f32x4_relaxed_nmadd,
+        .f64x2_relaxed_madd,
+        .f64x2_relaxed_nmadd,
+        .i8x16_relaxed_laneselect,
+        .i16x8_relaxed_laneselect,
+        .i32x4_relaxed_laneselect,
+        .i64x2_relaxed_laneselect,
+        .i32x4_relaxed_dot_i8x16_i7x16_add_s,
+        => .ternary,
+        else => unreachable,
+    };
     return switch (op) {
         .v128_load, .v128_load8x8_s, .v128_load8x8_u, .v128_load16x4_s, .v128_load16x4_u, .v128_load32x2_s, .v128_load32x2_u, .v128_load8_splat, .v128_load16_splat, .v128_load32_splat, .v128_load64_splat, .v128_load32_zero, .v128_load64_zero => .load,
         .v128_store => .store,
@@ -52,6 +78,7 @@ pub fn shape(op: simd.Op) Shape {
         .v128_load8_lane, .v128_load16_lane, .v128_load32_lane, .v128_load64_lane => .lane_load,
         .v128_store8_lane, .v128_store16_lane, .v128_store32_lane, .v128_store64_lane => .lane_store,
         .i8x16_shl, .i8x16_shr_s, .i8x16_shr_u, .i16x8_shl, .i16x8_shr_s, .i16x8_shr_u, .i32x4_shl, .i32x4_shr_s, .i32x4_shr_u, .i64x2_shl, .i64x2_shr_s, .i64x2_shr_u => .shift,
+        else => unreachable,
     };
 }
 

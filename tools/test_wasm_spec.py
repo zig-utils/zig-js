@@ -102,6 +102,27 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn(".join()", wait_js)
         self.assertIn("||", either_js)
 
+    def test_nested_either_vectors_use_raw_bit_alternatives(self) -> None:
+        generated = wasm_spec.generate_command(0, {
+            "type": "assert_return",
+            "line": 12,
+            "action": {
+                "type": "invoke",
+                "field": "relaxed",
+                "args": [{"type": "v128", "lane_type": "i32", "value": ["0", "0", "0", "0"]}],
+            },
+            "expected": [{
+                "type": "either",
+                "values": [
+                    {"type": "v128", "lane_type": "i32", "value": ["1", "2", "3", "4"]},
+                    {"type": "v128", "lane_type": "i32", "value": ["5", "6", "7", "8"]},
+                ],
+            }],
+        }, pathlib.Path("."))
+        self.assertIn("vector_bits", generated)
+        self.assertIn("||", generated)
+        self.assertIn("__wasmSpecInvokeBits", generated)
+
     def test_exception_assertion_requires_typed_webassembly_exception(self) -> None:
         generated = wasm_spec.generate_command(0, {
             "type": "assert_exception",

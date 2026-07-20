@@ -18,6 +18,7 @@ pub const Feature = enum {
     reference_types,
     bulk_memory,
     fixed_width_simd,
+    relaxed_simd,
     threads,
     tail_calls,
     typed_function_references,
@@ -34,6 +35,7 @@ pub const Feature = enum {
             .reference_types => "reference-types",
             .bulk_memory => "bulk-memory",
             .fixed_width_simd => "fixed-width-simd",
+            .relaxed_simd => "relaxed-simd",
             .threads => "threads",
             .tail_calls => "tail-calls",
             .typed_function_references => "typed-function-references",
@@ -52,6 +54,7 @@ pub const Features = struct {
     reference_types: bool = false,
     bulk_memory: bool = false,
     fixed_width_simd: bool = false,
+    relaxed_simd: bool = false,
     threads: bool = false,
     tail_calls: bool = false,
     typed_function_references: bool = false,
@@ -72,6 +75,8 @@ pub const Features = struct {
     }
 
     pub fn missingDependency(self: Features) ?DependencyFailure {
+        if (self.relaxed_simd and !self.fixed_width_simd)
+            return .{ .feature = .relaxed_simd, .required = .fixed_width_simd };
         if (self.typed_function_references and !self.reference_types)
             return .{ .feature = .typed_function_references, .required = .reference_types };
         if (self.gc and !self.typed_function_references)
@@ -1080,6 +1085,10 @@ pub const Module = struct {
 
 test "wasm feature dependency validation is deterministic" {
     try std.testing.expectEqual(@as(?Features.DependencyFailure, null), (Features{}).missingDependency());
+    try std.testing.expectEqualDeep(
+        Features.DependencyFailure{ .feature = .relaxed_simd, .required = .fixed_width_simd },
+        (Features{ .relaxed_simd = true }).missingDependency().?,
+    );
     try std.testing.expectEqualDeep(
         Features.DependencyFailure{ .feature = .gc, .required = .typed_function_references },
         (Features{ .reference_types = true, .gc = true }).missingDependency().?,

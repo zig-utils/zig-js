@@ -83,6 +83,7 @@ pub fn main(init: std.process.Init) !void {
             .reference_types = true,
             .bulk_memory = true,
             .fixed_width_simd = simd or core_3,
+            .relaxed_simd = core_3,
             .tail_calls = tail_calls or exception_handling or memory64 or core_3,
             .exception_handling = exception_handling or memory64 or core_3,
             .typed_function_references = wasm_gc or memory64 or core_3,

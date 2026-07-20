@@ -716,8 +716,37 @@ def requires_bit_exact_nan(command: dict) -> bool:
 
 
 def requires_vector_bits(command: dict) -> bool:
-    values = command.get("expected", []) + command.get("action", {}).get("args", [])
+    expected = command.get("expected", [])
+    values = command.get("action", {}).get("args", []) + expected
+    for value in expected:
+        if value.get("type") == "either":
+            values += value.get("values", [])
     return any(value.get("type") == "v128" for value in values)
+
+
+def expected_alternatives(command: dict) -> list[list[dict]]:
+    expected = command.get("expected", [])
+    if len(expected) == 1 and expected[0].get("type") == "either":
+        return [choice if isinstance(choice, list) else [choice] for choice in expected[0].get("values", [])]
+    if "either" in command:
+        return [choice if isinstance(choice, list) else [choice] for choice in command["either"]]
+    return [expected]
+
+
+def vector_comparison(actual: str, expected: list[dict]) -> str:
+    if len(expected) == 0:
+        return f"{actual}===undefined"
+    if len(expected) == 1 and expected[0].get("type") == "v128" and any(
+        str(lane).startswith("nan:") for lane in expected[0].get("value", [])
+    ):
+        return (
+            f"__sameV128Bits({actual},{js_string(expected[0]['lane_type'])},"
+            f"{json.dumps(expected[0]['value'], separators=(',', ':'))})"
+        )
+    if len(expected) == 1:
+        return f"{actual}==={js_string(raw_value_bits(expected[0]))}"
+    expected_bits = [raw_value_bits(value) for value in expected]
+    return f"JSON.stringify({actual})==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
 
 
 PRELUDE = r"""
@@ -950,29 +979,20 @@ def generate_command(index: int, command: dict, directory: Path) -> str:
             )
         if kind == "assert_return":
             if requires_vector_bits(command):
-                expected = command.get("expected", [])
+                alternatives = expected_alternatives(command)
                 expression = raw_action_expression(command["action"])
                 vector_nan_policy = any(
                     value.get("type") == "v128" and any(
                         str(lane).startswith("nan:") for lane in value.get("value", [])
                     )
+                    for expected in alternatives
                     for value in expected
                 )
                 vector_mode = "vector_nan_policy" if vector_nan_policy else "vector_bits"
-                if len(expected) == 0:
-                    comparison = "__actual===undefined"
-                elif len(expected) == 1 and expected[0].get("type") == "v128" and any(
-                    str(lane).startswith("nan:") for lane in expected[0].get("value", [])
-                ):
-                    comparison = (
-                        f"__sameV128Bits(__actual,{js_string(expected[0]['lane_type'])},"
-                        f"{json.dumps(expected[0]['value'], separators=(',', ':'))})"
-                    )
-                elif len(expected) == 1:
-                    comparison = f"__actual==={js_string(raw_value_bits(expected[0]))}"
-                else:
-                    expected_bits = [raw_value_bits(value) for value in expected]
-                    comparison = f"JSON.stringify(__actual)==={js_string(json.dumps(expected_bits, separators=(',', ':')))}"
+                comparison = "||".join(
+                    f"({vector_comparison('__actual', expected)})"
+                    for expected in alternatives
+                ) or "false"
                 return (
                     f"{{try{{const __actual={expression};if({comparison}){{"
                     f"{record_line(index, command, 'pass', mode=vector_mode)}"
