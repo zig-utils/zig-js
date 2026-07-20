@@ -22,7 +22,11 @@ encs = json.load(open('/tmp/encodings.json'))
 candidates = [k for k in indexes if isinstance(indexes[k], list) and len(indexes[k]) == 128 and k != 'windows-1252']
 candidates.append('iso-8859-8-i')  # shares iso-8859-8 layout; node treats it as its own encoding
 all_labels = sorted({lab for g in encs for e in g['encodings'] for lab in e['labels']})
-SPECIAL = {'utf-8', 'utf-16le', 'utf-16be', 'windows-1252'}  # decoded by hand, no generated table
+# Decoded elsewhere (no single-byte table): utf variants + windows-1252 (latin1),
+# plus gb18030 (encoding_multibyte.zig). big5/euc-kr/shift_jis/euc-jp/gbk are NOT
+# listed — node/ICU's tables for them deviate from WHATWG, so they stay
+# unsupported (RangeError) rather than subtly wrong.
+SPECIAL = {'utf-8', 'utf-16le', 'utf-16be', 'windows-1252', 'gb18030'}
 
 node_js = '''
 const labels = %s, names = %s;

@@ -34,6 +34,7 @@ const unicode_case = @import("unicode_case.zig");
 const unicode_normalize = @import("unicode_normalize.zig");
 const idna = @import("idna.zig");
 const enc_data = @import("encoding_singlebyte_data.zig");
+const enc_mb = @import("encoding_multibyte.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
@@ -40963,6 +40964,11 @@ fn textDecoderDecodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
         // node/V8 decodes windows-1252 (and its iso-8859-1/latin1/ascii aliases)
         // as latin1 — a raw byte→code-point map, not the WHATWG index.
         for (bytes) |b| try tdEmit(self, &out, b);
+    } else if (enc_mb.isMultibyte(enc)) {
+        enc_mb.decode(self.arena, &out, enc, bytes, fatal) catch |e| switch (e) {
+            error.DecodeInvalid => return self.throwError("TypeError", "The encoded data was not valid."),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
     } else if (enc_data.singleByteTable(enc)) |tbl| {
         // WHATWG single-byte decoder: 0x00–0x7F is ASCII; a high byte indexes the
         // table, and a 0xFFFD entry is an unmapped byte (error / U+FFFD).

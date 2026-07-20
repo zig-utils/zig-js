@@ -415,6 +415,7 @@ pub fn labelToName(label: []const u8) ?[]const u8 {
     if (std.ascii.eqlIgnoreCase(label, "ecma-114")) return "iso-8859-6";
     if (std.ascii.eqlIgnoreCase(label, "ecma-118")) return "iso-8859-7";
     if (std.ascii.eqlIgnoreCase(label, "elot_928")) return "iso-8859-7";
+    if (std.ascii.eqlIgnoreCase(label, "gb18030")) return "gb18030";
     if (std.ascii.eqlIgnoreCase(label, "greek")) return "iso-8859-7";
     if (std.ascii.eqlIgnoreCase(label, "greek8")) return "iso-8859-7";
     if (std.ascii.eqlIgnoreCase(label, "hebrew")) return "iso-8859-8";
