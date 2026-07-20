@@ -136,12 +136,15 @@ jobs:
               python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory-multi.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-core.json"
               python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter linking3.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-linking.json"
           # wasm-tools-backed proposals use their exact release binary and
-          # source pin. These files cover 64-bit memory/table execution plus GC
-          # packed aggregates, i31 references, and cast-branch control flow.
-          - name: wasm-memory64-gc-smoke
+          # source pins. These files cover Core 3 typed function calls,
+          # 64-bit memory/table execution, GC packed aggregates, i31
+          # references, and cast-branch control flow.
+          - name: wasm-core-3-memory64-gc-smoke
             wasm_memory64_gc: true
             cmd: |
               zig build wasm-spec-eval
+              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-call-ref.json"
+              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/return_call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-return-call-ref.json"
               python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter address64.wast --inventory "$RUNNER_TEMP/wasm-memory64-address.json"
               python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter table_copy_mixed.wast --inventory "$RUNNER_TEMP/wasm-memory64-table.json"
               python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter array_copy.wast --inventory "$RUNNER_TEMP/wasm-gc-array.json"
@@ -338,10 +341,11 @@ jobs:
             --output "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz"
           echo "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f  $RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" | sha256sum --check
           tar --extract --gzip --file "$RUNNER_TEMP/wabt-1.0.39-linux-x64.tar.gz" --directory "$RUNNER_TEMP"
-      - name: Install pinned Memory64 and GC corpus tools
+      - name: Install pinned Core 3, Memory64, and GC corpus tools
         if: matrix.wasm_memory64_gc == true
         working-directory: zig-js
         run: |
+          git submodule update --init --depth 1 wasm-spec-wg3
           git init "$RUNNER_TEMP/wasm-memory64"
           git -C "$RUNNER_TEMP/wasm-memory64" remote add origin https://github.com/WebAssembly/memory64.git
           git -C "$RUNNER_TEMP/wasm-memory64" fetch --depth=1 origin 9003cd5e24e53b84cd9027ea3dd7ae57159a6db1

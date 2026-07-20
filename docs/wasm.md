@@ -247,7 +247,8 @@ subtyping, and checks covariant tail results. Execution traps null references,
 checks canonical function types across instances, and preserves typed function
 slots through module-aware initialization and GC root checkpoints. The exact
 `wg-3.0` corpus passes all 35 `call_ref.wast` and all 51
-`return_call_ref.wast` commands, including million-step tail recursion.
+`return_call_ref.wast` commands, including million-step tail recursion. CI
+runs both exact files in the shared pinned wasm-tools smoke leg.
 
 Reproduce those execution and root-safety witnesses with:
 
