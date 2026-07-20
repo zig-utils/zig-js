@@ -273,6 +273,7 @@ const JSStringIterator = extern struct {
 
 const PrivateCallFrame = opaque {};
 const PrivateArrayBufferHandle = opaque {};
+const JSPropertyIterator = opaque {};
 const TextCodec = opaque {};
 const AbortSignal = opaque {};
 const JSHostFn = fn (JSContextRef, *PrivateCallFrame) callconv(.c) EncodedValue;
@@ -335,6 +336,12 @@ extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
 extern "c" fn JSC__JSValue__callCustomInspectFunction(JSContextRef, EncodedValue, EncodedValue, u32, u32, bool) EncodedValue;
 extern "c" fn Bun__JSValue__protect(EncodedValue) void;
 extern "c" fn Bun__JSValue__unprotect(EncodedValue) void;
+extern "c" fn Bun__JSPropertyIterator__create(JSContextRef, EncodedValue, *usize, bool, bool) ?*JSPropertyIterator;
+extern "c" fn Bun__JSPropertyIterator__deinit(*JSPropertyIterator) void;
+extern "c" fn Bun__JSPropertyIterator__getLongestPropertyName(*JSPropertyIterator, JSContextRef, ?*anyopaque) usize;
+extern "c" fn Bun__JSPropertyIterator__getName(*JSPropertyIterator, *BunString, usize) void;
+extern "c" fn Bun__JSPropertyIterator__getNameAndValue(*JSPropertyIterator, JSContextRef, ?*anyopaque, *BunString, usize) EncodedValue;
+extern "c" fn Bun__JSPropertyIterator__getNameAndValueNonObservable(*JSPropertyIterator, JSContextRef, ?*anyopaque, *BunString, usize) EncodedValue;
 extern "c" fn JSC__JSValue__toBoolean(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
 extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
@@ -788,6 +795,8 @@ fn uspToStringCallback(ctx: ?*anyopaque, str: *const ZigString) callconv(.c) voi
 
 fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
     if (actual.tag == .empty) return expected.len == 0;
+    if (actual.tag == .zig_string or actual.tag == .static_zig_string)
+        return zigStringUtf8Equals(actual.value.zig_string, expected);
     if (actual.tag != .wtf_string_impl) return false;
     const impl = actual.value.wtf_string_impl orelse return false;
     var view = std.unicode.Utf8View.init(expected) catch return false;
@@ -817,17 +826,37 @@ fn bunStringUtf8Equals(actual: BunString, expected: []const u8) bool {
 }
 
 fn zigStringUtf8Equals(actual: ZigString, expected: []const u8) bool {
-    if (actual.len != expected.len) return false;
     const untagged = actual.tagged_ptr & ((@as(usize, 1) << 53) - 1);
     if (actual.tagged_ptr & (@as(usize, 1) << 63) != 0) {
         const units: [*]align(1) const u16 = @ptrFromInt(untagged);
-        for (units[0..actual.len], expected) |unit, byte| {
-            if (unit != byte) return false;
+        var view = std.unicode.Utf8View.init(expected) catch return false;
+        var codepoints = view.iterator();
+        var index: usize = 0;
+        while (codepoints.nextCodepoint()) |codepoint| {
+            if (codepoint <= 0xffff) {
+                if (index >= actual.len or units[index] != @as(u16, @intCast(codepoint))) return false;
+                index += 1;
+                continue;
+            }
+            if (index + 1 >= actual.len) return false;
+            const scalar = codepoint - 0x10000;
+            if (units[index] != @as(u16, @intCast(0xd800 + (scalar >> 10))) or
+                units[index + 1] != @as(u16, @intCast(0xdc00 + (scalar & 0x3ff)))) return false;
+            index += 2;
         }
-        return true;
+        return index == actual.len;
     }
     const bytes: [*]const u8 = @ptrFromInt(untagged);
-    return std.mem.eql(u8, bytes[0..actual.len], expected);
+    if (actual.tagged_ptr & (@as(usize, 1) << 61) != 0)
+        return actual.len == expected.len and std.mem.eql(u8, bytes[0..actual.len], expected);
+    var view = std.unicode.Utf8View.init(expected) catch return false;
+    var codepoints = view.iterator();
+    var index: usize = 0;
+    while (codepoints.nextCodepoint()) |codepoint| {
+        if (index >= actual.len or codepoint > 0xff or bytes[index] != @as(u8, @intCast(codepoint))) return false;
+        index += 1;
+    }
+    return index == actual.len;
 }
 
 fn expectNativeUrlField(context: JSContextRef, actual: BunString, js_source: [*:0]const u8) bool {
@@ -1487,6 +1516,60 @@ pub fn main() void {
         fail("private counted protection released too early");
     Bun__JSValue__unprotect(protected_value);
     Bun__JSValue__unprotect(protected_value);
+
+    // Revision-pinned property iterator (#368): the independently compiled
+    // consumer sees the exact opaque pointer/BunString ABI, stable name
+    // snapshot, UTF-16 length, and observable-versus-VMInquiry split.
+    const iterator_target = evaluate(context, "globalThis.__property_iterator_gets_368 = 0; " ++
+        "globalThis.__property_iterator_target_368 = { 2: 2, 0: 0, alpha: 10, " ++
+        "get getter() { __property_iterator_gets_368++; return 20; }, 'unicode😀key': 30, [Symbol('ownSymbol')]: 40 }; " ++
+        "__property_iterator_target_368");
+    var iterator_count: usize = 999;
+    const property_iterator = Bun__JSPropertyIterator__create(context, iterator_target, &iterator_count, true, false) orelse
+        fail("private property iterator creation failed");
+    defer Bun__JSPropertyIterator__deinit(property_iterator);
+    if (iterator_count != 6 or
+        Bun__JSPropertyIterator__getLongestPropertyName(property_iterator, context, iterator_target.cellPointer()) != 12)
+        fail("private property iterator count/UTF-16 length mismatch");
+    const iterator_names = [_][]const u8{ "0", "2", "alpha", "getter", "unicode😀key", "ownSymbol" };
+    for (iterator_names, 0..) |expected, index| {
+        var property_name = emptyBunString();
+        Bun__JSPropertyIterator__getName(property_iterator, &property_name, index);
+        if (property_name.tag != .zig_string or !bunStringUtf8Equals(property_name, expected))
+            fail("private property iterator name order/borrow mismatch");
+    }
+    var property_name = emptyBunString();
+    if (Bun__JSPropertyIterator__getNameAndValueNonObservable(
+        property_iterator,
+        context,
+        iterator_target.cellPointer(),
+        &property_name,
+        3,
+    ) != .empty or property_name.tag != .dead or
+        JSValueToNumber(context, evaluate(context, "__property_iterator_gets_368").cellPointer(), null) != 0)
+        fail("private property iterator VM inquiry invoked a getter");
+    const observable_property = Bun__JSPropertyIterator__getNameAndValue(
+        property_iterator,
+        context,
+        iterator_target.cellPointer(),
+        &property_name,
+        3,
+    );
+    const observable_gets = JSValueToNumber(context, evaluate(context, "__property_iterator_gets_368").cellPointer(), null);
+    if (observable_property != EncodedValue.fromInt32(20) or !bunStringUtf8Equals(property_name, "getter") or observable_gets != 1)
+        fail("private property iterator observable getter mismatch");
+    _ = evaluate(context, "delete __property_iterator_target_368.alpha; __property_iterator_target_368.afterSnapshot = 50");
+    if (Bun__JSPropertyIterator__getNameAndValue(
+        property_iterator,
+        context,
+        iterator_target.cellPointer(),
+        &property_name,
+        2,
+    ) != .empty)
+        fail("private property iterator value lookup ignored live deletion");
+    Bun__JSPropertyIterator__getName(property_iterator, &property_name, 2);
+    if (!bunStringUtf8Equals(property_name, "alpha"))
+        fail("private property iterator name snapshot changed after mutation");
 
     // Revision-pinned native TextCodec fallback (#327): exact registry,
     // stable canonical-name storage, incremental state, errors, and ownership.

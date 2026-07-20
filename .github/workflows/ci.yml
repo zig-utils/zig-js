@@ -159,6 +159,7 @@ jobs:
               python3 -m unittest tools/test_home_private_abi.py
               zig build c-api-audit home-private-abi-audit test-home-private-abi
               zig build test-bun-private-abort-signal -Dprivate-abi-consumer=bun
+              zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
           - name: tsan-unit (shard 0/4)
             cmd: zig build test -Dtsan=true -Dunit-shard-index=0 -Dunit-shard-count=4
           - name: tsan-unit (shard 1/4)

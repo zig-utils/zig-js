@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (344 implemented, 127 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (352 implemented, 119 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 344 are implemented and 127 remain pending
+Of the private entries, 352 are implemented and 119 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -384,6 +384,16 @@ behavior. Array paths accept only string/number entries and use JSC's
 proxies, and exact number-to-string keys. Each target segment is boxed through
 `ToObject` and read once without a preliminary `has` lookup, preserving present
 `undefined`, accessors, abrupt completion, and first-exception state.
+
+The six shared property-iterator exports retain their VM and snapshot exact
+enumerable string/Symbol names in JSC order. Own-only and non-index modes,
+prototype traversal, enumerable-name de-duplication, mutation-stable borrowed
+BunStrings, and UTF-16 longest-name length follow the pinned boundary.
+Observable reads perform ordinary `Get`; VM inquiry walks only direct ordinary
+data slots and stops at accessors, Proxies, or custom/opaque objects without
+executing user code. Focused and independently compiled consumers cover both
+paths, thrown getters, symbols, sibling/foreign VMs, and final iterator-owned
+VM teardown.
 
 Four class/display-name projections separate raw class-info metadata,
 constructor-derived calculated class names, function/internal names, and Bun's
@@ -977,7 +987,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (336 implemented, 125 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (344 implemented, 117 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -990,9 +1000,10 @@ every name in each category rather than reducing that result to counts.
 ```sh
 zig build bun-private-abi-audit
 zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
+zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 125
+not claim complete Bun runtime compatibility; #164 remains open for the 117
 pending core entries and later wider/generated profiles.

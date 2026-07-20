@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 360,
-      "pending": 123
+      "implemented": 366,
+      "pending": 117
     }
   },
   "home_comparison": {
@@ -547,10 +547,10 @@
       "line": 144,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__create(globalObject: *jsc.JSGlobalObject, encodedValue: jsc.JSValue, count: *usize, own_properties_only: bool, only_non_index_properties: bool) ?*JSPropertyIteratorImpl;",
       "declaration_sha256": "0ff6ba7999f96ffac4eac2f723b059ef2fbd494060a3e88d4d7aad63ee7c6811",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__deinit",
@@ -558,10 +558,10 @@
       "line": 148,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__deinit(iter: *JSPropertyIteratorImpl) void;",
       "declaration_sha256": "8a634025efa54d0ecbd5af503b348fb52d692dd5dd5d220d2c113db05284e6c2",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__getLongestPropertyName",
@@ -569,10 +569,10 @@
       "line": 149,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getLongestPropertyName(iter: *JSPropertyIteratorImpl, globalObject: *jsc.JSGlobalObject, object: *jsc.JSObject) usize;",
       "declaration_sha256": "fd2d14196ea5e149d2c2e873ebd5a4d4da80103c87aa84a4e9afe08e455c3ed3",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__getName",
@@ -580,10 +580,10 @@
       "line": 147,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getName(iter: *JSPropertyIteratorImpl, propertyName: *bun.String, i: usize) void;",
       "declaration_sha256": "3e6b9d746b50ce395292df22a4456c1feb535a6ad242b9a611f15a7badb3f73c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__getNameAndValue",
@@ -591,10 +591,10 @@
       "line": 145,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getNameAndValue(iter: *JSPropertyIteratorImpl, globalObject: *jsc.JSGlobalObject, object: *jsc.JSObject, propertyName: *bun.String, i: usize) jsc.JSValue;",
       "declaration_sha256": "80b8281d5f1f9190d0a85af1d0d4c2c8a3d72c16484ff590093ac3c527e2c82d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSPropertyIterator__getNameAndValueNonObservable",
@@ -602,10 +602,10 @@
       "line": 146,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSPropertyIterator__getNameAndValueNonObservable(iter: *JSPropertyIteratorImpl, globalObject: *jsc.JSGlobalObject, object: *jsc.JSObject, propertyName: *bun.String, i: usize) jsc.JSValue;",
       "declaration_sha256": "aef1f4554acc3c058711cf3b3df8fa7e46b9793a5b73a49d2c1c30c489106978",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSValue__call",

@@ -740,6 +740,24 @@ const PrivateMarkedArgumentBuffer = struct {
     group: ?*CContextGroup = null,
 };
 
+/// Native owner for the pinned Home/Bun `JSPropertyIterator` boundary. JSC's
+/// iterator owns a `PropertyNameArray` and a strong VM reference; mirror both:
+/// keys are copied out of the evaluation arena, while borrowed BunString views
+/// live in (and therefore share the lifetime of) the retained context group.
+const PrivateJSPropertyIteratorEntry = struct {
+    key: []u8,
+    name: PrivateBunString,
+    utf16_length: usize,
+};
+
+const PrivateJSPropertyIterator = struct {
+    magic: u64 = private_js_property_iterator_magic,
+    group: *CContextGroup,
+    entries: []PrivateJSPropertyIteratorEntry,
+};
+
+const private_js_property_iterator_magic: u64 = 0x5a4a_5350_524f_5049; // "ZJSPROPI"
+
 const private_marked_argument_buffer_magic: u64 = 0x5a4a_534d_4142_5546; // "ZJSMABUF"
 const PrivateMarkedArgumentCallback = *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void;
 
@@ -5779,6 +5797,280 @@ export fn Bun__JSObject__getCodePropertyVMInquiry(
         current = object.protoAtomic();
     }
     return .empty;
+}
+
+fn privatePropertyIteratorKeys(
+    machine: *interp.Interpreter,
+    start: *Object,
+    own_properties_only: bool,
+    only_non_index_properties: bool,
+) interp.EvalError![]const []const u8 {
+    var result: std.ArrayListUnmanaged([]const u8) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var current: ?*Object = start;
+    var prototype_count: usize = 0;
+
+    while (current) |object| {
+        // JSC's PropertyNameArrayBuilder de-duplicates names that were actually
+        // added. A non-enumerable own name therefore does not hide an enumerable
+        // name on a prototype for this private API (unlike language `for-in`).
+        for (try builtins.ownEnumerablePropertyKeys(machine, object, true)) |key| {
+            if (value.isPrivateKey(key)) continue;
+            if (value.isSymbolKey(key) and !value.isRealSymbolKey(key)) continue;
+            if (own_properties_only and only_non_index_properties and value.canonicalIndex(key) != null) continue;
+            if (seen.contains(key)) continue;
+            try seen.put(machine.arena, key, {});
+            try result.append(machine.arena, key);
+        }
+        if (own_properties_only) break;
+
+        prototype_count += 1;
+        if (prototype_count > 10_000)
+            return machine.throwError("RangeError", "Maximum prototype chain depth exceeded");
+        const prototype = try machine.getPrototypeOfObject(object);
+        if (prototype.isNull()) break;
+        if (!prototype.isObject() or prototype.asObj().is_symbol or prototype.asObj().is_bigint)
+            return machine.throwError("TypeError", "Object prototype is neither an object nor null");
+        current = prototype.asObj();
+    }
+    return result.items;
+}
+
+fn privateCreatePropertyIteratorRecord(
+    group: *CContextGroup,
+    machine: *interp.Interpreter,
+    keys: []const []const u8,
+) !*PrivateJSPropertyIterator {
+    if (!group.retain()) return error.OutOfMemory;
+    errdefer _ = group.release();
+
+    const entries = try gpa.alloc(PrivateJSPropertyIteratorEntry, keys.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (entries[0..initialized]) |entry| gpa.free(entry.key);
+        gpa.free(entries);
+    }
+    for (keys, entries) |key, *entry| {
+        const owned_key = try gpa.dupe(u8, key);
+        errdefer gpa.free(owned_key);
+        const name_bytes = if (value.isRealSymbolKey(key)) symbol: {
+            const symbol_value = try machine.keyToValue(key);
+            if (!symbol_value.isObject() or !symbol_value.asObj().is_symbol)
+                return machine.throwError("TypeError", "Property iterator could not recover a Symbol key");
+            break :symbol symbol_value.asObj().symbolDescription() orelse "";
+        } else key;
+        const view = try privateBorrowedZigStringView(group, name_bytes);
+        entry.* = .{
+            .key = owned_key,
+            .name = .{ .tag = .zig_string, .value = .{ .zig_string = view } },
+            .utf16_length = view.len,
+        };
+        initialized += 1;
+    }
+    const iterator = try gpa.create(PrivateJSPropertyIterator);
+    iterator.* = .{ .group = group, .entries = entries };
+    return iterator;
+}
+
+fn privateDestroyPropertyIterator(iterator: *PrivateJSPropertyIterator) void {
+    const group = iterator.group;
+    iterator.magic = 0;
+    for (iterator.entries) |entry| gpa.free(entry.key);
+    gpa.free(iterator.entries);
+    gpa.destroy(iterator);
+    if (group.release()) group.destroy();
+}
+
+fn privatePropertyIteratorObject(
+    group: *CContextGroup,
+    cell: ?*anyopaque,
+) ?*Object {
+    const boxed = privateBoxFromCell(cell) orelse return null;
+    if (boxed.private_kind != .value or boxed.owner.c_api_group != @as(?*anyopaque, @ptrCast(group))) return null;
+    if (!boxed.value.isObject() or boxed.value.asObj().is_symbol or boxed.value.asObj().is_bigint) return null;
+    return boxed.value.asObj();
+}
+
+/// Pure PropertySlot::VMInquiry analogue. Ordinary data slots may be found on
+/// direct prototypes, but an accessor or any opaque/exotic object taints the
+/// inquiry and stops it without invoking JS, Proxy traps, or host callbacks.
+fn privatePropertyIteratorVMInquiry(object: *Object, key: []const u8) ?Value {
+    if (value.canonicalIndex(key) != null) return null;
+    var current: ?*Object = object;
+    var depth: usize = 0;
+    while (current) |candidate| {
+        depth += 1;
+        if (depth > 10_000) return null;
+        if (candidate.proxyHandler() != null or candidate.proxy_revoked or candidate.moduleNs() != null) return null;
+        if (candidate.getAccessor(key) != null) return null;
+        if (candidate.getOwn(key)) |found| return found;
+
+        // Pure virtual own data properties represented outside the shape.
+        if (std.mem.eql(u8, key, "length")) {
+            if (candidate.boxedPrimitive()) |primitive|
+                if (primitive.isString()) return Value.num(@floatFromInt(interp.Interpreter.utf16LenOfString(primitive.asStr())));
+            if (candidate.is_array and !candidate.is_arguments)
+                return Value.num(@floatFromInt(candidate.arrayLength()));
+        }
+
+        // Integer-indexed exotics do not continue to their prototype for any
+        // canonical numeric string, including "-0", negatives, fractions, and
+        // out-of-bounds values that are not ordinary array indices.
+        if (candidate.typedArray() != null and interp.canonicalNumericIndexString(key) != null) return null;
+
+        if (candidate.hostClassHooks() != null) return null;
+        current = candidate.protoAtomic();
+    }
+    return null;
+}
+
+export fn Bun__JSPropertyIterator__create(
+    global: JSContextRef,
+    encoded_value: EncodedValue,
+    count: *usize,
+    own_properties_only: bool,
+    only_non_index_properties: bool,
+) callconv(.c) ?*PrivateJSPropertyIterator {
+    count.* = 0;
+    const context = ctxForEvaluation(global) orelse return null;
+    const group = privatePropertyBoundaryGroup(context) orelse return null;
+    if (group.pending_exception != null) return null;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const target = privateValueFrom(global, encoded_value) orelse {
+        const abrupt = machine.throwError("TypeError", "Property iterator target belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return null;
+    };
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) {
+        const abrupt = machine.throwError("TypeError", "Property iterator target is not an object");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return null;
+    }
+    const keys = privatePropertyIteratorKeys(
+        &machine,
+        target.asObj(),
+        own_properties_only,
+        only_non_index_properties,
+    ) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return null;
+    };
+    if (keys.len == 0) return null;
+    const iterator = privateCreatePropertyIteratorRecord(group, &machine, keys) catch |err| {
+        switch (err) {
+            error.StringTooLong, error.InvalidString => privatePublishBunStringError(context, @errorCast(err)),
+            else => privateSetPendingAbrupt(context, &machine, err),
+        }
+        return null;
+    };
+    count.* = iterator.entries.len;
+    return iterator;
+}
+
+export fn Bun__JSPropertyIterator__deinit(iterator: ?*PrivateJSPropertyIterator) callconv(.c) void {
+    const value_ = iterator orelse return;
+    if (value_.magic != private_js_property_iterator_magic) return;
+    privateDestroyPropertyIterator(value_);
+}
+
+export fn Bun__JSPropertyIterator__getLongestPropertyName(
+    iterator: ?*PrivateJSPropertyIterator,
+    global: JSContextRef,
+    object_cell: ?*anyopaque,
+) callconv(.c) usize {
+    const value_ = iterator orelse return 0;
+    if (value_.magic != private_js_property_iterator_magic) return 0;
+    const context = ctxForHandleInspection(global) orelse return 0;
+    if (context.c_api_group != @as(?*anyopaque, @ptrCast(value_.group))) return 0;
+    if (privatePropertyIteratorObject(value_.group, object_cell) == null) return 0;
+    var longest: usize = 0;
+    for (value_.entries) |entry| longest = @max(longest, entry.utf16_length);
+    return longest;
+}
+
+export fn Bun__JSPropertyIterator__getName(
+    iterator: ?*PrivateJSPropertyIterator,
+    property_name: *PrivateBunString,
+    index: usize,
+) callconv(.c) void {
+    property_name.* = PrivateBunString.dead();
+    const value_ = iterator orelse return;
+    if (value_.magic != private_js_property_iterator_magic or index >= value_.entries.len) return;
+    property_name.* = value_.entries[index].name;
+}
+
+fn privatePropertyIteratorGet(
+    iterator: ?*PrivateJSPropertyIterator,
+    global: JSContextRef,
+    object_cell: ?*anyopaque,
+    property_name: *PrivateBunString,
+    index: usize,
+    observable: bool,
+) EncodedValue {
+    property_name.* = PrivateBunString.dead();
+    const value_ = iterator orelse return .empty;
+    if (value_.magic != private_js_property_iterator_magic or index >= value_.entries.len) return .empty;
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group != value_.group or group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const object = privatePropertyIteratorObject(group, object_cell) orelse {
+        const abrupt = machine.throwError("TypeError", "Property iterator object belongs to another VM");
+        privateSetPendingAbrupt(context, &machine, abrupt);
+        return .empty;
+    };
+    const entry = value_.entries[index];
+    const result = if (observable)
+        machine.getPropertyIfExists(Value.obj(object), entry.key) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        }
+    else
+        privatePropertyIteratorVMInquiry(object, entry.key);
+    const found = result orelse return .empty;
+    const encoded = privateEncodeResult(context, &machine, found);
+    if (encoded == .empty) return .empty;
+    property_name.* = entry.name;
+    return encoded;
+}
+
+export fn Bun__JSPropertyIterator__getNameAndValue(
+    iterator: ?*PrivateJSPropertyIterator,
+    global: JSContextRef,
+    object_cell: ?*anyopaque,
+    property_name: *PrivateBunString,
+    index: usize,
+) callconv(.c) EncodedValue {
+    return privatePropertyIteratorGet(iterator, global, object_cell, property_name, index, true);
+}
+
+export fn Bun__JSPropertyIterator__getNameAndValueNonObservable(
+    iterator: ?*PrivateJSPropertyIterator,
+    global: JSContextRef,
+    object_cell: ?*anyopaque,
+    property_name: *PrivateBunString,
+    index: usize,
+) callconv(.c) EncodedValue {
+    return privatePropertyIteratorGet(iterator, global, object_cell, property_name, index, false);
 }
 
 export fn JSC__JSValue__symbolFor(
@@ -22664,6 +22956,195 @@ test "private property path traversal preserves pinned string and array semantic
     try std.testing.expectEqual(EncodedValue.empty, JSC__JSValue__getIfPropertyExistsFromPath(blocked_target, context, blocked_path));
     pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(224), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private property iterator preserves snapshots observability and VM inquiry" {
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const Probe = struct {
+        fn encoded(context_: *Context, source: []const u8) !EncodedValue {
+            return privateEncodedFromValue(context_, try context_.evaluate(source));
+        }
+
+        fn cell(encoded_value: EncodedValue) !*anyopaque {
+            return @ptrFromInt(try encoded_value.asCellAddress());
+        }
+
+        fn text(context_: *Context, string: *const PrivateBunString) ![]const u8 {
+            const result = try privateBunStringValue(context_, string, null);
+            if (!result.isString()) return error.ValueInitFailed;
+            return result.asStr();
+        }
+
+        fn indexOf(context_: *Context, iterator: *PrivateJSPropertyIterator, expected: []const u8) !usize {
+            for (0..iterator.entries.len) |index| {
+                var name = PrivateBunString.dead();
+                Bun__JSPropertyIterator__getName(iterator, &name, index);
+                if (std.mem.eql(u8, try text(context_, &name), expected)) return index;
+            }
+            return error.MissingProperty;
+        }
+    };
+
+    const target = try Probe.encoded(
+        internal,
+        "globalThis.__property_iterator_gets_368 = 0; " ++
+            "globalThis.__property_iterator_proto_368 = { shadow: 30, inherited: 40, " ++
+            "get throwing() { throw 3681; }, [Symbol('protoSymbol')]: 50 }; " ++
+            "globalThis.__property_iterator_target_368 = Object.create(__property_iterator_proto_368); " ++
+            "__property_iterator_target_368[2] = 2; __property_iterator_target_368[0] = 0; " ++
+            "__property_iterator_target_368.alpha = 10; " ++
+            "Object.defineProperty(__property_iterator_target_368, 'getter', { enumerable: true, get() { __property_iterator_gets_368++; return 20; } }); " ++
+            "__property_iterator_target_368['unicode😀key'] = 60; " ++
+            "__property_iterator_target_368[Symbol('ownSymbol')] = 70; " ++
+            "Object.defineProperty(__property_iterator_target_368, 'shadow', { value: 99, enumerable: false }); " ++
+            "__property_iterator_target_368",
+    );
+    const target_cell = try Probe.cell(target);
+
+    var own_count: usize = 999;
+    const own = Bun__JSPropertyIterator__create(context, target, &own_count, true, false) orelse
+        return error.IteratorCreateFailed;
+    defer Bun__JSPropertyIterator__deinit(own);
+    try std.testing.expectEqual(@as(usize, 6), own_count);
+    try std.testing.expectEqual(@as(usize, 12), Bun__JSPropertyIterator__getLongestPropertyName(own, context, target_cell));
+    const expected_own = [_][]const u8{ "0", "2", "alpha", "getter", "unicode😀key", "ownSymbol" };
+    for (expected_own, 0..) |expected, index| {
+        var name = PrivateBunString.dead();
+        Bun__JSPropertyIterator__getName(own, &name, index);
+        try std.testing.expectEqual(PrivateBunStringTag.zig_string, name.tag);
+        try std.testing.expectEqualStrings(expected, try Probe.text(internal, &name));
+    }
+
+    var non_index_count: usize = 999;
+    const non_index = Bun__JSPropertyIterator__create(context, target, &non_index_count, true, true) orelse
+        return error.IteratorCreateFailed;
+    defer Bun__JSPropertyIterator__deinit(non_index);
+    try std.testing.expectEqual(@as(usize, 4), non_index_count);
+    try std.testing.expectEqualStrings("alpha", try Probe.text(internal, &non_index.entries[0].name));
+
+    var full_count: usize = 999;
+    const full = Bun__JSPropertyIterator__create(context, target, &full_count, false, true) orelse
+        return error.IteratorCreateFailed;
+    defer Bun__JSPropertyIterator__deinit(full);
+    // The non-index flag is ignored for inherited enumeration, matching the
+    // pinned C++ branch. A non-enumerable own `shadow` also does not enter the
+    // PropertyNameArrayBuilder, so the enumerable prototype name is retained.
+    try std.testing.expectEqual(@as(usize, 10), full_count);
+    try std.testing.expectEqualStrings("0", try Probe.text(internal, &full.entries[0].name));
+    const inherited_index = try Probe.indexOf(internal, full, "inherited");
+    const shadow_index = try Probe.indexOf(internal, full, "shadow");
+    const throwing_index = try Probe.indexOf(internal, full, "throwing");
+    _ = try Probe.indexOf(internal, full, "protoSymbol");
+
+    var output = PrivateBunString.dead();
+    const inherited = Bun__JSPropertyIterator__getNameAndValueNonObservable(full, context, target_cell, &output, inherited_index);
+    try std.testing.expectEqual(EncodedValue.fromInt32(40), inherited);
+    try std.testing.expectEqualStrings("inherited", try Probe.text(internal, &output));
+    const sibling = JSGlobalContextCreateInGroup(JSContextGetGroup(context), null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    output = PrivateBunString.dead();
+    try std.testing.expectEqual(
+        EncodedValue.fromInt32(40),
+        Bun__JSPropertyIterator__getNameAndValueNonObservable(full, sibling, target_cell, &output, inherited_index),
+    );
+    output = PrivateBunString.dead();
+    const shadow = Bun__JSPropertyIterator__getNameAndValueNonObservable(full, context, target_cell, &output, shadow_index);
+    // Lookup starts at the receiver, so the non-enumerable own slot wins even
+    // though the enumerable prototype slot supplied the snapshotted name.
+    try std.testing.expectEqual(EncodedValue.fromInt32(99), shadow);
+
+    const getter_index = try Probe.indexOf(internal, own, "getter");
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValueNonObservable(own, context, target_cell, &output, getter_index));
+    try std.testing.expectEqual(PrivateBunStringTag.dead, output.tag);
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__property_iterator_gets_368")).asNum());
+    try std.testing.expectEqual(EncodedValue.fromInt32(20), Bun__JSPropertyIterator__getNameAndValue(own, context, target_cell, &output, getter_index));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__property_iterator_gets_368")).asNum());
+
+    // Names are an owned snapshot, while values are looked up live.
+    _ = try internal.evaluate("delete __property_iterator_target_368.alpha; __property_iterator_target_368.afterSnapshot = 80");
+    const alpha_index = try Probe.indexOf(internal, own, "alpha");
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValue(own, context, target_cell, &output, alpha_index));
+    try std.testing.expectEqual(PrivateBunStringTag.dead, output.tag);
+    try std.testing.expectError(error.MissingProperty, Probe.indexOf(internal, own, "afterSnapshot"));
+
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValue(full, context, target_cell, &output, throwing_index));
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(3681), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+
+    const proxy = try Probe.encoded(
+        internal,
+        "globalThis.__property_iterator_proxy_own_368 = 0; globalThis.__property_iterator_proxy_desc_368 = 0; globalThis.__property_iterator_proxy_get_368 = 0; " ++
+            "new Proxy({ pure: 81 }, { ownKeys(t) { __property_iterator_proxy_own_368++; return Reflect.ownKeys(t); }, " ++
+            "getOwnPropertyDescriptor(t, k) { __property_iterator_proxy_desc_368++; return Reflect.getOwnPropertyDescriptor(t, k); }, " ++
+            "get(t, k, r) { __property_iterator_proxy_get_368++; return Reflect.get(t, k, r); } })",
+    );
+    var proxy_count: usize = 0;
+    const proxy_iterator = Bun__JSPropertyIterator__create(context, proxy, &proxy_count, true, true) orelse
+        return error.IteratorCreateFailed;
+    defer Bun__JSPropertyIterator__deinit(proxy_iterator);
+    try std.testing.expectEqual(@as(usize, 1), proxy_count);
+    const own_calls = (try internal.evaluate("__property_iterator_proxy_own_368")).asNum();
+    const desc_calls = (try internal.evaluate("__property_iterator_proxy_desc_368")).asNum();
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValueNonObservable(proxy_iterator, context, try Probe.cell(proxy), &output, 0));
+    try std.testing.expectEqual(own_calls, (try internal.evaluate("__property_iterator_proxy_own_368")).asNum());
+    try std.testing.expectEqual(desc_calls, (try internal.evaluate("__property_iterator_proxy_desc_368")).asNum());
+    try std.testing.expectEqual(@as(f64, 0), (try internal.evaluate("__property_iterator_proxy_get_368")).asNum());
+    try std.testing.expectEqual(EncodedValue.fromInt32(81), Bun__JSPropertyIterator__getNameAndValue(proxy_iterator, context, try Probe.cell(proxy), &output, 0));
+    try std.testing.expectEqual(@as(f64, 1), (try internal.evaluate("__property_iterator_proxy_get_368")).asNum());
+
+    const typed = try Probe.encoded(
+        internal,
+        "(() => { const proto = Object.create(Uint8Array.prototype); proto['-1'] = 91; " ++
+            "return Object.setPrototypeOf(new Uint8Array([1]), proto); })()",
+    );
+    var typed_count: usize = 0;
+    const typed_iterator = Bun__JSPropertyIterator__create(context, typed, &typed_count, false, false) orelse
+        return error.IteratorCreateFailed;
+    defer Bun__JSPropertyIterator__deinit(typed_iterator);
+    const negative_index = try Probe.indexOf(internal, typed_iterator, "-1");
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValueNonObservable(
+        typed_iterator,
+        context,
+        try Probe.cell(typed),
+        &output,
+        negative_index,
+    ));
+
+    const foreign = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign);
+    const foreign_internal = ctxForEvaluation(foreign) orelse return error.ContextCreateFailed;
+    const foreign_object = privateEncodedFromValue(foreign_internal, try foreign_internal.evaluate("({ inherited: 1 })"));
+    output = PrivateBunString.empty();
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSPropertyIterator__getNameAndValue(full, context, try Probe.cell(foreign_object), &output, inherited_index));
+    try std.testing.expect(JSGlobalObject__hasException(context));
+    JSGlobalObject__clearException(context);
+
+    var invalid_name = PrivateBunString.empty();
+    Bun__JSPropertyIterator__getName(own, &invalid_name, own_count);
+    try std.testing.expectEqual(PrivateBunStringTag.dead, invalid_name.tag);
+
+    // The native iterator owns a VM reference just like JSC's Ref<VM>: its
+    // borrowed names remain valid after the last public global is released,
+    // and deinit performs the eventual group teardown.
+    const retained_context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    const retained_internal = ctxForEvaluation(retained_context) orelse return error.ContextCreateFailed;
+    const retained_target = privateEncodedFromValue(retained_internal, try retained_internal.evaluate("({ retained: 368 })"));
+    var retained_count: usize = 0;
+    const retained_iterator = Bun__JSPropertyIterator__create(retained_context, retained_target, &retained_count, true, true) orelse
+        return error.IteratorCreateFailed;
+    try std.testing.expectEqual(@as(usize, 1), retained_count);
+    JSGlobalContextRelease(retained_context);
+    var retained_name = PrivateBunString.dead();
+    Bun__JSPropertyIterator__getName(retained_iterator, &retained_name, 0);
+    try std.testing.expectEqual(PrivateBunStringTag.zig_string, retained_name.tag);
+    Bun__JSPropertyIterator__deinit(retained_iterator);
 }
 
 test "private class and display names preserve metadata and observable tag rules" {
