@@ -17,6 +17,7 @@ const value = try ctx.evaluate("let x = 40; x + 2");
 | --- | ---: | --- |
 | configured test262 | **53,175 / 53,175** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
 | nine-profile WebAssembly matrix | **87,838 / 87,838 applicable** | [matrix](docs/.data/wasm-conformance-matrix.json) · [reproduce](docs/wasm.md) |
+| implemented Core 3 slices | **295 / 295 applicable** | [exact `wg-3.0` evidence](docs/wasm.md#beyond-the-mvp) |
 
 ## Performance
 

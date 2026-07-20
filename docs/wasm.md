@@ -187,15 +187,16 @@ zig build wasm-core-3 -Dwasm-core-3-converter=/path/to/wasm-tools
 ```
 
 The profile declares all 258 integrated Core 3 `.wast` files and records every
-command. It is not included in the published green aggregate yet: typed
-function references [#384](https://github.com/zig-utils/zig-js/issues/384),
-explicit exception heap references
-[#385](https://github.com/zig-utils/zig-js/issues/385), and relaxed SIMD
-[#386](https://github.com/zig-utils/zig-js/issues/386) are honest blockers
-under [#366](https://github.com/zig-utils/zig-js/issues/366).
+command. Typed function references
+[#384](https://github.com/zig-utils/zig-js/issues/384), explicit exception
+references [#385](https://github.com/zig-utils/zig-js/issues/385), and relaxed
+SIMD [#386](https://github.com/zig-utils/zig-js/issues/386) are complete. The
+profile stays outside the published green aggregate until the remaining exact
+inventory is implemented and audited under
+[#366](https://github.com/zig-utils/zig-js/issues/366).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
-the official proposal tracker and 13 selected proposal repositories by exact
+the official proposal tracker and 14 selected proposal/spec revisions by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
 keeps MVP as the only default complete profile until all features in a named
@@ -258,6 +259,25 @@ boundaries reuse canonical `WebAssembly.Exception` wrappers. Tag imports also
 retain nominal recursive type identity. All 98 applicable commands in the
 four-file `test/core/exceptions` directory pass; the remaining two commands
 are text-parser assertions that the binary-backed runner records as N/A.
+
+Core 3 relaxed SIMD adds all 20 `0xfd` subopcodes from `0x100` through `0x113`
+behind the explicit `relaxed_simd` feature and its fixed-width-SIMD dependency.
+The portable interpreter makes one stable spec-permitted choice for swizzle,
+saturating truncation, lane selection, fused multiply-add, min/max, q15
+multiplication, and dot products. The evaluator accepts only the alternatives
+encoded by the corpus, including bit-precise vector and NaN policies. All
+**77 / 77** commands in the seven exact `test/core/relaxed-simd` files pass,
+with zero failures, N/A cases, or runner errors. The
+[machine-readable opcode inventory](.data/wasm-relaxed-simd-opcodes.json) and
+CI pin the exact `wg-3.0` source revision.
+
+Reproduce the complete relaxed-SIMD slice with:
+
+```sh
+zig build wasm-core-3 \
+  -Dwasm-core-3-converter=/path/to/wasm-tools-1.253.0/wasm-tools \
+  -Dwasm-core-3-filter=test/core/relaxed-simd/
+```
 
 Reproduce those execution and root-safety witnesses with:
 
