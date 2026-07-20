@@ -11968,8 +11968,7 @@ fn contextGroupFrom(ref: JSContextGroupRef) ?*CContextGroup {
     return group;
 }
 
-export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
-    const primary = Context.create(gpa) catch return null;
+fn createContextGroupForPrimary(primary: *Context) JSContextGroupRef {
     const group = gpa.create(CContextGroup) catch {
         primary.destroy();
         return null;
@@ -11983,6 +11982,11 @@ export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
     primary.watchdog_check_flag = &group.need_watchdog_check;
     primary.watchdog_deadline_ns = &group.execution_deadline_ns;
     return @ptrCast(group);
+}
+
+export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
+    const primary = Context.create(gpa) catch return null;
+    return createContextGroupForPrimary(primary);
 }
 
 export fn JSContextGroupRetain(group_ref: JSContextGroupRef) callconv(.c) JSContextGroupRef {
@@ -12099,6 +12103,22 @@ export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
     const ctx = Context.createWith(gpa, .{ .enable_threads = true, .gil = gil }) catch return null;
     ctx.initCApiRef();
     return @ptrCast(ctx);
+}
+
+/// zig-js extension: create a standalone precise-GC context. Passing false is
+/// required for explicit movement until native JIT stack maps are available.
+export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) JSContextRef {
+    const ctx = Context.createWith(gpa, .{ .enable_gc = true, .enable_jit = enable_jit }) catch return null;
+    _ = createContextGroupForPrimary(ctx) orelse return null;
+    ctx.initCApiRef();
+    return @ptrCast(ctx);
+}
+
+/// zig-js extension: compact a quiescent precise-GC context. The Context gate
+/// fails closed for arena, JIT, active-interpreter, thread, or collector states.
+export fn ZJSContextCompactGarbage(ctx: JSContextRef) callconv(.c) bool {
+    const context = ctxFrom(ctx) orelse return false;
+    return context.compactGarbage().status == .compacted;
 }
 
 export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {

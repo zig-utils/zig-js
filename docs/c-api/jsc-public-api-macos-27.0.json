@@ -161,7 +161,8 @@
     {"name":"kJSClassDefinitionEmpty","status":"implemented"}
   ],
   "zig_js_extensions": [
-    "ZJSGlobalContextCreateThreaded", "ZJSValueProtect", "ZJSValueUnprotect",
+    "ZJSGlobalContextCreateThreaded", "ZJSGlobalContextCreateGarbageCollected",
+    "ZJSContextCompactGarbage", "ZJSValueProtect", "ZJSValueUnprotect",
     "ZJSContextGetCollectionEpoch", "ZJSValueIsReachable",
     "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",

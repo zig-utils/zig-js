@@ -1,4 +1,5 @@
 #import <JavaScriptCore/JavaScriptCore.h>
+#import <zig-js/Extensions.h>
 
 @interface ZJSTestObject : NSObject
 @property (nonatomic, copy) NSString *name;
@@ -530,6 +531,33 @@ int main(void)
                       [siblingConstructed isInstanceOf:siblingContext[@"ExportClass"]],
                   82))
             return 82;
+
+        JSGlobalContextRef movingContextRef = ZJSGlobalContextCreateGarbageCollected(false);
+        JSContext *movingContext = [JSContext contextWithJSGlobalContextRef:movingContextRef];
+        JSGlobalContextRelease(movingContextRef);
+        movingContextRef = movingContext.JSGlobalContextRef;
+        JSVirtualMachine *movingVM = movingContext.virtualMachine;
+        if (check(movingContext != nil && movingVM != nil, 88))
+            return 88;
+        NSObject *movingOwner = [NSObject new];
+        __block JSManagedValue *movingManaged = nil;
+        @autoreleasepool {
+            JSValue *target = [movingContext evaluateScript:@"({ tag: 'moving-managed' })"];
+            movingManaged = [JSManagedValue managedValueWithValue:target andOwner:movingOwner];
+        }
+        @autoreleasepool {
+            JSValue *beforeMove = movingManaged.value;
+            JSValueRef stableHandle = beforeMove.JSValueRef;
+            if (check(ZJSContextCompactGarbage(movingContextRef) &&
+                          movingManaged.value == beforeMove &&
+                          movingManaged.value.JSValueRef == stableHandle &&
+                          [movingManaged.value[@"tag"].toString isEqualToString:@"moving-managed"],
+                      89))
+                return 89;
+        }
+        [movingVM removeManagedReference:movingManaged withOwner:movingOwner];
+        if (check(ZJSContextCompactGarbage(movingContextRef) && movingManaged.value == nil, 90))
+            return 90;
     }
     return 0;
 }

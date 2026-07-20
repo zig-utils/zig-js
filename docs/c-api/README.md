@@ -14,7 +14,7 @@ The matrix deliberately separates declarations from completion:
   ABI mismatch. Pending calls must not be used by hosts yet.
 
 Current result: all 117 functions are implemented, none remain pending, and the
-library exports 117 public functions plus 17 zig-js extensions.
+library exports 117 public functions plus 21 zig-js extensions.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to

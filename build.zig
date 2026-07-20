@@ -67,7 +67,10 @@ pub fn build(b: *std.Build) void {
         compile_objc_bridge.addArg("-o");
         objc_bridge_object = compile_objc_bridge.addOutputFileArg("objc_bridge.o");
 
-        const merge_library = b.addSystemCommand(&.{ "xcrun", "libtool", "-static", "-o" });
+        const merge_library = b.addSystemCommand(&.{
+            "python3",
+            "tools/merge-static-library.py",
+        });
         installed_library = merge_library.addOutputFileArg("libzig-js.a");
         merge_library.addArtifactArg(lib);
         merge_library.addFileArg(objc_bridge_object.?);

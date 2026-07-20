@@ -3,7 +3,9 @@
 Moving collection is available only through explicit `Context.compactGarbage`
 on a quiescent GC realm created with JIT disabled. The checked policy refuses
 active interpreters, running JS threads, conservative native-stack scans, and
-in-flight concurrent/parallel collections.
+in-flight concurrent/parallel collections. C and Objective-C embedders can use
+`ZJSGlobalContextCreateGarbageCollected(false)` and
+`ZJSContextCompactGarbage` for the same checked boundary.
 
 The checked-in
 [`gc-relocation-inventory.json`](../.data/gc-relocation-inventory.json) covers

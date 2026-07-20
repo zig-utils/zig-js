@@ -11,6 +11,10 @@ extern "C" {
 JS_EXPORT bool ZJSValueProtect(JSContextRef ctx, JSValueRef value);
 JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 
+/* Standalone precise-GC context and explicit quiescent compaction. */
+JS_EXPORT JSGlobalContextRef ZJSGlobalContextCreateGarbageCollected(bool enableJIT);
+JS_EXPORT bool ZJSContextCompactGarbage(JSContextRef ctx);
+
 /* Monotonic explicit-collection epoch shared by every realm in a context group. */
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);
