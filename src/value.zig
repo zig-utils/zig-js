@@ -1351,6 +1351,13 @@ pub const ObjectColdState = struct {
     arg_map_severed: []std.atomic.Value(bool) = &.{},
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_index: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    /// Strong Map/Set acceleration index: content-hash(key) → position in the
+    /// ordered `elements` list. Holds only hashes and positions (no object
+    /// pointers), so it survives a moving GC and needs no tracing. Authoritative
+    /// for primitive keys; `coll_unindexed` turns it off (linear fallback) once a
+    /// non-indexable key (object/symbol) or a hash collision appears.
+    coll_index: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    coll_unindexed: bool = false,
     finalization_callback: Value = Value.undef(),
     /// FinalizationRegistry is uncommon, so keep its 24-byte list header behind
     /// the backing flag instead of charging every cold object for it.
@@ -1414,6 +1421,7 @@ pub const ObjectBackingFlags = packed struct {
     attrs: bool = false,
     holes: bool = false,
     weak_entries: bool = false,
+    coll_index: bool = false,
     finalization_records: bool = false,
     typed_array: bool = false,
     data_view: bool = false,
@@ -3182,6 +3190,45 @@ pub const Object = struct {
         const i = self.weakEntryIndexUnlocked(key) orelse return false;
         self.weakEntrySwapRemoveAtUnlocked(i);
         return true;
+    }
+
+    // ---- Strong Map/Set acceleration index ---------------------------------
+    // All of these assume the caller holds `lockElements()` (the index is
+    // logically part of the ordered `elements` list it accelerates).
+    /// Stored position for `hash`, or null. Null is authoritative ("absent")
+    /// only while `collUnindexed()` is false.
+    pub fn collIndexGet(self: *Object, hash: u64) ?u32 {
+        const cold = self.coldState() orelse return null;
+        return cold.coll_index.get(hash);
+    }
+    /// Record hash→position. Ensures cold state and the backing allocator first
+    /// (like the weak path). Returns false if it could not be recorded (OOM); the
+    /// caller must then `collDisableIndex` so lookups stay correct.
+    pub fn collIndexPut(self: *Object, fallback: std.mem.Allocator, hash: u64, pos: u32) bool {
+        const cold = self.ensureCold(fallback) catch return false;
+        const alloc = self.ensureBackingFor(fallback, "coll_index") catch return false;
+        cold.coll_index.put(alloc, hash, pos) catch return false;
+        return true;
+    }
+    pub fn collIndexRemove(self: *Object, hash: u64) void {
+        if (self.coldState()) |c| _ = c.coll_index.remove(hash);
+    }
+    pub fn collUnindexed(self: *Object) bool {
+        return if (self.coldState()) |c| c.coll_unindexed else false;
+    }
+    /// Permanently drop to linear scanning (a non-indexable key or hash
+    /// collision appeared). Needs cold state so the flag persists.
+    pub fn collDisableIndex(self: *Object, fallback: std.mem.Allocator) void {
+        const c = self.ensureCold(fallback) catch return;
+        c.coll_unindexed = true;
+        c.coll_index.clearRetainingCapacity();
+    }
+    /// `clear()` empties the collection: wipe the index and re-enable it.
+    pub fn collIndexReset(self: *Object) void {
+        if (self.coldState()) |c| {
+            c.coll_index.clearRetainingCapacity();
+            c.coll_unindexed = false;
+        }
     }
 
     fn weakIndexKey(key: ?*anyopaque) usize {

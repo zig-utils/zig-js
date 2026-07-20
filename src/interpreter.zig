@@ -9517,46 +9517,43 @@ pub const Interpreter = struct {
             try pair.appendElement(self.arena, val);
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
-                    _ = entry.setElementAt(1, val);
-                    return self_v;
-                };
+            if (mapFindPos(o, key, self.arena)) |pos| {
+                _ = liveMapEntry(o.elementsItems()[pos]).?.setElementAt(1, val);
+                return self_v;
             }
             gc_mod.barrierCellFrom(o, @ptrCast(pair)); // new entry hidden behind the live map
             const elements = try o.ensureElementsList(self.arena);
+            const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), Value.obj(pair));
+            if (!o.collUnindexed()) if (hashKey(key)) |hkey| {
+                if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
+            };
             return self_v;
         }
         if (eq(name, "get")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
-            }
+            if (mapFindPos(o, key, self.arena)) |pos| return mapEntryValue(liveMapEntry(o.elementsItems()[pos]).?);
             return Value.undef();
         }
         if (eq(name, "has")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return Value.boolVal(true);
-            }
-            return Value.boolVal(false);
+            return Value.boolVal(mapFindPos(o, key, self.arena) != null);
         }
         if (eq(name, "delete")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) {
-                    entry.clearElementsRetainingCapacity();
-                    return Value.boolVal(true);
-                };
+            if (mapFindPos(o, key, self.arena)) |pos| {
+                liveMapEntry(o.elementsItems()[pos]).?.clearElementsRetainingCapacity();
+                if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
+                return Value.boolVal(true);
             }
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
             o.clearElementsRetainingCapacity();
+            o.collIndexReset();
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -9591,9 +9588,7 @@ pub const Interpreter = struct {
             {
                 o.lockElements();
                 defer o.unlockElements();
-                for (o.elementsItems()) |e| {
-                    if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return mapEntryValue(entry);
-                }
+                if (mapFindPos(o, key, self.arena)) |pos| return mapEntryValue(liveMapEntry(o.elementsItems()[pos]).?);
             }
             const v = if (eq(name, "getOrInsertComputed")) blk: {
                 break :blk try self.callValue(cb, &.{key});
@@ -9666,37 +9661,36 @@ pub const Interpreter = struct {
         if (eq(name, "add")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return self_v;
-            }
+            if (setFindPos(o, key, self.arena) != null) return self_v;
             gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
             const elements = try o.ensureElementsList(self.arena);
+            const pos: u32 = @intCast(elements.items.len);
             try elements.append(o.elementsAllocator(self.arena), key);
+            if (!o.collUnindexed()) if (hashKey(key)) |hkey| {
+                if (!o.collIndexPut(self.arena, hkey, pos)) o.collDisableIndex(self.arena);
+            };
             return self_v;
         }
         if (eq(name, "has")) {
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems()) |e| {
-                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) return Value.boolVal(true);
-            }
-            return Value.boolVal(false);
+            return Value.boolVal(setFindPos(o, key, self.arena) != null);
         }
         if (eq(name, "delete")) {
             const tomb = try gc_mod.allocObj(self.arena);
             tomb.* = .{ .behavior = .{ .is_set_deleted = true } };
             o.lockElements();
             defer o.unlockElements();
-            for (o.elementsItems(), 0..) |e, i| {
-                if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, key)) {
-                    o.elementsItems()[i] = Value.obj(tomb);
-                    return Value.boolVal(true);
-                };
+            if (setFindPos(o, key, self.arena)) |pos| {
+                o.elementsItems()[pos] = Value.obj(tomb);
+                if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
+                return Value.boolVal(true);
             }
             return Value.boolVal(false);
         }
         if (eq(name, "clear")) {
             o.clearElementsRetainingCapacity();
+            o.collIndexReset();
             return Value.undef();
         }
         if (eq(name, "forEach")) {
@@ -30404,6 +30398,98 @@ fn liveSetEntryCount(o: *value.Object) usize {
         if (liveSetEntry(entry) != null) n += 1;
     }
     return n;
+}
+
+/// Content hash of a Map/Set key, consistent with `sameValueZero`, or null for a
+/// non-indexable key (a plain object or symbol — compared by identity, whose
+/// pointer would move under a compacting GC). Per-kind tag bytes keep the
+/// primitive kinds from colliding cheaply. `-0`/`+0` and all NaN each hash alike.
+fn hashKey(key: Value) ?u64 {
+    var h = std.hash.Wyhash.init(0);
+    switch (key.kind()) {
+        .number => {
+            const n = key.asNum();
+            if (std.math.isNan(n)) {
+                h.update("N");
+                return h.final();
+            }
+            if (n == 0) {
+                h.update("z");
+                return h.final();
+            }
+            h.update("d");
+            h.update(std.mem.asBytes(&n));
+            return h.final();
+        },
+        .string => {
+            h.update("s");
+            h.update(key.asStr());
+            return h.final();
+        },
+        .boolean => {
+            h.update(if (key.asBool()) "bT" else "bF");
+            return h.final();
+        },
+        .null => {
+            h.update("0n");
+            return h.final();
+        },
+        .undefined => {
+            h.update("0u");
+            return h.final();
+        },
+        .object => {
+            const o = key.asObj();
+            if (!o.is_bigint) return null; // object / symbol → identity, not indexable
+            h.update("i");
+            if (o.bigIntText()) |t| {
+                h.update(t);
+            } else {
+                const v = o.bigIntValue();
+                h.update(std.mem.asBytes(&v));
+            }
+            return h.final();
+        },
+    }
+}
+
+/// Position of the live Map entry for `key` in `o.elementsItems()`, or null.
+/// Consults the acceleration index for a primitive key: an index miss is an
+/// authoritative "absent" (no scan). Object/symbol keys, an unindexed map, or a
+/// hash collision fall through to the ordered linear scan. Caller holds the lock.
+fn mapFindPos(o: *value.Object, key: Value, arena: std.mem.Allocator) ?usize {
+    if (!o.collUnindexed()) {
+        if (hashKey(key)) |hkey| {
+            if (o.collIndexGet(hkey)) |pos| {
+                if (pos < o.elementsItems().len)
+                    if (liveMapEntry(o.elementsItems()[pos])) |entry|
+                        if (mapEntryMatches(entry, key)) return pos;
+                // Hash present but no matching live entry ⇒ collision; the index
+                // can no longer answer "absent" authoritatively — drop it.
+                o.collDisableIndex(arena);
+            } else return null; // authoritative: no primitive entry with this hash
+        }
+    }
+    for (o.elementsItems(), 0..) |e, i|
+        if (liveMapEntry(e)) |entry| if (mapEntryMatches(entry, key)) return i;
+    return null;
+}
+
+/// Set analogue of `mapFindPos`: position of the live Set entry equal to `val`.
+fn setFindPos(o: *value.Object, val: Value, arena: std.mem.Allocator) ?usize {
+    if (!o.collUnindexed()) {
+        if (hashKey(val)) |hkey| {
+            if (o.collIndexGet(hkey)) |pos| {
+                if (pos < o.elementsItems().len)
+                    if (liveSetEntry(o.elementsItems()[pos])) |entry|
+                        if (value.sameValueZero(entry, val)) return pos;
+                o.collDisableIndex(arena);
+            } else return null;
+        }
+    }
+    for (o.elementsItems(), 0..) |e, i|
+        if (liveSetEntry(e)) |entry| if (value.sameValueZero(entry, val)) return i;
+    return null;
 }
 
 /// The byte length of the well-formed UTF-8 sequence starting at `s[i]`; 1 for a

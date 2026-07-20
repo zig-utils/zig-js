@@ -1035,6 +1035,10 @@ const Deserializer = struct {
                     try pair.appendElement(a, v);
                     try o.appendInternalElement(a, Value.obj(pair));
                 }
+                // Entries were appended directly (not via Map.set), so the
+                // primitive-key acceleration index was not maintained; keep it
+                // off so lookups stay correct (they linear-scan).
+                if (n > 0) o.collDisableIndex(a);
                 return Value.obj(o);
             },
             .set => {
@@ -1046,6 +1050,7 @@ const Deserializer = struct {
                 const child_depth = if (n == 0) 0 else try d.childDepth(depth);
                 var i: u32 = 0;
                 while (i < n) : (i += 1) try o.appendInternalElement(a, try d.deser(child_depth));
+                if (n > 0) o.collDisableIndex(a); // see the .map case
                 return Value.obj(o);
             },
             .error_obj => {
