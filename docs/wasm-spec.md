@@ -15,7 +15,7 @@ below).
   normalizes modernized elem/data text forms and packs every binary module
   into `tests/wasm/spec/modules.bin` with a `manifest.json` directive index.
 
-The `wasm-spec` submodule is intentionally this frozen MVP fixture, not a
+The `wasm-spec-wg1` submodule is intentionally this frozen MVP fixture, not a
 checkout of upstream `main`. Core 2 and proposal corpora are separate,
 exact-pin profiles in [the WebAssembly matrix](wasm.md); a stable Core 3
 profile is tracked by [#366](https://github.com/zig-utils/zig-js/issues/366).

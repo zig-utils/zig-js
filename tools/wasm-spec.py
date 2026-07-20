@@ -284,7 +284,7 @@ def wasm_tools_version_matches(
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     corpus_root = spec_root / profile.get("corpus_root", Path(profile["corpus_glob"]).parent)
     if not corpus_root.is_dir():
-        fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec`")
+        fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec-wg1`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
     if actual_spec != profile["commit"]:
         fail(f"wasm-spec pin drift: expected {profile['commit']}, found {actual_spec}")
@@ -1353,7 +1353,7 @@ def main() -> int:
     timeout = args.timeout if args.timeout is not None else (
         600.0 if args.profile == "core-2-structural" else 120.0
     )
-    spec_root = (args.spec_root or ROOT / "wasm-spec").resolve()
+    spec_root = (args.spec_root or ROOT / "wasm-spec-wg1").resolve()
     converter = args.converter.resolve()
     engine = args.engine.resolve()
     default_inventories = {

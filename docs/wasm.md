@@ -96,7 +96,7 @@ zig build test -Dtest-filter=wasm
 
 Reproduce the deliberate complete corpus run with the live-WABT evaluator
 (WABT 1.0.12 at the pinned commit above, plus a `WebAssembly/spec` checkout at
-the pinned commit — the initialized `wasm-spec` submodule is the intentionally
+the pinned commit — the initialized `wasm-spec-wg1` submodule is the intentionally
 MVP-only default `--spec-root`, not a checkout of upstream `main`):
 
 ```sh
