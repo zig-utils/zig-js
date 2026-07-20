@@ -40,6 +40,34 @@ fn parseEnum(comptime T: type, text: []const u8) !T {
     return error.InvalidArguments;
 }
 
+fn evaluate(ctx: *js.Context, source: []const u8) !js.Value {
+    return ctx.evaluate(source) catch |err| {
+        if (ctx.exception) |exception| {
+            if (exception.isObject()) {
+                const object = exception.asObj();
+                const name = object.getOwn("name");
+                const message = object.getOwn("message");
+                std.debug.print(
+                    "GC generation benchmark evaluation failed: {s}: {s}: {s}\n",
+                    .{
+                        @errorName(err),
+                        if (name != null and name.?.isString()) name.?.asStr() else "<unnamed exception>",
+                        if (message != null and message.?.isString()) message.?.asStr() else "<no message>",
+                    },
+                );
+            } else {
+                std.debug.print("GC generation benchmark evaluation failed: {s}: exception kind {s}\n", .{
+                    @errorName(err),
+                    @tagName(exception.kind()),
+                });
+            }
+        } else {
+            std.debug.print("GC generation benchmark evaluation failed: {s}: no exception value\n", .{@errorName(err)});
+        }
+        return err;
+    };
+}
+
 fn scenarioConfig(scenario: Scenario) struct {
     ring: []const u8,
     slot_mask: usize,
@@ -72,15 +100,17 @@ fn prepareContext(ctx: *js.Context, age: u8, trigger_bytes: usize) *js.Context.G
 fn singleSource(arena: std.mem.Allocator, scenario: Scenario, batch: usize) ![]const u8 {
     const config = scenarioConfig(scenario);
     return std.fmt.allocPrint(arena,
-        \\const __slot = __generationRound & {d};
-        \\__generationRing[__slot] = [];
-        \\for (let i = 0; i < {d}; i++) {{
-        \\  const value = {{ i: i, nested: {{ value: i + 1 }} }};
-        \\  __generationChecksum = __generationChecksum + value.i + value.nested.value;
-        \\  if ({s}) __generationRing[__slot].push(value);
+        \\{{
+        \\  const __slot = __generationRound & {d};
+        \\  __generationRing[__slot] = [];
+        \\  for (let i = 0; i < {d}; i++) {{
+        \\    const value = {{ i: i, nested: {{ value: i + 1 }} }};
+        \\    __generationChecksum = __generationChecksum + value.i + value.nested.value;
+        \\    if ({s}) __generationRing[__slot].push(value);
+        \\  }}
+        \\  __generationRound = __generationRound + 1;
+        \\  __generationChecksum;
         \\}}
-        \\__generationRound = __generationRound + 1;
-        \\__generationChecksum;
     , .{ config.slot_mask, batch, config.retain });
 }
 
@@ -99,7 +129,7 @@ fn runSingle(
     });
     errdefer ctx.destroy();
     const config = scenarioConfig(scenario);
-    _ = try ctx.evaluate(try std.fmt.allocPrint(
+    _ = try evaluate(ctx, try std.fmt.allocPrint(
         init.arena.allocator(),
         "globalThis.__generationRing = {s}; globalThis.__generationRound = 0; globalThis.__generationChecksum = 0;",
         .{config.ring},
@@ -109,10 +139,10 @@ fn runSingle(
     const source = try singleSource(init.arena.allocator(), scenario, batch);
     var pause_total_ns: u64 = 0;
     var pause_max_ns: u64 = 0;
-    var value = try ctx.evaluate("0");
+    var value = try evaluate(ctx, "0");
     const started = nowNs(init.io);
     for (0..rounds) |_| {
-        value = try ctx.evaluate(source);
+        value = try evaluate(ctx, source);
         if (trigger == .forced) {
             const pause_started = nowNs(init.io);
             heap.collectYoung();
@@ -183,7 +213,7 @@ fn runShared(
         \\__first.join() + __second.join();
     , .{ config.ring, rounds, config.slot_mask, batch, config.retain });
     const started = nowNs(init.io);
-    const value = try ctx.evaluate(source);
+    const value = try evaluate(ctx, source);
     const elapsed_ns: u64 = @intCast(nowNs(init.io) - started);
     return .{
         .ctx = ctx,

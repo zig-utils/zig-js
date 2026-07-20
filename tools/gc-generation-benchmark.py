@@ -82,7 +82,16 @@ def run(
         str(runner), trigger, scenario, str(age), str(trigger_bytes),
         str(rounds), str(batch), str(sample),
     ]
-    completed = subprocess.run(command, check=True, text=True, capture_output=True, timeout=180)
+    try:
+        completed = subprocess.run(command, check=True, text=True, capture_output=True, timeout=180)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(
+            f"runner failed with exit {error.returncode}: {' '.join(command)}\n"
+            f"stdout:\n{error.stdout or '<empty>'}\n"
+            f"stderr:\n{error.stderr or '<empty>'}"
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"runner timed out after {error.timeout}s: {' '.join(command)}") from error
     return parse_row(completed.stdout)
 
 
