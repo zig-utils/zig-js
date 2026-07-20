@@ -2484,6 +2484,7 @@ pub const Context = struct {
     pub const DebugScriptNotifyHook = *const fn (ctx: *anyopaque, script: DebugScript) bool;
 
     pub const c_api_handle_reserve_granularity = 16;
+    pub const protected_value_reserve_granularity = 16;
     pub const js_thread_reserve_granularity = 16;
     pub const active_interpreter_reserve_granularity = 16;
 
@@ -2852,7 +2853,7 @@ pub const Context = struct {
     /// precise-root path. Tests compare deltas; embedders do not observe it.
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
-    /// `async_waiters`, public `timers`, `c_api_handles`, and
+    /// `async_waiters`, public `timers`, `protected_values`, `c_api_handles`, and
     /// `finalization_cleanup_jobs` — so the
     /// mid-script parallel collector can read them while peers mutate. Taken by
     /// both the writers and the collector **only under `parallel_js`** (a null
@@ -2866,6 +2867,10 @@ pub const Context = struct {
     /// aliases `*Value`, its first field); `gc.zig`'s `traceRoots` marks them
     /// until matching `JSValueUnprotect` calls remove the entry.
     c_api_handles: std.ArrayListUnmanaged(CApiHandle) = .empty,
+    /// Address-stable roots for Zig embedders that need a managed Value to
+    /// survive explicit movement. The handle stays fixed while gc.zig rewrites
+    /// its contained Value at the relocation safepoint.
+    protected_values: std.ArrayListUnmanaged(*ProtectedValueRecord) = .empty,
     /// VM-scoped private embedding handles. Records live in the VM arena and
     /// remain address-stable because zig-gc retains weak-slot addresses through
     /// the end of each collection cycle.
@@ -3016,6 +3021,25 @@ pub const Context = struct {
     pub const CApiHandle = struct {
         ref: *anyopaque,
         count: usize,
+    };
+    const ProtectedValueRecord = struct {
+        owner: *Context,
+        value: value.Value,
+    };
+
+    pub const ProtectedValue = opaque {
+        fn record(self: *const ProtectedValue) *const ProtectedValueRecord {
+            return @ptrCast(@alignCast(self));
+        }
+
+        /// Read the current payload only outside a compaction call. Copies of
+        /// the returned Value are raw and must not cross the next movement.
+        pub fn get(self: *const ProtectedValue) value.Value {
+            const protected = self.record();
+            protected.owner.assertOwnerThread();
+            std.debug.assert(!protected.owner.gc_relocation_active.load(.acquire));
+            return protected.value;
+        }
     };
     /// Stable storage embedded in a private strong-reference handle. The C ABI
     /// owns the wrapper; the Context owns only this root-list entry.
@@ -3686,6 +3710,11 @@ pub const Context = struct {
         return @constCast(&self.teardown_stop).load(.acquire);
     }
 
+    fn deinitProtectedValues(self: *Context) void {
+        for (self.protected_values.items) |handle| self.gpa.destroy(handle);
+        self.protected_values.deinit(self.gpa);
+    }
+
     pub fn destroy(self: *Context) void {
         std.debug.assert(self.c_api_inspector_state == null);
         const host_gpa = self.host_gpa;
@@ -3727,6 +3756,7 @@ pub const Context = struct {
         self.cancelAllTimers();
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
+        self.deinitProtectedValues();
         self.private_strong_roots.deinit(self.gpa);
         self.private_weak_roots.deinit(self.gpa);
         for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
@@ -3826,6 +3856,7 @@ pub const Context = struct {
         self.cancelAllTimers();
         self.finalization_cleanup_jobs.deinit(self.gpa);
         self.c_api_handles.deinit(self.gpa);
+        self.deinitProtectedValues();
         self.private_strong_roots.deinit(self.gpa);
         self.private_weak_roots.deinit(self.gpa);
         for (self.private_commonjs_functions.items) |root| self.gpa.destroy(root);
@@ -4567,6 +4598,45 @@ pub const Context = struct {
         if (self.gc != null) self.gc_requested.store(true, .release);
     }
 
+    /// Root a managed Value in address-stable storage. Keep the returned handle
+    /// rather than a raw Value copy across `compactGarbage`; call `get` after
+    /// movement to read its rewritten payload.
+    pub fn protectValue(self: *Context, protected: value.Value) std.mem.Allocator.Error!*ProtectedValue {
+        self.assertOwnerThread();
+        self.realmLock();
+        defer self.realmUnlock();
+        const spare = self.protected_values.capacity - self.protected_values.items.len;
+        if (spare == 0) try self.protected_values.ensureTotalCapacity(
+            self.gpa,
+            self.protected_values.items.len + protected_value_reserve_granularity,
+        );
+        const handle = try self.gpa.create(ProtectedValueRecord);
+        handle.* = .{ .owner = self, .value = protected };
+        self.protected_values.appendAssumeCapacity(handle);
+        return @ptrCast(handle);
+    }
+
+    /// Remove and destroy one handle owned by this Context. A pointer absent
+    /// from this Context is rejected by list identity without dereference; the
+    /// handle becomes invalid after this returns true.
+    pub fn unprotectValue(self: *Context, handle: *ProtectedValue) bool {
+        self.assertOwnerThread();
+        const record: *ProtectedValueRecord = @ptrCast(@alignCast(handle));
+        self.realmLock();
+        var found = false;
+        for (self.protected_values.items, 0..) |candidate, index| {
+            if (candidate != record) continue;
+            _ = self.protected_values.swapRemove(index);
+            found = true;
+            break;
+        }
+        self.realmUnlock();
+        if (!found) return false;
+        std.debug.assert(record.owner == self);
+        self.gpa.destroy(record);
+        return true;
+    }
+
     /// Whether the calling thread is the one that created this context.
     pub fn isOwnerThread(self: *const Context) bool {
         return std.Thread.getCurrentId() == self.owner_thread;
@@ -4635,7 +4705,8 @@ pub const Context = struct {
 
     /// Lock `realm_lock` only under `parallel_js` (a no-op in GIL mode, so those
     /// realm-list mutations stay byte-identical there). Guards `async_waiters`,
-    /// public `timers`, `c_api_handles`, and `finalization_cleanup_jobs`
+    /// public `timers`, `protected_values`, `c_api_handles`, and
+    /// `finalization_cleanup_jobs`
     /// against the mid-script parallel collector's reads.
     fn spinLockMutex(m: *std.atomic.Mutex) void {
         var spins: usize = 0;
@@ -14382,6 +14453,42 @@ test "GC compaction is fail-closed, rewrites a protected graph, and reaches a de
         boxed.asObj().getOwn("peer").?.asObj(),
         boxed.asObj().getOwn("alias").?.asObj(),
     );
+}
+
+test "GC compaction rewrites public Zig protected handles" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    const foreign = try Context.create(std.testing.allocator);
+    defer foreign.destroy();
+
+    const raw = try ctx.evaluate(
+        \\(() => {
+        \\  globalThis.zigHandleDiscard = [];
+        \\  for (let i = 0; i < 4096; i++)
+        \\    zigHandleDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\  const survivor = { tag: 357, nested: { live: true } };
+        \\  globalThis.zigHandleKeep = survivor;
+        \\  return survivor;
+        \\})()
+    );
+    const handle = try ctx.protectValue(raw);
+    const handle_address = @intFromPtr(handle);
+    const old_payload = @intFromPtr(raw.asObj());
+    _ = try ctx.evaluate("zigHandleDiscard = null; zigHandleKeep = null");
+
+    const moved = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, moved.status);
+    try std.testing.expect(moved.moved_cells > 0 and moved.moved_bytes > 0);
+    try std.testing.expectEqual(handle_address, @intFromPtr(handle));
+    const current = handle.get();
+    try std.testing.expect(old_payload != @intFromPtr(current.asObj()));
+    try std.testing.expectEqual(@as(f64, 357), current.asObj().getOwn("tag").?.asNum());
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
+    try std.testing.expect(!foreign.unprotectValue(handle));
+    try std.testing.expect(ctx.unprotectValue(handle));
 }
 
 test "enable_gc nursery: quick object replacement keeps exact-managed children" {

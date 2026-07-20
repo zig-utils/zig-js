@@ -101,6 +101,8 @@ def main() -> int:
     require("pub fn compactGarbage" in context_source, "checked Context compaction entrypoint missing")
     require("shouldRelocateCell" in context_source, "dense-prefix candidate policy missing")
     require("trimCompactedTailChunks" in context_source, "compacted-tail release policy missing")
+    require("pub fn protectValue" in context_source, "Zig protected-value API missing")
+    require("pub fn unprotectValue" in context_source, "Zig protected-value release API missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
     require("self.enable_jit" in context_source, "JIT fail-closed gate missing")
     require("self.gc_scan_native_stack" in context_source, "conservative-stack fail-closed gate missing")

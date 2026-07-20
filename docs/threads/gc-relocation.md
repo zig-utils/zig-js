@@ -175,6 +175,12 @@ diagnostic instead of boolean: embedders receive the exact unsupported,
 already-dense, planning-OOM, or compacted status plus optional exact moved-cell
 and moved-byte totals. Every non-moving outcome deterministically reports zero.
 
+[#357](https://github.com/zig-utils/zig-js/issues/357) gives Zig embedders the
+same safe lifetime model through `Context.protectValue` and
+`Context.unprotectValue`. A `ProtectedValue` address remains stable while its
+contained `Value` is traced and rewritten; raw `Value` copies returned by
+`get()` are valid only until the next compaction boundary.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

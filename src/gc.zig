@@ -2624,6 +2624,8 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
         const slot: *Value = @ptrCast(@alignCast(handle.ref));
         gc_relocation.rewriteValueSlot(v, slot);
     }
+    for (ctx.protected_values.items) |handle|
+        gc_relocation.rewriteValueSlot(v, &handle.value);
     for (ctx.private_strong_roots.items) |root|
         gc_relocation.rewriteValueSlot(v, &root.value);
     for (ctx.private_weak_roots.items) |root|
@@ -2904,7 +2906,7 @@ pub const Binding = struct {
         for (ctx.next_ticks.pendingItems()) |mt| traceMicrotask(mt, v);
         if (par != null) ctx.next_ticks.release();
 
-        // `async_waiters` + public `timers` + `c_api_handles` +
+        // `async_waiters` + public `timers` + protected/C-API handles +
         // `finalization_cleanup_jobs` share `realm_lock` (taken by their
         // mutators only under parallel_js).
         ctx.realmLock();
@@ -2925,6 +2927,7 @@ pub const Binding = struct {
             const vp: *const Value = @ptrCast(@alignCast(h.ref));
             markValue(v, vp.*);
         }
+        for (ctx.protected_values.items) |handle| markValue(v, handle.value);
         for (ctx.private_strong_roots.items) |root| markValue(v, root.value);
         for (ctx.private_weak_roots.items) |root| v.markWeakAtomic(&root.target);
         ctx.realmUnlock();
