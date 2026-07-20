@@ -160,6 +160,7 @@ jobs:
               zig build c-api-audit home-private-abi-audit test-home-private-abi
               zig build test-bun-private-abort-signal -Dprivate-abi-consumer=bun
               zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
+              zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
               zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
           - name: tsan-unit (shard 0/4)
             cmd: zig build test -Dtsan=true -Dunit-shard-index=0 -Dunit-shard-count=4

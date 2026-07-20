@@ -14960,6 +14960,15 @@ export fn JSObjectGetPrivate(object: JSObjectRef) callconv(.c) ?*anyopaque {
     return if (obj.private_data_tag == .host) obj.private_data else null;
 }
 
+export fn JSObjectGetProxyTarget(object: JSObjectRef) callconv(.c) JSObjectRef {
+    const boxed = boxedFrom(object) orelse return null;
+    if (boxed.private_kind != .value) return null;
+    const proxy = objectFromHandleInspection(object) orelse return null;
+    if (proxy.proxy_revoked or proxy.proxyHandler() == null) return null;
+    const target = proxy.proxyTarget() orelse return null;
+    return box(boxed.owner, Value.obj(target));
+}
+
 export fn JSObjectSetPrivate(object: JSObjectRef, data: ?*anyopaque) callconv(.c) bool {
     const obj = objectFromHandleInspection(object) orelse return false;
     if (obj.private_data_tag == .host) {
@@ -16703,6 +16712,39 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         return null;
     };
     return boxResult(c, exception, res);
+}
+
+export fn JSObjectCallAsFunctionReturnValueHoldingAPILock(
+    ctx: JSContextRef,
+    function: JSObjectRef,
+    this_object: JSObjectRef,
+    argc: usize,
+    argv: [*c]const JSValueRef,
+) callconv(.c) EncodedValue {
+    const c = ctxFrom(ctx) orelse return .empty;
+    const opaque_group = c.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    privateGroupApiLock(group);
+    defer privateGroupApiUnlock(group);
+
+    if (argc > 0 and argv == null) return .empty;
+    const callable = objectArgFrom(c, function, null) orelse return .empty;
+    if (!callable.isCallableObject()) return .empty;
+    if (this_object != null and objectArgFrom(c, this_object, null) == null) return .empty;
+    for (0..argc) |index| _ = valueFromContext(c, argv[index]) orelse return .empty;
+
+    var exception: JSValueRef = null;
+    const result = JSObjectCallAsFunction(ctx, function, this_object, argc, argv, &exception);
+    if (exception) |exception_ref| {
+        const thrown = valueFromContext(c, exception_ref) orelse return .empty;
+        const thrown_encoded = privateEncodedFromValue(c, thrown);
+        if (thrown_encoded == .empty) return .empty;
+        const exception_box = privateExceptionBox(c, thrown, thrown_encoded) orelse return .empty;
+        return EncodedValue.fromCellAddress(@intFromPtr(exception_box)) catch .empty;
+    }
+    const result_ref = result orelse return .empty;
+    const internal = valueFromContext(c, result_ref) orelse return .empty;
+    return privateEncodedFromValue(c, internal);
 }
 
 fn hostCallbackNative(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -19056,6 +19098,95 @@ test "C-API: ordinary constructors keep intrinsic identity and function source m
     try std.testing.expect(JSStringIsEqual(exception_source_string, source_url));
     const exception_line = JSObjectGetProperty(ctx, exception, line_key, null) orelse return error.PropertyGetFailed;
     try std.testing.expectEqual(@as(f64, 41), JSValueToNumber(ctx, exception_line, null));
+}
+
+fn privateApiLockProbeCallback(
+    ctx: JSContextRef,
+    function: JSObjectRef,
+    this_object: JSObjectRef,
+    argc: usize,
+    argv: [*c]const JSValueRef,
+    exception: ExceptionRef,
+) callconv(.c) JSValueRef {
+    _ = function;
+    _ = this_object;
+    _ = argc;
+    _ = argv;
+    _ = exception;
+    const context = ctxRawFrom(ctx) orelse return null;
+    const opaque_group = context.c_api_group orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    return JSValueMakeNumber(ctx, @floatFromInt(group.api_lock_depth));
+}
+
+test "private C-API call and proxy extensions preserve lock exception and target semantics" {
+    const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxForEvaluation(ctx) orelse return error.ContextCreateFailed;
+    const group: *CContextGroup = @ptrCast(@alignCast(context.c_api_group orelse return error.ContextCreateFailed));
+
+    const function_value = try context.evaluate("(function(a, b) { return [this.marker, a, b]; })");
+    const this_value = try context.evaluate("({ marker: 9 })");
+    const function_ref = box(context, function_value) orelse return error.ValueCreateFailed;
+    const this_ref = box(context, this_value) orelse return error.ValueCreateFailed;
+    const args = [_]JSValueRef{
+        box(context, Value.num(10)) orelse return error.ValueCreateFailed,
+        box(context, Value.num(11)) orelse return error.ValueCreateFailed,
+    };
+    privateGroupApiLock(group);
+    try std.testing.expectEqual(@as(usize, 1), group.api_lock_depth);
+    const result = JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, function_ref, this_ref, args.len, &args);
+    try std.testing.expectEqual(@as(usize, 1), group.api_lock_depth);
+    privateGroupApiUnlock(group);
+    const result_value = privateValueFrom(ctx, result) orelse return error.ValueCreateFailed;
+    const result_object = result_value.asObj();
+    try std.testing.expectEqual(@as(f64, 9), result_object.elementAt(0).?.asNum());
+    try std.testing.expectEqual(@as(f64, 10), result_object.elementAt(1).?.asNum());
+    try std.testing.expectEqual(@as(f64, 11), result_object.elementAt(2).?.asNum());
+
+    const lock_probe = JSObjectMakeFunctionWithCallback(ctx, null, privateApiLockProbeCallback) orelse
+        return error.ValueCreateFailed;
+    const lock_depth = privateValueFrom(
+        ctx,
+        JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, lock_probe, null, 0, null),
+    ) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(@as(f64, 1), lock_depth.asNum());
+
+    const default_this = box(context, try context.evaluate("(function() { return this === globalThis; })")) orelse
+        return error.ValueCreateFailed;
+    try std.testing.expectEqual(EncodedValue.true, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, default_this, null, 0, null));
+
+    const throwing = box(context, try context.evaluate("(function() { throw 371; })")) orelse return error.ValueCreateFailed;
+    const exception = JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, throwing, null, 0, null);
+    try std.testing.expect(JSC__JSValue__isException(exception, context.c_api_group));
+    try std.testing.expectEqual(EncodedValue.fromInt32(371), JSC__Exception__asJSValue(@ptrFromInt(try exception.asCellAddress())));
+    try std.testing.expect(!JSGlobalObject__hasException(ctx));
+    try std.testing.expectEqual(EncodedValue.empty, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, null, null, 0, null));
+    try std.testing.expectEqual(EncodedValue.empty, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, this_ref, null, 0, null));
+    const foreign_ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign_ctx);
+    const foreign_context = ctxForEvaluation(foreign_ctx) orelse return error.ContextCreateFailed;
+    const foreign_function = box(foreign_context, try foreign_context.evaluate("(function(){return 1})")) orelse
+        return error.ValueCreateFailed;
+    const foreign_object = box(foreign_context, try foreign_context.evaluate("({})")) orelse return error.ValueCreateFailed;
+    try std.testing.expectEqual(EncodedValue.empty, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, foreign_function, null, 0, null));
+    try std.testing.expectEqual(EncodedValue.empty, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, function_ref, foreign_object, 0, null));
+    const foreign_args = [_]JSValueRef{foreign_object};
+    try std.testing.expectEqual(EncodedValue.empty, JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx, function_ref, null, 1, &foreign_args));
+
+    const target_value = try context.evaluate("globalThis.__proxy_target_371 = { marker: 371 }; __proxy_target_371");
+    const proxy_value = try context.evaluate("globalThis.__proxy_traps_371 = 0; new Proxy(__proxy_target_371, { get() { __proxy_traps_371++; }, getOwnPropertyDescriptor() { __proxy_traps_371++; } })");
+    const target_ref = box(context, target_value) orelse return error.ValueCreateFailed;
+    const proxy_ref = box(context, proxy_value) orelse return error.ValueCreateFailed;
+    const projected = JSObjectGetProxyTarget(proxy_ref) orelse return error.ValueCreateFailed;
+    try std.testing.expect(JSValueIsStrictEqual(ctx, projected, target_ref));
+    try std.testing.expectEqual(@as(f64, 0), (try context.evaluate("__proxy_traps_371")).asNum());
+    try std.testing.expect(JSObjectGetProxyTarget(target_ref) == null);
+    const revoked_ref = box(context, try context.evaluate("(() => { const pair = Proxy.revocable({}, {}); pair.revoke(); return pair.proxy; })()")) orelse
+        return error.ValueCreateFailed;
+    try std.testing.expect(JSObjectGetProxyTarget(revoked_ref) == null);
+    try std.testing.expect(JSObjectGetProxyTarget(@ptrFromInt(try exception.asCellAddress())) == null);
+    try std.testing.expect(JSObjectGetProxyTarget(null) == null);
 }
 
 test "C-API: JSObjectSetPropertyForKey preserves key coercion and attributes" {

@@ -402,6 +402,23 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_property_iterator_test_step.dependOn(&run_bun_private_property_iterator_fixture.step);
 
+    const bun_private_c_api_extensions_fixture = b.addExecutable(.{
+        .name = "bun-private-c-api-extensions",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_c_api_extensions.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bun_private_c_api_extensions_fixture.root_module.linkLibrary(lib);
+    const run_bun_private_c_api_extensions_fixture = b.addRunArtifact(bun_private_c_api_extensions_fixture);
+    run_bun_private_c_api_extensions_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_c_api_extensions_test_step = b.step(
+        "test-bun-private-c-api-extensions",
+        "Compile, link, and run Bun's private C-API call/proxy extensions",
+    );
+    bun_private_c_api_extensions_test_step.dependOn(&run_bun_private_c_api_extensions_fixture.step);
+
     const bun_private_array_buffer_fixture = b.addExecutable(.{
         .name = "bun-private-array-buffer",
         .root_module = b.createModule(.{

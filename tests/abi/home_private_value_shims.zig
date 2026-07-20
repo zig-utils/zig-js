@@ -330,6 +330,8 @@ extern "c" fn JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef, [*c]JS
 extern "c" fn JSObjectSetProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef, c_uint, [*c]JSValueRef) void;
 extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
 extern "c" fn JSGarbageCollect(JSContextRef) void;
+extern "c" fn JSObjectCallAsFunctionReturnValueHoldingAPILock(JSContextRef, JSObjectRef, JSObjectRef, usize, [*c]const JSValueRef) EncodedValue;
+extern "c" fn JSObjectGetProxyTarget(JSObjectRef) JSObjectRef;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
@@ -4962,6 +4964,54 @@ pub fn main() void {
         JSC__JSValue__toError_(error_exception) != error_value)
         fail("ErrorInstance exception unwrapping mismatch");
 
+    // Private C-API extensions (#371): the call wrapper owns the recursive API
+    // lock, preserves argument order/default-this, and returns throws as an
+    // exception cell. Proxy projection is a direct, trap-free VM inquiry.
+    const private_call_function = evaluate(context, "(function(a,b){return [this.marker,a,b]})");
+    const private_call_this = evaluate(context, "({marker:371})");
+    const private_call_args = [_]JSValueRef{
+        evaluate(context, "10").cellPointer(),
+        evaluate(context, "11").cellPointer(),
+    };
+    const private_call_result = JSObjectCallAsFunctionReturnValueHoldingAPILock(
+        context,
+        private_call_function.cellPointer(),
+        private_call_this.cellPointer(),
+        private_call_args.len,
+        &private_call_args,
+    );
+    exposeCell(context, "__private_call_result_371", private_call_result);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_call_result_371)==='[371,10,11]'")))
+        fail("private API-lock call result mismatch");
+    const default_this_function = evaluate(context, "(function(){return this===globalThis})");
+    if (JSObjectCallAsFunctionReturnValueHoldingAPILock(context, default_this_function.cellPointer(), null, 0, null) != .true)
+        fail("private API-lock call default this mismatch");
+    const private_call_thrower = evaluate(context, "(function(){throw 371})");
+    const private_call_exception = JSObjectCallAsFunctionReturnValueHoldingAPILock(context, private_call_thrower.cellPointer(), null, 0, null);
+    if (!JSC__JSValue__isException(private_call_exception, vm) or
+        JSC__Exception__asJSValue(private_call_exception.cellPointer()) != EncodedValue.fromInt32(371) or
+        JSGlobalObject__hasException(context))
+        fail("private API-lock call exception-cell mismatch");
+    if (JSObjectCallAsFunctionReturnValueHoldingAPILock(context, null, null, 0, null) != .empty or
+        JSObjectCallAsFunctionReturnValueHoldingAPILock(context, private_call_this.cellPointer(), null, 0, null) != .empty)
+        fail("private API-lock call invalid callable mismatch");
+
+    const private_proxy_target = evaluate(context, "globalThis.__private_proxy_target_371={marker:371};__private_proxy_target_371");
+    const private_proxy = evaluate(
+        context,
+        "globalThis.__private_proxy_traps_371=0;new Proxy(__private_proxy_target_371,{" ++
+            "get(){__private_proxy_traps_371++},getOwnPropertyDescriptor(){__private_proxy_traps_371++}})",
+    );
+    const projected_proxy_target = JSObjectGetProxyTarget(private_proxy.cellPointer()) orelse
+        fail("private proxy target projection failed");
+    if (!JSC__JSValue__isStrictEqual(EncodedValue.fromRef(projected_proxy_target), private_proxy_target, context) or
+        JSC__JSValue__toInt32(evaluate(context, "__private_proxy_traps_371")) != 0 or
+        JSObjectGetProxyTarget(private_proxy_target.cellPointer()) != null)
+        fail("private proxy target identity/trap mismatch");
+    const revoked_proxy = evaluate(context, "(()=>{const p=Proxy.revocable({},{});p.revoke();return p.proxy})()");
+    if (JSObjectGetProxyTarget(revoked_proxy.cellPointer()) != null or JSObjectGetProxyTarget(null) != null)
+        fail("private proxy target invalid/revoked mismatch");
+
     const traced_script = JSStringCreateWithUTF8CString("(function outer249(){ return (function inner249(){ return new Error('stack-249'); })(); })()") orelse fail("trace script creation failed");
     defer JSStringRelease(traced_script);
     const traced_url = JSStringCreateWithUTF8CString("trace-249.js") orelse fail("trace URL creation failed");
@@ -6387,5 +6437,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 346/346 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 348/348 symbols linked; runtime matrix passed\n", .{});
 }

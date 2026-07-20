@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (359 implemented, 112 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (361 implemented, 110 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 359 are implemented and 112 remain pending
+Of the private entries, 361 are implemented and 110 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -1003,7 +1003,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (351 implemented, 110 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (353 implemented, 108 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1017,10 +1017,11 @@ every name in each category rather than reducing that result to counts.
 zig build bun-private-abi-audit
 zig build bun-private-abi-audit -Dbun-source-root="$HOME/Code/bun"
 zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
+zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
 zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 110
+not claim complete Bun runtime compatibility; #164 remains open for the 108
 pending core entries and later wider/generated profiles.

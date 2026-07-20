@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 418,
-      "pending": 112
+      "implemented": 420,
+      "pending": 110
     }
   },
   "declarations": [
@@ -3672,10 +3672,10 @@
       "line": 157,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern \"c\" fn JSObjectCallAsFunctionReturnValueHoldingAPILock(ctx: *jsc.JSGlobalObject, object: JSObjectRef, thisObject: JSObjectRef, argumentCount: usize, arguments: [*c]const JSValueRef) jsc.JSValue;",
       "declaration_sha256": "a957f766d71a03d4224990e52a93d5bb74b8496d9124f2ec6a2f8793427cb365",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSObjectGetArrayBufferByteLength",
@@ -3741,10 +3741,10 @@
       "line": 166,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "pub extern \"c\" fn JSObjectGetProxyTarget(JSObjectRef) JSObjectRef;",
       "declaration_sha256": "955484f3a691136d823041f6de27acff4cfa7fa5840f6bbdc7453a47f5c2652e",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSObjectGetTypedArrayBuffer",
