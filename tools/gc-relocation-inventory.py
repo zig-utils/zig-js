@@ -46,6 +46,7 @@ def main() -> int:
     )
     c_api = document.get("c_api", {})
     require(c_api.get("entrypoint") == "ZJSContextCompactGarbage", "C compaction entrypoint drift")
+    require(c_api.get("request_entrypoint") == "ZJSContextRequestGarbageCompaction", "C compaction request entrypoint drift")
     require(
         c_api.get("statuses") == ["unsupported", "no_candidates", "out_of_memory", "compacted"],
         "C compaction status contract drift",
@@ -90,7 +91,9 @@ def main() -> int:
     extension_header = (ROOT / "include/zig-js/Extensions.h").read_text()
     require("pub const ZJSGCCompactionStatus" in c_api_source, "C compaction status enum missing")
     require("export fn ZJSContextCompactGarbage" in c_api_source, "C compaction export missing")
+    require("export fn ZJSContextRequestGarbageCompaction" in c_api_source, "C compaction request export missing")
     require("typedef enum ZJSGCCompactionStatus" in extension_header, "C compaction status header missing")
+    require("bool ZJSContextRequestGarbageCompaction(JSContextRef ctx)" in extension_header, "C compaction request header missing")
     require("size_t* movedCells, size_t* movedBytes" in extension_header, "C movement output ABI missing")
     for hook in (
         "pub fn canRelocate",

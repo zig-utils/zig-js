@@ -555,7 +555,8 @@ int main(void)
             JSValueRef stableHandle = beforeMove.JSValueRef;
             size_t movedCells = 0;
             size_t movedBytes = 0;
-            if (check(ZJSContextCompactGarbage(movingContextRef, &movedCells, &movedBytes) ==
+            if (check(ZJSContextRequestGarbageCompaction(movingContextRef) &&
+                          ZJSContextCompactGarbage(movingContextRef, &movedCells, &movedBytes) ==
                               kZJSGCCompactionCompacted &&
                           movedCells > 0 && movedBytes > 0 &&
                           movingManaged.value == beforeMove &&

@@ -4613,8 +4613,10 @@ pub const Context = struct {
     /// `compactGarbage` call also consumes it after a supported attempt. Raw
     /// Values must not cross the requested movement boundary; use
     /// `ProtectedValue` when the payload must survive it.
-    pub fn requestGarbageCompaction(self: *Context) void {
-        if (self.gc != null) self.gc_compaction_requested.store(true, .release);
+    pub fn requestGarbageCompaction(self: *Context) bool {
+        if (self.gc == null) return false;
+        self.gc_compaction_requested.store(true, .release);
+        return true;
     }
 
     /// Root a managed Value in address-stable storage. Keep the returned handle
@@ -14620,7 +14622,7 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
     const function_record_address = @intFromPtr(function_before);
     const witness_address = @intFromPtr(handle.get().asObj());
 
-    ctx.requestGarbageCompaction();
+    try std.testing.expect(ctx.requestGarbageCompaction());
     try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
     // A checkpoint that is precise enough for marking still cannot consume the
     // request when its Zig helper may resume with raw pointers. Only the native

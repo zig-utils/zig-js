@@ -7,9 +7,9 @@ tier metadata, bytecode chunks, and native-frame storage do not move; the
 checkpoint has already materialized every managed local/operand in registered
 roots. Running JS threads, generic/native-host checkpoints, conservative stack
 scans, and in-flight concurrent/parallel collections still fail closed. C and
-Objective-C embedders use
-`ZJSGlobalContextCreateGarbageCollected` and `ZJSContextCompactGarbage` for the
-same checked boundary.
+Objective-C embedders use `ZJSGlobalContextCreateGarbageCollected`,
+`ZJSContextRequestGarbageCompaction`, and `ZJSContextCompactGarbage` for the
+same scheduled/direct boundaries.
 
 The checked-in
 [`gc-relocation-inventory.json`](../.data/gc-relocation-inventory.json) covers
@@ -199,6 +199,12 @@ live operands, and records exact instruction/step state. Movement rewrites the
 active registered graph, clears the request only after a supported attempt, and
 resumes the same native entry. Other live native/interpreter boundaries remain
 rejected.
+
+[#360](https://github.com/zig-utils/zig-js/issues/360) exposes that scheduling
+primitive to C and Objective-C hosts. A native callback may set the pending bit
+but cannot move the heap reentrantly; after it unwinds, the declared native
+checkpoint consumes the request. Long-lived C values still require counted
+`JSValueProtect` storage across that boundary.
 
 ## Safepoint Rule
 

@@ -6,6 +6,7 @@
   "placement_policy": "dense_size_class_prefix_tail_evacuation",
   "c_api": {
     "entrypoint": "ZJSContextCompactGarbage",
+    "request_entrypoint": "ZJSContextRequestGarbageCompaction",
     "statuses": ["unsupported", "no_candidates", "out_of_memory", "compacted"],
     "optional_outputs": ["moved_cells", "moved_bytes"],
     "non_moving_outputs": "zero"

@@ -162,7 +162,8 @@
   ],
   "zig_js_extensions": [
     "ZJSGlobalContextCreateThreaded", "ZJSGlobalContextCreateGarbageCollected",
-    "ZJSContextCompactGarbage", "ZJSValueProtect", "ZJSValueUnprotect",
+    "ZJSContextRequestGarbageCompaction", "ZJSContextCompactGarbage",
+    "ZJSValueProtect", "ZJSValueUnprotect",
     "ZJSContextGetCollectionEpoch", "ZJSValueIsReachable",
     "ZJSInspectorSessionCreate", "ZJSInspectorSessionDispatch", "ZJSInspectorSessionRelease",
     "JSWorkerCreate", "JSWorkerCreateWithLimits",

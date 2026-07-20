@@ -14,6 +14,8 @@ JS_EXPORT bool ZJSValueUnprotect(JSContextRef ctx, JSValueRef value);
 /* Standalone precise-GC context and explicit quiescent compaction. The current
  * pointer-free baseline JIT may remain enabled; live native frames fail closed. */
 JS_EXPORT JSGlobalContextRef ZJSGlobalContextCreateGarbageCollected(bool enableJIT);
+/* Schedule only; never moves inside the caller's native frame. */
+JS_EXPORT bool ZJSContextRequestGarbageCompaction(JSContextRef ctx);
 typedef enum ZJSGCCompactionStatus {
     kZJSGCCompactionUnsupported = 0,
     kZJSGCCompactionNoCandidates = 1,

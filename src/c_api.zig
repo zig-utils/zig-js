@@ -38,6 +38,7 @@ const interp = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const promise = @import("promise.zig");
 const structured_clone = @import("structured_clone.zig");
+const jit = @import("jit.zig");
 const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
@@ -12112,6 +12113,14 @@ export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) 
     _ = createContextGroupForPrimary(ctx) orelse return null;
     ctx.initCApiRef();
     return @ptrCast(ctx);
+}
+
+/// Schedule one moving collection without attempting movement inside the
+/// caller's native frame. A movement-safe baseline-JIT checkpoint or a later
+/// direct quiescent compaction consumes the request.
+export fn ZJSContextRequestGarbageCompaction(ctx: JSContextRef) callconv(.c) bool {
+    const context = ctxFrom(ctx) orelse return false;
+    return context.requestGarbageCompaction();
 }
 
 /// zig-js extension: compact a quiescent precise-GC context. The Context gate
@@ -24328,6 +24337,119 @@ test "C-API: JIT-enabled compaction fails closed in native callback then moves p
     const tag_after_oom = JSObjectGetProperty(ctx, survivor, tag_name, &exception) orelse return error.PropFailed;
     try std.testing.expect(exception == null);
     try std.testing.expectEqual(@as(f64, 355), JSValueToNumber(ctx, tag_after_oom, &exception));
+}
+
+test "C-API: callback schedules protected compaction at the next baseline JIT checkpoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const State = struct {
+        var calls: usize = 0;
+        var protected: JSValueRef = null;
+        var old_payload: usize = 0;
+        var direct_status: ZJSGCCompactionStatus = .compacted;
+        var request_accepted: bool = false;
+
+        fn schedule(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            argument_count: usize,
+            arguments: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            calls += 1;
+            if (argument_count != 1 or arguments == null or arguments[0] == null)
+                return JSValueMakeBoolean(ctx, false);
+            const context = ctxFrom(ctx) orelse return JSValueMakeBoolean(ctx, false);
+            protected = arguments[0];
+            if (!ZJSValueProtect(ctx, protected)) return JSValueMakeBoolean(ctx, false);
+            old_payload = @intFromPtr((valueFromContext(context, protected) orelse return JSValueMakeBoolean(ctx, false)).asObj());
+            direct_status = ZJSContextCompactGarbage(ctx, null, null);
+            request_accepted = ZJSContextRequestGarbageCompaction(ctx);
+            return JSValueMakeBoolean(ctx, direct_status == .unsupported and request_accepted);
+        }
+    };
+    State.calls = 0;
+    State.protected = null;
+    State.old_payload = 0;
+    State.direct_status = .compacted;
+    State.request_accepted = false;
+
+    try std.testing.expect(!ZJSContextRequestGarbageCompaction(null));
+    {
+        const arena_ctx = JSGlobalContextCreate(null) orelse return error.JSCInitFailed;
+        defer JSGlobalContextRelease(arena_ctx);
+        try std.testing.expect(!ZJSContextRequestGarbageCompaction(arena_ctx));
+    }
+
+    const ctx = ZJSGlobalContextCreateGarbageCollected(true) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxFrom(ctx) orelse return error.JSCInitFailed;
+    const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;
+    const callback_name = JSStringCreateWithUTF8CString("hostScheduleCompaction") orelse return error.StringInitFailed;
+    defer JSStringRelease(callback_name);
+    const callback = JSObjectMakeFunctionWithCallback(ctx, callback_name, State.schedule) orelse return error.FunctionCreateFailed;
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, global, callback_name, callback, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const warm_source = JSStringCreateWithUTF8CString(
+        \\function cScheduledSum(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\cScheduledSum(4096);
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(warm_source);
+    const warm_result = JSEvaluateScript(ctx, warm_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 8_386_560), JSValueToNumber(ctx, warm_result, &exception));
+    const sum_name = JSStringCreateWithUTF8CString("cScheduledSum") orelse return error.StringInitFailed;
+    defer JSStringRelease(sum_name);
+    const sum_value = JSObjectGetProperty(ctx, global, sum_name, &exception) orelse return error.PropFailed;
+    const sum_function: *interp.Function = @ptrCast(@alignCast((valueFromContext(context, sum_value) orelse return error.ValueFailed).asObj().jsFunction().?));
+    try std.testing.expectEqual(jit.TierState.ready, sum_function.chunk.?.tier.loadState());
+
+    const discard_source = JSStringCreateWithUTF8CString(
+        \\globalThis.cScheduledDiscard = [];
+        \\for (let i = 0; i < 4096; i++)
+        \\  cScheduledDiscard.push({ dead: i, child: { value: i + 1 } });
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(discard_source);
+    _ = JSEvaluateScript(ctx, discard_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+
+    const precise_compactions_before = context.gc_moving_safepoint_compactions.load(.monotonic);
+    const setup = JSStringCreateWithUTF8CString(
+        \\cScheduledDiscard = null;
+        \\globalThis.cScheduledSurvivor = { marker: 360 };
+        \\hostScheduleCompaction(cScheduledSurvivor);
+        \\cScheduledSum(20000);
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(setup);
+    const result = JSEvaluateScript(ctx, setup, null, null, 1, &exception) orelse return error.EvalFailed;
+    defer if (State.protected != null) std.debug.assert(ZJSValueUnprotect(ctx, State.protected));
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 199_990_000), JSValueToNumber(ctx, result, &exception));
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(usize, 1), State.calls);
+    try std.testing.expectEqual(ZJSGCCompactionStatus.unsupported, State.direct_status);
+    try std.testing.expect(State.request_accepted);
+    try std.testing.expect(!context.gc_compaction_requested.load(.acquire));
+    try std.testing.expectEqual(
+        precise_compactions_before + 1,
+        context.gc_moving_safepoint_compactions.load(.monotonic),
+    );
+    const protected = State.protected orelse return error.ProtectFailed;
+    const current = valueFromContext(context, protected) orelse return error.ValueFailed;
+    try std.testing.expect(State.old_payload != @intFromPtr(current.asObj()));
+    const marker_name = JSStringCreateWithUTF8CString("marker") orelse return error.StringInitFailed;
+    defer JSStringRelease(marker_name);
+    const marker = JSObjectGetProperty(ctx, protected, marker_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 360), JSValueToNumber(ctx, marker, &exception));
 }
 
 test "C-API: protected handles trace managed StringCells" {
