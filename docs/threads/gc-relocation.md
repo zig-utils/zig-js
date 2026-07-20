@@ -128,7 +128,11 @@ Root-registry rewriting begins in
 [#349](https://github.com/zig-utils/zig-js/issues/349): every microtask variant,
 module graph edge, active interpreter operand/frame/environment root, cache,
 debug frame, `import.meta`, and parked Wasm execution root now has a mutating
-world-stopped traversal. Queue/container addresses and ordering remain stable.
+world-stopped traversal. The same pass now covers Context globals and builtins,
+rejection/finalization/timer queues, C API boxes and prototype owners, private
+strong/weak handles, Thread results and join promises, GIL task jobs, property
+waiters, and the host exception slot. Queue, handle, and native-record addresses
+and ordering remain stable; only their managed payloads change.
 
 ## Safepoint Rule
 

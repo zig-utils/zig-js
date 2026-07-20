@@ -1642,6 +1642,100 @@ pub fn traceGilTaskRoots(g: *gil_mod.Gil, v: anytype) void {
     }
 }
 
+/// World-stopped companion to `traceGilTaskRoots`. The task queue and its
+/// arena-owned job records stay in place; only their managed payloads move.
+pub fn relocateGilTaskRoots(g: *gil_mod.Gil, v: anytype) void {
+    if (g.tasks_head >= g.tasks.items.len) return;
+    for (g.tasks.items[g.tasks_head..]) |raw| {
+        const job: *HoldJob = @ptrCast(@alignCast(raw));
+        relocateHoldJob(job, v);
+    }
+}
+
+/// Rewrite the Context-owned completion and async-join roots for one stable
+/// ThreadRecord. Its OS-thread, queue, mutex, and owner pointers are native
+/// metadata and deliberately remain unchanged.
+pub fn relocateThreadRecordRoots(record: *ThreadRecord, v: anytype) void {
+    gc_relocation.rewriteValueSlot(v, &record.result);
+    gc_relocation.rewriteOptionalSlot(v, value.Object, &record.js_obj);
+    for (record.pending_joins.items) |*pending|
+        gc_relocation.rewriteRequiredSlot(v, value.Object, &pending.promise);
+    for (record.settling_joins.items) |*pending|
+        gc_relocation.rewriteRequiredSlot(v, value.Object, &pending.promise);
+}
+
+/// Rewrite the managed fields in a type-erased property waitAsync ticket.
+/// The ticket and its captured native queue/thread ownership stay stable.
+pub fn relocatePropAsyncTicketRoot(raw: *anyopaque, v: anytype) void {
+    const ticket: *PropAsyncTicket = @ptrCast(@alignCast(raw));
+    gc_relocation.rewriteRequiredSlot(v, value.Object, &ticket.obj);
+    gc_relocation.rewriteRequiredSlot(v, value.Object, &ticket.promise);
+}
+
+test "realm root relocation rewrites GIL tasks thread records and property waiters" {
+    var old_objects: [9]value.Object = undefined;
+    var new_objects: [9]value.Object = undefined;
+    var g = gil_mod.Gil{};
+
+    var lock = LockRecord{ .gil = &g, .owner = &old_objects[0] };
+    var job = HoldJob{
+        .lock = &lock,
+        .outer = &old_objects[1],
+        .cb = Value.obj(&old_objects[2]),
+        .release_state = .{ .lock = &lock },
+    };
+    var task_items = [_]*anyopaque{@ptrCast(&job)};
+    g.tasks = .{ .items = &task_items, .capacity = task_items.len };
+
+    var queue = promise.MicrotaskQueue{};
+    var pending_joins = [_]PendingJoin{.{ .promise = &old_objects[5], .microtasks = &queue }};
+    var settling_joins = [_]PendingJoin{.{ .promise = &old_objects[6], .microtasks = &queue }};
+    var record = ThreadRecord{
+        .id = 7,
+        .gil = &g,
+        .ctx = undefined,
+        .result = Value.obj(&old_objects[3]),
+        .js_obj = &old_objects[4],
+        .pending_joins = .{ .items = &pending_joins, .capacity = pending_joins.len },
+        .settling_joins = .{ .items = &settling_joins, .capacity = settling_joins.len },
+    };
+    var ticket = PropAsyncTicket{
+        .obj = &old_objects[7],
+        .key = "root",
+        .deadline_ns = null,
+        .promise = &old_objects[8],
+        .microtasks = &queue,
+        .thread = &record,
+        .owner = &g,
+    };
+
+    const Plan = struct {
+        old_objects: *[9]value.Object,
+        new_objects: *[9]value.Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    const plan = Plan{ .old_objects = &old_objects, .new_objects = &new_objects };
+    relocateGilTaskRoots(&g, &plan);
+    relocateThreadRecordRoots(&record, &plan);
+    relocatePropAsyncTicketRoot(&ticket, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], lock.owner.?);
+    try std.testing.expectEqual(&new_objects[1], job.outer);
+    try std.testing.expectEqual(&new_objects[2], job.cb.?.asObj());
+    try std.testing.expectEqual(&new_objects[3], record.result.asObj());
+    try std.testing.expectEqual(&new_objects[4], record.js_obj.?);
+    try std.testing.expectEqual(&new_objects[5], record.pending_joins.items[0].promise);
+    try std.testing.expectEqual(&new_objects[6], record.settling_joins.items[0].promise);
+    try std.testing.expectEqual(&new_objects[7], ticket.obj);
+    try std.testing.expectEqual(&new_objects[8], ticket.promise);
+}
+
 fn currentTid() u64 {
     return @intCast(std.Thread.getCurrentId());
 }

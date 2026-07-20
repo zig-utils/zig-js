@@ -2290,6 +2290,175 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_environment, machine.debug_top_level_environment.?);
 }
 
+test "realm root relocation rewrites Context registries and embedder handles" {
+    const context = try ContextMod.Context.create(std.testing.allocator);
+    defer context.destroy();
+
+    var old_objects: [17]Object = undefined;
+    var new_objects: [17]Object = undefined;
+    var old_promises: [2]promise.Promise = .{ .{}, .{} };
+    var new_promises: [2]promise.Promise = .{ .{}, .{} };
+
+    const saved_global = context.global_object;
+    const saved_tdz = context.tdz_marker;
+    const saved_constructors = context.c_api_builtin_constructors;
+    const saved_oom = context.reserved_thread_oom_error;
+    const saved_private_exception = context.private_pending_exception_root;
+    const saved_exception = context.exception;
+    defer {
+        context.global_object = saved_global;
+        context.tdz_marker = saved_tdz;
+        context.c_api_builtin_constructors = saved_constructors;
+        context.reserved_thread_oom_error = saved_oom;
+        context.private_pending_exception_root = saved_private_exception;
+        context.exception = saved_exception;
+        _ = context.env.removeVar("__gc_relocation_context_root__");
+    }
+    context.global_object = &old_objects[0];
+    context.tdz_marker = &old_objects[1];
+    context.c_api_builtin_constructors[0] = Value.obj(&old_objects[2]);
+    context.reserved_thread_oom_error = Value.obj(&old_objects[3]);
+    context.private_pending_exception_root = Value.obj(&old_objects[4]);
+    context.exception = Value.obj(&old_objects[16]);
+    try context.env.put("__gc_relocation_context_root__", Value.obj(&old_objects[5]));
+
+    var microtask_items = [_]promise.Microtask{.{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = false,
+        .callback = Value.obj(&old_objects[6]),
+    }};
+    var next_tick_items = [_]promise.Microtask{.{
+        .kind = .callback,
+        .reaction = undefined,
+        .argument = Value.undef(),
+        .fulfilled = false,
+        .callback = Value.obj(&old_objects[7]),
+    }};
+    const saved_microtasks = context.microtasks.items;
+    const saved_microtask_head = context.microtasks.head;
+    const saved_next_ticks = context.next_ticks.items;
+    const saved_next_tick_head = context.next_ticks.head;
+    defer {
+        context.microtasks.items = saved_microtasks;
+        context.microtasks.head = saved_microtask_head;
+        context.next_ticks.items = saved_next_ticks;
+        context.next_ticks.head = saved_next_tick_head;
+    }
+    context.microtasks.items = .{ .items = &microtask_items, .capacity = microtask_items.len };
+    context.microtasks.head = 0;
+    context.next_ticks.items = .{ .items = &next_tick_items, .capacity = next_tick_items.len };
+    context.next_ticks.head = 0;
+
+    var unhandled = [_]*promise.Promise{&old_promises[0]};
+    var handled = [_]*promise.Promise{&old_promises[1]};
+    var async_waiters = [_]interp.AsyncWaiterEntry{.{ .id = 1, .promise = Value.obj(&old_objects[8]) }};
+    var timer_args = [_]Value{Value.obj(&old_objects[10])};
+    var timer = ContextMod.Context.TimerRecord{
+        .id = 1,
+        .owner = &context.microtasks,
+        .callback = Value.obj(&old_objects[9]),
+        .args = &timer_args,
+        .delay_ns = 0,
+        .deadline_ns = 0,
+        .sequence = 1,
+        .repeat = false,
+    };
+    var timers = [_]*ContextMod.Context.TimerRecord{&timer};
+    var finalization_jobs = [_]*Object{&old_objects[11]};
+    const PrototypeFinish = struct {
+        fn finish(_: *value.CApiClassPrototypeOwner) void {}
+    };
+    var prototype_owner = value.CApiClassPrototypeOwner{
+        .class_ref = undefined,
+        .object = &old_objects[12],
+        .finish_fn = PrototypeFinish.finish,
+    };
+    var prototypes = [_]*value.CApiClassPrototypeOwner{&prototype_owner};
+    var boxed = Value.obj(&old_objects[13]);
+    var handles = [_]ContextMod.Context.CApiHandle{.{ .ref = &boxed, .count = 1 }};
+    var strong_root = ContextMod.Context.PrivateStrongRoot{ .value = Value.obj(&old_objects[14]) };
+    var strong_roots = [_]*ContextMod.Context.PrivateStrongRoot{&strong_root};
+    var weak_root = ContextMod.Context.PrivateWeakRoot{};
+    weak_root.target.store(&old_objects[15], .release);
+    var weak_roots = [_]*ContextMod.Context.PrivateWeakRoot{&weak_root};
+
+    const saved_unhandled = context.unhandled_rejections;
+    const saved_handled = context.handled_rejections;
+    const saved_async_waiters = context.async_waiters;
+    const saved_timers = context.timers;
+    const saved_finalization_jobs = context.finalization_cleanup_jobs;
+    const saved_prototypes = context.c_api_class_prototypes;
+    const saved_handles = context.c_api_handles;
+    const saved_strong_roots = context.private_strong_roots;
+    const saved_weak_roots = context.private_weak_roots;
+    defer {
+        context.unhandled_rejections = saved_unhandled;
+        context.handled_rejections = saved_handled;
+        context.async_waiters = saved_async_waiters;
+        context.timers = saved_timers;
+        context.finalization_cleanup_jobs = saved_finalization_jobs;
+        context.c_api_class_prototypes = saved_prototypes;
+        context.c_api_handles = saved_handles;
+        context.private_strong_roots = saved_strong_roots;
+        context.private_weak_roots = saved_weak_roots;
+    }
+    context.unhandled_rejections = .{ .items = &unhandled, .capacity = unhandled.len };
+    context.handled_rejections = .{ .items = &handled, .capacity = handled.len };
+    context.async_waiters = .{ .items = &async_waiters, .capacity = async_waiters.len };
+    context.timers = .{ .items = &timers, .capacity = timers.len };
+    context.finalization_cleanup_jobs = .{ .items = &finalization_jobs, .capacity = finalization_jobs.len };
+    context.c_api_class_prototypes = .{ .items = &prototypes, .capacity = prototypes.len };
+    context.c_api_handles = .{ .items = &handles, .capacity = handles.len };
+    context.private_strong_roots = .{ .items = &strong_roots, .capacity = strong_roots.len };
+    context.private_weak_roots = .{ .items = &weak_roots, .capacity = weak_roots.len };
+
+    const Plan = struct {
+        old_objects: *[17]Object,
+        new_objects: *[17]Object,
+        old_promises: *[2]promise.Promise,
+        new_promises: *[2]promise.Promise,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            for (self.old_promises, 0..) |*promise_cell, index|
+                if (old == @as(*anyopaque, @ptrCast(promise_cell)))
+                    return @ptrCast(&self.new_promises[index]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_promises = &old_promises,
+        .new_promises = &new_promises,
+    };
+    relocateContextRoots(context, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], context.global_object);
+    try std.testing.expectEqual(&new_objects[1], context.tdz_marker);
+    try std.testing.expectEqual(&new_objects[2], context.c_api_builtin_constructors[0].asObj());
+    try std.testing.expectEqual(&new_objects[3], context.reserved_thread_oom_error.?.asObj());
+    try std.testing.expectEqual(&new_objects[4], context.private_pending_exception_root.?.asObj());
+    try std.testing.expectEqual(&new_objects[5], context.env.get("__gc_relocation_context_root__").?.asObj());
+    try std.testing.expectEqual(&new_objects[6], microtask_items[0].callback.asObj());
+    try std.testing.expectEqual(&new_objects[7], next_tick_items[0].callback.asObj());
+    try std.testing.expectEqual(&new_promises[0], context.unhandled_rejections.items[0]);
+    try std.testing.expectEqual(&new_promises[1], context.handled_rejections.items[0]);
+    try std.testing.expectEqual(&new_objects[8], async_waiters[0].promise.asObj());
+    try std.testing.expectEqual(&new_objects[9], timer.callback.asObj());
+    try std.testing.expectEqual(&new_objects[10], timer_args[0].asObj());
+    try std.testing.expectEqual(&new_objects[11], context.finalization_cleanup_jobs.items[0]);
+    try std.testing.expectEqual(&new_objects[12], prototype_owner.object);
+    try std.testing.expectEqual(&new_objects[13], boxed.asObj());
+    try std.testing.expectEqual(&new_objects[14], strong_root.value.asObj());
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&new_objects[15])), weak_root.target.load(.acquire));
+    try std.testing.expectEqual(&new_objects[16], context.exception.?.asObj());
+}
+
 fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
     switch (slot) {
         .externref, .hostref => |root| markValue(v, root),
@@ -2390,6 +2559,59 @@ const RootPublishVisitor = struct {
 pub fn publishInterpreterRoots(machine: *interp.Interpreter) void {
     var pv = RootPublishVisitor{};
     traceInterpreterRoots(machine, &pv);
+}
+
+/// Rewrite every precise Context root after weak pruning and while all realm
+/// mutators are stopped. Native stacks discovered conservatively are pinned by
+/// the relocation plan rather than rewritten here; all typed realm-owned slots
+/// mirror `Binding.traceRoots` below.
+pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
+    gc_relocation.rewriteRequiredSlot(v, Object, &ctx.global_object);
+    gc_relocation.rewriteRequiredSlot(v, Object, &ctx.tdz_marker);
+    for (&ctx.c_api_builtin_constructors) |*constructor|
+        gc_relocation.rewriteValueSlot(v, constructor);
+    gc_relocation.rewriteOptionalValueSlot(v, &ctx.reserved_thread_oom_error);
+    gc_relocation.rewriteOptionalValueSlot(v, &ctx.private_pending_exception_root);
+    relocateEnv(&ctx.env, v);
+
+    for (ctx.microtasks.pendingItems()) |*task| relocateMicrotask(task, v);
+    for (ctx.next_ticks.pendingItems()) |*task| relocateMicrotask(task, v);
+
+    for (ctx.unhandled_rejections.items) |*rejected|
+        gc_relocation.rewriteRequiredSlot(v, promise.Promise, rejected);
+    for (ctx.handled_rejections.items) |*handled|
+        gc_relocation.rewriteRequiredSlot(v, promise.Promise, handled);
+    relocateModuleGraph(&ctx.module_registry, v);
+    if (ctx.mod_cache) |cache|
+        if (cache != &ctx.module_registry) relocateModuleGraph(cache, v);
+    for (ctx.async_waiters.items) |*waiter|
+        gc_relocation.rewriteValueSlot(v, &waiter.promise);
+    for (ctx.timers.items) |timer| {
+        gc_relocation.rewriteValueSlot(v, &timer.callback);
+        for (timer.args) |*argument| gc_relocation.rewriteValueSlot(v, argument);
+    }
+    for (ctx.finalization_cleanup_jobs.items) |*registry|
+        gc_relocation.rewriteRequiredSlot(v, Object, registry);
+    for (ctx.c_api_class_prototypes.items) |prototype|
+        gc_relocation.rewriteRequiredSlot(v, Object, &prototype.object);
+    for (ctx.c_api_handles.items) |handle| {
+        // Each stable Boxed handle aliases its first field (`Value`).
+        const slot: *Value = @ptrCast(@alignCast(handle.ref));
+        gc_relocation.rewriteValueSlot(v, slot);
+    }
+    for (ctx.private_strong_roots.items) |root|
+        gc_relocation.rewriteValueSlot(v, &root.value);
+    for (ctx.private_weak_roots.items) |root|
+        gc_relocation.rewriteAtomicPointerSlot(v, &root.target);
+
+    if (ctx.gil) |g| jsthread.relocateGilTaskRoots(g, v);
+    for (ctx.js_threads.items) |record|
+        jsthread.relocateThreadRecordRoots(record, v);
+    for (ctx.active_interpreters.items) |machine|
+        relocateInterpreterRoots(machine, v);
+    if (ctx.gil) |g| for (g.prop_async.items) |raw|
+        jsthread.relocatePropAsyncTicketRoot(raw, v);
+    gc_relocation.rewriteOptionalValueSlot(v, &ctx.exception);
 }
 
 // ---- The binding the collector instantiates over -------------------------
