@@ -21700,6 +21700,7 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
             errdefer primary.destroy();
             const group = try gpa.create(CContextGroup);
             group.* = .{
+                .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
                 .atom_strings = strcell.InternTable.init(gpa),
@@ -23704,6 +23705,7 @@ test "private embedding references retain strong targets and clear weak targets"
             errdefer primary.destroy();
             const group = try gpa.create(CContextGroup);
             group.* = .{
+                .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
                 .atom_strings = strcell.InternTable.init(gpa),
@@ -26577,6 +26579,7 @@ test "private rooted native value containers retain and release exact cells" {
             errdefer primary.destroy();
             const group = try gpa.create(CContextGroup);
             group.* = .{
+                .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
                 .atom_strings = strcell.InternTable.init(gpa),
