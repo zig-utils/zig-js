@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 457,
-      "pending": 73
+      "implemented": 459,
+      "pending": 71
     }
   },
   "declarations": [
@@ -5373,10 +5373,10 @@
       "line": 24,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createFromH3(arg0: *anyopaque) *FetchHeaders;",
       "declaration_sha256": "56af2ffa07b66e4b518f75d5aeb78e9cd3fe0644024bb2a04cfb45ebab80a943",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createFromJS",
@@ -5406,10 +5406,10 @@
       "line": 10,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn WebCore__FetchHeaders__createFromUWS(arg1: *anyopaque) *FetchHeaders;",
       "declaration_sha256": "4e67ed8ba3fd67db9c986819b9fd1eb52099630e9335b2c09f660c90b2a44990",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "WebCore__FetchHeaders__createValue",

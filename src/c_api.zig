@@ -9672,6 +9672,107 @@ export fn WebCore__FetchHeaders__createFromPicoHeaders_(raw_headers: ?*const any
     return headers;
 }
 
+const PrivateFetchHeadersBridgeSpanV1 = extern struct {
+    ptr: [*c]const u8,
+    len: usize,
+};
+
+const PrivateFetchHeadersBridgeVisitorV1 = *const fn (
+    ?*anyopaque,
+    PrivateFetchHeadersBridgeSpanV1,
+    PrivateFetchHeadersBridgeSpanV1,
+) callconv(.c) bool;
+
+const PrivateFetchHeadersBridgeVisitRequestV1 = *const fn (
+    ?*anyopaque,
+    ?*anyopaque,
+    PrivateFetchHeadersBridgeVisitorV1,
+) callconv(.c) bool;
+
+fn privateFetchHeadersAbsentRequestBridgeV1(
+    _: ?*anyopaque,
+    _: ?*anyopaque,
+    _: PrivateFetchHeadersBridgeVisitorV1,
+) callconv(.c) bool {
+    return false;
+}
+
+comptime {
+    @export(&privateFetchHeadersAbsentRequestBridgeV1, .{
+        .name = "ZigJS__FetchHeadersBridge__visitUWSRequestV1",
+        .linkage = .weak,
+    });
+    @export(&privateFetchHeadersAbsentRequestBridgeV1, .{
+        .name = "ZigJS__FetchHeadersBridge__visitH3RequestV1",
+        .linkage = .weak,
+    });
+}
+
+const private_fetch_headers_visit_uws_request_v1 = @extern(PrivateFetchHeadersBridgeVisitRequestV1, .{
+    .name = "ZigJS__FetchHeadersBridge__visitUWSRequestV1",
+});
+
+const private_fetch_headers_visit_h3_request_v1 = @extern(PrivateFetchHeadersBridgeVisitRequestV1, .{
+    .name = "ZigJS__FetchHeadersBridge__visitH3RequestV1",
+});
+
+const PrivateFetchHeadersBridgeImport = struct {
+    headers: *fetch_headers.Record,
+    failed: bool = false,
+};
+
+fn privateFetchHeadersBridgeVisit(
+    raw_state: ?*anyopaque,
+    name: PrivateFetchHeadersBridgeSpanV1,
+    header_value: PrivateFetchHeadersBridgeSpanV1,
+) callconv(.c) bool {
+    const state: *PrivateFetchHeadersBridgeImport = @ptrCast(@alignCast(raw_state orelse return false));
+    if (state.failed) return false;
+    if (name.len > std.math.maxInt(u32) or header_value.len > std.math.maxInt(u32) or
+        (name.len != 0 and name.ptr == null) or (header_value.len != 0 and header_value.ptr == null))
+    {
+        state.failed = true;
+        return false;
+    }
+    if (name.len != 0) _ = std.math.add(usize, @intFromPtr(name.ptr), name.len) catch {
+        state.failed = true;
+        return false;
+    };
+    if (header_value.len != 0) _ = std.math.add(usize, @intFromPtr(header_value.ptr), header_value.len) catch {
+        state.failed = true;
+        return false;
+    };
+    const name_bytes: []const u8 = if (name.len == 0) "" else name.ptr[0..name.len];
+    const value_bytes: []const u8 = if (header_value.len == 0) "" else header_value.ptr[0..header_value.len];
+    state.headers.putParsed(name_bytes, value_bytes) catch {
+        state.failed = true;
+        return false;
+    };
+    return true;
+}
+
+fn privateFetchHeadersCreateFromRequest(
+    request: ?*anyopaque,
+    visit: PrivateFetchHeadersBridgeVisitRequestV1,
+) *fetch_headers.Record {
+    const headers = fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed");
+    const raw_request = request orelse return headers;
+    var state = PrivateFetchHeadersBridgeImport{ .headers = headers };
+    if (!visit(raw_request, &state, privateFetchHeadersBridgeVisit) or state.failed) {
+        headers.release();
+        return fetch_headers.Record.create() catch @panic("FetchHeaders allocation failed");
+    }
+    return headers;
+}
+
+export fn WebCore__FetchHeaders__createFromUWS(request: ?*anyopaque) callconv(.c) *fetch_headers.Record {
+    return privateFetchHeadersCreateFromRequest(request, private_fetch_headers_visit_uws_request_v1);
+}
+
+export fn WebCore__FetchHeaders__createFromH3(request: ?*anyopaque) callconv(.c) *fetch_headers.Record {
+    return privateFetchHeadersCreateFromRequest(request, private_fetch_headers_visit_h3_request_v1);
+}
+
 export fn WebCore__FetchHeaders__deref(raw_headers: ?*fetch_headers.Record) callconv(.c) void {
     if (raw_headers) |headers| headers.release();
 }
