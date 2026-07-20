@@ -24180,6 +24180,73 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     try std.testing.expect(!ZJSValueUnprotect(ctx, held));
 }
 
+test "C-API: native callback compaction fails closed before a protected handle moves quiescently" {
+    const State = struct {
+        var calls: usize = 0;
+        var accepted: bool = false;
+
+        fn compact(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            calls += 1;
+            accepted = ZJSContextCompactGarbage(ctx);
+            return JSValueMakeBoolean(ctx, !accepted);
+        }
+    };
+    State.calls = 0;
+    State.accepted = false;
+
+    const ctx = ZJSGlobalContextCreateGarbageCollected(false) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxFrom(ctx) orelse return error.JSCInitFailed;
+    const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;
+    const callback_name = JSStringCreateWithUTF8CString("hostCompact") orelse return error.StringInitFailed;
+    defer JSStringRelease(callback_name);
+    const callback = JSObjectMakeFunctionWithCallback(ctx, callback_name, State.compact) orelse return error.FunctionCreateFailed;
+    var exception: JSValueRef = null;
+    JSObjectSetProperty(ctx, global, callback_name, callback, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const setup = JSStringCreateWithUTF8CString(
+        \\globalThis.compactDiscard = [];
+        \\for (let i = 0; i < 4096; i++)
+        \\  compactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\globalThis.compactSurvivor = { tag: 355, nested: { live: true } };
+        \\compactDiscard = null;
+        \\hostCompact();
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(setup);
+    const callback_result = JSEvaluateScript(ctx, setup, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(JSValueToBoolean(ctx, callback_result));
+    try std.testing.expectEqual(@as(usize, 1), State.calls);
+    try std.testing.expect(!State.accepted);
+    try std.testing.expect(!context.gc_relocation_active.load(.acquire));
+
+    const survivor_name = JSStringCreateWithUTF8CString("compactSurvivor") orelse return error.StringInitFailed;
+    defer JSStringRelease(survivor_name);
+    const survivor = JSObjectGetProperty(ctx, global, survivor_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expect(ZJSValueProtect(ctx, survivor));
+    defer std.debug.assert(ZJSValueUnprotect(ctx, survivor));
+    const old_payload = valueFromContext(context, survivor).?.asObj();
+
+    try std.testing.expect(ZJSContextCompactGarbage(ctx));
+    const new_payload = valueFromContext(context, survivor).?.asObj();
+    try std.testing.expect(old_payload != new_payload);
+    const tag_name = JSStringCreateWithUTF8CString("tag") orelse return error.StringInitFailed;
+    defer JSStringRelease(tag_name);
+    const tag = JSObjectGetProperty(ctx, survivor, tag_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 355), JSValueToNumber(ctx, tag, &exception));
+    try std.testing.expect(exception == null);
+}
+
 test "C-API: protected handles trace managed StringCells" {
     const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx_obj.destroy();

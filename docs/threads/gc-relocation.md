@@ -164,6 +164,12 @@ only into lower free or never-issued prefix slots. Relocation never grows cell
 backing, explicit compaction returns every newly empty tail chunk, and a second
 pass over the packed heap reports `no_candidates` without mutation.
 
+[#355](https://github.com/zig-utils/zig-js/issues/355) proves the native callback
+boundary is fail-closed: reentrant C compaction is rejected while its interpreter
+is active. At the next quiescent host boundary, the same counted
+`JSValueProtect` wrapper survives while its managed payload moves and remains
+fully usable.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
