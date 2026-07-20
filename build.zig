@@ -588,6 +588,40 @@ pub fn build(b: *std.Build) void {
     private_heap_snapshot_test_step.dependOn(&run_home_private_heap_snapshot_fixture.step);
     private_heap_snapshot_test_step.dependOn(&run_bun_private_heap_snapshot_fixture.step);
 
+    const home_private_cpu_profile_fixture = b.addExecutable(.{
+        .name = "home-private-cpu-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_private_cpu_profile.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .link_libc = true,
+        }),
+    });
+    home_private_cpu_profile_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_cpu_profile_fixture = b.addRunArtifact(home_private_cpu_profile_fixture);
+    run_home_private_cpu_profile_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_cpu_profile_fixture = b.addExecutable(.{
+        .name = "bun-private-cpu-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_cpu_profile.zig"),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_thread = tsan,
+            .link_libc = true,
+        }),
+    });
+    bun_private_cpu_profile_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_cpu_profile_fixture = b.addRunArtifact(bun_private_cpu_profile_fixture);
+    run_bun_private_cpu_profile_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_cpu_profile_test_step = b.step(
+        "test-private-cpu-profile",
+        "Compile, link, and run both pinned CPU-profiler ownership profiles",
+    );
+    private_cpu_profile_test_step.dependOn(&run_home_private_cpu_profile_fixture.step);
+    private_cpu_profile_test_step.dependOn(&run_bun_private_cpu_profile_fixture.step);
+
     const home_private_error_code_fixture = b.addExecutable(.{
         .name = "home-private-error-code",
         .root_module = b.createModule(.{

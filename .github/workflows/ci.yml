@@ -181,6 +181,9 @@ jobs:
               zig build test-private-heap-snapshot
               zig build test-private-heap-snapshot -Doptimize=ReleaseSafe
               zig build test-private-heap-snapshot -Dtsan=true
+              zig build test-private-cpu-profile
+              zig build test-private-cpu-profile -Doptimize=ReleaseSafe
+              zig build test-private-cpu-profile -Dtsan=true
               zig build test-private-error-code
               zig build test-private-inspector-agents
               zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
