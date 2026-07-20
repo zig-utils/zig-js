@@ -964,6 +964,21 @@ pub fn build(b: *std.Build) void {
     const diag_bin_step = b.step("diag-bin", "Build the diagnostic runner exe only (no run)");
     diag_bin_step.dependOn(&diag_install.step);
 
+    // THROWAWAY negative-axis (missing early-error) diagnostic.
+    const negdiag = b.addExecutable(.{
+        .name = "negdiag",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("conformance/negdiag.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "js", .module = mod }},
+        }),
+    });
+    negdiag.root_module.addOptions("build_options", t262_options);
+    const negdiag_install = b.addInstallArtifact(negdiag, .{});
+    const negdiag_bin_step = b.step("negdiag-bin", "Build the negative-axis diagnostic exe only (no run)");
+    negdiag_bin_step.dependOn(&negdiag_install.step);
+
     // Benchmarks: `zig build bench` times the VM against the tree-walker.
     // ReleaseFast so the numbers reflect real performance, not Debug overhead.
     const bench_js_mod = b.createModule(.{
