@@ -203,11 +203,25 @@ class ScriptGenerationTests(unittest.TestCase):
         )
         self.assertEqual(selected, [pathlib.Path("test/core/table.wast")])
 
+    def test_core_3_feature_areas_preserve_integrated_profile_provenance(self) -> None:
+        self.assertEqual(
+            wasm_spec.feature_area("core-3", "test/core/gc/i31.wast"), "gc",
+        )
+        self.assertEqual(
+            wasm_spec.feature_area("core-3", "test/core/relaxed-simd/relaxed_laneselect.wast"),
+            "relaxed_simd",
+        )
+        self.assertEqual(
+            wasm_spec.feature_area("core-3", "test/core/call_ref.wast"),
+            "typed_function_references",
+        )
+
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
         exceptions = wasm_spec.PROFILES["exception-handling"]
         memory64 = wasm_spec.PROFILES["memory64"]
         gc = wasm_spec.PROFILES["gc"]
+        core_3 = wasm_spec.PROFILES["core-3"]
         self.assertEqual(tail["default_files"], [
             "return_call.wast",
             "return_call_indirect.wast",
@@ -231,6 +245,15 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertEqual(gc["converter_kind"], "wasm-tools")
         self.assertEqual(gc["converter_version"], "1.253.0")
         self.assertEqual(gc["converter_args"], [])
+        self.assertEqual(core_3["tag"], "wg-3.0")
+        self.assertEqual(core_3["commit"], wasm_spec.CORE_3_COMMIT)
+        self.assertEqual(core_3["corpus_glob"], "test/core/**/*.wast")
+        self.assertEqual(core_3["converter_kind"], "wasm-tools")
+        self.assertEqual(core_3["converter_version"], "1.253.0")
+        self.assertEqual(core_3["evaluator_profile"], "core-3")
+        self.assertIn("gc", core_3["features"])
+        self.assertIn("memory64", core_3["features"])
+        self.assertIn("relaxed_simd", core_3["features"])
         self.assertIn("item.type === 'eqref'", wasm_spec.PRELUDE)
         self.assertIn("item.type === 'refnull'", wasm_spec.PRELUDE)
         self.assertIn("return typeof actual === 'function'", wasm_spec.PRELUDE)

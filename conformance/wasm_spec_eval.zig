@@ -7,7 +7,7 @@
 //! `WASM_SPEC_PROFILE=simd` adds fixed-width SIMD; `threads` selects shared
 //! memories and atomic execution; `tail-calls`, `exception-handling`,
 //! `multi-memory`, `memory64`, and `gc` select their exact pinned proposal
-//! feature gates.
+//! feature gates; `core-3` composes every standardized Core 3 gate.
 
 const std = @import("std");
 const js = @import("js");
@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
 
     const profile = init.environ_map.get("WASM_SPEC_PROFILE") orelse "";
     const structural = std.mem.eql(u8, profile, "core-2-structural") or
+        std.mem.eql(u8, profile, "core-3") or
         std.mem.eql(u8, profile, "simd") or
         std.mem.eql(u8, profile, "tail-calls") or
         std.mem.eql(u8, profile, "exception-handling") or
@@ -60,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
         std.mem.eql(u8, profile, "memory64") or
         std.mem.eql(u8, profile, "gc");
     const simd = std.mem.eql(u8, profile, "simd");
+    const core_3 = std.mem.eql(u8, profile, "core-3");
     const threads = std.mem.eql(u8, profile, "threads");
     const tail_calls = std.mem.eql(u8, profile, "tail-calls");
     const exception_handling = std.mem.eql(u8, profile, "exception-handling");
@@ -80,13 +82,13 @@ pub fn main(init: std.process.Init) !void {
             .multi_value = true,
             .reference_types = true,
             .bulk_memory = true,
-            .fixed_width_simd = simd,
-            .tail_calls = tail_calls or exception_handling or memory64,
-            .exception_handling = exception_handling or memory64,
-            .typed_function_references = wasm_gc or memory64,
-            .gc = wasm_gc,
-            .memory64 = memory64,
-            .multi_memory = multi_memory or memory64,
+            .fixed_width_simd = simd or core_3,
+            .tail_calls = tail_calls or exception_handling or memory64 or core_3,
+            .exception_handling = exception_handling or memory64 or core_3,
+            .typed_function_references = wasm_gc or memory64 or core_3,
+            .gc = wasm_gc or core_3,
+            .memory64 = memory64 or core_3,
+            .multi_memory = multi_memory or memory64 or core_3,
         } else .{},
     });
     defer ctx.destroy();

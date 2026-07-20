@@ -17,6 +17,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC_COMMIT = "977f97014c962f7bd1291fcc6d28b41a924882bf"
+CORE_3_COMMIT = "9d36019973201a19f9c9ebb0f10828b2fe2374aa"
 WABT_VERSION = "1.0.12"
 WABT_COMMIT = "cf261f2bd561297e0da7008ddde8c09ba5ea35a2"
 
@@ -48,6 +49,35 @@ PROFILES = {
             "bulk_memory",
         ],
         "corpus_glob": "test/core/*.wast",
+    },
+    "core-3": {
+        "kind": "webassembly_core_3_0_inventory",
+        "repository": "https://github.com/WebAssembly/spec.git",
+        "tag": "wg-3.0",
+        "commit": CORE_3_COMMIT,
+        "converter_kind": "wasm-tools",
+        "converter_repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "converter_version": "1.253.0",
+        "converter_commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "evaluator_profile": "core-3",
+        "features": [
+            "sign_extension_ops",
+            "nontrapping_float_to_int",
+            "multi_value",
+            "reference_types",
+            "bulk_memory",
+            "fixed_width_simd",
+            "relaxed_simd",
+            "tail_calls",
+            "typed_function_references",
+            "gc",
+            "exception_handling",
+            "memory64",
+            "multi_memory",
+        ],
+        "corpus_root": "test/core",
+        "corpus_glob": "test/core/**/*.wast",
+        "converter_args": [],
     },
     "simd-movement": {
         "kind": "webassembly_fixed_width_simd_movement_inventory",
@@ -284,7 +314,8 @@ def wasm_tools_version_matches(
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     corpus_root = spec_root / profile.get("corpus_root", Path(profile["corpus_glob"]).parent)
     if not corpus_root.is_dir():
-        fail(f"missing corpus at {spec_root}; run `git submodule update --init wasm-spec-wg1`")
+        submodule = "wasm-spec-wg3" if profile["commit"] == CORE_3_COMMIT else "wasm-spec-wg1"
+        fail(f"missing corpus at {spec_root}; run `git submodule update --init {submodule}`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
     if actual_spec != profile["commit"]:
         fail(f"wasm-spec pin drift: expected {profile['commit']}, found {actual_spec}")
@@ -1266,7 +1297,8 @@ def runner_error_details(
     return details
 
 
-def feature_area(profile_name: str, filename: str) -> str:
+def feature_area(profile_name: str, path: str) -> str:
+    filename = Path(path).name
     if profile_name == "mvp":
         return "mvp"
     if profile_name == "simd-movement":
@@ -1285,6 +1317,25 @@ def feature_area(profile_name: str, filename: str) -> str:
         return "memory64"
     if profile_name == "gc":
         return "gc"
+    if profile_name == "core-3":
+        directory_areas = {
+            "bulk-memory": "bulk_memory",
+            "exceptions": "exception_handling",
+            "gc": "gc",
+            "memory64": "memory64",
+            "multi-memory": "multi_memory",
+            "relaxed-simd": "relaxed_simd",
+            "simd": "fixed_width_simd",
+        }
+        parts = Path(path).parts
+        for directory, area in directory_areas.items():
+            if directory in parts:
+                return area
+        stem = Path(filename).stem
+        if stem in {"call_ref", "return_call_ref", "br_on_null", "br_on_non_null"}:
+            return "typed_function_references"
+        if stem in {"return_call", "return_call_indirect"}:
+            return "tail_calls"
     stem = Path(filename).stem
     if stem in {
         "bulk", "memory_copy", "memory_fill", "memory_init", "table_copy", "table_init",
@@ -1335,7 +1386,7 @@ def main() -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        help="per-file evaluator timeout (default: 600s for Core 2 structural, 120s otherwise)",
+        help="per-file evaluator timeout (default: 600s for complete Core 2/Core 3 profiles, 120s otherwise)",
     )
     parser.add_argument("--keep-work", type=Path)
     parser.add_argument(
@@ -1351,14 +1402,16 @@ def main() -> int:
 
     profile = PROFILES[args.profile]
     timeout = args.timeout if args.timeout is not None else (
-        600.0 if args.profile == "core-2-structural" else 120.0
+        600.0 if args.profile in {"core-2-structural", "core-3"} else 120.0
     )
-    spec_root = (args.spec_root or ROOT / "wasm-spec-wg1").resolve()
+    default_spec_root = ROOT / ("wasm-spec-wg3" if args.profile == "core-3" else "wasm-spec-wg1")
+    spec_root = (args.spec_root or default_spec_root).resolve()
     converter = args.converter.resolve()
     engine = args.engine.resolve()
     default_inventories = {
         "mvp": ROOT / "docs/.data/wasm-spec-inventory.json",
         "core-2-structural": ROOT / "docs/.data/wasm-core-2-structural-inventory.json",
+        "core-3": ROOT / "docs/.data/wasm-core-3-inventory.json",
         "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
         "simd": ROOT / "docs/.data/wasm-simd-inventory.json",
         "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
@@ -1397,7 +1450,7 @@ def main() -> int:
             profile,
             args.command_shards,
         )
-        area = feature_area(args.profile, wast.name)
+        area = feature_area(args.profile, wast.relative_to(spec_root).as_posix())
         entry["feature_area"] = area
         for command in entry["commands"]:
             command.setdefault("mode", "javascript_api")

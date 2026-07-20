@@ -706,6 +706,27 @@ pub fn build(b: *std.Build) void {
     const wasm_spec_bin_step = b.step("wasm-spec-bin", "Build the wasm-spec runner exe only (no run)");
     wasm_spec_bin_step.dependOn(&wasm_spec_install.step);
 
+    const wasm_core_3_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/wasm-spec.py",
+        "--profile",
+        "core-3",
+        "--converter",
+        b.option([]const u8, "wasm-core-3-converter", "Path to pinned wasm-tools 1.253.0") orelse "wasm-tools",
+    });
+    if (b.option([]const u8, "wasm-core-3-filter", "Run only Core 3 corpus paths containing this substring")) |filter| {
+        wasm_core_3_cmd.addArgs(&.{ "--filter", filter });
+    }
+    if (b.option([]const u8, "wasm-core-3-inventory", "Core 3 inventory output path")) |inventory| {
+        wasm_core_3_cmd.addArgs(&.{ "--inventory", inventory });
+    }
+    wasm_core_3_cmd.step.dependOn(&wasm_spec_eval_install.step);
+    const wasm_core_3_step = b.step(
+        "wasm-core-3",
+        "Run the exact pinned WebAssembly Core 3 corpus and emit its inventory",
+    );
+    wasm_core_3_step.dependOn(&wasm_core_3_cmd.step);
+
     const wasm_feature_profiles_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/wasm-feature-profiles.py",

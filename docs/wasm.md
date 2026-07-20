@@ -175,8 +175,24 @@ Post-Core-2 feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249
 WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
-The stable Core 3 corpus is tracked as a separately pinned profile by
-[issue #366](https://github.com/zig-utils/zig-js/issues/366).
+The stable Core 3 corpus is a separate `wasm-spec-wg3` submodule pinned to
+official tag `wg-3.0` at
+`9d36019973201a19f9c9ebb0f10828b2fe2374aa`. It never changes the frozen
+WG-1.0 baseline. Run the deliberate complete profile with pinned
+`wasm-tools` 1.253.0:
+
+```sh
+git submodule update --init wasm-spec-wg3
+zig build wasm-core-3 -Dwasm-core-3-converter=/path/to/wasm-tools
+```
+
+The profile declares all 258 integrated Core 3 `.wast` files and records every
+command. It is not included in the published green aggregate yet: typed
+function references [#384](https://github.com/zig-utils/zig-js/issues/384),
+explicit exception heap references
+[#385](https://github.com/zig-utils/zig-js/issues/385), and relaxed SIMD
+[#386](https://github.com/zig-utils/zig-js/issues/386) are honest blockers
+under [#366](https://github.com/zig-utils/zig-js/issues/366).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 13 selected proposal repositories by exact

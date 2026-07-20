@@ -4,3 +4,7 @@
 [submodule "wasm-spec"]
 	path = wasm-spec-wg1
 	url = https://github.com/WebAssembly/spec.git
+[submodule "wasm-spec-wg3"]
+	path = wasm-spec-wg3
+	url = https://github.com/WebAssembly/spec.git
+	shallow = true
