@@ -3595,7 +3595,13 @@ pub const Context = struct {
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,
             .gc = self.gc,
-            .gc_backing = if (self.gc) |h| h.backing else null,
+            // Interpreter-owned buffers are reclaimable side storage, not GC
+            // cells. Allocate them directly from the Context allocator so a
+            // budget miss can trigger collection before retrying. Routing them
+            // through GcCellBacking would delegate while holding its internal
+            // allocator lock, where recursive allocation recovery is correctly
+            // blocked.
+            .gc_side_storage = if (self.gc != null) self.gpa else null,
             .gc_array_buffer_bytes_live = if (self.gc != null) &self.gc_array_buffer_bytes_live else null,
             .gc_promise_reactions_live = if (self.gc != null) &self.gc_promise_reactions_live else null,
             .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
@@ -14143,6 +14149,7 @@ test "Context heap_limit_bytes object side-store pressure recovers garbage" {
         \\})();
     );
     try std.testing.expectEqual(@as(f64, 17), result.asNum());
+    try std.testing.expect(ctx.runtimeHeapAccounting().collections > 0);
     const stats = ctx.heapBudgetStats().?;
     try std.testing.expect(stats.peak_bytes <= stats.limit_bytes);
 }

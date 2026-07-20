@@ -1198,7 +1198,7 @@ pub const Interpreter = struct {
     /// Backing allocator for GC-owned object side data. Null keeps the legacy
     /// arena ownership path; non-null means ArrayBuffer metadata/bytes must be
     /// released by the GC finalizer.
-    gc_backing: ?std.mem.Allocator = null,
+    gc_side_storage: ?std.mem.Allocator = null,
     /// Internal byte accounting for GC-owned non-shared ArrayBuffer slabs.
     gc_array_buffer_bytes_live: ?*usize = null,
     /// Internal entry accounting for GC-owned Promise reaction lists.
@@ -2314,7 +2314,7 @@ pub const Interpreter = struct {
     pub fn initEnvironment(self: *Interpreter, env: *Environment, parent: ?*Environment, fn_scope: bool) void {
         env.* = .{
             .arena = self.arena,
-            .bindings_allocator = self.gc_backing,
+            .bindings_allocator = self.gc_side_storage,
             .gc_name_bytes_live = self.gc_environment_name_bytes_live,
             .parent = parent,
             .gc_managed = gc_mod.allocationsAreManaged(),
@@ -12135,10 +12135,10 @@ pub const Interpreter = struct {
     fn makeArrayBufferWithInitialization(self: *Interpreter, len: usize, zero_fill: bool) EvalError!*value.Object {
         const o = (try self.newObject()).asObj();
         const data = try self.allocArrayBufferBytesWithInitialization(len, zero_fill);
-        errdefer self.freeArrayBufferBytes(data, self.gc_backing != null);
+        errdefer self.freeArrayBufferBytes(data, self.gc_side_storage != null);
         const ab = try self.allocArrayBufferData();
         errdefer self.destroyArrayBufferData(ab);
-        ab.* = .{ .local_data = data, .gc_owned = self.gc_backing != null };
+        ab.* = .{ .local_data = data, .gc_owned = self.gc_side_storage != null };
         try o.setArrayBuffer(self.arena, ab);
         errdefer o.clearArrayBuffer();
         if (self.env.get("ArrayBuffer")) |c| {
@@ -12156,7 +12156,7 @@ pub const Interpreter = struct {
         errdefer self.destroyArrayBufferData(ab);
         ab.* = .{
             .local_data = bytes,
-            .gc_owned = self.gc_backing != null,
+            .gc_owned = self.gc_side_storage != null,
             .external_owner = owner,
         };
         try o.setArrayBuffer(self.arena, ab);
@@ -12195,7 +12195,7 @@ pub const Interpreter = struct {
 
     fn allocArrayBufferBytesWithInitialization(self: *Interpreter, len: usize, zero_fill: bool) EvalError![]u8 {
         if (len == 0) return &.{};
-        const data = if (self.gc_backing) |a| blk: {
+        const data = if (self.gc_side_storage) |a| blk: {
             const p = a.rawAlloc(len, .@"8", @returnAddress()) orelse retry: {
                 if (self.gc_checkpoint_ctx) |ctx| {
                     if (self.gc_recover_allocation_fn) |recover| {
@@ -12215,7 +12215,7 @@ pub const Interpreter = struct {
 
     fn freeArrayBufferBytes(self: *Interpreter, bytes: []u8, gc_owned: bool) void {
         if (!gc_owned or bytes.len == 0) return;
-        const a = self.gc_backing orelse return;
+        const a = self.gc_side_storage orelse return;
         a.rawFree(bytes, .@"8", @returnAddress());
         if (self.gc_array_buffer_bytes_live) |live| {
             _ = @atomicRmw(usize, live, .Sub, bytes.len, .monotonic);
@@ -12223,13 +12223,13 @@ pub const Interpreter = struct {
     }
 
     fn allocArrayBufferData(self: *Interpreter) EvalError!*value.ArrayBufferData {
-        if (self.gc_backing) |a| return a.create(value.ArrayBufferData);
+        if (self.gc_side_storage) |a| return a.create(value.ArrayBufferData);
         return self.arena.create(value.ArrayBufferData);
     }
 
     fn destroyArrayBufferData(self: *Interpreter, ab: *value.ArrayBufferData) void {
         if (!ab.gc_owned) return;
-        const a = self.gc_backing orelse return;
+        const a = self.gc_side_storage orelse return;
         a.destroy(ab);
     }
 
@@ -28889,7 +28889,7 @@ pub fn makeSharedArrayBufferWrapper(self: *Interpreter, storage: *shared_buffer.
     ab.* = .{
         .local_data = &.{},
         .shared = storage,
-        .gc_owned = self.gc_backing != null,
+        .gc_owned = self.gc_side_storage != null,
         .is_shared = true,
         .max_byte_length = if (storage.growable) storage.capacity else null,
     };

@@ -327,7 +327,7 @@ test "Promise reactions keep first entry inline then reserve overflow chunks" {
         .arena = a,
         .env = undefined,
         .root_shape = undefined,
-        .gc_backing = a,
+        .gc_side_storage = a,
         .gc_promise_reactions_live = &live,
     };
     var p = Promise{ .gc_owned = true };
@@ -563,7 +563,7 @@ pub fn newRejectedPromise(self: *Interpreter, reason: Value) EvalError!*Object {
 }
 
 inline fn reactionAllocator(self: *Interpreter) std.mem.Allocator {
-    return self.gc_backing orelse self.arena;
+    return self.gc_side_storage orelse self.arena;
 }
 
 fn noteReactionAdded(self: *Interpreter, p: *Promise) void {
