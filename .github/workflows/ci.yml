@@ -173,6 +173,7 @@ jobs:
               zig build test-bun-private-abort-signal -Dprivate-abi-consumer=bun
               zig build test-bun-private-cached-bytecode -Dprivate-abi-consumer=bun
               zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
+              zig build test-private-hot-reload
               zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
               zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
               zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun

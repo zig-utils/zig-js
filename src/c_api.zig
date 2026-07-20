@@ -417,6 +417,8 @@ const PrivateRemoteInspectorProcessState = struct {
 };
 
 var private_remote_inspector_process: PrivateRemoteInspectorProcessState = .{};
+var private_inspector_sessions_lock: std.atomic.Mutex = .unlocked;
+var private_inspector_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .empty;
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
 var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
 var private_serialized_script_handles: std.AutoHashMapUnmanaged(usize, PrivateSerializedScriptOwned) = .empty;
@@ -976,6 +978,10 @@ const CInspectorSession = struct {
     runtime_enabled: bool = false,
     debugger_enabled: bool = false,
     release_requested: bool = false,
+    /// Process-wide broadcasts retain a session across arbitrary frontend
+    /// callbacks. A callback may release this or a later snapshotted session;
+    /// destruction waits until every broadcast drops its temporary reference.
+    broadcast_refs: usize = 0,
 };
 
 const CInspectorRemoteKind = union(enum) {
@@ -14009,6 +14015,58 @@ fn inspectorSession(ref: ZJSInspectorSessionRef) ?*CInspectorSession {
     return @ptrCast(@alignCast(ref orelse return null));
 }
 
+fn lockPrivateInspectorSessions() void {
+    var spins: usize = 0;
+    while (!private_inspector_sessions_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0)
+            std.Thread.yield() catch {}
+        else
+            std.atomic.spinLoopHint();
+    }
+}
+
+fn registerPrivateInspectorSession(session: *CInspectorSession) error{OutOfMemory}!void {
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    try private_inspector_sessions.append(gpa, session);
+}
+
+fn unregisterPrivateInspectorSession(session: *CInspectorSession) void {
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    for (private_inspector_sessions.items, 0..) |candidate, index| {
+        if (candidate != session) continue;
+        _ = private_inspector_sessions.orderedRemove(index);
+        if (private_inspector_sessions.items.len == 0)
+            private_inspector_sessions.clearAndFree(gpa);
+        return;
+    }
+}
+
+/// Snapshot creation order while holding one temporary lifetime reference per
+/// deliverable session. Frontend callbacks run without the registry lock and
+/// may therefore detach, release, create, or recursively broadcast sessions.
+fn snapshotPrivateInspectorSessions() ?[]*CInspectorSession {
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+
+    var count: usize = 0;
+    for (private_inspector_sessions.items) |session|
+        count += @intFromBool(session.attached and !session.release_requested);
+    if (count == 0) return null;
+
+    const snapshot = gpa.alloc(*CInspectorSession, count) catch return null;
+    var index: usize = 0;
+    for (private_inspector_sessions.items) |session| {
+        if (!session.attached or session.release_requested) continue;
+        session.broadcast_refs += 1;
+        snapshot[index] = session;
+        index += 1;
+    }
+    std.debug.assert(index == count);
+    return snapshot;
+}
+
 fn sendInspectorJson(session: *CInspectorSession, payload: anytype) bool {
     const message = std.json.Stringify.valueAlloc(gpa, payload, .{}) catch return false;
     defer gpa.free(message);
@@ -14016,6 +14074,35 @@ fn sendInspectorJson(session: *CInspectorSession, payload: anytype) bool {
     defer session.state.callback_depth -= 1;
     session.callback(message.ptr, message.len, session.user_data);
     return true;
+}
+
+fn releasePrivateInspectorBroadcastRef(session: *CInspectorSession) void {
+    lockPrivateInspectorSessions();
+    std.debug.assert(session.broadcast_refs > 0);
+    session.broadcast_refs -= 1;
+    const destroy = session.broadcast_refs == 0 and session.release_requested and
+        session.state.operation_depth == 0 and session.state.callback_depth == 0;
+    private_inspector_sessions_lock.unlock();
+    if (destroy) _ = releaseInspectorSessionNow(session);
+}
+
+fn privateInspectorSessionDeliverable(session: *CInspectorSession) bool {
+    lockPrivateInspectorSessions();
+    defer private_inspector_sessions_lock.unlock();
+    return session.attached and !session.release_requested;
+}
+
+/// Notify every live inspector connection that a hot reload may proceed. The
+/// pinned Bun implementation broadcasts this process-wide rather than limiting
+/// it to one VM or to sessions that enabled the Runtime/Debugger domains.
+export fn BunDebugger__willHotReload() callconv(.c) void {
+    const sessions = snapshotPrivateInspectorSessions() orelse return;
+    defer gpa.free(sessions);
+    for (sessions) |session| {
+        if (privateInspectorSessionDeliverable(session))
+            _ = sendInspectorJson(session, .{ .method = "Bun.canReload" });
+        releasePrivateInspectorBroadcastRef(session);
+    }
 }
 
 fn sendInspectorError(session: *CInspectorSession, id: i64, code: i64, message: []const u8) bool {
@@ -15014,6 +15101,10 @@ fn createInspectorSession(
     errdefer gpa.destroy(session);
     session.* = .{ .state = state.?, .callback = cb, .user_data = user_data };
     state.?.sessions.append(gpa, session) catch return null;
+    registerPrivateInspectorSession(session) catch {
+        _ = state.?.sessions.pop();
+        return null;
+    };
     _ = sendInspectorJson(session, .{
         .method = "Inspector.attached",
         .params = .{ .protocolVersion = "zig-js-inspector/0.1" },
@@ -15032,6 +15123,8 @@ export fn ZJSInspectorSessionCreate(
 fn releaseInspectorSessionNow(session: *CInspectorSession) bool {
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
+    std.debug.assert(session.broadcast_refs == 0);
+    unregisterPrivateInspectorSession(session);
     if (state.next_pause_owner == session) state.next_pause_owner = null;
     releaseInspectorRemotes(state, session, null, false);
     for (state.sessions.items, 0..) |candidate, index| {
@@ -15068,6 +15161,7 @@ fn drainDeferredInspectorReleases(state: *CInspectorState) void {
         index -= 1;
         const session = state.sessions.items[index];
         if (!session.release_requested) continue;
+        if (session.broadcast_refs != 0) continue;
         if (releaseInspectorSessionNow(session)) return;
         index = @min(index, state.sessions.items.len);
     }
@@ -15084,10 +15178,16 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
     const state = session.state;
     const ctx: JSContextRef = @ptrCast(state.context);
     _ = ctxFrom(ctx) orelse return;
-    if (session.release_requested) return;
-    if (state.operation_depth > 0 or state.callback_depth > 0) {
-        session.release_requested = true;
-        session.attached = false;
+    lockPrivateInspectorSessions();
+    if (session.release_requested) {
+        private_inspector_sessions_lock.unlock();
+        return;
+    }
+    session.release_requested = true;
+    session.attached = false;
+    const broadcast_refs = session.broadcast_refs;
+    private_inspector_sessions_lock.unlock();
+    if (state.operation_depth > 0 or state.callback_depth > 0 or broadcast_refs != 0) {
         session.debugger_enabled = false;
         if (state.next_pause_owner == session) state.next_pause_owner = null;
         if (state.pause_owner == session) {
@@ -18772,6 +18872,96 @@ test "private script execution context identifiers are stable and process unique
         try std.testing.expect(id != 0 and id != first_id and id != second_id);
         for (ids[0..index]) |prior| try std.testing.expect(id != prior);
     }
+}
+
+test "private hot-reload inspector broadcast spans VMs and survives reentrant release" {
+    const Trace = struct {
+        ids: [16]u8 = @splat(0),
+        len: usize = 0,
+
+        fn append(self: *@This(), id: u8) void {
+            std.debug.assert(self.len < self.ids.len);
+            self.ids[self.len] = id;
+            self.len += 1;
+        }
+    };
+    const State = struct {
+        id: u8,
+        trace: *Trace,
+        session: ZJSInspectorSessionRef = null,
+        release_target: ?*ZJSInspectorSessionRef = null,
+        reenter_once: bool = false,
+        reloads: usize = 0,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            const bytes = message[0..message_len];
+            if (!std.mem.eql(u8, bytes, "{\"method\":\"Bun.canReload\"}")) return;
+            self.reloads += 1;
+            self.trace.append(self.id);
+            if (self.release_target) |target| {
+                self.release_target = null;
+                const doomed = target.*;
+                target.* = null;
+                ZJSInspectorSessionRelease(doomed);
+            }
+            if (self.reenter_once) {
+                self.reenter_once = false;
+                BunDebugger__willHotReload();
+            }
+        }
+    };
+
+    // No debugger script context or connection is a strict no-op.
+    BunDebugger__willHotReload();
+
+    const first = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    const second = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    JSGlobalContextSetInspectable(first, true);
+    JSGlobalContextSetInspectable(second, true);
+
+    var trace: Trace = .{};
+    var first_state = State{ .id = 1, .trace = &trace };
+    var second_state = State{ .id = 2, .trace = &trace };
+    var third_state = State{ .id = 3, .trace = &trace };
+    first_state.session = ZJSInspectorSessionCreate(first, State.receive, &first_state) orelse return error.SessionCreateFailed;
+    second_state.session = ZJSInspectorSessionCreate(first, State.receive, &second_state) orelse return error.SessionCreateFailed;
+    third_state.session = ZJSInspectorSessionCreate(second, State.receive, &third_state) orelse return error.SessionCreateFailed;
+
+    // Domain enablement is irrelevant: every live connection receives one
+    // exact payload in process creation order, including a different VM.
+    BunDebugger__willHotReload();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, trace.ids[0..trace.len]);
+    try std.testing.expectEqual(@as(usize, 1), first_state.reloads);
+    try std.testing.expectEqual(@as(usize, 1), second_state.reloads);
+    try std.testing.expectEqual(@as(usize, 1), third_state.reloads);
+
+    // The first callback releases the later second connection, then recursively
+    // broadcasts. The released snapshot entry is skipped and kept alive until
+    // the outer traversal drops its lifetime reference.
+    trace.len = 0;
+    first_state.release_target = &second_state.session;
+    first_state.reenter_once = true;
+    BunDebugger__willHotReload();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 3, 3 }, trace.ids[0..trace.len]);
+    try std.testing.expectEqual(@as(usize, 1), second_state.reloads);
+
+    // Self-release is equally safe; subsequent broadcasts retain only the
+    // remaining foreign-VM session.
+    trace.len = 0;
+    first_state.release_target = &first_state.session;
+    BunDebugger__willHotReload();
+    try std.testing.expectEqualSlices(u8, &.{ 1, 3 }, trace.ids[0..trace.len]);
+    trace.len = 0;
+    BunDebugger__willHotReload();
+    try std.testing.expectEqualSlices(u8, &.{3}, trace.ids[0..trace.len]);
+
+    ZJSInspectorSessionRelease(third_state.session);
+    third_state.session = null;
+    JSGlobalContextRelease(second);
+    JSGlobalContextRelease(first);
+    try std.testing.expectEqual(@as(usize, 0), private_inspector_sessions.items.len);
+    BunDebugger__willHotReload();
 }
 
 test "C-API: inspectability gates concurrent in-process protocol sessions" {

@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 467,
-      "pending": 63
+      "implemented": 468,
+      "pending": 62
     }
   },
   "declarations": [
@@ -151,10 +151,10 @@
       "line": 115,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn BunDebugger__willHotReload() void;",
       "declaration_sha256": "dd61cc6bcb528fa7ec3435fa758b45f7f07d8cd5c447a93965683ec23b2699ad",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BunString__createArray",

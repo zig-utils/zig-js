@@ -442,6 +442,36 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_vm_lifecycle_test_step.dependOn(&run_bun_private_vm_lifecycle_fixture.step);
 
+    const home_private_hot_reload_fixture = b.addExecutable(.{
+        .name = "home-private-hot-reload",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_hot_reload.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    home_private_hot_reload_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_hot_reload_fixture = b.addRunArtifact(home_private_hot_reload_fixture);
+    run_home_private_hot_reload_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_hot_reload_fixture = b.addExecutable(.{
+        .name = "bun-private-hot-reload",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_hot_reload.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bun_private_hot_reload_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_hot_reload_fixture = b.addRunArtifact(bun_private_hot_reload_fixture);
+    run_bun_private_hot_reload_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_hot_reload_test_step = b.step(
+        "test-private-hot-reload",
+        "Compile, link, and run both pinned hot-reload inspector boundaries",
+    );
+    private_hot_reload_test_step.dependOn(&run_home_private_hot_reload_fixture.step);
+    private_hot_reload_test_step.dependOn(&run_bun_private_hot_reload_fixture.step);
+
     const bun_private_property_iterator_fixture = b.addExecutable(.{
         .name = "bun-private-property-iterator",
         .root_module = b.createModule(.{
