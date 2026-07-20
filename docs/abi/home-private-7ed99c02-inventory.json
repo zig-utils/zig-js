@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 482,
-      "pending": 48
+      "implemented": 483,
+      "pending": 47
     }
   },
   "declarations": [
@@ -1116,10 +1116,10 @@
       "line": 110,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__onSignalForJS(number: i32, globalObject: *jsc.JSGlobalObject) void;",
       "declaration_sha256": "2957563d1e904edf84d931d601a3244b8216ddda576ffe5db433aaf12823ffb4",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__promises__emitUnhandledRejectionWarning",

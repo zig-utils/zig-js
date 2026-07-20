@@ -472,6 +472,38 @@ pub fn build(b: *std.Build) void {
     private_hot_reload_test_step.dependOn(&run_home_private_hot_reload_fixture.step);
     private_hot_reload_test_step.dependOn(&run_bun_private_hot_reload_fixture.step);
 
+    const home_private_process_signal_fixture = b.addExecutable(.{
+        .name = "home-private-process-signal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_process_signal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    home_private_process_signal_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_process_signal_fixture = b.addRunArtifact(home_private_process_signal_fixture);
+    run_home_private_process_signal_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_process_signal_fixture = b.addExecutable(.{
+        .name = "bun-private-process-signal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/private_process_signal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    bun_private_process_signal_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_process_signal_fixture = b.addRunArtifact(bun_private_process_signal_fixture);
+    run_bun_private_process_signal_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_process_signal_test_step = b.step(
+        "test-private-process-signal",
+        "Compile, link, and run both pinned process-signal boundaries",
+    );
+    private_process_signal_test_step.dependOn(&run_home_private_process_signal_fixture.step);
+    private_process_signal_test_step.dependOn(&run_bun_private_process_signal_fixture.step);
+
     const home_private_error_code_fixture = b.addExecutable(.{
         .name = "home-private-error-code",
         .root_module = b.createModule(.{

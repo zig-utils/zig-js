@@ -18,6 +18,7 @@ OUTPUT = ROOT / "docs/abi/bun-private-core-4982b91e-inventory.json"
 DIAGNOSTIC_CONTRACT = ROOT / "docs/abi/bun-diagnostic-inspector-4982b91e.json"
 INSPECTOR_AGENTS_CONTRACT = ROOT / "docs/abi/bun-inspector-agents-4982b91e.json"
 HTTP_SERVER_INSPECTOR_CONTRACT = ROOT / "docs/abi/bun-http-server-inspector-4982b91e.json"
+PROCESS_SIGNAL_CONTRACT = ROOT / "docs/abi/bun-process-signal-4982b91e.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -389,6 +390,47 @@ def validate_http_server_inspector_contract(bun_root: Path | None) -> None:
         fail("HTTP server inspector semantic inventory is incomplete or duplicated")
 
 
+def validate_process_signal_contract(bun_root: Path | None) -> None:
+    if not PROCESS_SIGNAL_CONTRACT.is_file():
+        fail(f"missing checked-in process signal contract {PROCESS_SIGNAL_CONTRACT}")
+    contract = json.loads(PROCESS_SIGNAL_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "process-native-signal-delivery"
+        or contract.get("revision") != REVISION
+        or contract.get("issue") != 400
+        or contract.get("parent_issue") != 140
+        or contract.get("export") != "Bun__onSignalForJS"
+        or contract.get("event_arguments") != ["signalName", "signalNumber"]
+    ):
+        fail("process signal contract schema, revision, or boundary drift")
+    sources = contract.get("sources")
+    if not isinstance(sources, dict) or set(sources) != {"src/jsc/bindings/BunProcess.cpp"}:
+        fail("process signal source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid process signal digest for {relative}")
+        if bun_root is not None:
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"process signal source drift for {relative}")
+    expected_names = [
+        "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGIOT", "SIGBUS",
+        "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM",
+        "SIGCHLD", "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU",
+        "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGIO", "SIGINFO", "SIGSYS", "SIGBREAK",
+    ]
+    if contract.get("signal_names") != expected_names:
+        fail("process signal name order drift")
+    if contract.get("windows_signal_names") != [
+        "SIGHUP", "SIGINT", "SIGQUIT", "SIGKILL", "SIGTERM", "SIGWINCH", "SIGBREAK"
+    ]:
+        fail("process Windows signal subset drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 7 or len(semantics) != len(set(semantics)):
+        fail("process signal semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -415,6 +457,7 @@ def main() -> None:
     validate_diagnostic_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_inspector_agents_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_http_server_inspector_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_process_signal_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

@@ -8767,6 +8767,87 @@ fn privateProcessEventCount(machine: *interp.Interpreter, event: []const u8) usi
     return interp.processEventListenerCount(machine, event) catch 0;
 }
 
+fn privateSignalName(signal_number: i32) ?[]const u8 {
+    if (comptime builtin.os.tag == .windows) return switch (signal_number) {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        9 => "SIGKILL",
+        15 => "SIGTERM",
+        21 => "SIGBREAK",
+        28 => "SIGWINCH",
+        else => null,
+    };
+
+    const Signal = std.c.SIG;
+    inline for (.{
+        .{ "HUP", "SIGHUP" },
+        .{ "INT", "SIGINT" },
+        .{ "QUIT", "SIGQUIT" },
+        .{ "ILL", "SIGILL" },
+        .{ "TRAP", "SIGTRAP" },
+        .{ "ABRT", "SIGABRT" },
+        .{ "BUS", "SIGBUS" },
+        .{ "FPE", "SIGFPE" },
+        .{ "KILL", "SIGKILL" },
+        .{ "USR1", "SIGUSR1" },
+        .{ "SEGV", "SIGSEGV" },
+        .{ "USR2", "SIGUSR2" },
+        .{ "PIPE", "SIGPIPE" },
+        .{ "ALRM", "SIGALRM" },
+        .{ "TERM", "SIGTERM" },
+        .{ "CHLD", "SIGCHLD" },
+        .{ "CONT", "SIGCONT" },
+        .{ "STOP", "SIGSTOP" },
+        .{ "TSTP", "SIGTSTP" },
+        .{ "TTIN", "SIGTTIN" },
+        .{ "TTOU", "SIGTTOU" },
+        .{ "URG", "SIGURG" },
+        .{ "XCPU", "SIGXCPU" },
+        .{ "XFSZ", "SIGXFSZ" },
+        .{ "VTALRM", "SIGVTALRM" },
+        .{ "PROF", "SIGPROF" },
+        .{ "WINCH", "SIGWINCH" },
+        .{ "IO", "SIGIO" },
+        .{ "INFO", "SIGINFO" },
+        .{ "SYS", "SIGSYS" },
+    }) |entry| {
+        if (@hasField(Signal, entry[0]) and
+            signal_number == @as(i32, @intCast(@intFromEnum(@field(Signal, entry[0])))))
+            return entry[1];
+    }
+    return null;
+}
+
+/// Deliver one native signal through the selected realm's process
+/// EventEmitter. The pinned Bun boundary is synchronous and passes both the
+/// canonical signal name and native number to listeners.
+export fn Bun__onSignalForJS(signal_number: i32, global: JSContextRef) callconv(.c) void {
+    const signal_name = privateSignalName(signal_number) orelse return;
+    const context = ctxForEvaluation(global) orelse return;
+    const group = privatePropertyBoundaryGroup(context) orelse return;
+    if (group.pending_exception != null) return;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const signal_value = Value.strAlloc(machine.arena, signal_name) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return;
+    };
+    _ = interp.emitProcessEvent(&machine, signal_name, &.{
+        signal_value,
+        Value.num(@floatFromInt(signal_number)),
+    }) catch |err| privateSetPendingAbrupt(context, &machine, err);
+}
+
 export fn Bun__handleUnhandledRejection(
     global: JSContextRef,
     reason_encoded: EncodedValue,
@@ -27960,6 +28041,58 @@ test "private process rejection and uncaught dispatch preserve pinned events" {
     try std.testing.expect(JSGlobalObject__hasException(context));
     const pending = JSGlobalObject__tryTakeException(context);
     try std.testing.expectEqual(EncodedValue.fromInt32(242), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+}
+
+test "private process signal dispatch preserves names arguments realms and exceptions" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+    const signal_number: i32 = @intCast(@intFromEnum(std.c.SIG.INT));
+
+    _ = try internal.evaluate(
+        \\globalThis.__signals_400 = [];
+        \\globalThis.__signal_on_400 = function (name, number) { __signals_400.push(["on", name, number, this === process]); };
+        \\process.on("SIGINT", __signal_on_400);
+        \\process.once("SIGINT", function (name, number) { __signals_400.push(["once", name, number, this === process]); });
+    );
+    _ = try sibling_internal.evaluate(
+        \\globalThis.__signals_400 = [];
+        \\process.on("SIGINT", function (name, number) { __signals_400.push([name, number]); });
+    );
+
+    Bun__onSignalForJS(signal_number, context);
+    Bun__onSignalForJS(signal_number, context);
+    Bun__onSignalForJS(std.math.maxInt(i32), context);
+    Bun__onSignalForJS(signal_number, null);
+    try std.testing.expect((try internal.evaluate(
+        \\JSON.stringify(__signals_400) === '[["on","SIGINT",2,true],["once","SIGINT",2,true],["on","SIGINT",2,true]]'
+    )).asBool());
+    try std.testing.expectEqual(@as(f64, 0), (try sibling_internal.evaluate("__signals_400.length")).asNum());
+
+    Bun__onSignalForJS(signal_number, sibling);
+    try std.testing.expect((try sibling_internal.evaluate("JSON.stringify(__signals_400) === '[[\"SIGINT\",2]]'")).asBool());
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__signals_400.length")).asNum());
+
+    JSC__VM__throwError(JSC__JSGlobalObject__vm(context), context, EncodedValue.fromInt32(399));
+    Bun__onSignalForJS(signal_number, context);
+    var pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(399), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__signals_400.length")).asNum());
+
+    _ = try internal.evaluate(
+        \\process.removeListener("SIGINT", __signal_on_400);
+        \\process.on("SIGINT", function () { throw 400; });
+        \\process.on("SIGINT", function () { __signals_400.push("late"); });
+    );
+    Bun__onSignalForJS(signal_number, context);
+    pending = JSGlobalObject__tryTakeException(context);
+    try std.testing.expectEqual(EncodedValue.fromInt32(400), JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())));
+    try std.testing.expectEqual(@as(f64, 3), (try internal.evaluate("__signals_400.length")).asNum());
 }
 
 test "private process next tick preserves queue ordering and exact arguments" {

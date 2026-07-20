@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "contract": "process-native-signal-delivery",
+  "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+  "issue": 400,
+  "parent_issue": 140,
+  "sources": {
+    "src/jsc/bindings/BunProcess.cpp": "ce285e8249d9decf76531822b327ce153eefdc174e2d5d2c34cd775ed8f11754"
+  },
+  "export": "Bun__onSignalForJS",
+  "event_arguments": [
+    "signalName",
+    "signalNumber"
+  ],
+  "signal_names": [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGIOT",
+    "SIGBUS",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGUSR1",
+    "SIGSEGV",
+    "SIGUSR2",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGCHLD",
+    "SIGCONT",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGURG",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGIO",
+    "SIGINFO",
+    "SIGSYS",
+    "SIGBREAK"
+  ],
+  "windows_signal_names": [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGKILL",
+    "SIGTERM",
+    "SIGWINCH",
+    "SIGBREAK"
+  ],
+  "semantics": [
+    "The signal number maps to Bun's canonical SIG-prefixed event name using the pinned insertion order, so aliases such as SIGIOT do not replace SIGABRT.",
+    "The selected realm's process EventEmitter is invoked synchronously with signal name then native signal number.",
+    "Signal delivery never broadcasts to sibling or foreign realms.",
+    "Ordinary EventEmitter listener ordering, once removal, and this binding are preserved.",
+    "A listener-thrown value becomes the selected VM's pending private exception and later listeners are not invoked.",
+    "Null or dead globals, unknown signal numbers, and a pre-existing pending exception are inert.",
+    "The Home and Bun profile libraries compile, link, and run one external consumer against the export."
+  ]
+}
