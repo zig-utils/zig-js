@@ -41438,6 +41438,27 @@ fn urlSerializeIPv6(arena: std.mem.Allocator, address: [8]u16) EvalError![]const
     try out.append(arena, ']');
     return out.items;
 }
+
+/// Canonicalize a host string for `scheme`: an IPv6 literal `[…]` → compressed
+/// form; a special-scheme host → lowercased domain or parsed IPv4; a non-special
+/// host → C0-percent-encoded opaque host. Returns null on failure. Shared by the
+/// `host`/`hostname` setters (the constructor path inlines the same logic).
+fn urlCanonHost(arena: std.mem.Allocator, scheme: []const u8, host_str: []const u8) EvalError!?[]const u8 {
+    if (host_str.len > 0 and host_str[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, host_str, ']') orelse return null;
+        return try urlSerializeIPv6(arena, urlParseIPv6(host_str[1..close]) orelse return null);
+    }
+    if (urlIsSpecialScheme(scheme)) {
+        var hb: std.ArrayListUnmanaged(u8) = .empty;
+        for (host_str) |c| try hb.append(arena, std.ascii.toLower(c));
+        const domain = hb.items;
+        if (urlHostEndsInNumber(domain)) return (try urlParseIPv4(arena, domain)) orelse return null;
+        return domain;
+    }
+    var hb: std.ArrayListUnmanaged(u8) = .empty;
+    try urlPercentEncode(arena, &hb, host_str, .c0);
+    return hb.items;
+}
 fn urlParsePathQueryFrag(arena: std.mem.Allocator, p: *UrlParts, s_in: []const u8, special: bool, has_host: bool) EvalError!void {
     var s = s_in;
     // Fragment
@@ -41815,9 +41836,7 @@ fn urlSetter(comptime which: []const u8) value.NativeFn {
                 }
             } else if (comptime std.mem.eql(u8, which, "hostname")) {
                 if (val.len == 0 and special) return Value.undef();
-                var hb: std.ArrayListUnmanaged(u8) = .empty;
-                for (val) |c| try hb.append(self.arena, std.ascii.toLower(c));
-                p.host = hb.items;
+                p.host = if (val.len == 0) "" else (try urlCanonHost(self.arena, p.scheme, val)) orelse return Value.undef();
             } else if (comptime std.mem.eql(u8, which, "host")) {
                 var hs = val;
                 var new_port: ?[]const u8 = null;
@@ -41831,9 +41850,7 @@ fn urlSetter(comptime which: []const u8) value.NativeFn {
                     hs = hs[0..colon];
                 }
                 if (hs.len == 0 and special) return Value.undef();
-                var hb: std.ArrayListUnmanaged(u8) = .empty;
-                for (hs) |c| try hb.append(self.arena, std.ascii.toLower(c));
-                p.host = hb.items;
+                p.host = (try urlCanonHost(self.arena, p.scheme, hs)) orelse return Value.undef();
                 if (new_port) |np| p.port = np;
             } else if (comptime std.mem.eql(u8, which, "pathname")) {
                 if (p.opaque_path) return Value.undef();
