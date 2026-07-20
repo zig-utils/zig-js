@@ -1971,6 +1971,116 @@ fn privateEncodeResult(context: *Context, machine: *interp.Interpreter, result: 
     return encoded;
 }
 
+/// Capture Bun/Home's realm-local async-context slot around a callback without
+/// making the wrapper itself callable. JSC recognizes this private brand only
+/// at its explicit call boundary; keeping that distinction prevents ordinary
+/// JavaScript `Function` checks from accepting the frame.
+export fn AsyncContextFrame__withAsyncContextIfNeeded(
+    global: JSContextRef,
+    callback_encoded: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const callback = privateValueFrom(global, callback_encoded) orelse return .empty;
+    if (context.private_async_context.isUndefined()) return callback_encoded;
+    if (callback.isObject() and callback.asObj().asyncContextFrame() != null) return callback_encoded;
+    if (!callback.isObject() or !callback.asObj().isCallableObject()) return .empty;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+    const frame_value = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const frame = frame_value.asObj();
+    frame.proto = null;
+    frame.setAsyncContextFrame(context.arena(), callback, context.private_async_context) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, frame_value);
+}
+
+export fn Bun__JSValue__isAsyncContextFrame(encoded: EncodedValue) callconv(.c) bool {
+    const boxed = privateBoxedFrom(encoded) orelse return false;
+    if (boxed.private_kind != .value or !boxed.value.isObject()) return false;
+    return boxed.value.asObj().asyncContextFrame() != null;
+}
+
+fn privateCallWithAsyncContext(
+    context: *Context,
+    machine: *interp.Interpreter,
+    callable: Value,
+    this_value: Value,
+    arguments: []const Value,
+) interp.EvalError!Value {
+    var target = callable;
+    const frame = if (callable.isObject()) callable.asObj().asyncContextFrame() else null;
+    const previous = context.private_async_context;
+    var async_root_mark: ?usize = null;
+    if (frame) |captured| {
+        async_root_mark = try machine.pushTempRoot(previous);
+        target = captured.callback;
+        context.private_async_context = captured.context;
+        gc_mod.barrierValue(captured.context);
+    }
+    defer if (frame != null) {
+        context.private_async_context = previous;
+        gc_mod.barrierValue(previous);
+        machine.restoreTempRoots(async_root_mark.?);
+    };
+    return machine.callValueWithThis(target, arguments, this_value);
+}
+
+export fn Bun__JSValue__call(
+    global: JSContextRef,
+    callable_encoded: EncodedValue,
+    this_encoded: EncodedValue,
+    argument_count: usize,
+    argument_encodings: [*]const EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const group = privatePropertyBoundaryGroup(context) orelse return .empty;
+    if (group.pending_exception != null) return .empty;
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const callable = privateValueFrom(global, callable_encoded) orelse return .empty;
+    const this_value = if (this_encoded == .empty)
+        Value.obj(context.global_object)
+    else
+        privateValueFrom(global, this_encoded) orelse return .empty;
+    const arguments = context.arena().alloc(Value, argument_count) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    for (argument_encodings[0..argument_count], arguments) |encoded, *argument| {
+        argument.* = privateValueFrom(global, encoded) orelse return .empty;
+    }
+    const result = privateCallWithAsyncContext(context, &machine, callable, this_value, arguments) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    return privateEncodeResult(context, &machine, result);
+}
+
 /// Invoke a Home/Bun `JSHostFn` using JavaScriptCore's 64-bit CallFrame register
 /// layout. The consumer's opaque `CallFrame` methods index these words directly:
 /// 0 caller, 1 return PC, 2 code block, 3 callee, 4 argc including `this`, 5
@@ -19123,6 +19233,24 @@ fn privateApiLockProbeCallback(
     return JSValueMakeNumber(ctx, @floatFromInt(group.api_lock_depth));
 }
 
+fn privateAsyncContextProbeCallback(
+    ctx: JSContextRef,
+    function: JSObjectRef,
+    this_object: JSObjectRef,
+    argc: usize,
+    argv: [*c]const JSValueRef,
+    exception: ExceptionRef,
+) callconv(.c) JSValueRef {
+    _ = function;
+    _ = this_object;
+    _ = argc;
+    _ = argv;
+    _ = exception;
+    const context = ctxRawFrom(ctx) orelse return null;
+    context.collectGarbage();
+    return box(context, context.private_async_context);
+}
+
 test "private C-API call and proxy extensions preserve lock exception and target semantics" {
     const ctx = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
     defer JSGlobalContextRelease(ctx);
@@ -19191,6 +19319,83 @@ test "private C-API call and proxy extensions preserve lock exception and target
     try std.testing.expect(JSObjectGetProxyTarget(revoked_ref) == null);
     try std.testing.expect(JSObjectGetProxyTarget(@ptrFromInt(try exception.asCellAddress())) == null);
     try std.testing.expect(JSObjectGetProxyTarget(null) == null);
+}
+
+test "private async-context call ABI captures brands traces and restores dynamic state" {
+    const global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global) orelse return error.ContextCreateFailed;
+
+    const plain_callback = privateEncodedFromValue(
+        context,
+        try context.evaluate("(function(a, b) { return [this === globalThis, this.marker, a, b]; })"),
+    );
+    try std.testing.expectEqual(
+        plain_callback,
+        AsyncContextFrame__withAsyncContextIfNeeded(global, plain_callback),
+    );
+    try std.testing.expect(!Bun__JSValue__isAsyncContextFrame(plain_callback));
+
+    const captured = try context.evaluate("({ marker: 373 })");
+    context.private_async_context = captured;
+    const probe_ref = JSObjectMakeFunctionWithCallback(global, null, privateAsyncContextProbeCallback) orelse
+        return error.ValueCreateFailed;
+    const probe = privateEncodedFromRef(probe_ref);
+    const wrapped_probe = AsyncContextFrame__withAsyncContextIfNeeded(global, probe);
+    try std.testing.expect(wrapped_probe != .empty);
+    try std.testing.expect(Bun__JSValue__isAsyncContextFrame(wrapped_probe));
+    try std.testing.expectEqual(
+        wrapped_probe,
+        AsyncContextFrame__withAsyncContextIfNeeded(global, wrapped_probe),
+    );
+    const wrapped_value = privateValueFrom(global, wrapped_probe) orelse return error.ValueCreateFailed;
+    try std.testing.expect(!wrapped_value.asObj().isCallableObject());
+    try std.testing.expect(wrapped_value.asObj().proto == null);
+
+    const previous = try context.evaluate("({ marker: 999 })");
+    context.private_async_context = previous;
+    context.collectGarbage();
+    const empty_arguments: [1]EncodedValue = undefined;
+    const observed = Bun__JSValue__call(global, wrapped_probe, .empty, 0, &empty_arguments);
+    try std.testing.expect(value.strictEquals(
+        privateValueFrom(global, observed) orelse return error.ValueCreateFailed,
+        captured,
+    ));
+    try std.testing.expect(value.strictEquals(context.private_async_context, previous));
+
+    const explicit_this = privateEncodedFromValue(context, try context.evaluate("({ marker: 7 })"));
+    const args = [_]EncodedValue{ EncodedValue.fromInt32(8), EncodedValue.fromInt32(9) };
+    const explicit_result = Bun__JSValue__call(global, plain_callback, explicit_this, args.len, &args);
+    const explicit_object = (privateValueFrom(global, explicit_result) orelse return error.ValueCreateFailed).asObj();
+    try std.testing.expect(!explicit_object.elementAt(0).?.asBool());
+    try std.testing.expectEqual(@as(f64, 7), explicit_object.elementAt(1).?.asNum());
+    try std.testing.expectEqual(@as(f64, 8), explicit_object.elementAt(2).?.asNum());
+    try std.testing.expectEqual(@as(f64, 9), explicit_object.elementAt(3).?.asNum());
+    const default_result = Bun__JSValue__call(global, plain_callback, .empty, 0, &empty_arguments);
+    try std.testing.expect((privateValueFrom(global, default_result) orelse return error.ValueCreateFailed).asObj().elementAt(0).?.asBool());
+
+    context.private_async_context = captured;
+    const throwing = privateEncodedFromValue(context, try context.evaluate("(function() { throw 373; })"));
+    const wrapped_throwing = AsyncContextFrame__withAsyncContextIfNeeded(global, throwing);
+    context.private_async_context = previous;
+    try std.testing.expectEqual(
+        EncodedValue.empty,
+        Bun__JSValue__call(global, wrapped_throwing, .empty, 0, &empty_arguments),
+    );
+    try std.testing.expect(value.strictEquals(context.private_async_context, previous));
+    const pending = JSGlobalObject__tryTakeException(global);
+    try std.testing.expectEqual(
+        EncodedValue.fromInt32(373),
+        JSC__Exception__asJSValue(@ptrFromInt(try pending.asCellAddress())),
+    );
+
+    const foreign_global = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(foreign_global);
+    const foreign_context = ctxForEvaluation(foreign_global) orelse return error.ContextCreateFailed;
+    const foreign_callable = privateEncodedFromValue(foreign_context, try foreign_context.evaluate("(function(){ return 1; })"));
+    try std.testing.expectEqual(EncodedValue.empty, Bun__JSValue__call(global, foreign_callable, .empty, 0, &empty_arguments));
+    try std.testing.expect(!Bun__JSValue__isAsyncContextFrame(EncodedValue.fromInt32(1)));
+    try std.testing.expectEqual(EncodedValue.empty, AsyncContextFrame__withAsyncContextIfNeeded(global, .empty));
 }
 
 test "private JSC Math.pow operation preserves ECMAScript edge semantics" {

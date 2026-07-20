@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (362 implemented, 109 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (365 implemented, 106 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 362 are implemented and 109 remain pending
+Of the private entries, 365 are implemented and 106 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -135,8 +135,8 @@ It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
-and 19 extensions; these 200 symbols are reported only as private profile
-exports.
+and 22 extensions; private-profile exports are counted only in their pinned
+inventories.
 
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
 three signed/unsigned/double ordering functions, and `JSC__JSBigInt__toInt64`.
@@ -1003,7 +1003,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (354 implemented, 107 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (357 implemented, 104 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1023,5 +1023,5 @@ zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 107
+not claim complete Bun runtime compatibility; #164 remains open for the 104
 pending core entries and later wider/generated profiles.

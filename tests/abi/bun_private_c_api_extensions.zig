@@ -43,6 +43,9 @@ extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__Exception__asJSValue(?*anyopaque) EncodedValue;
 extern "c" fn JSC__JSValue__isStrictEqual(EncodedValue, EncodedValue, JSContextRef) bool;
 extern "c" fn Bun__JSC__operationMathPow(f64, f64) f64;
+extern "c" fn AsyncContextFrame__withAsyncContextIfNeeded(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn Bun__JSValue__isAsyncContextFrame(EncodedValue) bool;
+extern "c" fn Bun__JSValue__call(JSContextRef, EncodedValue, EncodedValue, usize, [*]const EncodedValue) EncodedValue;
 
 fn fail(message: []const u8) noreturn {
     std.debug.panic("{s}", .{message});
@@ -112,6 +115,27 @@ pub fn main() void {
     const revoked = evaluate(context, "(()=>{const p=Proxy.revocable({},{});p.revoke();return p.proxy})()");
     if (JSObjectGetProxyTarget(revoked.cellPointer()) != null or JSObjectGetProxyTarget(null) != null)
         fail("Bun proxy target invalid/revoked mismatch");
+
+    if (AsyncContextFrame__withAsyncContextIfNeeded(context, function) != function or
+        Bun__JSValue__isAsyncContextFrame(function))
+        fail("Bun inactive async-context identity/brand mismatch");
+    const async_arguments = [_]EncodedValue{ EncodedValue.fromInt32(12), EncodedValue.fromInt32(13) };
+    const async_result = Bun__JSValue__call(context, function, this_object, async_arguments.len, &async_arguments);
+    const async_stringify_arguments = [_]JSValueRef{async_result.cellPointer()};
+    const async_result_json = JSObjectCallAsFunctionReturnValueHoldingAPILock(
+        context,
+        evaluate(context, "JSON.stringify").cellPointer(),
+        null,
+        async_stringify_arguments.len,
+        &async_stringify_arguments,
+    );
+    if (!JSC__JSValue__isStrictEqual(async_result_json, evaluate(context, "'[371,12,13]'"), context))
+        fail("Bun async-context call result mismatch");
+    const no_async_arguments: [1]EncodedValue = undefined;
+    if (Bun__JSValue__call(context, default_this, .empty, 0, &no_async_arguments) != .true or
+        AsyncContextFrame__withAsyncContextIfNeeded(context, .empty) != .empty or
+        Bun__JSValue__isAsyncContextFrame(EncodedValue.fromInt32(1)))
+        fail("Bun async-context default-this/invalid boundary mismatch");
 
     const negative_zero = Bun__JSC__operationMathPow(-0.0, 3);
     if (Bun__JSC__operationMathPow(2, 10) != 1024 or

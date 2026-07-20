@@ -2587,6 +2587,11 @@ pub const Context = struct {
     /// cell on its shared group record; the primary Context keeps the thrown
     /// value alive for precise GC until that cell is cleared or taken.
     private_pending_exception_root: ?value.Value = null,
+    /// The value inherited by callbacks wrapped through Bun/Home's private
+    /// AsyncContextFrame ABI. `undefined` is the exact inactive sentinel used
+    /// by JSC. This realm-local slot is a precise root because a callback can
+    /// snapshot it without otherwise making it reachable from JavaScript.
+    private_async_context: value.Value = value.Value.undef(),
     /// Prebuilt, immutable-ish OOM completion object for capped shared-realm
     /// `Thread`s. It is allocated during bootstrap, while budget is still
     /// available, so an exhausted thread can publish a real Error object without

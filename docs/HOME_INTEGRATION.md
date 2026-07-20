@@ -1,7 +1,7 @@
 # Replacing JSC/WebKit in Home with zig-js
 
 > Status: **public profile verified; private migration not started**
-> (2026-07-17). Home currently links vendored JavaScriptCore. zig-js now proves
+> (2026-07-20). Home currently links vendored JavaScriptCore. zig-js now proves
 > the exact 50-function public M1 consumer at Home revision `7ed99c02`, while
 > private profiles explicitly support `7ed99c02` and the byte-identical JSC
 > source aliases `5e829ad4`, `38702f9e`, and `4389ddee`. The broader private
@@ -28,16 +28,16 @@ hashes, calling convention, layouts, enum values, and semantic assumptions;
 `zig build test-home-public-abi -Dhome-source-root="$HOME/Code/Home/lang"`
 checks the live checkout too.
 
-zig-js's complete public target is now 117 functions plus 19 extensions.
+zig-js's complete public target is now 117 functions plus 22 extensions.
 Nevertheless, **zig-js is not yet a drop-in for the JSC that Home's production
 runtime links**: success of the 50-function public profile says nothing about
 the thousands of LLInt and private/generated binding symbols above.
 
 The first source-level private inventory is now reproducible too. At the same
-pinned Home revision, the 58 JSC source files containing legacy/private
-`extern fn` declarations contain 448 unique symbols: 431 private
-JSC/Bun/WebCore imports, 15 public-C overlaps already implemented by zig-js,
-one platform libc import, and one consumer-generated `JSFunctionCall`
+pinned Home revision, 66 JSC source files containing legacy/private
+`extern fn` declarations contain 538 unique symbols: 471 private
+JSC/Bun/WebCore imports, 59 public-C overlaps already implemented by zig-js,
+seven platform libc imports, and one consumer-generated `JSFunctionCall`
 definition. See [the exact declaration inventory](abi/home-private-7ed99c02-inventory.json)
 and run:
 
@@ -48,8 +48,8 @@ zig build home-private-abi-audit \
 ```
 
 This verifies the live revision, every source hash, signature, classification,
-and calling convention. It replaces a vague source-level estimate, but the 431
-private imports are now 264 implemented / 167 pending under #163. The generated
+and calling convention. It replaces a vague source-level estimate: the 471
+private imports are now 365 implemented / 106 pending under #163. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,
@@ -144,6 +144,11 @@ running traps, returns null fields after revocation, and safely rejects invalid
 selectors and non-proxies. Canonical per-VM private object handles keep repeated
 and sibling-realm EncodedJSValue publication bit-identical without crossing VM
 boundaries.
+The async-context call trio retains inactive callback identity, captures active
+realm state in a non-callable branded frame, keeps its callback/context edges
+precisely traced and relocatable, and restores the caller's prior state before
+returning or publishing a throw. Encoded receivers and arguments preserve
+ordering and same-VM ownership at the compiled Home/Bun boundary.
 Script execution context IDs are lazily allocated as stable, nonzero process
 identifiers. Sibling realms receive distinct IDs, repeated reads are identical,
 parallel independent context creation is race-free, and the query leaves VM
@@ -289,7 +294,7 @@ second pass over current/preceding source lines by retained script ID.
 stackless native errors by walking pending await/transparent-forwarding links,
 with exact suspension positions, a per-segment 32-hop guard, realm stack limits,
 precise GC retention, and existing/materialized-stack preservation. The
-349-symbol combined fixture covers sibling realms, foreign VMs, callback
+352-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement

@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 362
-implemented and 109 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 365
+implemented and 106 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -319,7 +319,7 @@ classifies Error, DOMException, primitive, and system-like values; owns its
 strings; preserves the stable exception cell; and reports the cause runtime
 type. The second pass resolves the retained script identity and copies the
 current source line plus capped preceding lines with exact zero-based numbers,
-including through a sibling realm. The combined 349-symbol fixture also covers
+including through a sibling realm. The combined 352-symbol fixture also covers
 foreign-VM failures, exception clearing, callback reentrancy, and already-settled
 targets.
 
@@ -336,6 +336,13 @@ ECMAScript operation. It preserves JSC's NaN, infinity, signed-zero,
 negative-base, and odd/even exponent behavior instead of exposing host-libm
 exceptions at the private boundary.
 
+The three async-context call exports snapshot a realm's active context into a
+branded, non-callable frame with precise GC edges. Calling the frame installs
+the captured value only for the callback's dynamic extent, restores the prior
+value before normal return or exception publication, preserves argument and
+receiver semantics, and never crosses VM ownership. With no active context the
+original callback is returned unchanged, including its exact encoded identity.
+
 `Bun__attachAsyncStackFromPromise` reconstructs stackless native Errors from
 pending async-await chains. Promise links retain only suspended activations,
 survive GC and settlement-to-microtask handoff, follow each transparent
@@ -344,7 +351,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 354 shims are implemented and 107 remain pending. Its
+of which 357 shims are implemented and 104 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled

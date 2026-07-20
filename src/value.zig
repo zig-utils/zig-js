@@ -1145,6 +1145,7 @@ pub const ObjectRareTag = enum(u8) {
     generator,
     iter_helper,
     bound_function,
+    async_context_frame,
     proxy,
     buffer_view,
     temporal,
@@ -1219,6 +1220,10 @@ pub const ObjectRareState = union(ObjectRareTag) {
     generator: struct { ptr: ?*anyopaque = null },
     iter_helper: struct { ptr: ?*IterHelper = null },
     bound_function: struct { ptr: ?*anyopaque = null },
+    async_context_frame: struct {
+        callback: Value = Value.undef(),
+        context: Value = Value.undef(),
+    },
     proxy: struct {
         target: ?*Object = null,
         handler: ?*Object = null,
@@ -1975,6 +1980,8 @@ pub const Object = struct {
         proxy_target: ?*Object,
         proxy_handler: ?*Object,
         boxed_primitive: ?Value,
+        async_context_callback: ?Value,
+        async_context: ?Value,
         weak_ref_target_slot: ?*?*Object,
         js_function: ?*anyopaque,
         bound_function: ?*anyopaque,
@@ -2000,6 +2007,8 @@ pub const Object = struct {
             .proxy_target = self.proxyTarget(),
             .proxy_handler = self.proxyHandler(),
             .boxed_primitive = self.boxedPrimitive(),
+            .async_context_callback = if (self.asyncContextFrame()) |frame| frame.callback else null,
+            .async_context = if (self.asyncContextFrame()) |frame| frame.context else null,
             .weak_ref_target_slot = if (self.behavior.is_weak_ref) self.weakRefTargetSlot() else null,
             .js_function = self.jsFunction(),
             .bound_function = self.boundFunction(),
@@ -2236,6 +2245,23 @@ pub const Object = struct {
     pub fn setBoundFunction(self: *Object, fallback: std.mem.Allocator, bound_function: *anyopaque) std.mem.Allocator.Error!void {
         const state = try self.ensureRare(fallback, .bound_function, .{});
         state.ptr = bound_function;
+    }
+
+    pub inline fn asyncContextFrame(self: *const Object) ?*@FieldType(ObjectRareState, "async_context_frame") {
+        const cold = self.coldState() orelse return null;
+        if (!cold.hasRare(.async_context_frame)) return null;
+        return @constCast(&cold.rare.async_context_frame);
+    }
+
+    pub fn setAsyncContextFrame(
+        self: *Object,
+        fallback: std.mem.Allocator,
+        callback: Value,
+        context: Value,
+    ) std.mem.Allocator.Error!void {
+        const state = try self.ensureRare(fallback, .async_context_frame, .{});
+        state.callback = callback;
+        state.context = context;
     }
 
     pub inline fn proxyTarget(self: *const Object) ?*Object {

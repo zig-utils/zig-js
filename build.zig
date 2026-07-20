@@ -415,7 +415,7 @@ pub fn build(b: *std.Build) void {
     run_bun_private_c_api_extensions_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_c_api_extensions_test_step = b.step(
         "test-bun-private-c-api-extensions",
-        "Compile, link, and run Bun's private C-API call/proxy extensions",
+        "Compile, link, and run Bun's private call/proxy/async-context extensions",
     );
     bun_private_c_api_extensions_test_step.dependOn(&run_bun_private_c_api_extensions_fixture.step);
 

@@ -173,6 +173,8 @@ pub fn traceObject(o: *Object, v: anytype) void {
         if (concurrent) o.unlockElements();
     }
     markValueOpt(v, cold.boxed_primitive);
+    markValueOpt(v, cold.async_context_callback);
+    markValueOpt(v, cold.async_context);
     markValueOpt(v, cold.getter_setter_getter);
     markValueOpt(v, cold.getter_setter_setter);
     if (cold.weak_ref_target_slot) |slot| markWeakObject(v, slot); // stable cold-slot address
@@ -278,6 +280,10 @@ pub fn relocateObjectRareStrong(o: *Object, v: anytype) void {
         .generator => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.generator.ptr),
         .iter_helper => gc_relocation.rewriteOptionalSlot(v, value.IterHelper, &cold.rare.iter_helper.ptr),
         .bound_function => gc_relocation.rewriteOptionalSlot(v, anyopaque, &cold.rare.bound_function.ptr),
+        .async_context_frame => {
+            gc_relocation.rewriteValueSlot(v, &cold.rare.async_context_frame.callback);
+            gc_relocation.rewriteValueSlot(v, &cold.rare.async_context_frame.context);
+        },
         .proxy => {
             gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.proxy.target);
             gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.proxy.handler);
@@ -417,7 +423,7 @@ test "Object rare strong relocation mutates every active managed payload" {
     const allocator = arena.allocator();
     var old_objects: [8]Object = undefined;
     var new_objects: [8]Object = undefined;
-    var rare_objects: [11]Object = undefined;
+    var rare_objects: [12]Object = undefined;
     for (&rare_objects) |*object| object.* = .{};
     var old_environment: Environment = undefined;
     var new_environment: Environment = undefined;
@@ -463,6 +469,11 @@ test "Object rare strong relocation mutates every active managed payload" {
         Value.obj(&old_objects[6]),
         Value.obj(&old_objects[7]),
     ));
+    try rare_objects[11].setAsyncContextFrame(
+        allocator,
+        Value.obj(&old_objects[0]),
+        Value.obj(&old_objects[7]),
+    );
 
     const Plan = struct {
         old_objects: *[8]Object,
@@ -536,6 +547,9 @@ test "Object rare strong relocation mutates every active managed payload" {
     const getter_setter = rare_objects[10].getterSetterCellData().?;
     try std.testing.expectEqual(&new_objects[6], getter_setter.getterValue().?.asObj());
     try std.testing.expectEqual(&new_objects[7], getter_setter.setterValue().?.asObj());
+    const async_context_frame = rare_objects[11].asyncContextFrame().?;
+    try std.testing.expectEqual(&new_objects[0], async_context_frame.callback.asObj());
+    try std.testing.expectEqual(&new_objects[7], async_context_frame.context.asObj());
 }
 
 test "Wasm relocation: Object rare state rewrites every JavaScript-bearing slot" {
@@ -773,6 +787,7 @@ pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
         .generator,
         .iter_helper,
         .bound_function,
+        .async_context_frame,
         .proxy,
         .buffer_view,
         .temporal,
@@ -2319,8 +2334,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     const context = try ContextMod.Context.create(std.testing.allocator);
     defer context.destroy();
 
-    var old_objects: [17]Object = undefined;
-    var new_objects: [17]Object = undefined;
+    var old_objects: [18]Object = undefined;
+    var new_objects: [18]Object = undefined;
     var old_promises: [2]promise.Promise = .{ .{}, .{} };
     var new_promises: [2]promise.Promise = .{ .{}, .{} };
 
@@ -2329,6 +2344,7 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     const saved_constructors = context.c_api_builtin_constructors;
     const saved_oom = context.reserved_thread_oom_error;
     const saved_private_exception = context.private_pending_exception_root;
+    const saved_async_context = context.private_async_context;
     const saved_exception = context.exception;
     defer {
         context.global_object = saved_global;
@@ -2336,6 +2352,7 @@ test "realm root relocation rewrites Context registries and embedder handles" {
         context.c_api_builtin_constructors = saved_constructors;
         context.reserved_thread_oom_error = saved_oom;
         context.private_pending_exception_root = saved_private_exception;
+        context.private_async_context = saved_async_context;
         context.exception = saved_exception;
         _ = context.env.removeVar("__gc_relocation_context_root__");
     }
@@ -2344,7 +2361,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     context.c_api_builtin_constructors[0] = Value.obj(&old_objects[2]);
     context.reserved_thread_oom_error = Value.obj(&old_objects[3]);
     context.private_pending_exception_root = Value.obj(&old_objects[4]);
-    context.exception = Value.obj(&old_objects[16]);
+    context.private_async_context = Value.obj(&old_objects[16]);
+    context.exception = Value.obj(&old_objects[17]);
     try context.env.put("__gc_relocation_context_root__", Value.obj(&old_objects[5]));
 
     var microtask_items = [_]promise.Microtask{.{
@@ -2440,8 +2458,8 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     context.private_weak_roots = .{ .items = &weak_roots, .capacity = weak_roots.len };
 
     const Plan = struct {
-        old_objects: *[17]Object,
-        new_objects: *[17]Object,
+        old_objects: *[18]Object,
+        new_objects: *[18]Object,
         old_promises: *[2]promise.Promise,
         new_promises: *[2]promise.Promise,
 
@@ -2468,6 +2486,7 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     try std.testing.expectEqual(&new_objects[2], context.c_api_builtin_constructors[0].asObj());
     try std.testing.expectEqual(&new_objects[3], context.reserved_thread_oom_error.?.asObj());
     try std.testing.expectEqual(&new_objects[4], context.private_pending_exception_root.?.asObj());
+    try std.testing.expectEqual(&new_objects[16], context.private_async_context.asObj());
     try std.testing.expectEqual(&new_objects[5], context.env.get("__gc_relocation_context_root__").?.asObj());
     try std.testing.expectEqual(&new_objects[6], microtask_items[0].callback.asObj());
     try std.testing.expectEqual(&new_objects[7], next_tick_items[0].callback.asObj());
@@ -2481,7 +2500,7 @@ test "realm root relocation rewrites Context registries and embedder handles" {
     try std.testing.expectEqual(&new_objects[13], boxed.asObj());
     try std.testing.expectEqual(&new_objects[14], strong_root.value.asObj());
     try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&new_objects[15])), weak_root.target.load(.acquire));
-    try std.testing.expectEqual(&new_objects[16], context.exception.?.asObj());
+    try std.testing.expectEqual(&new_objects[17], context.exception.?.asObj());
 }
 
 fn traceWasmSlot(slot: value.WasmSlot, v: anytype) void {
@@ -2597,6 +2616,7 @@ pub fn relocateContextRoots(ctx: *ContextMod.Context, v: anytype) void {
         gc_relocation.rewriteValueSlot(v, constructor);
     gc_relocation.rewriteOptionalValueSlot(v, &ctx.reserved_thread_oom_error);
     gc_relocation.rewriteOptionalValueSlot(v, &ctx.private_pending_exception_root);
+    gc_relocation.rewriteValueSlot(v, &ctx.private_async_context);
     relocateEnv(&ctx.env, v);
 
     for (ctx.microtasks.pendingItems()) |*task| relocateMicrotask(task, v);
@@ -2897,6 +2917,7 @@ pub const Binding = struct {
         for (ctx.c_api_builtin_constructors) |constructor| markValue(v, constructor);
         if (ctx.reserved_thread_oom_error) |err| markValue(v, err);
         if (ctx.private_pending_exception_root) |err| markValue(v, err);
+        markValue(v, ctx.private_async_context);
         traceEnv(&ctx.env, v); // the global environment is embedded by value (binding_lock)
 
         if (par != null) ctx.lockMicrotasks();

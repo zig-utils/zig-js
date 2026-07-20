@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 376,
-      "pending": 107
+      "implemented": 379,
+      "pending": 104
     }
   },
   "home_comparison": {
@@ -217,10 +217,10 @@
       "line": 2484,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn AsyncContextFrame__withAsyncContextIfNeeded(global: *JSGlobalObject, callback: JSValue) JSValue;",
       "declaration_sha256": "13c5002126612500a7109797e55e3bacbecb0d5c6549afc55e0a40febaa10368",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "BakeCreateProdGlobal",
@@ -613,10 +613,10 @@
       "line": 241,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSValue__call( ctx: *JSGlobalObject, object: JSValue, thisObject: JSValue, argumentCount: usize, arguments: [*]const JSValue, ) JSValue;",
       "declaration_sha256": "6df51caa15a232be8571ac7a44ea81cab6aa11e4d5deac21b77be1f607233a7c",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSValue__deserialize",
@@ -635,10 +635,10 @@
       "line": 2485,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSValue__isAsyncContextFrame(value: JSValue) bool;",
       "declaration_sha256": "6bda1f3f48b02ffbcdfb5575e8b2acd0045df9a9c7c71bda5dfc8309697c6f19",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSValue__protect",

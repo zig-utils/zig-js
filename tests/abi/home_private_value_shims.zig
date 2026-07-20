@@ -333,6 +333,9 @@ extern "c" fn JSGarbageCollect(JSContextRef) void;
 extern "c" fn JSObjectCallAsFunctionReturnValueHoldingAPILock(JSContextRef, JSObjectRef, JSObjectRef, usize, [*c]const JSValueRef) EncodedValue;
 extern "c" fn JSObjectGetProxyTarget(JSObjectRef) JSObjectRef;
 extern "c" fn Bun__JSC__operationMathPow(f64, f64) f64;
+extern "c" fn AsyncContextFrame__withAsyncContextIfNeeded(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn Bun__JSValue__isAsyncContextFrame(EncodedValue) bool;
+extern "c" fn Bun__JSValue__call(JSContextRef, EncodedValue, EncodedValue, usize, [*]const EncodedValue) EncodedValue;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
@@ -5021,6 +5024,36 @@ pub fn main() void {
     if (JSObjectGetProxyTarget(revoked_proxy.cellPointer()) != null or JSObjectGetProxyTarget(null) != null)
         fail("private proxy target invalid/revoked mismatch");
 
+    // Async-context call boundary (#373): a realm with no active context keeps
+    // the callback's exact identity, while the call export still exercises the
+    // pinned encoded-value signature, argument order, default-this, exception,
+    // and VM-ownership behavior. Active capture/restoration is covered by the
+    // engine test, which can set the otherwise-private realm slot legitimately.
+    if (AsyncContextFrame__withAsyncContextIfNeeded(context, private_call_function) != private_call_function or
+        Bun__JSValue__isAsyncContextFrame(private_call_function))
+        fail("private inactive async-context identity/brand mismatch");
+    const async_call_args = [_]EncodedValue{ EncodedValue.fromInt32(12), EncodedValue.fromInt32(13) };
+    const async_call_result = Bun__JSValue__call(
+        context,
+        private_call_function,
+        private_call_this,
+        async_call_args.len,
+        &async_call_args,
+    );
+    exposeCell(context, "__private_async_call_result_373", async_call_result);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "JSON.stringify(__private_async_call_result_373)==='[371,12,13]'")))
+        fail("private async-context call result mismatch");
+    const no_async_args: [1]EncodedValue = undefined;
+    if (Bun__JSValue__call(context, default_this_function, .empty, 0, &no_async_args) != .true)
+        fail("private async-context call default-this mismatch");
+    if (Bun__JSValue__call(context, private_call_thrower, .empty, 0, &no_async_args) != .empty or
+        JSC__Exception__asJSValue(JSGlobalObject__tryTakeException(context).cellPointer()) != EncodedValue.fromInt32(371))
+        fail("private async-context call exception mismatch");
+    if (Bun__JSValue__call(context, evaluate(foreign_context, "(function(){return 1})"), .empty, 0, &no_async_args) != .empty or
+        AsyncContextFrame__withAsyncContextIfNeeded(context, .empty) != .empty or
+        Bun__JSValue__isAsyncContextFrame(EncodedValue.fromInt32(1)))
+        fail("private async-context invalid/foreign boundary mismatch");
+
     const traced_script = JSStringCreateWithUTF8CString("(function outer249(){ return (function inner249(){ return new Error('stack-249'); })(); })()") orelse fail("trace script creation failed");
     defer JSStringRelease(traced_script);
     const traced_url = JSStringCreateWithUTF8CString("trace-249.js") orelse fail("trace URL creation failed");
@@ -6446,5 +6479,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 349/349 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 352/352 symbols linked; runtime matrix passed\n", .{});
 }
