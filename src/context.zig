@@ -753,6 +753,11 @@ pub const GcCellBacking = struct {
     bucket_bump_start: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     /// A chunk known to contain reusable issued slots for each size class.
     bucket_free_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
+    /// Explicit compaction packs each size class into this many leading chunks.
+    /// Targets are computed lazily after the collector's pre-move sweep, then
+    /// frozen while reservations temporarily raise live-slot counts.
+    relocation_target_chunks: [bucket_count]?usize = .{ null, null, null, null, null, null },
+    relocation_planning: bool = false,
     /// Last chunk that classified an owned pointer for each bucket. GC frees
     /// and teardown usually arrive in chunk-local runs, so this avoids restarting
     /// the chunk walk for every cell while preserving exact ownership checks.
@@ -907,39 +912,34 @@ pub const GcCellBacking = struct {
         }
     }
 
-    fn bumpFreshSlotLocked(self: *GcCellBacking, idx: usize) ?[*]u8 {
+    fn bumpFreshSlotInChunkLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) ?[*]u8 {
         const slot_size = bucket_sizes[idx];
+        const chunk = self.bucket_chunks[idx].items[chunk_idx];
+        const off = self.bucket_next_offsets[idx].items[chunk_idx];
+        if (off + slot_size > chunk.len) return null;
+        self.bucket_next_offsets[idx].items[chunk_idx] = off + slot_size;
+        self.recordFreshBump(idx, chunk_idx, off);
+        return chunk.ptr + off;
+    }
+
+    fn bumpFreshSlotLocked(self: *GcCellBacking, idx: usize) ?[*]u8 {
         if (self.bucket_bump_hint[idx]) |hint| {
             const chunks = self.bucket_chunks[idx].items;
             if (hint < chunks.len) {
-                const chunk = chunks[hint];
-                const off = self.bucket_next_offsets[idx].items[hint];
-                if (off + slot_size <= chunk.len) {
-                    self.bucket_next_offsets[idx].items[hint] = off + slot_size;
-                    self.recordFreshBump(idx, hint, off);
-                    return chunk.ptr + off;
-                }
+                if (self.bumpFreshSlotInChunkLocked(idx, hint)) |ptr| return ptr;
             }
         }
         const chunks = self.bucket_chunks[idx].items;
         var chunk_idx = @min(self.bucket_bump_start[idx], chunks.len);
         while (chunk_idx < chunks.len) : (chunk_idx += 1) {
-            const chunk = chunks[chunk_idx];
-            const off = self.bucket_next_offsets[idx].items[chunk_idx];
-            if (off + slot_size > chunk.len) {
+            if (self.bumpFreshSlotInChunkLocked(idx, chunk_idx)) |ptr| return ptr else {
                 self.bucket_bump_start[idx] = chunk_idx + 1;
                 continue;
             }
-            self.bucket_next_offsets[idx].items[chunk_idx] = off + slot_size;
-            self.recordFreshBump(idx, chunk_idx, off);
-            return chunk.ptr + off;
         }
         if (!self.addChunk(idx)) return null;
         const new_idx = self.bucket_chunks[idx].items.len - 1;
-        const chunk = self.bucket_chunks[idx].items[new_idx];
-        self.bucket_next_offsets[idx].items[new_idx] = slot_size;
-        self.recordFreshBump(idx, new_idx, 0);
-        return chunk.ptr;
+        return self.bumpFreshSlotInChunkLocked(idx, new_idx);
     }
 
     inline fn chunkOwnsPtr(chunk: []align(16) u8, addr: usize) bool {
@@ -1196,6 +1196,56 @@ pub const GcCellBacking = struct {
         return allocated;
     }
 
+    pub fn beginRelocationPlanning(self: *GcCellBacking) void {
+        std.debug.assert(!self.relocation_planning);
+        self.relocation_planning = true;
+        self.relocation_target_chunks = .{ null, null, null, null, null, null };
+    }
+
+    pub fn endRelocationPlanning(self: *GcCellBacking) void {
+        std.debug.assert(self.relocation_planning);
+        self.relocation_target_chunks = .{ null, null, null, null, null, null };
+        self.relocation_planning = false;
+    }
+
+    fn relocationTargetChunksLocked(self: *GcCellBacking, idx: usize) usize {
+        if (self.relocation_target_chunks[idx]) |target| return target;
+        var live: usize = 0;
+        for (self.bucket_live_counts[idx].items) |count| live += count;
+        var target: usize = 0;
+        var capacity: usize = 0;
+        while (target < self.bucket_chunks[idx].items.len and capacity < live) : (target += 1)
+            capacity += self.bucket_chunks[idx].items[target].len / bucket_sizes[idx];
+        self.relocation_target_chunks[idx] = target;
+        return target;
+    }
+
+    /// True only for a published cell outside its size class's minimal dense
+    /// chunk prefix. The collector will still rewrite pinned prefix cells so
+    /// their edges can point at evacuated destinations.
+    pub fn shouldRelocateCell(self: *GcCellBacking, payload: *anyopaque) bool {
+        if (!self.relocation_planning) return false;
+        const address = @intFromPtr(payload);
+        for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
+            const entry = self.findChunkAddrLocked(idx, address) orelse {
+                self.unlockBucket(idx);
+                continue;
+            };
+            const chunk = self.bucket_chunks[idx].items[entry.chunk_idx];
+            const offset = address - @intFromPtr(chunk.ptr);
+            const slot = (offset - offset % bucket_sizes[idx]) / bucket_sizes[idx];
+            if (!self.bucket_published_bitmaps[idx].items[entry.chunk_idx].contains(slot)) {
+                self.unlockBucket(idx);
+                return false;
+            }
+            const relocate = entry.chunk_idx >= self.relocationTargetChunksLocked(idx);
+            self.unlockBucket(idx);
+            return relocate;
+        }
+        return false;
+    }
+
     /// Reserve an unpublished compaction destination without charging it as
     /// fresh mutator allocation. The normal live-slot accounting intentionally
     /// includes the reservation until rollback or old→new commit.
@@ -1204,6 +1254,14 @@ pub const GcCellBacking = struct {
         self.acquireBucket(idx);
         defer self.unlockBucket(idx);
         if (self.bulk_teardown) return null;
+        if (self.relocation_planning) {
+            const target = self.relocation_target_chunks[idx] orelse return null;
+            for (0..target) |chunk_idx|
+                if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| return @ptrCast(ptr);
+            for (0..target) |chunk_idx|
+                if (self.bumpFreshSlotInChunkLocked(idx, chunk_idx)) |ptr| return @ptrCast(ptr);
+            return null;
+        }
         const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse return null;
         return @ptrCast(ptr);
     }
@@ -1448,7 +1506,7 @@ pub const GcCellBacking = struct {
         }
     }
 
-    fn trimEmptyTailChunksLocked(self: *GcCellBacking, idx: usize) usize {
+    fn trimEmptyTailChunksLocked(self: *GcCellBacking, idx: usize, retained_empty_tail: usize) usize {
         const old_len = self.bucket_chunks[idx].items.len;
         var first_trimmed = old_len;
         while (first_trimmed > 0 and self.bucket_live_counts[idx].items[first_trimmed - 1] == 0) {
@@ -1462,7 +1520,7 @@ pub const GcCellBacking = struct {
         // spikes.
         if (first_trimmed < old_len and first_trimmed > 0) {
             const empty_tail = old_len - first_trimmed;
-            first_trimmed += @min(empty_tail, reusable_tail_chunks);
+            first_trimmed += @min(empty_tail, retained_empty_tail);
         }
         if (first_trimmed == old_len) return 0;
 
@@ -1511,7 +1569,18 @@ pub const GcCellBacking = struct {
         var trimmed: usize = 0;
         inline for (0..bucket_count) |idx| {
             self.acquireBucket(idx);
-            trimmed += self.trimEmptyTailChunksLocked(idx);
+            trimmed += self.trimEmptyTailChunksLocked(idx, reusable_tail_chunks);
+            self.unlockBucket(idx);
+        }
+        return trimmed;
+    }
+
+    pub fn trimCompactedTailChunks(self: *GcCellBacking) usize {
+        if (self.bulk_teardown) return 0;
+        var trimmed: usize = 0;
+        inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
+            trimmed += self.trimEmptyTailChunksLocked(idx, 0);
             self.unlockBucket(idx);
         }
         return trimmed;
@@ -1547,6 +1616,8 @@ pub const GcCellBacking = struct {
         self.bucket_bump_hint = .{ null, null, null, null, null, null };
         self.bucket_bump_start = .{ 0, 0, 0, 0, 0, 0 };
         self.bucket_free_hint = .{ null, null, null, null, null, null };
+        self.relocation_target_chunks = .{ null, null, null, null, null, null };
+        self.relocation_planning = false;
         self.bulk_teardown = false;
     }
 };
@@ -4759,9 +4830,13 @@ pub const Context = struct {
         if (self.gc_relocation_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
             return .{ .status = .unsupported };
         defer self.gc_relocation_active.store(false, .release);
+        const backing = self.gc_cell_backing orelse return .{ .status = .unsupported };
+        backing.beginRelocationPlanning();
+        defer backing.endRelocationPlanning();
         const result = h.collectAndCompact();
         wasm_api.collectWasmGarbage(self);
-        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        if (result.status == .compacted or result.status == .no_candidates)
+            _ = backing.trimCompactedTailChunks();
         self.gc_requested.store(false, .monotonic);
         return result;
     }
@@ -14122,13 +14197,21 @@ test "enable_gc: collector scratch allocator follows the context concurrency pol
     }
 }
 
-test "GC compaction is fail-closed and rewrites a protected cyclic graph repeatedly" {
+test "GC compaction is fail-closed, rewrites a protected graph, and reaches a dense fixed point" {
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,
         .enable_jit = false,
         .wasm_features = .{ .reference_types = true },
     });
     defer ctx.destroy();
+
+    // Put the representative graph in tail chunks behind a reclaimable batch,
+    // so the placement-aware policy has useful evacuation work to perform.
+    _ = try ctx.evaluate(
+        \\globalThis.compactDiscard = [];
+        \\for (let i = 0; i < 4096; i++) compactDiscard.push({ i, dead: true });
+        \\compactDiscard = null;
+    );
 
     var boxed = try ctx.evaluate(
         \\(() => {
@@ -14203,14 +14286,16 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     ctx.collectGarbage();
     try std.testing.expectEqual(@as(?*anyopaque, null), private_dead_weak.target.load(.acquire));
     const before = ctx.gc.?.accounting();
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    try std.testing.expect(backing_before.chunks > 1);
     const verifications_before = gc_mod.relocationVerificationsForTesting();
     const old_root_address = @intFromPtr(boxed.asObj());
     const old_peer_address = @intFromPtr(boxed.asObj().getOwn("peer").?.asObj());
 
     const first = ctx.compactGarbage();
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, first.status);
-    try std.testing.expectEqual(before.live_cells, first.moved_cells);
-    try std.testing.expectEqual(before.live_bytes, first.moved_bytes);
+    try std.testing.expect(first.moved_cells > 0 and first.moved_cells < before.live_cells);
+    try std.testing.expect(first.moved_bytes > 0 and first.moved_bytes < before.live_bytes);
     try std.testing.expect(old_root_address != @intFromPtr(boxed.asObj()));
     const first_root = boxed.asObj();
     const first_peer = first_root.getOwn("peer").?.asObj();
@@ -14223,14 +14308,18 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     try std.testing.expectEqual(private_live_weak_address, @intFromPtr(ctx.private_weak_roots.items[0]));
     try std.testing.expectEqual(@as(?*anyopaque, first_peer), private_live_weak.target.load(.acquire));
     const after_first = ctx.gc.?.accounting();
+    const backing_after_first = ctx.gc_cell_backing.?.stats();
     try std.testing.expectEqual(before.live_cells, after_first.live_cells);
     try std.testing.expectEqual(before.live_bytes, after_first.live_bytes);
+    try std.testing.expect(backing_after_first.chunks < backing_before.chunks);
+    try std.testing.expect(backing_after_first.capacity_bytes < backing_before.capacity_bytes);
+    try std.testing.expectEqual(backing_before.live_slots, backing_after_first.live_slots);
 
     const first_root_address = @intFromPtr(first_root);
     const second = ctx.compactGarbage();
-    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
-    try std.testing.expectEqual(before.live_cells, second.moved_cells);
-    try std.testing.expect(first_root_address != @intFromPtr(boxed.asObj()));
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, second.status);
+    try std.testing.expectEqual(@as(usize, 0), second.moved_cells);
+    try std.testing.expectEqual(first_root_address, @intFromPtr(boxed.asObj()));
     const second_root = boxed.asObj();
     const second_peer = second_root.getOwn("peer").?.asObj();
     try std.testing.expectEqual(second_peer, second_root.getOwn("alias").?.asObj());
@@ -14238,14 +14327,17 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     try std.testing.expectEqual(second_root, private_strong.value.asObj());
     try std.testing.expectEqual(@as(?*anyopaque, second_peer), private_live_weak.target.load(.acquire));
     const after_second = ctx.gc.?.accounting();
+    const backing_after_second = ctx.gc_cell_backing.?.stats();
     try std.testing.expectEqual(before.live_cells, after_second.live_cells);
     try std.testing.expectEqual(before.live_bytes, after_second.live_bytes);
+    try std.testing.expectEqual(backing_after_first, backing_after_second);
     try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
     try std.testing.expect(gc_mod.relocationVerificationsForTesting() > verifications_before);
 
-    // These values were all created before either move. Running them only now
+    // These values were all created before the move. Running them only now
     // proves the Function/Environment/Promise/Generator/String representatives,
-    // not just the directly inspected Object cycle, survived both compactions.
+    // not just the directly inspected Object cycle, survived compaction and the
+    // subsequent dense no-op pass.
     _ = try ctx.evaluate(
         "compactPromise.then(value => { globalThis.compactPromiseValue = value; })",
     );
@@ -14270,6 +14362,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     // the first plan-capacity reservation while leaving cell backing available.
     ctx.collectGarbage();
     const before_failure = ctx.gc.?.accounting();
+    const backing_before_failure = ctx.gc_cell_backing.?.stats();
     const verifications_before_failure = gc_mod.relocationVerificationsForTesting();
     const root_before_failure = boxed.asObj();
     var no_scratch: [1]u8 = undefined;
@@ -14283,6 +14376,7 @@ test "GC compaction is fail-closed and rewrites a protected cyclic graph repeate
     const after_failure = ctx.gc.?.accounting();
     try std.testing.expectEqual(before_failure.live_cells, after_failure.live_cells);
     try std.testing.expectEqual(before_failure.live_bytes, after_failure.live_bytes);
+    try std.testing.expectEqual(backing_before_failure, ctx.gc_cell_backing.?.stats());
     try std.testing.expectEqual(verifications_before_failure, gc_mod.relocationVerificationsForTesting());
     try std.testing.expectEqual(
         boxed.asObj().getOwn("peer").?.asObj(),

@@ -157,6 +157,13 @@ paired native-slot audit/relocate callbacks, so their atomic JS root mirrors
 and the slots WebAssembly actually executes are rewritten together without
 adding plain native reads to concurrent marking.
 
+[#352](https://github.com/zig-utils/zig-js/issues/352) makes movement useful for
+fragmented heaps. After sweep, each size class freezes its minimal dense leading
+chunk count; cells already inside that prefix stay pinned while tail cells move
+only into lower free or never-issued prefix slots. Relocation never grows cell
+backing, explicit compaction returns every newly empty tail chunk, and a second
+pass over the packed heap reports `no_candidates` without mutation.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

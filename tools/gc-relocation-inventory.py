@@ -40,6 +40,10 @@ def main() -> int:
     require(document.get("issue") == 333, "issue owner drift")
     require(document.get("status") == "explicit_stop_the_world", "relocation status drift")
     require(document.get("movement_enabled") is True, "explicit compaction must remain inventoried")
+    require(
+        document.get("placement_policy") == "dense_size_class_prefix_tail_evacuation",
+        "compaction placement policy drift",
+    )
 
     identity = document.get("identity", {})
     require(identity.get("forwarding_state") == "executable", "forwarding contract status drift")
@@ -81,6 +85,8 @@ def main() -> int:
     ):
         require(hook in gc_source, f"collector binding hook missing: {hook}")
     require("pub fn compactGarbage" in context_source, "checked Context compaction entrypoint missing")
+    require("shouldRelocateCell" in context_source, "dense-prefix candidate policy missing")
+    require("trimCompactedTailChunks" in context_source, "compacted-tail release policy missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
     require("self.enable_jit" in context_source, "JIT fail-closed gate missing")
     require("self.gc_scan_native_stack" in context_source, "conservative-stack fail-closed gate missing")

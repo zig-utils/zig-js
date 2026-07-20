@@ -2814,10 +2814,13 @@ pub const Binding = struct {
     }
 
     /// `Context.compactGarbage` opens this token only after rejecting every
-    /// unrewritable native/JIT/conservative boundary. All managed CellKinds use
-    /// the exact dispatch below once that realm-wide proof holds.
-    pub fn canRelocate(self: *Binding, _: *anyopaque, _: Kind) bool {
-        return self.context.gc_relocation_active.load(.acquire);
+    /// unrewritable native/JIT/conservative boundary. The backing then selects
+    /// only tail cells that can move into a smaller dense chunk prefix; pinned
+    /// prefix cells still use the exact rewrite dispatch below for their edges.
+    pub fn canRelocate(self: *Binding, cell: *anyopaque, _: Kind) bool {
+        if (!self.context.gc_relocation_active.load(.acquire)) return false;
+        const backing = self.context.gc_cell_backing orelse return false;
+        return backing.shouldRelocateCell(cell);
     }
 
     pub fn relocateRoots(self: *Binding, v: anytype) void {

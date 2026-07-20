@@ -3,6 +3,7 @@
   "issue": 333,
   "status": "explicit_stop_the_world",
   "movement_enabled": true,
+  "placement_policy": "dense_size_class_prefix_tail_evacuation",
   "identity": {
     "rule": "JavaScript identity is the logical allocation, never its current payload address.",
     "forwarding_state": "executable",
