@@ -137,6 +137,7 @@ const PrivateCachedBytecodeKind = enum(u8) {
 /// deref, exactly mirroring the consumer's allocator-vtable lifetime.
 const PrivateCachedBytecode = struct {
     magic: u64 = private_cached_bytecode_magic,
+    allocator: std.mem.Allocator,
     bytes: []u8,
 };
 
@@ -4030,8 +4031,8 @@ fn privateCachedBytecodeWriteU64(out: []u8, value_: u64) void {
     for (0..8) |index| out[index] = @truncate(value_ >> @intCast(index * 8));
 }
 
-fn privateCachedBytecodeSyntaxValid(kind: PrivateCachedBytecodeKind, source: []const u8) bool {
-    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+fn privateCachedBytecodeSyntaxValid(allocator: std.mem.Allocator, kind: PrivateCachedBytecodeKind, source: []const u8) bool {
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const owned = arena.dupe(u8, source) catch return false;
@@ -4046,6 +4047,7 @@ fn privateCachedBytecodeSyntaxValid(kind: PrivateCachedBytecodeKind, source: []c
 }
 
 fn privateGenerateCachedBytecode(
+    allocator: std.mem.Allocator,
     kind: PrivateCachedBytecodeKind,
     source_provider_url: ?*const PrivateBunString,
     input_code: ?[*]const u8,
@@ -4063,20 +4065,20 @@ fn privateGenerateCachedBytecode(
 
     if (input_source_code_size > 0 and input_code == null) return false;
     const source = if (input_source_code_size == 0) &.{} else input_code.?[0..input_source_code_size];
-    if (!privateCachedBytecodeSyntaxValid(kind, source)) return false;
+    if (!privateCachedBytecodeSyntaxValid(allocator, kind, source)) return false;
 
     const url_units = if (source_provider_url) |url|
-        privateStringBuilderBunStringUnits(private_string_allocator, url) catch return false
+        privateStringBuilderBunStringUnits(allocator, url) catch return false
     else
-        private_string_allocator.alloc(u16, 0) catch return false;
-    defer private_string_allocator.free(url_units);
+        allocator.alloc(u16, 0) catch return false;
+    defer allocator.free(url_units);
     const url_byte_len = std.math.mul(usize, url_units.len, @sizeOf(u16)) catch return false;
     const payload_len = std.math.add(usize, url_byte_len, source.len) catch return false;
     const artifact_len = std.math.add(usize, private_cached_bytecode_header_len, payload_len) catch return false;
 
-    const owner = private_string_allocator.create(PrivateCachedBytecode) catch return false;
-    const artifact = private_string_allocator.alloc(u8, artifact_len) catch {
-        private_string_allocator.destroy(owner);
+    const owner = allocator.create(PrivateCachedBytecode) catch return false;
+    const artifact = allocator.alloc(u8, artifact_len) catch {
+        allocator.destroy(owner);
         return false;
     };
 
@@ -4100,7 +4102,7 @@ fn privateGenerateCachedBytecode(
     hash.final(&digest);
     @memcpy(artifact[28..private_cached_bytecode_header_len], &digest);
 
-    owner.* = .{ .bytes = artifact };
+    owner.* = .{ .allocator = allocator, .bytes = artifact };
     output.* = artifact.ptr;
     output_size.* = artifact.len;
     owner_output.* = owner;
@@ -4115,7 +4117,7 @@ export fn generateCachedModuleByteCodeFromSourceCode(
     output_bytecode_size: ?*usize,
     cached_bytecode: ?*?*PrivateCachedBytecode,
 ) callconv(.c) bool {
-    return privateGenerateCachedBytecode(.module, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
+    return privateGenerateCachedBytecode(private_string_allocator, .module, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
 }
 
 export fn generateCachedCommonJSProgramByteCodeFromSourceCode(
@@ -4126,15 +4128,16 @@ export fn generateCachedCommonJSProgramByteCodeFromSourceCode(
     output_bytecode_size: ?*usize,
     cached_bytecode: ?*?*PrivateCachedBytecode,
 ) callconv(.c) bool {
-    return privateGenerateCachedBytecode(.common_js, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
+    return privateGenerateCachedBytecode(private_string_allocator, .common_js, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
 }
 
 export fn CachedBytecode__deref(cached_bytecode: ?*PrivateCachedBytecode) callconv(.c) void {
     const owner = cached_bytecode orelse return;
     if (owner.magic != private_cached_bytecode_magic) return;
     owner.magic = 0;
-    private_string_allocator.free(owner.bytes);
-    private_string_allocator.destroy(owner);
+    const allocator = owner.allocator;
+    allocator.free(owner.bytes);
+    allocator.destroy(owner);
 }
 
 /// Yarr operates on UTF-16 code units. Encoding every unit independently as
@@ -27877,4 +27880,64 @@ test "private cached bytecode rejects syntax without publishing partial outputs"
     try std.testing.expectEqual(@as(?[*]u8, null), bytes);
     try std.testing.expectEqual(@as(usize, 0), len);
     try std.testing.expectEqual(@as(?*PrivateCachedBytecode, null), owner);
+}
+
+test "private cached bytecode allocation failures are rollback safe" {
+    const source = "const cached = 42;";
+    var reached_success = false;
+    for (0..32) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var bytes: ?[*]u8 = null;
+        var len: usize = 0;
+        var owner: ?*PrivateCachedBytecode = null;
+        const ok = privateGenerateCachedBytecode(
+            failing.allocator(),
+            .module,
+            null,
+            source.ptr,
+            source.len,
+            &bytes,
+            &len,
+            &owner,
+        );
+        if (ok) {
+            CachedBytecode__deref(owner);
+            reached_success = true;
+        } else {
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(@as(?[*]u8, null), bytes);
+            try std.testing.expectEqual(@as(usize, 0), len);
+            try std.testing.expectEqual(@as(?*PrivateCachedBytecode, null), owner);
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        if (ok) break;
+    }
+    try std.testing.expect(reached_success);
+}
+
+test "private cached bytecode generation is concurrent and isolated" {
+    const Task = struct {
+        failed: bool = false,
+
+        fn run(task: *@This()) void {
+            const source = "export const cached = 42;";
+            for (0..25) |_| {
+                var bytes: ?[*]u8 = null;
+                var len: usize = 0;
+                var owner: ?*PrivateCachedBytecode = null;
+                if (!generateCachedModuleByteCodeFromSourceCode(null, source.ptr, source.len, &bytes, &len, &owner) or
+                    len <= source.len or bytes.?[10] != @intFromEnum(PrivateCachedBytecodeKind.module))
+                {
+                    task.failed = true;
+                    return;
+                }
+                CachedBytecode__deref(owner);
+            }
+        }
+    };
+    var tasks: [4]Task = @splat(.{});
+    var threads: [tasks.len]std.Thread = undefined;
+    for (&threads, &tasks) |*thread, *task| thread.* = try std.Thread.spawn(.{}, Task.run, .{task});
+    for (&threads) |*thread| thread.join();
+    for (tasks) |task| try std.testing.expect(!task.failed);
 }
