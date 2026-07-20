@@ -201,10 +201,9 @@ trees without advancing `wg-3.0` or changing the accepted score; CI refreshes
 the observation as informational output and tolerates network/report failures.
 
 The latest complete ReleaseFast audit, followed by exact reruns of every
-corrected slice, reaches **63,950 / 63,964 applicable commands** with 1,235
+corrected slice, reaches **63,958 / 63,964 applicable commands** with 1,235
 text-format commands classified N/A and no harness runner errors. The remaining
-14 semantic assertions are isolated to four files under
-[#388](https://github.com/zig-utils/zig-js/issues/388) and
+6 semantic assertions are isolated to two files under
 [#389](https://github.com/zig-utils/zig-js/issues/389); Core 3 therefore remains
 outside the accepted aggregate.
 
@@ -300,6 +299,12 @@ constant-expression whitelist, and instantiation evaluates it without exposing
 the runtime operand stack. `data.wast` passes 65/65 and `global.wast` passes all
 121 applicable commands (3 text-only N/A); all extended-expression cases in
 `elem.wast` pass, leaving only #389's five unrelated subtyping assertions.
+
+Core 3 reference refinement accepts a nullable branch label when
+`br_on_non_null` carries its non-null subtype, while preserving the nullable
+fallthrough and unreachable-polymorphic rules. Explicit typed `select` results
+also validate concrete heap indices even when operands are unreachable. The
+exact `br_on_non_null.wast` and `ref.wast` files pass 12/12 and 13/13.
 
 Reproduce those execution and root-safety witnesses with:
 
