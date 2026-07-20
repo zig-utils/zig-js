@@ -1196,6 +1196,40 @@ pub const GcCellBacking = struct {
         return allocated;
     }
 
+    /// Reserve an unpublished compaction destination without charging it as
+    /// fresh mutator allocation. The normal live-slot accounting intentionally
+    /// includes the reservation until rollback or old→new commit.
+    pub fn reserveRelocationCell(self: *GcCellBacking, len: usize) ?*anyopaque {
+        const idx = bucketIndex(len, .@"16") orelse return null;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        if (self.bulk_teardown) return null;
+        const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx) orelse return null;
+        return @ptrCast(ptr);
+    }
+
+    pub fn releaseRelocationReservation(self: *GcCellBacking, allocation: *anyopaque, len: usize) void {
+        const idx = bucketIndex(len, .@"16") orelse unreachable;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        const ptr: [*]u8 = @ptrCast(allocation);
+        std.debug.assert(self.freeOwnedSlotLocked(idx, ptr));
+    }
+
+    /// Atomically replace one published owned slot with its already-reserved
+    /// destination. No live-count or capacity delta escapes the critical
+    /// section: the destination reservation contributed +1 and returning the
+    /// old slot contributes -1.
+    pub fn commitRelocationCell(self: *GcCellBacking, old: *anyopaque, new: *anyopaque, len: usize) void {
+        const idx = bucketIndex(len, .@"16") orelse unreachable;
+        self.acquireBucket(idx);
+        defer self.unlockBucket(idx);
+        self.setCellPublishedLocked(idx, old, false);
+        self.setCellPublishedLocked(idx, new, true);
+        const old_ptr: [*]u8 = @ptrCast(old);
+        std.debug.assert(self.freeOwnedSlotLocked(idx, old_ptr));
+    }
+
     fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *GcCellBacking = @ptrCast(@alignCast(ctx));
         if (bucketIndex(len, alignment)) |idx| {
@@ -1628,6 +1662,41 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
     }
+}
+
+test "GC cell backing relocation reservation rolls back and commits exact publication accounting" {
+    var backing = GcCellBacking{
+        .inner = std.testing.allocator,
+        .parallel = true,
+        .parallel_cell_tracking_enabled = .init(true),
+    };
+    defer backing.deinit();
+    const len = 200;
+    const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+
+    const old = backing.reserveRelocationCell(len).?;
+    backing.publishCellAllocation(old, len);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
+    try std.testing.expect(backing.ownsCellAllocation(old));
+    try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
+
+    const rolled_back = backing.reserveRelocationCell(len).?;
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_live_counts[idx].items[0]);
+    backing.releaseRelocationReservation(rolled_back, len);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
+    try std.testing.expect(!backing.ownsCellAllocation(rolled_back));
+
+    const destination = backing.reserveRelocationCell(len).?;
+    try std.testing.expectEqual(@as(usize, 2), backing.bucket_live_counts[idx].items[0]);
+    backing.commitRelocationCell(old, destination, len);
+    try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
+    try std.testing.expect(!backing.ownsCellAllocation(old));
+    try std.testing.expect(backing.ownsCellAllocation(destination));
+    try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
+
+    backing.unpublishCellAllocation(destination, len);
+    backing.releaseRelocationReservation(destination, len);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[0]);
 }
 
 test "GC cell backing enumerates only published slots in global address order" {

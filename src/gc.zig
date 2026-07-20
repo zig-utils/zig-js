@@ -867,6 +867,21 @@ pub const Binding = struct {
         return backing.allocateCellBatch(total, out);
     }
 
+    pub fn reserveRelocationCell(self: *Binding, total: usize) ?*anyopaque {
+        const backing = self.context.gc_cell_backing orelse return null;
+        return backing.reserveRelocationCell(total);
+    }
+
+    pub fn releaseRelocationReservation(self: *Binding, allocation: *anyopaque, total: usize) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.releaseRelocationReservation(allocation, total);
+    }
+
+    pub fn commitRelocationCell(self: *Binding, old: *anyopaque, new: *anyopaque, total: usize) void {
+        const backing = self.context.gc_cell_backing orelse unreachable;
+        backing.commitRelocationCell(old, new, total);
+    }
+
     /// Optional zig-gc sweep hook. Dead cells are already finalized and
     /// unlinked; return a bounded same-size run under one backing lock.
     pub fn freeCellStorageBatch(self: *Binding, total: usize, allocations: []*anyopaque) void {

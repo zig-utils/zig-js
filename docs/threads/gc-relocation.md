@@ -45,6 +45,16 @@ raw native/JIT pointers safe. The ordered follow-ups are stop-the-world
 failure-atomic movement (#334), complete root/edge rewriting (#335),
 concurrent/native/JIT barriers (#336), and terminal evidence (#337).
 
+The generic collector mechanism is now supplied by
+[`zig-gc@e6ea569`](https://github.com/zig-utils/zig-gc/commit/e6ea569). It
+reserves the complete old-to-new plan before mutation, rolls every destination
+back on OOM, rewrites moved and pinned cells, and commits live storage without
+running finalizers. zig-js's owned `GcCellBacking` provides a matching
+unpublished reserve/release/commit trio: relocation does not inflate mutator
+allocation pressure, publication swaps under one size-class lock, and live-slot
+accounting stays unchanged. Production movement remains off until #334/#335
+finish the engine cell policy and complete root/edge rewrite implementation.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
