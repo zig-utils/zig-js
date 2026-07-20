@@ -589,6 +589,7 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
             // earlier cycle; never ask the heap about that stale pointer again.
             if (!record.ready and !heap.isLive(record.target)) {
                 record.ready = true;
+                record.target = null;
                 cleanup_ready = true;
             }
             // A dead unregister token can never match a future unregister; drop it.
@@ -596,6 +597,128 @@ pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
         }
     }
     return cleanup_ready;
+}
+
+/// Run after weak clearing/pruning and sweep, before old live payloads are
+/// released. Every remaining weak key/target/token is live; ready finalization
+/// targets are null so a swept address is never offered to the forwarding map.
+pub fn relocateObjectWeakState(o: *Object, v: anytype) void {
+    const cold = o.coldState() orelse return;
+    if (cold.hasRare(.weak_ref))
+        gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.weak_ref.target);
+    if (o.is_weak and (o.is_map or o.is_set)) {
+        // The pointer-keyed lookup table is only a cache; clear its old-address
+        // keys. Linear lookup remains correct and later mutations repopulate it.
+        cold.weak_index.clearRetainingCapacity();
+        for (cold.weak_entries.items) |*entry| {
+            gc_relocation.rewriteOptionalSlot(v, anyopaque, &entry.key);
+            gc_relocation.rewriteValueSlot(v, &entry.value);
+        }
+    }
+    if (!o.behavior.is_finalization_registry) return;
+    gc_relocation.rewriteValueSlot(v, &cold.finalization_callback);
+    if (cold.finalization_records) |records| for (records.items) |*record| {
+        if (record.ready) {
+            // A ready record's target was swept before relocation.
+            record.target = null;
+        } else {
+            gc_relocation.rewriteOptionalSlot(v, anyopaque, &record.target);
+        }
+        gc_relocation.rewriteValueSlot(v, &record.held);
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &record.token);
+    };
+}
+
+test "weak and finalization relocation never resolves dead targets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var old_objects: [10]Object = undefined;
+    var new_objects: [10]Object = undefined;
+
+    var weak_ref = Object{ .behavior = .{ .is_weak_ref = true } };
+    try weak_ref.setWeakRefTarget(allocator, &old_objects[0]);
+    var weak_map = Object{ .is_weak = true, .is_map = true };
+    try weak_map.weakEntrySet(
+        allocator,
+        @ptrCast(&old_objects[1]),
+        Value.obj(&old_objects[2]),
+    );
+    try std.testing.expect(weak_map.coldState().?.weak_index.count() > 0);
+
+    var registry = Object{ .behavior = .{ .is_finalization_registry = true } };
+    try registry.finRecordAppend(allocator, .{
+        .target = @ptrCast(&old_objects[3]),
+        .held = Value.obj(&old_objects[4]),
+        .token = @ptrCast(&old_objects[5]),
+    });
+    try registry.finRecordAppend(allocator, .{
+        .target = @ptrCast(&old_objects[6]),
+        .held = Value.obj(&old_objects[7]),
+        .token = @ptrCast(&old_objects[8]),
+    });
+    registry.coldState().?.finalization_callback = Value.obj(&old_objects[9]);
+
+    const Liveness = struct {
+        dead_target: *Object,
+        dead_token: *Object,
+
+        pub fn isLive(self: *const @This(), cell: ?*anyopaque) bool {
+            const pointer = cell orelse return false;
+            return pointer != @as(*anyopaque, @ptrCast(self.dead_target)) and
+                pointer != @as(*anyopaque, @ptrCast(self.dead_token));
+        }
+    };
+    const liveness = Liveness{
+        .dead_target = &old_objects[6],
+        .dead_token = &old_objects[8],
+    };
+    try std.testing.expect(pruneDeadWeakEntries(&registry, &liveness));
+    const records = registry.coldState().?.finalization_records.?;
+    try std.testing.expect(!records.items[0].ready);
+    try std.testing.expect(records.items[1].ready);
+    try std.testing.expectEqual(@as(?*anyopaque, null), records.items[1].target);
+    try std.testing.expectEqual(@as(?*anyopaque, null), records.items[1].token);
+
+    const Plan = struct {
+        old_objects: *[10]Object,
+        new_objects: *[10]Object,
+        forbidden: *Object,
+        resolved_forbidden: bool = false,
+
+        pub fn resolve(self: *@This(), old: *anyopaque) *anyopaque {
+            if (old == @as(*anyopaque, @ptrCast(self.forbidden))) {
+                self.resolved_forbidden = true;
+                return @ptrCast(&self.new_objects[6]);
+            }
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    var plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .forbidden = &old_objects[6],
+    };
+    relocateObjectWeakState(&weak_ref, &plan);
+    relocateObjectWeakState(&weak_map, &plan);
+    relocateObjectWeakState(&registry, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], weak_ref.weakRefTarget().?);
+    const weak_entry = weak_map.coldState().?.weak_entries.items[0];
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[1])), weak_entry.key.?);
+    try std.testing.expectEqual(&new_objects[2], weak_entry.value.asObj());
+    try std.testing.expectEqual(@as(usize, 0), weak_map.coldState().?.weak_index.count());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[3])), records.items[0].target.?);
+    try std.testing.expectEqual(&new_objects[4], records.items[0].held.asObj());
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_objects[5])), records.items[0].token.?);
+    try std.testing.expectEqual(@as(?*anyopaque, null), records.items[1].target);
+    try std.testing.expectEqual(&new_objects[7], records.items[1].held.asObj());
+    try std.testing.expectEqual(@as(?*anyopaque, null), records.items[1].token);
+    try std.testing.expectEqual(&new_objects[9], registry.finalizationCallback().asObj());
+    try std.testing.expect(!plan.resolved_forbidden);
 }
 
 pub fn traceEnv(e: *Environment, v: anytype) void {

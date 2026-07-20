@@ -103,6 +103,13 @@ constructor/proxy links, callable side cells, arguments-map Environment, and
 TypedArray/DataView buffer owners. Marker snapshots are never mutated, and
 native ArrayBuffer/arena metadata remains address-stable.
 
+Internal weak ordering is covered by
+[#346](https://github.com/zig-utils/zig-js/issues/346): dead finalization targets
+are nulled before sweep can leave a stale address, then surviving WeakRef,
+weak-collection, ephemeron, callback/held, and unregister-token slots rewrite.
+The pointer-keyed weak lookup cache is cleared because its old-address hashes
+are invalid; linear lookup remains correct and later mutations repopulate it.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
