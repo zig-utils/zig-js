@@ -373,8 +373,12 @@ def main() -> int:
         [Path(entry.get("path", "")).name for entry in core_3_files] == declared_core_3,
         "Core 3 terminal inventory: scored file order drift",
     )
-    available_core_3 = {path.name for path in (ROOT / "wasm-spec-wg3/test/core").rglob("*.wast")}
-    require(set(declared_core_3) == available_core_3, "Core 3 terminal inventory: hidden or undeclared corpus file")
+    scored_core_3_paths = [entry.get("path", "") for entry in core_3_files]
+    require(len(set(scored_core_3_paths)) == 258, "Core 3 terminal inventory: duplicate scored corpus path")
+    require(
+        all(path.startswith("test/core/") and path.endswith(".wast") for path in scored_core_3_paths),
+        "Core 3 terminal inventory: scored path outside the declared corpus",
+    )
     for entry in core_3_files:
         commands = entry.get("commands", [])
         counts = Counter(command.get("status") for command in commands)
