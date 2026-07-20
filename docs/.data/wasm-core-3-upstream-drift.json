@@ -1,0 +1,106 @@
+{
+  "accepted": {
+    "commit": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+    "corpus_files": 258,
+    "tag": "wg-3.0"
+  },
+  "accepted_score_changed": false,
+  "core_test_diff": {
+    "added_files": 0,
+    "changed_files": 21,
+    "entries": [
+      {
+        "path": "test/core/binary-leb128.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/bulk-memory/memory_init.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/bulk-memory/table_init.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/exceptions/tag.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/exceptions/try_table.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array_copy.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array_fill.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array_init_data.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array_init_elem.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/array_new_elem.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/struct.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/gc/type-subtyping.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/loop.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/memory64/bulk64.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/memory64/memory_init64.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/memory64/table_init64.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/relaxed-simd/i8x16_relaxed_swizzle.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/relaxed-simd/relaxed_madd_nmadd.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/return_call_indirect.wast",
+        "status": "M"
+      },
+      {
+        "path": "test/core/simd/simd_lane.wast",
+        "status": "M"
+      }
+    ],
+    "removed_files": 0
+  },
+  "kind": "webassembly_core_3_upstream_drift",
+  "schema_version": 1,
+  "upstream": {
+    "commit": "d7b37e4170d8315f2f1283aed4e8076591a9a333",
+    "corpus_files": 258,
+    "ref": "origin/main"
+  }
+}

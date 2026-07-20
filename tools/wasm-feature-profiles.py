@@ -210,6 +210,11 @@ def main() -> int:
         type=Path,
         default=ROOT / ".github/workflows/ci.yml",
     )
+    parser.add_argument(
+        "--core-3-drift-report",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-core-3-upstream-drift.json",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -230,6 +235,7 @@ def main() -> int:
         "--profile memory64",
         "--profile gc",
         "test/core/relaxed-simd/",
+        "tools/wasm-core3-drift.py",
     )
     require(
         all(token in ci_source for token in required_ci_tokens),
@@ -315,6 +321,18 @@ def main() -> int:
         for name, subopcode in zip(relaxed_names, relaxed_subopcodes)
     }
     require(runtime_relaxed_simd == inventoried_relaxed_simd, "relaxed SIMD inventory/runtime opcode drift")
+
+    core_3_drift = json.loads(args.core_3_drift_report.read_text())
+    require(core_3_drift.get("schema_version") == 1, "Core 3 drift report: unsupported schema version")
+    require(core_3_drift.get("kind") == "webassembly_core_3_upstream_drift", "Core 3 drift report: invalid kind")
+    require(core_3_drift.get("accepted", {}).get("tag") == "wg-3.0", "Core 3 drift report: accepted tag drift")
+    require(core_3_drift.get("accepted", {}).get("commit") == relaxed_feature["commit"], "Core 3 drift report: accepted commit drift")
+    require(core_3_drift.get("accepted", {}).get("corpus_files") == 258, "Core 3 drift report: accepted corpus drift")
+    require(SHA.fullmatch(core_3_drift.get("upstream", {}).get("commit", "")) is not None, "Core 3 drift report: invalid upstream commit")
+    require(core_3_drift.get("accepted_score_changed") is False, "Core 3 drift report must not alter accepted score")
+    drift_entries = core_3_drift.get("core_test_diff", {}).get("entries", [])
+    require(core_3_drift.get("core_test_diff", {}).get("changed_files") == len(drift_entries), "Core 3 drift report: changed-file count drift")
+    require(all(entry.get("path", "").startswith("test/core/") for entry in drift_entries), "Core 3 drift report: path outside Core corpus")
 
     threads_feature = next(feature for feature in features if feature["id"] == "threads")
     atomic_inventory = json.loads(args.atomic_inventory.read_text())

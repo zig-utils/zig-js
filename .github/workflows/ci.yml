@@ -363,6 +363,13 @@ jobs:
             --output "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz"
           echo "4e2898f7ca3bd0536218ed9b7b36ff7b86954c57ae0e6272fde69728cbe01088  $RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz" | sha256sum --check
           tar --extract --gzip --file "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux.tar.gz" --directory "$RUNNER_TEMP"
+      - name: Report non-blocking Core 3 upstream drift
+        if: matrix.wasm_memory64_gc == true
+        continue-on-error: true
+        working-directory: zig-js
+        run: |
+          git -C wasm-spec-wg3 fetch --depth=1 origin main
+          python3 tools/wasm-core3-drift.py --upstream-ref FETCH_HEAD --output "$RUNNER_TEMP/wasm-core-3-upstream-drift.json"
       - name: ${{ matrix.name }}
         working-directory: zig-js
         run: ${{ matrix.cmd }}

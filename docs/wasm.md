@@ -195,6 +195,11 @@ profile stays outside the published green aggregate until the remaining exact
 inventory is implemented and audited under
 [#366](https://github.com/zig-utils/zig-js/issues/366).
 
+Current upstream `main` is observed separately by the non-blocking
+[drift report](.data/wasm-core-3-upstream-drift.json). It compares Core test
+trees without advancing `wg-3.0` or changing the accepted score; CI refreshes
+the observation as informational output and tolerates network/report failures.
+
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 14 selected proposal/spec revisions by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
