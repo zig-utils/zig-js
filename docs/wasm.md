@@ -228,8 +228,8 @@ opcodes, binary field order, stack-polymorphic signatures, validation rules,
 and the two proposal corpus files with all 119 top-level commands. Behind the
 `tail_calls` switch, `return_call` and `return_call_indirect` decode with exact
 byte-offset failures and validate direct/indirect indices, `funcref` tables,
-operand types, unreachable-polymorphic stacks, and exact current-function
-result compatibility. Direct and indirect dispatch replaces the active frame
+operand types, unreachable-polymorphic stacks, and current-function result
+subtyping. Direct and indirect dispatch replaces the active frame
 while retaining its caller-facing stack, local, and label bases; tail calls to
 host imports retire that same frame after exact argument/result checks. Focused
 coverage proves a 200,000-call mutual recursion stays below 64 slots of capacity,
@@ -239,6 +239,15 @@ keeps both successful and trapping host-import boundaries precisely rooted.
 The public JavaScript API also performs 33 repeated deep invocations to cover
 per-call arena/frame teardown. Normal and ThreadSanitizer focused runs pass with
 zero failures, leaks, or reported races.
+
+Core 3 typed function calls extend that foundation with `call_ref` (`0x14`)
+and `return_call_ref` (`0x15`). Validation consumes a nullable concrete
+function reference after the call arguments, applies nominal reference
+subtyping, and checks covariant tail results. Execution traps null references,
+checks canonical function types across instances, and preserves typed function
+slots through module-aware initialization and GC root checkpoints. The exact
+`wg-3.0` corpus passes all 35 `call_ref.wast` and all 51
+`return_call_ref.wast` commands, including million-step tail recursion.
 
 Reproduce those execution and root-safety witnesses with:
 

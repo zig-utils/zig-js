@@ -1166,10 +1166,22 @@ const FuncValidator = struct {
     }
 
     fn tailCallFunc(self: *FuncValidator, ft: types.FuncType) Error!void {
-        if (!std.mem.eql(types.ValType, ft.results, self.frames[0].results))
-            return self.fail("type mismatch");
+        const expected = self.frames[0].results;
+        if (ft.results.len != expected.len) return self.fail("type mismatch");
+        for (ft.results, expected) |actual, result|
+            if (!valTypeMatches(self.mod, actual, result)) return self.fail("type mismatch");
         try self.popTypes(ft.params);
         self.setUnreachable();
+    }
+
+    fn callRefType(self: *FuncValidator, type_index: u32) Error!types.FuncType {
+        const ft = self.mod.funcTypeAt(type_index) orelse
+            return if (type_index >= self.mod.types.len) self.fail("unknown type") else self.fail("type mismatch");
+        try self.popExpect(types.ValType.fromRef(.{
+            .nullable = true,
+            .heap = types.HeapType.concrete(type_index),
+        }));
+        return ft;
     }
 
     // Signature helpers.
@@ -1793,6 +1805,8 @@ const FuncValidator = struct {
                         return self.fail("unknown function");
                     try self.tailCallFunc(self.mod.funcType(idx));
                 },
+                .call_ref => try self.callFunc(try self.callRefType(instr.imm.idx)),
+                .return_call_ref => try self.tailCallFunc(try self.callRefType(instr.imm.idx)),
                 .call_indirect => {
                     const tidx = instr.imm.call_indirect.type_index;
                     const tableidx = instr.imm.call_indirect.table_index;

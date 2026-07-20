@@ -914,7 +914,7 @@ pub fn destroyTable(gpa: Allocator, tab: *TableInst) void {
 /// Grow by `delta` elements (null-initialized). Returns the previous
 /// element count, or -1 on failure.
 pub fn tableGrow(tab: *TableInst, delta: u32) i32 {
-    return tableGrowWith(tab, delta, nullTableSlot(tab.type));
+    return tableGrowWith(tab, delta, zeroSlotIn(if (tab.owner_instance) |owner| owner.module else null, tab.type));
 }
 
 /// Grow and initialize new slots with `fill` while holding the table lock, so
@@ -981,7 +981,10 @@ fn nullTableSlot(elem_type: types.ValType) ValueSlot {
 }
 
 fn funcFromSlot(slot: ValueSlot) ?*FuncInst {
-    return if (slot.funcref) |func| @ptrCast(@alignCast(func)) else null;
+    return switch (slot) {
+        .funcref => |func| if (func) |value| @ptrCast(@alignCast(value)) else null,
+        else => null,
+    };
 }
 
 pub fn createGlobal(gpa: Allocator, gt: types.GlobalType, value: u64) error{OutOfMemory}!*GlobalInst {
@@ -1086,14 +1089,7 @@ fn evalConstExpr(inst: *Instance, ce: types.ConstExpr) error{OutOfMemory}!ValueS
         .f64 => |bits| .{ .numeric = bits },
         .v128 => |bits| .{ .vector = bits },
         .global => |k| inst.globals[k].value,
-        .ref_null => |ref_type| blk: {
-            const reference = ref_type.refType().?;
-            break :blk switch (reference.heap) {
-                .func, .nofunc => .{ .funcref = null },
-                .extern_, .noextern => .{ .externref = js_value.Value.nul() },
-                else => .{ .gcref = null },
-            };
-        },
+        .ref_null => |ref_type| zeroSlotIn(inst.module, ref_type),
         .ref_func => |funcidx| .{ .funcref = @ptrCast(inst.funcs[funcidx]) },
         .extended => |extended| try evalExtendedConstExpr(inst, extended.instrs),
     };
@@ -1110,7 +1106,7 @@ fn evalExtendedConstExpr(inst: *Instance, instrs: []const types.Instr) error{Out
         .f64_const => try stack.append(inst.gpa, .{ .numeric = instr.imm.f64 }),
         .simd => try stack.append(inst.gpa, .{ .vector = instr.imm.simd_v128.bits }),
         .global_get => try stack.append(inst.gpa, inst.globals[instr.imm.idx].value),
-        .ref_null => try stack.append(inst.gpa, zeroSlot(instr.imm.type)),
+        .ref_null => try stack.append(inst.gpa, zeroSlotIn(inst.module, instr.imm.type)),
         .ref_func => try stack.append(inst.gpa, .{ .funcref = @ptrCast(inst.funcs[instr.imm.idx]) }),
         .gc => {
             const op = switch (instr.imm) {
@@ -1151,7 +1147,7 @@ fn evalExtendedConstExpr(inst: *Instance, instrs: []const types.Instr) error{Out
                             fields[index] = normalizePackedField(structure.fields[index].storage, stack.pop().?);
                         }
                     } else for (structure.fields, fields) |field, *slot|
-                        slot.* = zeroSlot(field.storage.unpacked());
+                        slot.* = zeroSlotIn(inst.module, field.storage.unpacked());
                     const object = try createGcAggregate(inst, type_index, .struct_, fields);
                     try stack.append(inst.gpa, .{ .gcref = gcObjectRef(object) });
                 },
@@ -1178,7 +1174,7 @@ fn evalExtendedConstExpr(inst: *Instance, instrs: []const types.Instr) error{Out
                         const initial = if (op == .array_new)
                             normalizePackedField(array_type.field.storage, stack.pop().?)
                         else
-                            zeroSlot(array_type.field.storage.unpacked());
+                            zeroSlotIn(inst.module, array_type.field.storage.unpacked());
                         @memset(fields, initial);
                     }
                     const object = try createGcAggregate(inst, immediate.first, .array, fields);
@@ -1323,6 +1319,7 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (mod.tables, 0..) |tt, j| {
         const t = try createTableAddressed(gpa, tt.address, tt.elem, tt.limits.min, tt.limits.max);
         t.owner_instance = inst;
+        @memset(t.elems, zeroSlotIn(mod, tt.elem));
         inst.tables[mod.imported_tables + j] = t;
         created_tables += 1;
         if (tt.init) |init| @memset(t.elems, try evalConstExpr(inst, init));
@@ -1477,7 +1474,7 @@ pub fn callFuncInst(f: *const FuncInst, args: []const u64, results: []u64, diag:
     for (slot_results, 0..) |slot, i| results[i] = slot.numericBits();
 }
 
-fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
+fn slotMatchesType(mod: ?*const types.Module, slot: ValueSlot, val_type: types.ValType) bool {
     if (val_type.refType()) |reference| {
         if (!reference.nullable and slotIsNull(slot)) return false;
         return switch (reference.heap) {
@@ -1487,7 +1484,13 @@ fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
             .eq => slot == .i31ref or slot == .gcref,
             .any => slot == .i31ref or slot == .gcref or slot == .hostref,
             .struct_, .array, .none => slot == .gcref,
-            _ => reference.heap.concreteIndex() != null and slot == .gcref,
+            _ => if (reference.heap.concreteIndex()) |type_index|
+                if (mod != null and mod.?.funcTypeAt(type_index) != null)
+                    slot == .funcref
+                else
+                    slot == .gcref
+            else
+                false,
         };
     }
     return switch (val_type) {
@@ -1498,10 +1501,15 @@ fn slotMatchesType(slot: ValueSlot, val_type: types.ValType) bool {
     };
 }
 
-fn argumentsMatchSignature(signature: types.FuncType, args: []const ValueSlot, result_len: usize) bool {
+fn argumentsMatchSignature(
+    mod: ?*const types.Module,
+    signature: types.FuncType,
+    args: []const ValueSlot,
+    result_len: usize,
+) bool {
     if (args.len != signature.params.len or result_len != signature.results.len) return false;
     for (args, signature.params) |slot, val_type|
-        if (!slotMatchesType(slot, val_type)) return false;
+        if (!slotMatchesType(mod, slot, val_type)) return false;
     return true;
 }
 
@@ -1519,7 +1527,8 @@ fn callNumericImport(alloc: Allocator, imp: *const ImportFunc, args: []const Val
 pub fn callFuncInstSlots(f: *const FuncInst, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
     switch (f.*) {
         .imported => |*imp| {
-            if (!argumentsMatchSignature(imp.type, args, results.len)) {
+            const signature_mod = imp.nominal_type_owner orelse if (imp.owner_instance) |owner| owner.module else null;
+            if (!argumentsMatchSignature(signature_mod, imp.type, args, results.len)) {
                 diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
                 return error.Trap;
             }
@@ -1528,7 +1537,7 @@ pub fn callFuncInstSlots(f: *const FuncInst, args: []const ValueSlot, results: [
             else
                 try callNumericImport(std.heap.page_allocator, imp, args, results, diag);
             for (results, imp.type.results) |slot, val_type| {
-                if (!slotMatchesType(slot, val_type)) {
+                if (!slotMatchesType(signature_mod, slot, val_type)) {
                     diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
                     return error.Trap;
                 }
@@ -1541,7 +1550,7 @@ pub fn callFuncInstSlots(f: *const FuncInst, args: []const ValueSlot, results: [
 fn runDefinedSlots(f: *const FuncInst, args: []const ValueSlot, results: []ValueSlot, diag: *types.Diagnostic) ExecError!void {
     const def = f.defined;
     const fty = def.inst.module.funcTypeAt(def.inst.module.funcs[def.idx]).?;
-    if (!argumentsMatchSignature(fty, args, results.len)) {
+    if (!argumentsMatchSignature(def.inst.module, fty, args, results.len)) {
         diag.set(types.Diagnostic.no_offset, "function signature mismatch", .{});
         return error.Trap;
     }
@@ -1817,7 +1826,7 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
                     fields[index] = normalizePackedField(structure.fields[index].storage, popSlot(s));
                 }
             } else for (structure.fields, fields) |field, *slot|
-                slot.* = zeroSlot(field.storage.unpacked());
+                slot.* = zeroSlotIn(inst.module, field.storage.unpacked());
             const object = try createGcAggregate(inst, type_index, .struct_, fields);
             try pushSlot(s, .{ .gcref = gcObjectRef(object) });
         },
@@ -1865,7 +1874,7 @@ fn executeGc(s: *State, inst: *Instance, instr: types.Instr) ExecError!void {
                 const initial = if (op == .array_new)
                     normalizePackedField(array_type.field.storage, popSlot(s))
                 else
-                    zeroSlot(array_type.field.storage.unpacked());
+                    zeroSlotIn(inst.module, array_type.field.storage.unpacked());
                 @memset(fields, initial);
             }
             const object = try createGcAggregate(inst, immediate.first, .array, fields);
@@ -3065,11 +3074,17 @@ fn popF64(s: *State) f64 {
     return @bitCast(pop(s));
 }
 
-fn zeroSlot(val_type: types.ValType) WasmSlot {
+fn zeroSlotIn(mod: ?*const types.Module, val_type: types.ValType) WasmSlot {
     if (val_type.refType()) |reference| return switch (reference.heap) {
         .func, .nofunc => .{ .funcref = null },
         .extern_, .noextern => .{ .externref = js_value.Value.nul() },
-        else => .{ .gcref = null },
+        else => if (reference.heap.concreteIndex()) |type_index|
+            if (mod != null and mod.?.funcTypeAt(type_index) != null)
+                .{ .funcref = null }
+            else
+                .{ .gcref = null }
+        else
+            .{ .gcref = null },
     };
     return switch (val_type) {
         .i32, .i64, .f32, .f64 => .{ .numeric = 0 },
@@ -3105,7 +3120,7 @@ fn pushFrame(s: *State, f: *const FuncInst) ExecError!void {
     const locals_base = s.locals.items.len;
     try s.locals.appendSlice(s.alloc, s.stack.items[arg_start..]);
     s.stack.items.len = arg_start;
-    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlot(local_type));
+    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlotIn(mod, local_type));
     try s.frames.append(s.alloc, .{
         .func = f,
         .pc = 0,
@@ -3386,11 +3401,12 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
     switch (f.*) {
         .defined => try pushFrame(s, f),
         .imported => |*imp| {
+            const signature_mod = imp.nominal_type_owner orelse if (imp.owner_instance) |owner| owner.module else null;
             const arg_start = s.stack.items.len - imp.type.params.len;
             const args = s.stack.items[arg_start..];
             publishEscapingSlots(args);
             const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
-            if (!argumentsMatchSignature(imp.type, args, res.len))
+            if (!argumentsMatchSignature(signature_mod, imp.type, args, res.len))
                 return s.trap("function signature mismatch");
             if (imp.call_slots) |call_slots|
                 call_slots(imp.ctx, args, res, s.diag) catch |err| switch (err) {
@@ -3403,7 +3419,7 @@ fn callFunc(s: *State, f: *const FuncInst) ExecError!void {
                     else => return err,
                 };
             for (res, imp.type.results) |slot, val_type|
-                if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
+                if (!slotMatchesType(signature_mod, slot, val_type)) return s.trap("function signature mismatch");
             s.stack.items.len = arg_start;
             for (res) |slot| try pushSlot(s, slot);
         },
@@ -3426,7 +3442,7 @@ fn replaceFrame(s: *State, f: *const FuncInst) ExecError!void {
 
     s.locals.items.len = current.locals_base;
     try s.locals.appendSlice(s.alloc, args);
-    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlot(local_type));
+    for (body.locals) |local_type| try s.locals.append(s.alloc, zeroSlotIn(mod, local_type));
     s.stack.items.len = current.stack_base;
     s.labels.items.len = current.label_base;
     pruneHandlers(s);
@@ -3452,6 +3468,7 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
     switch (f.*) {
         .defined => try replaceFrame(s, f),
         .imported => |*imp| {
+            const signature_mod = imp.nominal_type_owner orelse if (imp.owner_instance) |owner| owner.module else null;
             // Publish current locals and the argument stack before a host call,
             // which may re-enter the runtime or request collection.
             checkpoint(s);
@@ -3460,7 +3477,7 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
             const args = s.stack.items[arg_start..];
             publishEscapingSlots(args);
             const res = try s.alloc.alloc(ValueSlot, imp.type.results.len);
-            if (!argumentsMatchSignature(imp.type, args, res.len))
+            if (!argumentsMatchSignature(signature_mod, imp.type, args, res.len))
                 return s.trap("function signature mismatch");
             const caller_inst = current.func.defined.inst;
             if (imp.call_slots) |call_slots|
@@ -3488,7 +3505,7 @@ fn tailCallFunc(s: *State, f: *const FuncInst) ExecError!void {
                     else => return err,
                 };
             for (res, imp.type.results) |slot, val_type|
-                if (!slotMatchesType(slot, val_type)) return s.trap("function signature mismatch");
+                if (!slotMatchesType(signature_mod, slot, val_type)) return s.trap("function signature mismatch");
 
             s.stack.items.len = current.stack_base;
             for (res) |slot| try pushSlot(s, slot);
@@ -3538,6 +3555,29 @@ fn indirectCallable(
             types.funcTypeEql(expected, imported.type),
     };
     if (!compatible) return s.trap("indirect call type mismatch");
+    return callable;
+}
+
+fn referenceCallable(s: *State, inst: *const Instance, expected_type_index: u32) ExecError!*const FuncInst {
+    const callable = funcFromSlot(popSlot(s)) orelse return s.trap("null function reference");
+    const compatible = switch (callable.*) {
+        .defined => |defined| validate.heapTypeMatchesAcross(
+            defined.inst.module,
+            .concrete(defined.inst.module.funcTypeIndex(defined.inst.module.imported_funcs + defined.idx)),
+            inst.module,
+            .concrete(expected_type_index),
+        ),
+        .imported => |imported| if (imported.nominal_type_owner) |actual_mod|
+            validate.heapTypeMatchesAcross(
+                actual_mod,
+                .concrete(imported.nominal_type_index orelse return s.trap("function reference type mismatch")),
+                inst.module,
+                .concrete(expected_type_index),
+            )
+        else
+            types.funcTypeEql(inst.module.funcTypeAt(expected_type_index).?, imported.type),
+    };
+    if (!compatible) return s.trap("function reference type mismatch");
     return callable;
 }
 
@@ -3936,6 +3976,8 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
             .throw_ref => try throwReference(s, inst),
             .call => try callFunc(s, inst.funcs[instr.imm.idx]),
             .return_call => try tailCallFunc(s, inst.funcs[instr.imm.idx]),
+            .call_ref => try callFunc(s, try referenceCallable(s, inst, instr.imm.idx)),
+            .return_call_ref => try tailCallFunc(s, try referenceCallable(s, inst, instr.imm.idx)),
             .call_indirect => {
                 const immediate = instr.imm.call_indirect;
                 const callable = try indirectCallable(s, inst, mod.funcTypeAt(immediate.type_index).?, immediate);
@@ -3980,7 +4022,7 @@ fn execute(s: *State, entry: *const FuncInst, args: []const ValueSlot, results: 
                 table.elems[@intCast(index)] = slot;
                 if (table.host) |host| host.sync(host.ctx, table, @intCast(index), 1);
             },
-            .ref_null => try pushSlot(s, zeroSlot(instr.imm.type)),
+            .ref_null => try pushSlot(s, zeroSlotIn(mod, instr.imm.type)),
             .ref_is_null => {
                 const slot = popSlot(s);
                 try pushBool(s, slotIsNull(slot));
@@ -6617,6 +6659,61 @@ test "wasm.exec tail calls keep deep mutual recursion storage bounded" {
     try std.testing.expectEqual(@as(usize, 0), state.frames.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.labels.items.len);
     try std.testing.expectEqual(@as(usize, 0), state.locals.items.len);
+}
+
+test "wasm.exec typed function references preserve cross-instance canonical types" {
+    const features: types.Features = .{
+        .reference_types = true,
+        .typed_function_references = true,
+    };
+    const source_bytes = comptime (hdr ++ typesSec(&.{ft(I32, I32)}) ++
+        funcSec(&.{0}) ++ codeSec(&.{"\x20\x00"}));
+    const target_types = comptime sec(
+        1,
+        "\x02" ++
+            "\x60\x01\x7F\x01\x7F" ++ // type 0: (i32) -> i32
+            "\x60\x02\x7F\x64\x00\x01\x7F", // type 1: (i32, ref null 0) -> i32
+    );
+    const target_bytes = comptime (hdr ++ target_types ++ funcSec(&.{1}) ++
+        codeSec(&.{"\x20\x00\x20\x01\x14\x00"}));
+
+    var diag: types.Diagnostic = .{};
+    const source_mod = try buildModuleWithFeatures(source_bytes, features, &diag);
+    defer decode.destroyModule(talloc, source_mod);
+    const source = try instantiate(talloc, source_mod, .{}, &diag);
+    defer destroyInstance(talloc, source);
+    const target_mod = try buildModuleWithFeatures(target_bytes, features, &diag);
+    defer decode.destroyModule(talloc, target_mod);
+    const target = try instantiate(talloc, target_mod, .{}, &diag);
+    defer destroyInstance(talloc, target);
+
+    var results: [1]ValueSlot = undefined;
+    try invokeSlots(
+        target,
+        0,
+        &.{ .{ .numeric = 42 }, .{ .funcref = @ptrCast(source.funcs[0]) } },
+        &results,
+        &diag,
+    );
+    try std.testing.expectEqual(@as(u64, 42), results[0].numericBits());
+
+    const wrong_source_bytes = comptime (hdr ++ typesSec(&.{ft("", I32)}) ++
+        funcSec(&.{0}) ++ codeSec(&.{"\x41\x07"}));
+    const wrong_mod = try buildModuleWithFeatures(wrong_source_bytes, features, &diag);
+    defer decode.destroyModule(talloc, wrong_mod);
+    const wrong = try instantiate(talloc, wrong_mod, .{}, &diag);
+    defer destroyInstance(talloc, wrong);
+    try std.testing.expectError(
+        error.Trap,
+        invokeSlots(
+            target,
+            0,
+            &.{ .{ .numeric = 42 }, .{ .funcref = @ptrCast(wrong.funcs[0]) } },
+            &results,
+            &diag,
+        ),
+    );
+    try std.testing.expectEqualStrings("function reference type mismatch", diag.message());
 }
 
 test "wasm.exec exception tag imports preserve identity and reject mismatched types" {

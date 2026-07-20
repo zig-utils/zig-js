@@ -943,7 +943,6 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             }
             if (b == 0xFE) return r.unsupportedFeature(instr_off, .threads);
             if (b >= 0xC0 and b <= 0xC4) return r.unsupportedFeature(instr_off, .sign_extension_ops);
-            if (b == 0x14 or b == 0x15) return r.unsupportedFeature(instr_off, .typed_function_references);
             return r.failAt(instr_off, "invalid opcode 0x{x:0>2}", .{b});
         };
         if (b >= 0xC0 and b <= 0xC4 and !r.features.sign_extension_ops)
@@ -952,13 +951,14 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             return r.unsupportedFeature(instr_off, .fixed_width_simd);
         if (op == .atomic and !r.features.threads)
             return r.unsupportedFeature(instr_off, .threads);
-        if ((op == .return_call or op == .return_call_indirect) and !r.features.tail_calls)
+        if ((op == .return_call or op == .return_call_indirect or op == .return_call_ref) and !r.features.tail_calls)
             return r.unsupportedFeature(instr_off, .tail_calls);
         if ((op == .throw or op == .throw_ref or op == .try_table) and !r.features.exception_handling)
             return r.unsupportedFeature(instr_off, .exception_handling);
         if ((op == .gc or op == .ref_eq or op == .ref_as_non_null) and !r.features.gc)
             return r.unsupportedFeature(instr_off, .gc);
-        if ((op == .br_on_null or op == .br_on_non_null) and !r.features.typed_function_references)
+        if ((op == .br_on_null or op == .br_on_non_null or op == .call_ref or op == .return_call_ref) and
+            !r.features.typed_function_references)
             return r.unsupportedFeature(instr_off, .typed_function_references);
         if ((op == .typed_select or op == .table_get or op == .table_set or
             op == .ref_null or op == .ref_is_null or op == .ref_func or
@@ -1054,6 +1054,8 @@ fn decodeInstrs(r: *Reader, a: Allocator) DecodeError!struct { instrs: []types.I
             .br_on_non_null,
             .call,
             .return_call,
+            .call_ref,
+            .return_call_ref,
             .throw,
             .local_get,
             .local_set,
@@ -1908,6 +1910,39 @@ test "wasm.decode tail-call opcodes feature gate and immediates" {
         19,
         "unexpected end",
     );
+}
+
+test "wasm.decode typed function call opcodes feature gates and immediates" {
+    const call_bytes = comptime (hdr ++ func_sec_1 ++ testCode("\x14\x83\x01\x0B"));
+    try expectMalformed(call_bytes, 17, "WebAssembly feature typed-function-references is disabled");
+
+    var diag: types.Diagnostic = .{};
+    const call_mod = try decodeWithFeatures(
+        std.testing.allocator,
+        call_bytes,
+        .{ .reference_types = true, .typed_function_references = true },
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, call_mod);
+    try std.testing.expectEqual(types.Op.call_ref, call_mod.code[0].instrs[0].op);
+    try std.testing.expectEqual(@as(u32, 131), call_mod.code[0].instrs[0].imm.idx);
+
+    const tail_bytes = comptime (hdr ++ func_sec_1 ++ testCode("\x15\x84\x01\x0B"));
+    try expectMalformedWithFeatures(
+        tail_bytes,
+        .{ .reference_types = true, .typed_function_references = true },
+        17,
+        "WebAssembly feature tail-calls is disabled",
+    );
+    const tail_mod = try decodeWithFeatures(
+        std.testing.allocator,
+        tail_bytes,
+        .{ .tail_calls = true, .reference_types = true, .typed_function_references = true },
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, tail_mod);
+    try std.testing.expectEqual(types.Op.return_call_ref, tail_mod.code[0].instrs[0].op);
+    try std.testing.expectEqual(@as(u32, 132), tail_mod.code[0].instrs[0].imm.idx);
 }
 
 test "wasm.decode modern exception instruction immediates and catches" {

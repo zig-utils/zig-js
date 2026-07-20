@@ -698,6 +698,8 @@ pub const Op = enum(u16) {
     call_indirect = 0x11,
     return_call = 0x12,
     return_call_indirect = 0x13,
+    call_ref = 0x14,
+    return_call_ref = 0x15,
     try_table = 0x1F,
     // Parametric
     drop = 0x1A,
