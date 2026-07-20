@@ -41196,7 +41196,14 @@ pub fn urlParse(arena: std.mem.Allocator, input_raw: []const u8, base: ?UrlParts
         } else if (special) {
             var hb: std.ArrayListUnmanaged(u8) = .empty;
             for (host_str) |c| try hb.append(arena, std.ascii.toLower(c));
-            p.host = hb.items;
+            const domain = hb.items;
+            // A special-scheme host that ends in a number is an IPv4 address:
+            // parse (decimal/hex/octal parts) and re-serialize as dotted decimal,
+            // or fail the whole URL (`999.999.999.999` → TypeError). A bracketed
+            // IPv6 literal never reaches here as "ends in a number".
+            if (urlHostEndsInNumber(domain)) {
+                p.host = (try urlParseIPv4(arena, domain)) orelse return null;
+            } else p.host = domain;
         } else {
             var hb: std.ArrayListUnmanaged(u8) = .empty;
             try urlPercentEncode(arena, &hb, host_str, .c0);
@@ -41214,7 +41221,6 @@ pub fn urlParse(arena: std.mem.Allocator, input_raw: []const u8, base: ?UrlParts
     return p;
 }
 fn urlNormalizePort(arena: std.mem.Allocator, scheme: []const u8, s: []const u8) EvalError!?[]const u8 {
-    _ = arena;
     if (s.len == 0) return "";
     var n: u32 = 0;
     for (s) |c| {
@@ -41227,7 +41233,88 @@ fn urlNormalizePort(arena: std.mem.Allocator, scheme: []const u8, s: []const u8)
         const ns = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return null;
         if (std.mem.eql(u8, ns, dp)) return ""; // default port omitted
     }
-    return s;
+    // Serialize the parsed number, not the raw text: WHATWG stores the port as
+    // an integer, so leading zeros are dropped (`:007` → `7`).
+    return try std.fmt.allocPrint(arena, "{d}", .{n});
+}
+
+/// WHATWG IPv4-number parser: decode one dotted part as decimal, `0x…` hex, or
+/// `0…` octal. Returns null on an invalid digit or >32-bit overflow. An empty
+/// part (or a bare `0x`) is 0.
+fn urlParseIPv4Number(part: []const u8) ?u32 {
+    if (part.len == 0) return null; // an originally-empty part fails (`1..2` is invalid)
+    var s = part;
+    var radix: u8 = 10;
+    if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) {
+        radix = 16;
+        s = s[2..];
+    } else if (s.len >= 2 and s[0] == '0') {
+        radix = 8;
+        s = s[1..];
+    }
+    if (s.len == 0) return 0;
+    var n: u64 = 0;
+    for (s) |c| {
+        const d = std.fmt.charToDigit(c, radix) catch return null;
+        n = n * radix + d;
+        if (n > 0xFFFFFFFF) return null;
+    }
+    return @intCast(n);
+}
+
+/// WHATWG "ends in a number" check: does the host's last dot-part (a single
+/// trailing empty part removed) parse as an IPv4 number? Gates IPv4 parsing so a
+/// real domain (`example.com`) is never mis-parsed.
+fn urlHostEndsInNumber(host: []const u8) bool {
+    var last = host;
+    if (std.mem.lastIndexOfScalar(u8, host, '.')) |dot| {
+        if (dot == host.len - 1) {
+            const head = host[0..dot];
+            last = if (std.mem.lastIndexOfScalar(u8, head, '.')) |d2| head[d2 + 1 ..] else head;
+        } else last = host[dot + 1 ..];
+    }
+    if (last.len == 0) return false;
+    var all_digits = true;
+    for (last) |c| if (!std.ascii.isDigit(c)) {
+        all_digits = false;
+        break;
+    };
+    if (all_digits) return true;
+    return urlParseIPv4Number(last) != null and last.len >= 2 and last[0] == '0' and (last[1] == 'x' or last[1] == 'X');
+}
+
+/// WHATWG IPv4 parser + serializer: parse `host` (already known to end in a
+/// number) into a 32-bit address and return it as canonical dotted decimal, or
+/// null on failure (too many parts, a bad number, or an out-of-range value).
+fn urlParseIPv4(arena: std.mem.Allocator, host: []const u8) EvalError!?[]const u8 {
+    var parts: [5][]const u8 = undefined;
+    var np: usize = 0;
+    var it = std.mem.splitScalar(u8, host, '.');
+    while (it.next()) |part| {
+        if (np == 5) return null; // >5 tokens can never be a valid IPv4
+        parts[np] = part;
+        np += 1;
+    }
+    if (np > 1 and parts[np - 1].len == 0) np -= 1; // drop a single trailing empty
+    if (np == 0 or np > 4) return null;
+    var numbers: [4]u32 = undefined;
+    for (parts[0..np], 0..) |part, i| numbers[i] = urlParseIPv4Number(part) orelse return null;
+    // Every part but the last must fit in a byte.
+    var i: usize = 0;
+    while (i + 1 < np) : (i += 1) if (numbers[i] > 255) return null;
+    // The last part absorbs the remaining bytes: it must be < 256^(5 − np).
+    const last = numbers[np - 1];
+    const max_shift: u6 = @intCast(8 * (5 - np));
+    if (max_shift < 32 and last >= (@as(u64, 1) << max_shift)) return null;
+    var ipv4: u32 = last;
+    i = 0;
+    while (i + 1 < np) : (i += 1) {
+        const shift: u5 = @intCast(8 * (3 - i));
+        ipv4 +%= numbers[i] << shift;
+    }
+    return try std.fmt.allocPrint(arena, "{d}.{d}.{d}.{d}", .{
+        (ipv4 >> 24) & 0xff, (ipv4 >> 16) & 0xff, (ipv4 >> 8) & 0xff, ipv4 & 0xff,
+    });
 }
 fn urlParsePathQueryFrag(arena: std.mem.Allocator, p: *UrlParts, s_in: []const u8, special: bool, has_host: bool) EvalError!void {
     var s = s_in;
