@@ -319,6 +319,95 @@ pub fn traceEnv(e: *Environment, v: anytype) void {
     if (e.with_object) |o| v.mark(o);
 }
 
+/// Relocation is committed only while every mutator is stopped, so the
+/// arena/backing-owned hash tables and disposable list are stable and must not
+/// take `binding_lock` while their payload slots are rewritten.
+pub fn relocateEnv(e: *Environment, v: anytype) void {
+    var values = e.vars.valueIterator();
+    while (values.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
+    for (e.disposables.items) |*disposable| {
+        gc_relocation.rewriteValueSlot(v, &disposable.value);
+        gc_relocation.rewriteValueSlot(v, &disposable.method);
+    }
+    gc_relocation.rewriteOptionalValueSlot(v, &e.dispose_pending);
+    var aliases = e.aliases.valueIterator();
+    while (aliases.next()) |alias|
+        gc_relocation.rewriteRequiredSlot(v, Environment, &alias.env);
+    gc_relocation.rewriteOptionalSlot(v, Object, &e.object_proto_intrinsic);
+    gc_relocation.rewriteOptionalSlot(v, Environment, &e.parent);
+    gc_relocation.rewriteOptionalSlot(v, Object, &e.with_object);
+}
+
+test "Environment relocation rewrites every managed binding slot" {
+    var old_objects: [6]Object = undefined;
+    var new_objects: [6]Object = undefined;
+    var old_environments = [_]Environment{
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+    };
+    var new_environments = [_]Environment{
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+        .{ .arena = std.testing.allocator, .gc_managed = true },
+    };
+    var environment = Environment{
+        .arena = std.testing.allocator,
+        .gc_managed = true,
+        .dispose_pending = Value.obj(&old_objects[3]),
+        .object_proto_intrinsic = &old_objects[4],
+        .parent = &old_environments[0],
+        .with_object = &old_objects[5],
+    };
+    defer environment.vars.deinit(std.testing.allocator);
+    defer environment.disposables.deinit(std.testing.allocator);
+    defer environment.aliases.deinit(std.testing.allocator);
+    try environment.vars.put(std.testing.allocator, "binding", Value.obj(&old_objects[0]));
+    try environment.disposables.append(std.testing.allocator, .{
+        .value = Value.obj(&old_objects[1]),
+        .method = Value.obj(&old_objects[2]),
+        .is_async = true,
+    });
+    try environment.aliases.put(std.testing.allocator, "imported", .{
+        .env = &old_environments[1],
+        .name = "exported",
+    });
+
+    const Plan = struct {
+        old_objects: *[6]Object,
+        new_objects: *[6]Object,
+        old_environments: *[2]Environment,
+        new_environments: *[2]Environment,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            for (self.old_environments, 0..) |*candidate, index|
+                if (old == @as(*anyopaque, @ptrCast(candidate)))
+                    return @ptrCast(&self.new_environments[index]);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_environments = &old_environments,
+        .new_environments = &new_environments,
+    };
+    relocateEnv(&environment, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], environment.vars.get("binding").?.asObj());
+    try std.testing.expectEqual(&new_objects[1], environment.disposables.items[0].value.asObj());
+    try std.testing.expectEqual(&new_objects[2], environment.disposables.items[0].method.asObj());
+    try std.testing.expect(environment.disposables.items[0].is_async);
+    try std.testing.expectEqual(&new_objects[3], environment.dispose_pending.?.asObj());
+    try std.testing.expectEqual(&new_objects[4], environment.object_proto_intrinsic.?);
+    try std.testing.expectEqual(&new_environments[0], environment.parent.?);
+    const alias = environment.aliases.get("imported").?;
+    try std.testing.expectEqual(&new_environments[1], alias.env);
+    try std.testing.expectEqualStrings("exported", alias.name);
+    try std.testing.expectEqual(&new_objects[5], environment.with_object.?);
+}
+
 fn finalizeEnv(e: *Environment) void {
     const a = e.bindings_allocator orelse return;
     var vit = e.vars.keyIterator();

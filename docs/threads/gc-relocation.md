@@ -77,6 +77,12 @@ realm, `import.meta`, async-parent, and pending-request coverage; iterator
 helpers rewrite all six `Value` slots. Both remain world-stopped during the
 rewrite, matching their existing concurrent-mark finish deferral.
 
+[#341](https://github.com/zig-utils/zig-js/issues/341) completes Environment
+payload rewriting across binding values, disposal state, live module aliases,
+realm prototype, parent scope, and `with` object. Binding names, declaration
+sets, allocator/accounting fields, and arena-owned containers stay in place;
+the world-stopped rewrite deliberately takes no binding lock.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
