@@ -467,7 +467,7 @@ pub fn build(b: *std.Build) void {
     run_bun_private_fetch_headers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_fetch_headers_test_step = b.step(
         "test-bun-private-fetch-headers",
-        "Compile, link, and run Bun's private FetchHeaders core boundary",
+        "Compile, link, and run Bun's private FetchHeaders boundary",
     );
     bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_fixture.step);
 

@@ -595,6 +595,9 @@ const DOMFormDataForEachCallback = *const fn (?*anyopaque, *const ZigString, *an
 extern "c" fn DOMFormData__forEach(?*anyopaque, ?*anyopaque, DOMFormDataForEachCallback) void;
 const FetchHeaders = opaque {};
 const FetchHeadersStringPointer = extern struct { offset: u32, length: u32 };
+const FetchHeadersPicoSlice = extern struct { ptr: [*c]const u8, len: usize };
+const FetchHeadersPicoHeader = extern struct { name: FetchHeadersPicoSlice, value: FetchHeadersPicoSlice };
+const FetchHeadersPicoHeaders = extern struct { ptr: [*c]const FetchHeadersPicoHeader, len: usize };
 extern "c" fn WebCore__FetchHeaders__append(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
 extern "c" fn WebCore__FetchHeaders__cast_(EncodedValue, ?*anyopaque) ?*FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__clone(*FetchHeaders, JSContextRef) EncodedValue;
@@ -602,6 +605,7 @@ extern "c" fn WebCore__FetchHeaders__cloneThis(*FetchHeaders, JSContextRef) ?*Fe
 extern "c" fn WebCore__FetchHeaders__copyTo(*FetchHeaders, [*]FetchHeadersStringPointer, [*]FetchHeadersStringPointer, [*]u8) void;
 extern "c" fn WebCore__FetchHeaders__count(*FetchHeaders, *u32, *u32) void;
 extern "c" fn WebCore__FetchHeaders__createEmpty() *FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createFromPicoHeaders_(?*const anyopaque) *FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createFromJS(JSContextRef, EncodedValue) ?*FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createValue(JSContextRef, [*c]const FetchHeadersStringPointer, [*c]const FetchHeadersStringPointer, *const ZigString, u32) EncodedValue;
 extern "c" fn WebCore__FetchHeaders__createValueNotJS(JSContextRef, [*c]const FetchHeadersStringPointer, [*c]const FetchHeadersStringPointer, *const ZigString, u32) ?*FetchHeaders;
@@ -1601,6 +1605,22 @@ fn runFetchHeadersFixture(context: JSContextRef, vm: ?*anyopaque) void {
     const from_js = WebCore__FetchHeaders__createFromJS(context, evaluate(context, "[['A','1'],['a','2']]")) orelse
         fail("private FetchHeaders createFromJS failed");
     WebCore__FetchHeaders__deref(from_js);
+
+    const pico_rows = [_]FetchHeadersPicoHeader{
+        .{ .name = .{ .ptr = "Accept".ptr, .len = "Accept".len }, .value = .{ .ptr = "raw".ptr, .len = "raw".len } },
+        .{ .name = .{ .ptr = "accept".ptr, .len = "accept".len }, .value = .{ .ptr = "two".ptr, .len = "two".len } },
+        .{ .name = .{ .ptr = "Set-Cookie".ptr, .len = "Set-Cookie".len }, .value = .{ .ptr = "a=1".ptr, .len = "a=1".len } },
+        .{ .name = .{ .ptr = "set-cookie".ptr, .len = "set-cookie".len }, .value = .{ .ptr = "b=2".ptr, .len = "b=2".len } },
+    };
+    const pico_input = FetchHeadersPicoHeaders{ .ptr = &pico_rows, .len = pico_rows.len };
+    const pico_headers = WebCore__FetchHeaders__createFromPicoHeaders_(&pico_input);
+    output = .{ .tagged_ptr = 0, .len = 0 };
+    WebCore__FetchHeaders__get_(pico_headers, &accept, &output, context);
+    if (!zigStringUtf8Equals(output, "raw, two")) fail("private FetchHeaders Pico adapter mismatch");
+    WebCore__FetchHeaders__deref(pico_headers);
+    const empty_pico = WebCore__FetchHeaders__createFromPicoHeaders_(null);
+    if (!WebCore__FetchHeaders__isEmpty(empty_pico)) fail("private FetchHeaders null Pico input mismatch");
+    WebCore__FetchHeaders__deref(empty_pico);
 
     WebCore__FetchHeaders__remove(headers, &custom_name, context);
     if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("private FetchHeaders remove mismatch");
@@ -6821,5 +6841,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 384/384 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 385/385 symbols linked; runtime matrix passed\n", .{});
 }

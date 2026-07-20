@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (397 implemented, 74 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (398 implemented, 73 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 397 are implemented and 74 remain pending
+Of the private entries, 398 are implemented and 73 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -731,7 +731,7 @@ wrappers and round-trip byte-for-byte through `DOMFormData__forEach`; zig-js
 never dereferences them or invents an empty body. VM-scoped `cast_`, canonical
 `fromJS`, duplicate order/count, callback ZigString lifetimes, lone-surrogate
 replacement, plus/percent/invalid-UTF-8 parsing, JS-origin Blob-token
-roundtrips, and Blob omission are covered by both the 384-symbol Home fixture
+roundtrips, and Blob omission are covered by both the 385-symbol Home fixture
 and Bun's focused 10-symbol fixture.
 
 The one-symbol CommonStrings boundary (#378) maps all 13 pinned enum values to
@@ -739,13 +739,16 @@ their exact Bun strings. Each value has one stable encoded cell per VM across
 sibling realms, while independent VMs remain isolated; invalid enum bytes and
 null globals return empty without disturbing a pending exception.
 
-The 21-symbol FetchHeaders core boundary (#376) uses the same branded,
-ref-counted header record for JavaScript `Headers` and native handles. It owns
-name/value bytes independently of a realm, merges ordinary duplicates
-(`Cookie` uses `; `), preserves separate `Set-Cookie` rows, validates before
-mutation, caches one wrapper per VM, and exposes sorted `count`/`copyTo` rows
-with checked `u32` offsets. The four opaque Pico/uWS/H3 adapters remain
-separately tracked by #377.
+The 22-symbol implemented FetchHeaders boundary (#376, #380) uses the same
+branded, ref-counted header record for JavaScript `Headers` and native handles.
+Its 21 core symbols validate WebIDL mutations, merge ordinary duplicates
+(`Cookie` uses `; `), preserve separate `Set-Cookie` rows, cache one wrapper per
+VM, and expose checked sorted `count`/`copyTo` rows. The Pico adapter copies the
+pinned nested `{ptr,len}` layout without retaining foreign bytes: empty rows
+are skipped, known duplicates use `HTTPHeaderMap::add`, uncommon duplicates are
+last-value-wins, and parsed values are not WebIDL-trimmed. Null, misaligned, and
+invalid nullable spans return an empty native handle. The three opaque UWS/H3
+object adapters remain separately tracked by #381 behind a versioned C bridge.
 
 The URL native-record boundary (#308, first URL-cluster sub-slice) maps Bun's
 context-free `WTF::URL*` exactly: because `URL__fromString` carries no global
@@ -1033,7 +1036,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (389 implemented, 72 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (390 implemented, 71 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |

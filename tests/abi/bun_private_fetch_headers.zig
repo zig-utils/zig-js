@@ -18,6 +18,9 @@ const EncodedValue = enum(i64) {
 const ZigString = extern struct { tagged_ptr: usize = 0, len: usize = 0 };
 const StringPointer = extern struct { offset: u32, length: u32 };
 const FetchHeaders = opaque {};
+const PicoSlice = extern struct { ptr: [*c]const u8, len: usize };
+const PicoHTTPHeader = extern struct { name: PicoSlice, value: PicoSlice };
+const PicoHTTPHeaders = extern struct { ptr: [*c]const PicoHTTPHeader, len: usize };
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
@@ -36,6 +39,7 @@ extern "c" fn WebCore__FetchHeaders__cloneThis(*FetchHeaders, JSContextRef) ?*Fe
 extern "c" fn WebCore__FetchHeaders__copyTo(*FetchHeaders, [*]StringPointer, [*]StringPointer, [*]u8) void;
 extern "c" fn WebCore__FetchHeaders__count(*FetchHeaders, *u32, *u32) void;
 extern "c" fn WebCore__FetchHeaders__createEmpty() *FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createFromPicoHeaders_(?*const anyopaque) *FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createFromJS(JSContextRef, EncodedValue) ?*FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createValue(JSContextRef, [*c]const StringPointer, [*c]const StringPointer, *const ZigString, u32) EncodedValue;
 extern "c" fn WebCore__FetchHeaders__createValueNotJS(JSContextRef, [*c]const StringPointer, [*c]const StringPointer, *const ZigString, u32) ?*FetchHeaders;
@@ -66,6 +70,10 @@ fn evaluate(context: JSContextRef, source: [*:0]const u8) EncodedValue {
 
 fn zigString(bytes: []const u8) ZigString {
     return .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len };
+}
+
+fn picoSlice(bytes: []const u8) PicoSlice {
+    return .{ .ptr = if (bytes.len == 0) null else bytes.ptr, .len = bytes.len };
 }
 
 fn zigStringEquals(actual: ZigString, expected: []const u8) bool {
@@ -196,7 +204,50 @@ pub fn main() void {
     if (!JSGlobalObject__hasException(context)) fail("FetchHeaders invalid initializer did not throw");
     JSGlobalObject__clearException(context);
 
+    if (@sizeOf(PicoSlice) != 2 * @sizeOf(usize) or
+        @sizeOf(PicoHTTPHeader) != 4 * @sizeOf(usize) or
+        @sizeOf(PicoHTTPHeaders) != 2 * @sizeOf(usize) or
+        @offsetOf(PicoHTTPHeader, "value") != 2 * @sizeOf(usize) or
+        @offsetOf(PicoHTTPHeaders, "len") != @sizeOf(usize))
+        fail("PicoHeaders ABI layout mismatch");
+    var pico_last = [_]u8{ 'l', 'a', 's', 't' };
+    const pico_rows = [_]PicoHTTPHeader{
+        .{ .name = picoSlice("Accept"), .value = picoSlice(" one ") },
+        .{ .name = picoSlice("accept"), .value = picoSlice("two") },
+        .{ .name = picoSlice("X-Raw"), .value = picoSlice("first") },
+        .{ .name = picoSlice("x-raw"), .value = picoSlice(&pico_last) },
+        .{ .name = picoSlice("Cookie"), .value = picoSlice("a=1") },
+        .{ .name = picoSlice("cookie"), .value = picoSlice("b=2") },
+        .{ .name = picoSlice("Set-Cookie"), .value = picoSlice("a=1") },
+        .{ .name = picoSlice("set-cookie"), .value = picoSlice("b=2") },
+        .{ .name = picoSlice(""), .value = picoSlice("ignored") },
+        .{ .name = picoSlice("X-Empty"), .value = picoSlice("") },
+    };
+    const pico_input = PicoHTTPHeaders{ .ptr = &pico_rows, .len = pico_rows.len };
+    const pico_headers = WebCore__FetchHeaders__createFromPicoHeaders_(&pico_input);
+    defer WebCore__FetchHeaders__deref(pico_headers);
+    pico_last[0] = 'X';
+    expectGet(pico_headers, context, "accept", " one , two");
+    expectGet(pico_headers, context, "x-raw", "last");
+    expectGet(pico_headers, context, "cookie", "a=1; b=2");
+    expectGet(pico_headers, context, "set-cookie", "a=1, b=2");
+    var pico_count: u32 = 0;
+    var pico_length: u32 = 0;
+    WebCore__FetchHeaders__count(pico_headers, &pico_count, &pico_length);
+    if (pico_count != 5 or pico_length == 0) fail("PicoHeaders import row semantics mismatch");
+    const null_pico = WebCore__FetchHeaders__createFromPicoHeaders_(null);
+    defer WebCore__FetchHeaders__deref(null_pico);
+    if (!WebCore__FetchHeaders__isEmpty(null_pico)) fail("null PicoHeaders input was not rejected");
+    const invalid_pico = PicoHTTPHeaders{ .ptr = null, .len = 1 };
+    const rejected_pico = WebCore__FetchHeaders__createFromPicoHeaders_(&invalid_pico);
+    defer WebCore__FetchHeaders__deref(rejected_pico);
+    if (!WebCore__FetchHeaders__isEmpty(rejected_pico)) fail("invalid PicoHeaders span was not rejected");
+    var misaligned_storage: [@sizeOf(PicoHTTPHeaders) + 1]u8 align(@alignOf(PicoHTTPHeaders)) = undefined;
+    const misaligned_pico = WebCore__FetchHeaders__createFromPicoHeaders_(&misaligned_storage[1]);
+    defer WebCore__FetchHeaders__deref(misaligned_pico);
+    if (!WebCore__FetchHeaders__isEmpty(misaligned_pico)) fail("misaligned PicoHeaders record was not rejected");
+
     WebCore__FetchHeaders__remove(headers, &custom_name, context);
     if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("FetchHeaders remove mismatch");
-    std.debug.print("Bun private FetchHeaders: 21/21 core symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Bun private FetchHeaders: 22/22 symbols linked; runtime matrix passed\n", .{});
 }
