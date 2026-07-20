@@ -862,6 +862,20 @@ pub fn relocateObjectNativePrivateData(o: *Object, v: anytype) void {
     vm.relocateNativePrivateData(o, v);
 }
 
+/// Complete Object-cell rewrite in the same semantic layers as `traceObject`.
+/// Weak pruning runs before the collector enters relocation, so the weak pass
+/// only rewrites live targets (or already-cleared finalization targets).
+pub fn relocateObject(o: *Object, v: anytype) void {
+    relocateObjectProperties(o, v);
+    relocateObjectRareStrong(o, v);
+    relocateObjectWeakState(o, v);
+    relocateObjectNativePrivateData(o, v);
+    relocateObjectWasmState(o, v);
+}
+
+/// StringCell payloads contain bytes/ownership metadata but no managed edge.
+pub fn relocateString(_: *StringCell, _: anytype) void {}
+
 test "weak and finalization relocation never resolves dead targets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2711,6 +2725,30 @@ pub const Binding = struct {
         return true;
     }
 
+    /// The complete dispatch is executable, but candidate selection stays
+    /// fail-closed until #350's quiescent/native/JIT eligibility gate lands.
+    pub fn canRelocate(_: *Binding, _: *anyopaque, _: Kind) bool {
+        return false;
+    }
+
+    pub fn relocateRoots(self: *Binding, v: anytype) void {
+        relocateContextRoots(self.context, v);
+    }
+
+    pub fn relocateCell(_: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
+        switch (kind) {
+            .object => relocateObject(@ptrCast(@alignCast(cell)), v),
+            .string => relocateString(@ptrCast(@alignCast(cell)), v),
+            .environment => relocateEnv(@ptrCast(@alignCast(cell)), v),
+            .function => relocateFunction(@ptrCast(@alignCast(cell)), v),
+            .bound_fn => relocateBoundFn(@ptrCast(@alignCast(cell)), v),
+            .promise => relocatePromise(@ptrCast(@alignCast(cell)), v),
+            .generator => relocateGenerator(@ptrCast(@alignCast(cell)), v),
+            .iter_helper => relocateIterHelper(@ptrCast(@alignCast(cell)), v),
+            .module_ns => relocateModuleNs(@ptrCast(@alignCast(cell)), v),
+        }
+    }
+
     /// Persistent roots reachable from the realm plus registered active
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {
@@ -3003,6 +3041,23 @@ pub const Binding = struct {
 
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
+
+test "GC relocation binding dispatch is complete and policy-disabled" {
+    var object = Object{};
+    object.initInlineSlots();
+    var binding = Binding{ .context = undefined };
+    const IdentityPlan = struct {
+        pub fn resolve(_: *const @This(), old: *anyopaque) *anyopaque {
+            return old;
+        }
+    };
+    const plan = IdentityPlan{};
+
+    binding.relocateCell(&object, .object, &plan);
+    try std.testing.expect(!binding.canRelocate(&object, .object));
+    try std.testing.expect(@hasDecl(Binding, "relocateRoots"));
+    try std.testing.expect(@hasDecl(Binding, "relocateCell"));
+}
 
 test "Object fits the 128-byte GC slab and cold sidecar fits 256 bytes" {
     // The raw payload can differ across target ABIs even when the allocator

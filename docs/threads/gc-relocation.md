@@ -134,6 +134,12 @@ strong/weak handles, Thread results and join promises, GIL task jobs, property
 waiters, and the host exception slot. Queue, handle, and native-record addresses
 and ordering remain stable; only their managed payloads change.
 
+[#350](https://github.com/zig-utils/zig-js/issues/350) composes those helpers
+into the collector-facing root and exact nine-kind cell dispatch. Candidate
+selection still returns false for every cell: this makes the executable wiring
+compile-checked without permitting a move before the quiescent/native/JIT
+eligibility policy and end-to-end compaction witnesses land.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
