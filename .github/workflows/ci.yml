@@ -147,6 +147,7 @@ jobs:
               python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/return_call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-return-call-ref.json"
               python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/exceptions/ --inventory "$RUNNER_TEMP/wasm-core-3-exceptions.json"
               python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/ref_null.wast --inventory "$RUNNER_TEMP/wasm-core-3-ref-null.json"
+              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/relaxed-simd/ --inventory "$RUNNER_TEMP/wasm-core-3-relaxed-simd.json"
               python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter address64.wast --inventory "$RUNNER_TEMP/wasm-memory64-address.json"
               python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter table_copy_mixed.wast --inventory "$RUNNER_TEMP/wasm-memory64-table.json"
               python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter array_copy.wast --inventory "$RUNNER_TEMP/wasm-gc-array.json"
@@ -348,6 +349,7 @@ jobs:
         working-directory: zig-js
         run: |
           git submodule update --init --depth 1 wasm-spec-wg3
+          test "$(git -C wasm-spec-wg3 rev-parse HEAD)" = 9d36019973201a19f9c9ebb0f10828b2fe2374aa
           git init "$RUNNER_TEMP/wasm-memory64"
           git -C "$RUNNER_TEMP/wasm-memory64" remote add origin https://github.com/WebAssembly/memory64.git
           git -C "$RUNNER_TEMP/wasm-memory64" fetch --depth=1 origin 9003cd5e24e53b84cd9027ea3dd7ae57159a6db1
