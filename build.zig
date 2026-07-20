@@ -454,6 +454,23 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_dom_form_data_test_step.dependOn(&run_bun_private_dom_form_data_fixture.step);
 
+    const bun_private_fetch_headers_fixture = b.addExecutable(.{
+        .name = "bun-private-fetch-headers",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_fetch_headers.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bun_private_fetch_headers_fixture.root_module.linkLibrary(lib);
+    const run_bun_private_fetch_headers_fixture = b.addRunArtifact(bun_private_fetch_headers_fixture);
+    run_bun_private_fetch_headers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_fetch_headers_test_step = b.step(
+        "test-bun-private-fetch-headers",
+        "Compile, link, and run Bun's private FetchHeaders core boundary",
+    );
+    bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_fixture.step);
+
     const private_jstype_fixture = b.addExecutable(.{
         .name = "private-jstype-shims",
         .root_module = b.createModule(.{

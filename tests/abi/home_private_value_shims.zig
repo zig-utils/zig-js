@@ -593,6 +593,29 @@ extern "c" fn DOMFormData__toQueryString(?*anyopaque, ?*anyopaque, ?*const fn (?
 extern "c" fn WebCore__DOMFormData__toQueryString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
 const DOMFormDataForEachCallback = *const fn (?*anyopaque, *const ZigString, *anyopaque, ?*const ZigString, u8) callconv(.c) void;
 extern "c" fn DOMFormData__forEach(?*anyopaque, ?*anyopaque, DOMFormDataForEachCallback) void;
+const FetchHeaders = opaque {};
+const FetchHeadersStringPointer = extern struct { offset: u32, length: u32 };
+extern "c" fn WebCore__FetchHeaders__append(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
+extern "c" fn WebCore__FetchHeaders__cast_(EncodedValue, ?*anyopaque) ?*FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__clone(*FetchHeaders, JSContextRef) EncodedValue;
+extern "c" fn WebCore__FetchHeaders__cloneThis(*FetchHeaders, JSContextRef) ?*FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__copyTo(*FetchHeaders, [*]FetchHeadersStringPointer, [*]FetchHeadersStringPointer, [*]u8) void;
+extern "c" fn WebCore__FetchHeaders__count(*FetchHeaders, *u32, *u32) void;
+extern "c" fn WebCore__FetchHeaders__createEmpty() *FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createFromJS(JSContextRef, EncodedValue) ?*FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createValue(JSContextRef, [*c]const FetchHeadersStringPointer, [*c]const FetchHeadersStringPointer, *const ZigString, u32) EncodedValue;
+extern "c" fn WebCore__FetchHeaders__createValueNotJS(JSContextRef, [*c]const FetchHeadersStringPointer, [*c]const FetchHeadersStringPointer, *const ZigString, u32) ?*FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__deref(*FetchHeaders) void;
+extern "c" fn WebCore__FetchHeaders__fastGet_(*FetchHeaders, u8, *ZigString) void;
+extern "c" fn WebCore__FetchHeaders__fastHas_(*FetchHeaders, u8) bool;
+extern "c" fn WebCore__FetchHeaders__fastRemove_(*FetchHeaders, u8) void;
+extern "c" fn WebCore__FetchHeaders__get_(*FetchHeaders, *const ZigString, *ZigString, JSContextRef) void;
+extern "c" fn WebCore__FetchHeaders__has(*FetchHeaders, *const ZigString, JSContextRef) bool;
+extern "c" fn WebCore__FetchHeaders__isEmpty(*FetchHeaders) bool;
+extern "c" fn WebCore__FetchHeaders__put(*FetchHeaders, u8, *const ZigString, JSContextRef) void;
+extern "c" fn WebCore__FetchHeaders__put_(*FetchHeaders, *const ZigString, *const ZigString, JSContextRef) void;
+extern "c" fn WebCore__FetchHeaders__remove(*FetchHeaders, *const ZigString, JSContextRef) void;
+extern "c" fn WebCore__FetchHeaders__toJS(*FetchHeaders, JSContextRef) EncodedValue;
 extern "c" fn URL__fromString(?*const BunString) ?*anyopaque;
 extern "c" fn URL__deinit(?*anyopaque) void;
 extern "c" fn URL__href(?*anyopaque) BunString;
@@ -1503,6 +1526,84 @@ fn jsStringIterator(state: *JSStringIteratorState) JSStringIterator {
         .write8 = null,
         .write16 = null,
     };
+}
+
+fn runFetchHeadersFixture(context: JSContextRef, vm: ?*anyopaque) void {
+    const headers = WebCore__FetchHeaders__createEmpty();
+    defer WebCore__FetchHeaders__deref(headers);
+    if (!WebCore__FetchHeaders__isEmpty(headers)) fail("private FetchHeaders empty state mismatch");
+
+    var accept = ZigString{ .tagged_ptr = @intFromPtr("Accept".ptr), .len = "Accept".len };
+    var plain = ZigString{ .tagged_ptr = @intFromPtr(" text/plain ".ptr), .len = " text/plain ".len };
+    var json = ZigString{ .tagged_ptr = @intFromPtr("application/json".ptr), .len = "application/json".len };
+    WebCore__FetchHeaders__append(headers, &accept, &plain, context);
+    WebCore__FetchHeaders__append(headers, &accept, &json, context);
+    var output: ZigString = .{ .tagged_ptr = 0, .len = 0 };
+    WebCore__FetchHeaders__get_(headers, &accept, &output, context);
+    if (!zigStringUtf8Equals(output, "text/plain, application/json")) fail("private FetchHeaders append/get mismatch");
+
+    var content_type = ZigString{ .tagged_ptr = @intFromPtr("text/html".ptr), .len = "text/html".len };
+    WebCore__FetchHeaders__put(headers, 25, &content_type, context);
+    var custom_name = ZigString{ .tagged_ptr = @intFromPtr("x-home".ptr), .len = "x-home".len };
+    var custom_value = ZigString{ .tagged_ptr = @intFromPtr("fixture".ptr), .len = "fixture".len };
+    WebCore__FetchHeaders__put_(headers, &custom_name, &custom_value, context);
+    if (!WebCore__FetchHeaders__fastHas_(headers, 25) or !WebCore__FetchHeaders__has(headers, &custom_name, context))
+        fail("private FetchHeaders has mismatch");
+    output = .{ .tagged_ptr = 0, .len = 0 };
+    WebCore__FetchHeaders__fastGet_(headers, 25, &output);
+    if (!zigStringUtf8Equals(output, "text/html")) fail("private FetchHeaders fastGet mismatch");
+
+    var count: u32 = 0;
+    var bytes_len: u32 = 0;
+    WebCore__FetchHeaders__count(headers, &count, &bytes_len);
+    if (count != 3 or bytes_len == 0) fail("private FetchHeaders count mismatch");
+    const names = std.heap.page_allocator.alloc(FetchHeadersStringPointer, count) catch fail("private FetchHeaders names allocation failed");
+    defer std.heap.page_allocator.free(names);
+    const values = std.heap.page_allocator.alloc(FetchHeadersStringPointer, count) catch fail("private FetchHeaders values allocation failed");
+    defer std.heap.page_allocator.free(values);
+    const bytes = std.heap.page_allocator.alloc(u8, bytes_len) catch fail("private FetchHeaders buffer allocation failed");
+    defer std.heap.page_allocator.free(bytes);
+    WebCore__FetchHeaders__copyTo(headers, names.ptr, values.ptr, bytes.ptr);
+    if (!std.mem.eql(u8, bytes[names[0].offset .. names[0].offset + names[0].length], "Accept"))
+        fail("private FetchHeaders copyTo mismatch");
+
+    const wrapped = WebCore__FetchHeaders__toJS(headers, context);
+    if (wrapped == .empty or WebCore__FetchHeaders__cast_(wrapped, vm) != headers or
+        WebCore__FetchHeaders__toJS(headers, context) != wrapped or
+        WebCore__FetchHeaders__cast_(evaluate(context, "Object.create(Headers.prototype)"), vm) != null)
+        fail("private FetchHeaders branding/identity mismatch");
+    const clone_value = WebCore__FetchHeaders__clone(headers, context);
+    if (clone_value == .empty or WebCore__FetchHeaders__cast_(clone_value, vm) == null)
+        fail("private FetchHeaders clone wrapper mismatch");
+    const native_clone = WebCore__FetchHeaders__cloneThis(headers, context) orelse fail("private FetchHeaders cloneThis failed");
+    WebCore__FetchHeaders__fastRemove_(native_clone, 25);
+    if (WebCore__FetchHeaders__fastHas_(native_clone, 25) or !WebCore__FetchHeaders__fastHas_(headers, 25))
+        fail("private FetchHeaders clone independence mismatch");
+    WebCore__FetchHeaders__deref(native_clone);
+
+    const table = "A1Set-Cookiea=1Set-Cookieb=2";
+    var table_string = ZigString{ .tagged_ptr = @intFromPtr(table.ptr), .len = table.len };
+    const table_names = [_]FetchHeadersStringPointer{
+        .{ .offset = 0, .length = 1 },
+        .{ .offset = 2, .length = 10 },
+        .{ .offset = 15, .length = 10 },
+    };
+    const table_values = [_]FetchHeadersStringPointer{
+        .{ .offset = 1, .length = 1 },
+        .{ .offset = 12, .length = 3 },
+        .{ .offset = 25, .length = 3 },
+    };
+    const native_table = WebCore__FetchHeaders__createValueNotJS(context, &table_names, &table_values, &table_string, @intCast(table_names.len)) orelse
+        fail("private FetchHeaders createValueNotJS failed");
+    WebCore__FetchHeaders__deref(native_table);
+    if (WebCore__FetchHeaders__createValue(context, &table_names, &table_values, &table_string, @intCast(table_names.len)) == .empty)
+        fail("private FetchHeaders createValue failed");
+    const from_js = WebCore__FetchHeaders__createFromJS(context, evaluate(context, "[['A','1'],['a','2']]")) orelse
+        fail("private FetchHeaders createFromJS failed");
+    WebCore__FetchHeaders__deref(from_js);
+
+    WebCore__FetchHeaders__remove(headers, &custom_name, context);
+    if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("private FetchHeaders remove mismatch");
 }
 
 pub fn main() void {
@@ -4129,6 +4230,7 @@ pub fn main() void {
     defer JSGlobalContextRelease(sibling_context);
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
+    runFetchHeadersFixture(context, vm);
 
     const common_string_kinds = [_]CommonStringsForZig{
         .IPv4,       .IPv6,         .IN4Loopback, .IN6Any,                .ipv4Lower,            .ipv6Lower,            .fetchDefault,
@@ -6719,5 +6821,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 363/363 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 384/384 symbols linked; runtime matrix passed\n", .{});
 }
