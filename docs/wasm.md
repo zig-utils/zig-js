@@ -200,6 +200,14 @@ Current upstream `main` is observed separately by the non-blocking
 trees without advancing `wg-3.0` or changing the accepted score; CI refreshes
 the observation as informational output and tolerates network/report failures.
 
+The latest complete ReleaseFast audit, followed by exact reruns of every
+corrected slice, reaches **63,950 / 63,964 applicable commands** with 1,235
+text-format commands classified N/A and no harness runner errors. The remaining
+14 semantic assertions are isolated to four files under
+[#388](https://github.com/zig-utils/zig-js/issues/388) and
+[#389](https://github.com/zig-utils/zig-js/issues/389); Core 3 therefore remains
+outside the accepted aggregate.
+
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 14 selected proposal/spec revisions by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
@@ -283,6 +291,15 @@ zig build wasm-core-3 \
   -Dwasm-core-3-converter=/path/to/wasm-tools-1.253.0/wasm-tools \
   -Dwasm-core-3-filter=test/core/relaxed-simd/
 ```
+
+Core 3 extended constant expressions allow wrapping `i32`/`i64` add, subtract,
+and multiply in global initializers and active data/element offsets, including
+nested reads of earlier immutable globals. The shared decoder retains the full
+instruction sequence, validation applies ordinary typed-stack rules plus the
+constant-expression whitelist, and instantiation evaluates it without exposing
+the runtime operand stack. `data.wast` passes 65/65 and `global.wast` passes all
+121 applicable commands (3 text-only N/A); all extended-expression cases in
+`elem.wast` pass, leaving only #389's five unrelated subtyping assertions.
 
 Reproduce those execution and root-safety witnesses with:
 
