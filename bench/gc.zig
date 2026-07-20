@@ -639,7 +639,7 @@ const nursery_cases = [_]NurseryCase{
 
 fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
     std.debug.print("\nQuiescent nursery cycle shapes (512 allocation graphs)\n", .{});
-    std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>8} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
+    std.debug.print("{s:<18} {s:<14} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>10} {s:>12} {s:>8} {s:>8} {s:>12} {s:>10} {s:>10}\n", .{
         "mode",
         "shape",
         "pause ns",
@@ -647,6 +647,8 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
         "young bytes",
         "reclaimed",
         "recl bytes",
+        "survived",
+        "surv bytes",
         "promoted",
         "prom bytes",
         "surv %",
@@ -673,18 +675,20 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
             _ = try ctx.evaluate(case.source);
             const young_in = heap.young_cells;
             const t0 = nowNs(io);
-            _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
+            heap.collectYoung();
             const pause_ns: u64 = @intCast(nowNs(io) - t0);
             const promoted = heap.promoted_cells - promoted_before;
             const minor_delta = heap.minor_collections - minor_before;
             const full_delta = heap.full_collections - full_before;
-            const reclaimed = if (minor_delta + full_delta > 0) young_in -| promoted else 0;
             const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
             const reclaimed_bytes = if (minor_delta > 0) heap.last_minor_reclaimed_bytes else 0;
+            const survived = if (minor_delta > 0) heap.last_minor_survived_cells else promoted;
+            const survived_bytes = if (minor_delta > 0) heap.last_minor_survived_bytes else heap.promoted_bytes - promoted_bytes_before;
+            const reclaimed = if (minor_delta + full_delta > 0) young_in -| survived else 0;
             const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else heap.promoted_bytes - promoted_bytes_before;
-            const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (promoted_bytes * 10000) / young_bytes;
+            const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (survived_bytes * 10000) / young_bytes;
             const reclaimed_x100 = if (young_bytes == 0) @as(usize, 0) else (reclaimed_bytes * 10000) / young_bytes;
-            std.debug.print("{s:<18} {s:<14} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>5}.{d:0>2}% {d:>5}.{d:0>2}% {d:>12} {d:>10} {d:>10}\n", .{
+            std.debug.print("{s:<18} {s:<14} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>10} {d:>12} {d:>5}.{d:0>2}% {d:>5}.{d:0>2}% {d:>12} {d:>10} {d:>10}\n", .{
                 mode.name,
                 case.name,
                 pause_ns,
@@ -692,6 +696,8 @@ fn printNursery(gpa: std.mem.Allocator, io: std.Io) !void {
                 young_bytes,
                 reclaimed,
                 reclaimed_bytes,
+                survived,
+                survived_bytes,
                 promoted,
                 promoted_bytes,
                 survival_x100 / 100,
@@ -714,7 +720,7 @@ fn printNurseryDrift(gpa: std.mem.Allocator) !void {
         "shape",
         "cycle",
         "young bytes",
-        "prom bytes",
+        "surv bytes",
         "surv %",
         "next thresh",
         "minor",
@@ -735,18 +741,18 @@ fn printNurseryDrift(gpa: std.mem.Allocator) !void {
                 const minor_before = heap.minor_collections;
                 const full_before = heap.full_collections;
                 _ = try ctx.evaluate(case.source);
-                _ = try ctx.evaluate("0"); // collection runs at the quiescent entry boundary
+                heap.collectYoung();
                 const minor_delta = heap.minor_collections - minor_before;
                 const full_delta = heap.full_collections - full_before;
                 const young_bytes = if (minor_delta > 0) heap.last_minor_young_bytes else 0;
-                const promoted_bytes = if (minor_delta > 0) heap.last_minor_promoted_bytes else 0;
-                const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (promoted_bytes * 10000) / young_bytes;
+                const survived_bytes = if (minor_delta > 0) heap.last_minor_survived_bytes else 0;
+                const survival_x100 = if (young_bytes == 0) @as(usize, 0) else (survived_bytes * 10000) / young_bytes;
                 std.debug.print("{s:<18} {s:<14} {d:>6} {d:>12} {d:>12} {d:>5}.{d:0>2}% {d:>12} {d:>10} {d:>10}\n", .{
                     mode.name,
                     case.name,
                     cycle + 1,
                     young_bytes,
-                    promoted_bytes,
+                    survived_bytes,
                     survival_x100 / 100,
                     survival_x100 % 100,
                     heap.nursery_threshold_bytes,
