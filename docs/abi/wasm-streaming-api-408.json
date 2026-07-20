@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "contract": "wasm-streaming-api",
+  "issue": 408,
+  "parent_issues": [140, 141, 143, 406],
+  "follow_up_issue": 409,
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+    "webassembly_spec": "9d36019973201a19f9c9ebb0f10828b2fe2374aa"
+  },
+  "specification": {
+    "source": "wasm-spec-wg3/document/web-api/index.bs",
+    "sha256": "23bb491dd0d6bfe2b13e2bd26a9ab8555df6e34a0cf8f9ed44782ae84a5c5dc3"
+  },
+  "sources": {
+    "home": {
+      "packages/runtime/src/jsc/JSGlobalObject.zig": "b7f74131f8316ebce31fa65add121e73367e6c2d4bbe59eb8c53643a5e6189b2",
+      "packages/runtime/upstream/src/jsc/bindings/ZigGlobalObject.cpp": "72f4a089c9e75ad919be6ebe8d47e846db74b1872aecdad7f9b217e3c696cf9d",
+      "packages/runtime/upstream/src/jsc/bindings/ZigGlobalObject.h": "db333158e15da0eb23da28fca12255d3a6850e902028ce7fba486bd623dbe282",
+      "packages/runtime/src/runtime/webcore/Body.zig": "51b05af87ee778347c923d85ad7c1e854ce46f3795d0ec7ac492f0734a66a4d1"
+    },
+    "bun": {
+      "src/jsc/JSGlobalObject.zig": "acb3aba5a555edecf26a13c672b59a2c32554194b6b7d0e7fad38d8f4c2db1ab",
+      "src/jsc/bindings/ZigGlobalObject.cpp": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04",
+      "src/jsc/bindings/ZigGlobalObject.h": "ae8097b3cc5f09966d71f6cda95701a62fc5a2d517bf911f161f4d547be1f41b",
+      "src/runtime/webcore/Body.zig": "51b05af87ee778347c923d85ad7c1e854ce46f3795d0ec7ac492f0734a66a4d1"
+    }
+  },
+  "feature_profiles": [
+    "mvp",
+    "core-2-structural",
+    "simd",
+    "threads",
+    "tail-calls",
+    "exception-handling",
+    "multi-memory",
+    "memory64",
+    "gc",
+    "core-3"
+  ],
+  "semantics": [
+    "WebAssembly.compileStreaming and WebAssembly.instantiateStreaming are non-enumerable namespace methods with length one and return intrinsic Promises.",
+    "The source is assimilated as a Promise or thenable before its fulfillment is validated as an engine Response, preserving abrupt and rejected reason identity.",
+    "Only successful 200 through 299 responses are accepted; a non-Response, failed status, locked body, or already-used non-null body rejects with TypeError before compilation.",
+    "Content-Type is compared byte-case-insensitively with application/wasm after HTTP-whitespace trimming, and every parameter including an empty trailing semicolon is rejected.",
+    "The Response body is consumed through the same pull-driven Fetch Body bytes machinery as the public body methods, so bodyUsed, locking, cancellation, and abrupt stream errors stay coherent.",
+    "The fully consumed body is copied into stable engine-owned bytes before queued compilation; incremental private compiler feeding remains separately tracked by issue 409 and is not claimed here.",
+    "Streaming compilation uses the exact ordinary WebAssembly parser, validator, enabled feature profile, module owner, and CompileError conversion without a permissive alternate path.",
+    "Streaming instantiation uses the exact ordinary import resolver, linker, start-function execution, result shape, and TypeError, LinkError, RuntimeError, or original exception behavior.",
+    "compileStreaming fulfills with a WebAssembly.Module while instantiateStreaming fulfills with an ordinary object containing the compiled module and instance.",
+    "The import object is retained as a managed Value edge until the queued instantiate job completes and remains visible across collection and relocation.",
+    "Responses created in a same-VM sibling realm are accepted while the returned Promise and compiled wrapper use the calling realm's intrinsics.",
+    "Asynchronous ordering is preserved across source assimilation, body pulls, body completion, compilation, linking, and outer Promise settlement.",
+    "Every declared WebAssembly conformance profile reaches the same streaming entry point and exact decoder rather than profile-specific streaming shims.",
+    "The frozen WG1 submodule remains the reproducible MVP corpus baseline; the WG3 Web API source separately pins the streaming algorithm and MIME rule.",
+    "Focused Debug, ReleaseSafe, and TSan evidence covers split asynchronous chunks, imports, sibling realms, MIME and status rejection, locking, disturbance, malformed modules, abrupt pulls, and rejection identity."
+  ]
+}

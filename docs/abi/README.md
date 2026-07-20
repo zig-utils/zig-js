@@ -572,6 +572,13 @@ same consumer machinery, and cloning tees live streams with combined
 cancellation. The pinned lifecycle contract is
 [`fetch-body-lifecycle-407.json`](fetch-body-lifecycle-407.json).
 
+`WebAssembly.compileStreaming` and `instantiateStreaming` consume that body
+path, enforce the official status and exact `application/wasm` MIME boundary,
+then enter the ordinary parser/linker with a stable byte snapshot. The pinned
+specification and Home/Bun evidence is
+[`wasm-streaming-api-408.json`](wasm-streaming-api-408.json); the unobservable
+incremental private compiler feed remains tracked separately by issue 409.
+
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
 described/undescribed Symbols. Strings retain their original encoded identity;

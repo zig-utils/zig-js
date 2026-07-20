@@ -35,6 +35,9 @@ are their focused compile-link-runtime gates.
 derived `bodyUsed`, tee live bodies during cloning, and route all Body
 conversions through the engine stream consumer. The exact pinned behavior is
 recorded in [`abi/fetch-body-lifecycle-407.json`](abi/fetch-body-lifecycle-407.json).
+WebAssembly streaming compilation reuses that lifecycle and the ordinary Wasm
+parser/linker; its exact MIME, Promise, realm, and error contract is recorded in
+[`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json).
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact

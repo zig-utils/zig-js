@@ -24,6 +24,8 @@ HEAP_SNAPSHOT_CONTRACT = ROOT / "docs/abi/heap-snapshot-serialization-403.json"
 CPU_PROFILE_CONTRACT = ROOT / "docs/abi/cpu-profile-sampling-404.json"
 READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json"
 FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
+WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
+WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -658,6 +660,61 @@ def validate_fetch_body_contract(bun_root: Path | None) -> None:
         fail("Fetch Body semantic inventory is incomplete or duplicated")
 
 
+def validate_wasm_streaming_contract(bun_root: Path | None) -> None:
+    if not WASM_STREAMING_CONTRACT.is_file():
+        fail(f"missing checked-in WebAssembly streaming contract {WASM_STREAMING_CONTRACT}")
+    contract = json.loads(WASM_STREAMING_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "wasm-streaming-api"
+        or contract.get("issue") != 408
+        or contract.get("parent_issues") != [140, 141, 143, 406]
+        or contract.get("follow_up_issue") != 409
+        or contract.get("revisions") != {
+            "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+            "bun": REVISION,
+            "webassembly_spec": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+        }
+    ):
+        fail("WebAssembly streaming contract schema, revisions, or issue lineage drift")
+    specification = contract.get("specification")
+    if not isinstance(specification, dict) or specification.get("source") != "wasm-spec-wg3/document/web-api/index.bs":
+        fail("WebAssembly streaming specification source drift")
+    spec_digest = specification.get("sha256")
+    if not isinstance(spec_digest, str) or re.fullmatch(r"[0-9a-f]{64}", spec_digest) is None:
+        fail("invalid WebAssembly streaming specification digest")
+    if WASM_WEB_API_SOURCE.is_file() and sha256(WASM_WEB_API_SOURCE) != spec_digest:
+        fail("WebAssembly WG3 Web API source drift")
+    sources = contract.get("sources")
+    expected_bun = {
+        "src/jsc/JSGlobalObject.zig",
+        "src/jsc/bindings/ZigGlobalObject.cpp",
+        "src/jsc/bindings/ZigGlobalObject.h",
+        "src/runtime/webcore/Body.zig",
+    }
+    if not isinstance(sources, dict) or set(sources) != {"home", "bun"}:
+        fail("WebAssembly streaming contract profile source set drift")
+    home_sources = sources.get("home")
+    bun_sources = sources.get("bun")
+    if not isinstance(bun_sources, dict) or set(bun_sources) != expected_bun or not isinstance(home_sources, dict):
+        fail("WebAssembly streaming contract Bun source set drift")
+    for profile_sources in (home_sources, bun_sources):
+        for relative, digest in profile_sources.items():
+            if not isinstance(relative, str) or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid WebAssembly streaming digest for {relative}")
+    if bun_root is not None:
+        for relative, digest in bun_sources.items():
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"WebAssembly streaming source drift for {relative}")
+    profiles = contract.get("feature_profiles")
+    if not isinstance(profiles, list) or len(profiles) != 10 or len(profiles) != len(set(profiles)):
+        fail("WebAssembly streaming feature-profile inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 15 or len(semantics) != len(set(semantics)):
+        fail("WebAssembly streaming semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -690,6 +747,7 @@ def main() -> None:
     validate_cpu_profile_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_readable_stream_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_fetch_body_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_wasm_streaming_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

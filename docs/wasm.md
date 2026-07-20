@@ -17,7 +17,7 @@ The engine has a pure-Zig MVP binary pipeline:
 - deterministic traps and explicit rejection of unsupported opcodes and
   sections rather than silent acceptance.
 
-The JS-facing runtime on main through `66237d21` provides:
+The JS-facing runtime provides:
 
 - the `WebAssembly` namespace;
 - `WebAssembly.CompileError`, `LinkError`, and `RuntimeError` with the correct
@@ -47,7 +47,10 @@ The JS-facing runtime on main through `66237d21` provides:
 - `WebAssembly.compile` and both `WebAssembly.instantiate` Promise overloads,
   including synchronous byte snapshots, queued work, asynchronous rejection,
   exact error classes, and the specified Module-versus-bytes result shapes;
-  and
+- `WebAssembly.compileStreaming` and `instantiateStreaming` over
+  `Response`/`Promise<Response>`, with the exact `application/wasm` MIME and
+  successful-status checks, coherent body disturbance, stable byte ownership,
+  imports, sibling realms, and the ordinary parser/linker error classes; and
 - `WebAssembly`, `Module`, `Instance`, `Memory`, `Table`, and `Global` branding
   and derived constructor prototypes.
 
@@ -55,6 +58,13 @@ The module and its decoded data are owned by the creating context and released
 during deterministic context teardown. `customSections` returns fresh
 `ArrayBuffer` copies. Detached or out-of-bounds views and direct
 `SharedArrayBuffer` inputs are rejected.
+
+The streaming methods deliberately follow the observable specification model:
+consume the complete body, take a stable byte copy, then compile through the
+same decoder used by every feature profile. A true incremental private compiler
+feed is a separate optimization/ABI slice under issue #409. The exact WG3 Web
+API source and Home/Bun evidence are pinned in
+[`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json).
 
 ## Evidence
 
