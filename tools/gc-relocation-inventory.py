@@ -115,6 +115,7 @@ def main() -> int:
     require("self.enable_jit" not in compact_source, "quiescent pointer-free JIT is still rejected")
     require("self.gc_scan_native_stack" in compact_source, "conservative-stack fail-closed gate missing")
     require("self.gc_scan_parked_stacks" in compact_source, "parked-stack fail-closed gate missing")
+    require("self.hasRunningJsThreads()" in compact_source, "running-thread fail-closed gate missing")
     require("has_active_interpreter" in compact_source, "active-interpreter fail-closed gate missing")
     require("compactGarbageAtMovingSafepoint" in compact_source, "moving-safepoint compaction entry missing")
     require("allowed_active_interpreter" in compact_source, "narrow active-interpreter allowance missing")

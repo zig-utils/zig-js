@@ -206,6 +206,12 @@ but cannot move the heap reentrantly; after it unwinds, the declared native
 checkpoint consumes the request. Long-lived C values still require counted
 `JSValueProtect` storage across that boundary.
 
+[#361](https://github.com/zig-utils/zig-js/issues/361) makes the no-GIL policy
+deterministic: a parked spawned peer keeps a callback-scheduled request pending
+across repeated movement-safe native checkpoints, with the relocation token
+closed and movement count unchanged. After wake and join, the same request
+compacts usefully at the quiescent host boundary and reaches a dense fixed point.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
@@ -214,8 +220,8 @@ use stable handle storage whose contained value is rewritten; the handle's own
 address does not move. A live frame may move only at a checkpoint whose compiler
 and runtime jointly declare complete materialization; the current AArch64
 numeric tier is the sole admitted path. Other native frames and conservative
-stack scans reject compaction until #336 supplies precise maps, rewriting, or
-per-cell pinning.
+stack scans remain unsupported; each future tier or native boundary must add
+its own precise maps, rewrite protocol, or per-cell pinning before admission.
 
 ## Focused Evidence
 

@@ -24452,6 +24452,158 @@ test "C-API: callback schedules protected compaction at the next baseline JIT ch
     try std.testing.expectEqual(@as(f64, 360), JSValueToNumber(ctx, marker, &exception));
 }
 
+test "C-API: no-GIL parked peer defers scheduled compaction until post-join" {
+    if (builtin.single_threaded or !jit.supported or builtin.cpu.arch != .aarch64)
+        return error.SkipZigTest;
+
+    const State = struct {
+        var protected: JSValueRef = null;
+        var old_payload: usize = 0;
+        var compactions_before: u64 = 0;
+        var schedule_calls: usize = 0;
+        var confirm_calls: usize = 0;
+        var direct_status: ZJSGCCompactionStatus = .compacted;
+        var confirm_status: ZJSGCCompactionStatus = .compacted;
+
+        fn schedule(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            argument_count: usize,
+            arguments: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            schedule_calls += 1;
+            if (argument_count != 1 or arguments == null or arguments[0] == null)
+                return JSValueMakeBoolean(ctx, false);
+            const context = ctxFrom(ctx) orelse return JSValueMakeBoolean(ctx, false);
+            protected = arguments[0];
+            if (!ZJSValueProtect(ctx, protected)) return JSValueMakeBoolean(ctx, false);
+            old_payload = @intFromPtr((valueFromContext(context, protected) orelse return JSValueMakeBoolean(ctx, false)).asObj());
+            compactions_before = context.gc_moving_safepoint_compactions.load(.monotonic);
+            direct_status = ZJSContextCompactGarbage(ctx, null, null);
+            return JSValueMakeBoolean(
+                ctx,
+                direct_status == .unsupported and ZJSContextRequestGarbageCompaction(ctx),
+            );
+        }
+
+        fn confirm(
+            ctx: JSContextRef,
+            _: JSObjectRef,
+            _: JSObjectRef,
+            _: usize,
+            _: [*c]const JSValueRef,
+            _: ExceptionRef,
+        ) callconv(.c) JSValueRef {
+            confirm_calls += 1;
+            const context = ctxFrom(ctx) orelse return JSValueMakeBoolean(ctx, false);
+            const pending = context.gc_compaction_requested.load(.acquire);
+            const unchanged = context.gc_moving_safepoint_compactions.load(.monotonic) == compactions_before;
+            const closed = !context.gc_relocation_active.load(.acquire);
+            confirm_status = ZJSContextCompactGarbage(ctx, null, null);
+            return JSValueMakeBoolean(ctx, pending and unchanged and closed and confirm_status == .unsupported);
+        }
+    };
+    State.protected = null;
+    State.old_payload = 0;
+    State.compactions_before = 0;
+    State.schedule_calls = 0;
+    State.confirm_calls = 0;
+    State.direct_status = .compacted;
+    State.confirm_status = .compacted;
+
+    const ctx = ZJSGlobalContextCreateThreaded(false) orelse return error.JSCInitFailed;
+    defer JSGlobalContextRelease(ctx);
+    const context = ctxFrom(ctx) orelse return error.JSCInitFailed;
+    const global = JSContextGetGlobalObject(ctx) orelse return error.GlobalObjectFailed;
+    var exception: JSValueRef = null;
+
+    const schedule_name = JSStringCreateWithUTF8CString("hostScheduleNoGilCompaction") orelse return error.StringInitFailed;
+    defer JSStringRelease(schedule_name);
+    const schedule_callback = JSObjectMakeFunctionWithCallback(ctx, schedule_name, State.schedule) orelse return error.FunctionCreateFailed;
+    JSObjectSetProperty(ctx, global, schedule_name, schedule_callback, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const confirm_name = JSStringCreateWithUTF8CString("hostConfirmNoGilCompaction") orelse return error.StringInitFailed;
+    defer JSStringRelease(confirm_name);
+    const confirm_callback = JSObjectMakeFunctionWithCallback(ctx, confirm_name, State.confirm) orelse return error.FunctionCreateFailed;
+    JSObjectSetProperty(ctx, global, confirm_name, confirm_callback, 0, &exception);
+    try std.testing.expect(exception == null);
+
+    const warm_source = JSStringCreateWithUTF8CString(
+        \\function noGilScheduledSum(n) {
+        \\  var total = 0;
+        \\  var i = 0;
+        \\  while (i < n) { total = total + i; i = i + 1; }
+        \\  return total;
+        \\}
+        \\noGilScheduledSum(4096);
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(warm_source);
+    const warm_result = JSEvaluateScript(ctx, warm_source, null, null, 1, &exception) orelse return error.EvalFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 8_386_560), JSValueToNumber(ctx, warm_result, &exception));
+
+    const source = JSStringCreateWithUTF8CString(
+        \\globalThis.noGilCompactGate = { parked: 0, wake: 0 };
+        \\globalThis.noGilCompactDiscard = [];
+        \\for (let i = 0; i < 4096; i++)
+        \\  noGilCompactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\globalThis.noGilCompactSurvivor = { marker: 361 };
+        \\globalThis.noGilCompactWorker = new Thread((gate) => {
+        \\  Atomics.store(gate, "parked", 1);
+        \\  Atomics.notify(gate, "parked");
+        \\  Atomics.wait(gate, "wake", 0);
+        \\  return "joined";
+        \\}, noGilCompactGate);
+        \\while (Atomics.load(noGilCompactGate, "parked") === 0) {}
+        \\noGilCompactDiscard = null;
+        \\if (!hostScheduleNoGilCompaction(noGilCompactSurvivor)) throw new Error("schedule");
+        \\if (noGilScheduledSum(20000) !== 199990000) throw new Error("native result");
+        \\if (!hostConfirmNoGilCompaction()) throw new Error("premature movement");
+        \\Atomics.store(noGilCompactGate, "wake", 1);
+        \\Atomics.notify(noGilCompactGate, "wake");
+        \\noGilCompactWorker.join()
+    ) orelse return error.StringInitFailed;
+    defer JSStringRelease(source);
+    const result = JSEvaluateScript(ctx, source, null, null, 1, &exception) orelse return error.EvalFailed;
+    defer if (State.protected != null) std.debug.assert(ZJSValueUnprotect(ctx, State.protected));
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqualStrings("joined", valueFromContext(context, result).?.asStr());
+    try std.testing.expectEqual(@as(usize, 1), State.schedule_calls);
+    try std.testing.expectEqual(@as(usize, 1), State.confirm_calls);
+    try std.testing.expectEqual(ZJSGCCompactionStatus.unsupported, State.direct_status);
+    try std.testing.expectEqual(ZJSGCCompactionStatus.unsupported, State.confirm_status);
+    try std.testing.expect(context.gc_compaction_requested.load(.acquire));
+    try std.testing.expectEqual(
+        State.compactions_before,
+        context.gc_moving_safepoint_compactions.load(.monotonic),
+    );
+    try std.testing.expect(!context.gc_relocation_active.load(.acquire));
+
+    var moved_cells: usize = 0;
+    var moved_bytes: usize = 0;
+    try std.testing.expectEqual(
+        ZJSGCCompactionStatus.compacted,
+        ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes),
+    );
+    try std.testing.expect(moved_cells > 0 and moved_bytes > 0);
+    try std.testing.expect(!context.gc_compaction_requested.load(.acquire));
+    const protected = State.protected orelse return error.ProtectFailed;
+    const current = valueFromContext(context, protected) orelse return error.ValueFailed;
+    try std.testing.expect(State.old_payload != @intFromPtr(current.asObj()));
+    const marker_name = JSStringCreateWithUTF8CString("marker") orelse return error.StringInitFailed;
+    defer JSStringRelease(marker_name);
+    const marker = JSObjectGetProperty(ctx, protected, marker_name, &exception) orelse return error.PropFailed;
+    try std.testing.expect(exception == null);
+    try std.testing.expectEqual(@as(f64, 361), JSValueToNumber(ctx, marker, &exception));
+    try std.testing.expectEqual(
+        ZJSGCCompactionStatus.no_candidates,
+        ZJSContextCompactGarbage(ctx, &moved_cells, &moved_bytes),
+    );
+}
+
 test "C-API: protected handles trace managed StringCells" {
     const ctx_obj = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx_obj.destroy();
