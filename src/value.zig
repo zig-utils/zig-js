@@ -68,8 +68,10 @@ pub const WasmException = struct {
 };
 
 pub const WasmGcMarkValueFn = *const fn (*anyopaque, Value) void;
+pub const WasmGcRewriteValueFn = *const fn (*anyopaque, *Value) void;
 pub const WasmGcReleaseFn = *const fn (*anyopaque, *Object) void;
 pub const WasmGcTraceRootsFn = *const fn (*anyopaque, *anyopaque, WasmGcMarkValueFn) void;
+pub const WasmGcRelocateRootsFn = *const fn (*anyopaque, *anyopaque, WasmGcRewriteValueFn) void;
 
 /// Type-erased tracing header embedded in every runtime-owned Wasm GC
 /// aggregate. Core GC can precisely visit nested JavaScript references
@@ -77,6 +79,7 @@ pub const WasmGcTraceRootsFn = *const fn (*anyopaque, *anyopaque, WasmGcMarkValu
 pub const WasmGcRef = struct {
     context: *anyopaque,
     trace: *const fn (*WasmGcRef, *anyopaque, WasmGcMarkValueFn) void,
+    relocate: *const fn (*WasmGcRef, *anyopaque, WasmGcRewriteValueFn) void,
 };
 
 pub const WasmSlot = union(enum) {
@@ -1377,6 +1380,7 @@ pub const WasmInstanceGcState = struct {
     global_refs: []const *std.atomic.Value(u64) = &.{},
     context: ?*anyopaque = null,
     trace: ?WasmGcTraceRootsFn = null,
+    relocate: ?WasmGcRelocateRootsFn = null,
 };
 
 pub const ObjectBackingFlags = packed struct {

@@ -1939,6 +1939,7 @@ fn instantiateModuleObject(
         .global_refs = global_refs,
         .context = @ptrCast(inst),
         .trace = exec.traceInstanceGcRoots,
+        .relocate = exec.relocateInstanceGcRoots,
     };
     state.gc_state = gc_state;
     for (inst.globals[module.imported_globals..]) |global| {

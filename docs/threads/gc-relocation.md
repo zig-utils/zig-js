@@ -117,6 +117,13 @@ Thread lock/condition/TLS/release queues now rewrite their hidden roots while
 host-opaque payloads remain untouched. The audit also added the previously
 missing `Promise.prototype.finally` constructor edge to marking.
 
+WebAssembly-owned roots complete the Object boundary in
+[#348](https://github.com/zig-utils/zig-js/issues/348). `WasmGcRef` and instance
+owners now expose paired by-value trace and by-pointer relocation callbacks;
+imports, atomic globals/tables, execution roots, exceptions/wrappers, nested
+externref/hostref slots, and cyclic GC aggregates all rewrite. Numeric,
+funcref, i31, native-owner, and aggregate identities remain stable.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

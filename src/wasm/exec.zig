@@ -366,6 +366,66 @@ fn traceGcReference(
     }
 }
 
+fn rewriteExceptionValues(
+    exception: *js_value.WasmException,
+    visitor: *anyopaque,
+    rewrite_value: js_value.WasmGcRewriteValueFn,
+) void {
+    if (exception.wrapper.load(.acquire)) |wrapper| {
+        var wrapped = js_value.Value.obj(wrapper);
+        rewrite_value(visitor, &wrapped);
+        exception.wrapper.store(wrapped.asObj(), .release);
+    }
+    if (exception.is_js_exception) rewrite_value(visitor, &exception.js_exception);
+    for (@constCast(exception.externrefs)) |*root| rewrite_value(visitor, root);
+}
+
+/// Mutating companion to `traceGcReference`. Runtime aggregate identities and
+/// gcref links remain native-stable; only nested JavaScript Values rewrite.
+fn relocateGcReference(
+    reference: *js_value.WasmGcRef,
+    visitor: *anyopaque,
+    rewrite_value: js_value.WasmGcRewriteValueFn,
+) void {
+    while (!gc_host_trace_lock.tryLock()) std.atomic.spinLoopHint();
+    defer gc_host_trace_lock.unlock();
+
+    var epoch = gc_host_trace_epoch.fetchAdd(1, .monotonic) +% 1;
+    if (epoch == 0) {
+        epoch = gc_host_trace_epoch.fetchAdd(1, .monotonic) +% 1;
+        if (epoch == 0) epoch = 1;
+    }
+    const first = gcObjectFromRef(reference);
+    first.host_trace_epoch = epoch;
+    first.host_trace_next = null;
+    var worklist: ?*GcObject = first;
+    while (worklist) |object| {
+        worklist = object.host_trace_next;
+        object.host_trace_next = null;
+        for (object.fields) |*slot| switch (slot.*) {
+            .externref, .hostref => |*child| rewrite_value(visitor, child),
+            .exnref => |exception| if (exception) |ex| rewriteExceptionValues(ex, visitor, rewrite_value),
+            .gcref => |child_ref| if (child_ref) |child_header| {
+                const child = gcObjectFromRef(child_header);
+                if (child.host_trace_epoch != epoch) {
+                    child.host_trace_epoch = epoch;
+                    child.host_trace_next = worklist;
+                    worklist = child;
+                }
+            },
+            .externalized_gcref => |child_header| {
+                const child = gcObjectFromRef(child_header);
+                if (child.host_trace_epoch != epoch) {
+                    child.host_trace_epoch = epoch;
+                    child.host_trace_next = worklist;
+                    worklist = child;
+                }
+            },
+            .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
+        };
+    }
+}
+
 fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.WasmGcMarkValueFn) void {
     switch (slot) {
         .gcref => |reference| if (reference) |root| root.trace(root, visitor, mark_value),
@@ -375,6 +435,19 @@ fn traceGcRootSlot(slot: ValueSlot, visitor: *anyopaque, mark_value: js_value.Wa
             for (ex.payload) |payload| traceGcRootSlot(payload, visitor, mark_value);
         },
         .externalized_gcref => |root| root.trace(root, visitor, mark_value),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
+    }
+}
+
+fn relocateGcRootSlot(slot: *ValueSlot, visitor: *anyopaque, rewrite_value: js_value.WasmGcRewriteValueFn) void {
+    switch (slot.*) {
+        .gcref => |reference| if (reference) |root| root.relocate(root, visitor, rewrite_value),
+        .externref, .hostref => |*root| rewrite_value(visitor, root),
+        .exnref => |exception| if (exception) |ex| {
+            rewriteExceptionValues(ex, visitor, rewrite_value);
+            for (@constCast(ex.payload)) |*payload| relocateGcRootSlot(payload, visitor, rewrite_value);
+        },
+        .externalized_gcref => |root| root.relocate(root, visitor, rewrite_value),
         .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     }
 }
@@ -399,6 +472,13 @@ pub fn traceInstanceGcRoots(raw: *anyopaque, visitor: *anyopaque, mark_value: js
             traceGcRootSlot(slot, visitor, mark_value);
         }
     }
+}
+
+pub fn relocateInstanceGcRoots(raw: *anyopaque, visitor: *anyopaque, rewrite_value: js_value.WasmGcRewriteValueFn) void {
+    const inst: *Instance = @ptrCast(@alignCast(raw));
+    for (inst.globals) |global| relocateGcRootSlot(&global.value, visitor, rewrite_value);
+    for (inst.tables) |table|
+        for (table.elems) |*slot| relocateGcRootSlot(slot, visitor, rewrite_value);
 }
 
 const GcRootRegistration = struct {
@@ -534,7 +614,11 @@ fn createGcAggregate(inst: *Instance, type_index: u32, kind: GcAggregateKind, fi
     errdefer inst.gpa.free(owned_fields);
     const object = try inst.gpa.create(GcObject);
     object.* = .{
-        .trace_ref = .{ .context = @ptrCast(object), .trace = traceGcReference },
+        .trace_ref = .{
+            .context = @ptrCast(object),
+            .trace = traceGcReference,
+            .relocate = relocateGcReference,
+        },
         .owner = inst,
         .type_index = type_index,
         .kind = kind,
@@ -7299,6 +7383,21 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     var trace_probe: TraceProbe = .{};
     third.trace_ref.trace(&third.trace_ref, @ptrCast(&trace_probe), TraceProbe.mark);
     try std.testing.expectEqual(&js_child, trace_probe.marked);
+    var relocated_child = js_value.Object{};
+    const RewriteProbe = struct {
+        old: *js_value.Object,
+        new: *js_value.Object,
+
+        fn rewrite(raw: *anyopaque, slot: *js_value.Value) void {
+            const probe: *@This() = @ptrCast(@alignCast(raw));
+            if (slot.isObject() and slot.asObj() == probe.old) slot.* = .obj(probe.new);
+        }
+    };
+    var rewrite_probe = RewriteProbe{ .old = &js_child, .new = &relocated_child };
+    third.trace_ref.relocate(&third.trace_ref, @ptrCast(&rewrite_probe), RewriteProbe.rewrite);
+    try std.testing.expectEqual(&relocated_child, third.fields[0].externref.asObj());
+    try std.testing.expect(first.fields[0].gcref == gcObjectRef(second));
+    try std.testing.expect(second.fields[0].gcref == gcObjectRef(first));
     const active_slots = [_]ValueSlot{.{ .externalized_gcref = gcObjectRef(first) }};
     var active_roots: js_value.WasmExecutionRoots = .{ .stack = &active_slots };
     var registration: GcRootRegistration = .{ .roots = &active_roots };
@@ -7314,7 +7413,7 @@ fn exerciseGcAggregateAllocation(gpa: Allocator) !void {
     try std.testing.expectEqual(@as(usize, 0), inst.gc_object_count);
 }
 
-test "wasm.exec GC aggregate allocation is failure atomic and cycle safe" {
+test "Wasm relocation: GC aggregate allocation is failure atomic and cycle safe" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         exerciseGcAggregateAllocation,

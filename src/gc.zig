@@ -533,6 +533,132 @@ test "Object rare strong relocation mutates every active managed payload" {
     try std.testing.expectEqual(&new_objects[7], getter_setter.setterValue().?.asObj());
 }
 
+test "Wasm relocation: Object rare state rewrites every JavaScript-bearing slot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var old_objects: [19]Object = undefined;
+    var new_objects: [19]Object = undefined;
+    var wrappers: [8]Object = undefined;
+    for (&wrappers) |*wrapper| wrapper.* = .{};
+
+    var instance_imports = [_]Value{Value.obj(&old_objects[1])};
+    var instance_global = std.atomic.Value(u64).init(Value.obj(&old_objects[3]).rawBits());
+    var instance_global_refs = [_]*std.atomic.Value(u64){&instance_global};
+    var instance_hidden = Value.obj(&old_objects[4]);
+    const HiddenRoots = struct {
+        fn trace(raw: *anyopaque, visitor: *anyopaque, mark: value.WasmGcMarkValueFn) void {
+            const slot: *Value = @ptrCast(@alignCast(raw));
+            mark(visitor, slot.*);
+        }
+
+        fn relocate(raw: *anyopaque, visitor: *anyopaque, rewrite: value.WasmGcRewriteValueFn) void {
+            const slot: *Value = @ptrCast(@alignCast(raw));
+            rewrite(visitor, slot);
+        }
+    };
+    var instance_gc = value.WasmInstanceGcState{
+        .global_refs = &instance_global_refs,
+        .context = &instance_hidden,
+        .trace = HiddenRoots.trace,
+        .relocate = HiddenRoots.relocate,
+    };
+    const instance = try wrappers[0].wasmInstanceState(allocator);
+    instance.module_obj = &old_objects[0];
+    instance.import_vals = &instance_imports;
+    instance.exports_obj = &old_objects[2];
+    instance.gc_state = &instance_gc;
+
+    const memory = try wrappers[1].wasmMemoryState(allocator);
+    memory.buffer_obj = &old_objects[5];
+    memory.owner_obj = &old_objects[6];
+
+    var table_ref = [_]std.atomic.Value(u64){std.atomic.Value(u64).init(Value.obj(&old_objects[7]).rawBits())};
+    const table = try wrappers[2].wasmTableState(allocator);
+    table.refs = &table_ref;
+    table.owner_obj = &old_objects[8];
+
+    var global_ref = std.atomic.Value(u64).init(Value.obj(&old_objects[9]).rawBits());
+    const global = try wrappers[3].wasmGlobalState(allocator);
+    global.ref = &global_ref;
+    global.owner_obj = &old_objects[10];
+    (try wrappers[4].wasmFunctionState(allocator)).owner_obj = &old_objects[11];
+    (try wrappers[5].wasmTagState(allocator)).owner_obj = &old_objects[12];
+
+    var payload_values = [_]Value{Value.obj(&old_objects[13])};
+    var exception_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&old_objects[14]) }};
+    var exception_externrefs = [_]Value{Value.obj(&old_objects[14])};
+    var dummy_tag: u8 = 0;
+    var dummy_owner: u8 = 0;
+    var exception = value.WasmException{
+        .tag = &dummy_tag,
+        .payload = &exception_payload,
+        .externrefs = &exception_externrefs,
+        .owner = &dummy_owner,
+        .wrapper = .init(&old_objects[15]),
+        .js_exception = Value.obj(&old_objects[16]),
+        .is_js_exception = true,
+    };
+    const exception_state = try wrappers[6].wasmExceptionState(allocator);
+    exception_state.exception = &exception;
+    exception_state.payload_values = &payload_values;
+    exception_state.owner_obj = &old_objects[17];
+
+    var aggregate_hidden = Value.obj(&old_objects[18]);
+    const Aggregate = struct {
+        fn trace(reference: *value.WasmGcRef, visitor: *anyopaque, mark: value.WasmGcMarkValueFn) void {
+            const slot: *Value = @ptrCast(@alignCast(reference.context));
+            mark(visitor, slot.*);
+        }
+
+        fn relocate(reference: *value.WasmGcRef, visitor: *anyopaque, rewrite: value.WasmGcRewriteValueFn) void {
+            const slot: *Value = @ptrCast(@alignCast(reference.context));
+            rewrite(visitor, slot);
+        }
+    };
+    var aggregate = value.WasmGcRef{
+        .context = &aggregate_hidden,
+        .trace = Aggregate.trace,
+        .relocate = Aggregate.relocate,
+    };
+    (try wrappers[7].wasmGcReferenceState(allocator)).reference = &aggregate;
+
+    const Plan = struct {
+        old_objects: *[19]Object,
+        new_objects: *[19]Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    const plan = Plan{ .old_objects = &old_objects, .new_objects = &new_objects };
+    for (&wrappers) |*wrapper| relocateObjectWasmState(wrapper, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], instance.module_obj.?);
+    try std.testing.expectEqual(&new_objects[1], instance_imports[0].asObj());
+    try std.testing.expectEqual(&new_objects[2], instance.exports_obj.?);
+    try std.testing.expectEqual(&new_objects[3], Value.fromRawBits(instance_global.load(.acquire)).asObj());
+    try std.testing.expectEqual(&new_objects[4], instance_hidden.asObj());
+    try std.testing.expectEqual(&new_objects[5], memory.buffer_obj.?);
+    try std.testing.expectEqual(&new_objects[6], memory.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[7], Value.fromRawBits(table_ref[0].load(.acquire)).asObj());
+    try std.testing.expectEqual(&new_objects[8], table.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[9], Value.fromRawBits(global_ref.load(.acquire)).asObj());
+    try std.testing.expectEqual(&new_objects[10], global.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[11], wrappers[4].wasmFunction().?.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[12], wrappers[5].wasmTag().?.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[13], payload_values[0].asObj());
+    try std.testing.expectEqual(&new_objects[14], exception_payload[0].externref.asObj());
+    try std.testing.expectEqual(&new_objects[14], exception_externrefs[0].asObj());
+    try std.testing.expectEqual(&new_objects[15], exception.wrapper.load(.acquire).?);
+    try std.testing.expectEqual(&new_objects[16], exception.js_exception.asObj());
+    try std.testing.expectEqual(&new_objects[17], exception_state.owner_obj.?);
+    try std.testing.expectEqual(&new_objects[18], aggregate_hidden.asObj());
+}
+
 fn traceWasmException(v: anytype, exception: *const value.WasmException) void {
     const Marker = struct {
         fn mark(raw: *anyopaque, child: Value) void {
@@ -540,6 +666,9 @@ fn traceWasmException(v: anytype, exception: *const value.WasmException) void {
             markValue(visitor, child);
         }
     };
+    if (exception.wrapper.load(.acquire)) |wrapper| v.mark(wrapper);
+    if (exception.is_js_exception) markValue(v, exception.js_exception);
+    for (exception.externrefs) |root| markValue(v, root);
     for (exception.payload) |slot| switch (slot) {
         .externref, .hostref => |root| markValue(v, root),
         .gcref => |reference| if (reference) |root| root.trace(root, @ptrCast(v), Marker.mark),
@@ -547,6 +676,103 @@ fn traceWasmException(v: anytype, exception: *const value.WasmException) void {
         .exnref => |nested| if (nested) |child| traceWasmException(v, child),
         .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
     };
+}
+
+fn relocateWasmException(v: anytype, exception: *value.WasmException) void {
+    const Rewriter = struct {
+        fn rewrite(raw: *anyopaque, slot: *Value) void {
+            const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+            gc_relocation.rewriteValueSlot(visitor, slot);
+        }
+    };
+    if (exception.wrapper.load(.acquire)) |wrapper| {
+        var wrapped = Value.obj(wrapper);
+        gc_relocation.rewriteValueSlot(v, &wrapped);
+        exception.wrapper.store(wrapped.asObj(), .release);
+    }
+    if (exception.is_js_exception)
+        gc_relocation.rewriteValueSlot(v, &exception.js_exception);
+    for (@constCast(exception.externrefs)) |*root|
+        gc_relocation.rewriteValueSlot(v, root);
+    for (@constCast(exception.payload)) |*slot| switch (slot.*) {
+        .externref, .hostref => |*root| gc_relocation.rewriteValueSlot(v, root),
+        .gcref => |reference| if (reference) |root|
+            root.relocate(root, @ptrCast(@constCast(v)), Rewriter.rewrite),
+        .externalized_gcref => |root| root.relocate(root, @ptrCast(@constCast(v)), Rewriter.rewrite),
+        .exnref => |nested| if (nested) |child| relocateWasmException(v, child),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
+    };
+}
+
+pub fn relocateObjectWasmState(o: *Object, v: anytype) void {
+    const cold = o.coldState() orelse return;
+    const Rewriter = struct {
+        fn rewrite(raw: *anyopaque, slot: *Value) void {
+            const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+            gc_relocation.rewriteValueSlot(visitor, slot);
+        }
+    };
+    switch (cold.rare_tag.load(.acquire)) {
+        .wasm_instance => {
+            const state = &cold.rare.wasm_instance;
+            gc_relocation.rewriteOptionalSlot(v, Object, &state.module_obj);
+            for (@constCast(state.import_vals)) |*import_value|
+                gc_relocation.rewriteValueSlot(v, import_value);
+            gc_relocation.rewriteOptionalSlot(v, Object, &state.exports_obj);
+            if (state.gc_state) |gc_state| {
+                for (gc_state.global_refs) |reference|
+                    gc_relocation.rewriteAtomicValueSlot(v, reference);
+                if (gc_state.relocate) |relocate| if (gc_state.context) |context|
+                    relocate(context, @ptrCast(@constCast(v)), Rewriter.rewrite);
+            }
+        },
+        .wasm_memory => {
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_memory.buffer_obj);
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_memory.owner_obj);
+        },
+        .wasm_table => {
+            for (@constCast(cold.rare.wasm_table.refs)) |*reference|
+                gc_relocation.rewriteAtomicValueSlot(v, reference);
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_table.owner_obj);
+        },
+        .wasm_global => {
+            if (cold.rare.wasm_global.ref) |reference|
+                gc_relocation.rewriteAtomicValueSlot(v, reference);
+            gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_global.owner_obj);
+        },
+        .wasm_function => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_function.owner_obj),
+        .wasm_tag => gc_relocation.rewriteOptionalSlot(v, Object, &cold.rare.wasm_tag.owner_obj),
+        .wasm_exception => {
+            const state = &cold.rare.wasm_exception;
+            for (@constCast(state.payload_values)) |*payload|
+                gc_relocation.rewriteValueSlot(v, payload);
+            if (state.exception) |exception| relocateWasmException(v, exception);
+            gc_relocation.rewriteOptionalSlot(v, Object, &state.owner_obj);
+        },
+        .wasm_gc_ref => if (cold.rare.wasm_gc_ref.reference) |reference|
+            reference.relocate(reference, @ptrCast(@constCast(v)), Rewriter.rewrite),
+        .none,
+        .primitive,
+        .error_state,
+        .date,
+        .module_ns,
+        .weak_ref,
+        .host_callback,
+        .boxed_primitive,
+        .generator,
+        .iter_helper,
+        .bound_function,
+        .proxy,
+        .buffer_view,
+        .temporal,
+        .promise,
+        .constructor,
+        .sparse_array,
+        .js_function,
+        .regex,
+        .wasm_module,
+        => {},
+    }
 }
 
 pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
@@ -1765,6 +1991,29 @@ fn traceWasmExecutionRoots(roots: *const value.WasmExecutionRoots, v: anytype) v
         for (exception.externrefs) |root| markValue(v, root);
 }
 
+fn relocateWasmSlot(slot: *value.WasmSlot, v: anytype) void {
+    const Rewriter = struct {
+        fn rewrite(raw: *anyopaque, root: *Value) void {
+            const visitor: @TypeOf(v) = @ptrCast(@alignCast(raw));
+            gc_relocation.rewriteValueSlot(visitor, root);
+        }
+    };
+    switch (slot.*) {
+        .externref, .hostref => |*root| gc_relocation.rewriteValueSlot(v, root),
+        .exnref => |exception| if (exception) |root| relocateWasmException(v, root),
+        .gcref => |reference| if (reference) |root|
+            root.relocate(root, @ptrCast(@constCast(v)), Rewriter.rewrite),
+        .externalized_gcref => |root| root.relocate(root, @ptrCast(@constCast(v)), Rewriter.rewrite),
+        .numeric, .vector, .funcref, .i31ref, .externalized_i31 => {},
+    }
+}
+
+fn relocateWasmExecutionRoots(roots: *value.WasmExecutionRoots, v: anytype) void {
+    for (@constCast(roots.stack)) |*slot| relocateWasmSlot(slot, v);
+    for (@constCast(roots.locals)) |*slot| relocateWasmSlot(slot, v);
+    for (roots.exceptions) |exception| relocateWasmException(v, exception);
+}
+
 /// A `Visitor`-shaped adapter that routes every root it is handed through the
 /// insertion write barrier (`gc_runtime.barrier` → the active heap's
 /// `writeBarrier`) instead of the marker-private `mark_stack`. This is how a
@@ -2719,7 +2968,7 @@ test "gc traces only the active microtask variant" {
     try std.testing.expect(!next_tick_marks.contains(&inactive_argument));
 }
 
-test "gc traces direct and exception-payload WebAssembly roots" {
+test "Wasm relocation: direct and exception-payload execution roots" {
     const Recorder = struct {
         marked: [7]?*anyopaque = .{ null, null, null, null, null, null, null },
         len: usize = 0,
@@ -2745,33 +2994,48 @@ test "gc traces direct and exception-payload WebAssembly roots" {
     var pending_ref = Object{};
     var aggregate_ref = Object{};
     var host_ref = Object{};
+    var new_stack_ref = Object{};
+    var new_local_ref = Object{};
+    var new_nested_ref = Object{};
+    var new_pending_ref = Object{};
+    var new_aggregate_ref = Object{};
+    var new_host_ref = Object{};
     var dummy_tag: u8 = 0;
     var dummy_owner: u8 = 0;
+    var aggregate_value = Value.obj(&aggregate_ref);
     const AggregateTrace = struct {
         fn trace(reference: *value.WasmGcRef, raw: *anyopaque, mark: value.WasmGcMarkValueFn) void {
-            const child: *Object = @ptrCast(@alignCast(reference.context));
-            mark(raw, Value.obj(child));
+            const child: *Value = @ptrCast(@alignCast(reference.context));
+            mark(raw, child.*);
+        }
+
+        fn relocate(reference: *value.WasmGcRef, raw: *anyopaque, rewrite: value.WasmGcRewriteValueFn) void {
+            const child: *Value = @ptrCast(@alignCast(reference.context));
+            rewrite(raw, child);
         }
     };
     var aggregate_header: value.WasmGcRef = .{
-        .context = @ptrCast(&aggregate_ref),
+        .context = @ptrCast(&aggregate_value),
         .trace = AggregateTrace.trace,
+        .relocate = AggregateTrace.relocate,
     };
-    const nested_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&nested_ref) }};
+    var nested_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&nested_ref) }};
+    var nested_externrefs = [_]Value{Value.obj(&nested_ref)};
     var nested_exception: value.WasmException = .{
         .tag = @ptrCast(&dummy_tag),
         .payload = &nested_payload,
-        .externrefs = &.{Value.obj(&nested_ref)},
+        .externrefs = &nested_externrefs,
         .owner = @ptrCast(&dummy_owner),
     };
-    const pending_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&pending_ref) }};
+    var pending_payload = [_]value.WasmSlot{.{ .externref = Value.obj(&pending_ref) }};
+    var pending_externrefs = [_]Value{Value.obj(&pending_ref)};
     var pending_exception: value.WasmException = .{
         .tag = @ptrCast(&dummy_tag),
         .payload = &pending_payload,
-        .externrefs = &.{Value.obj(&pending_ref)},
+        .externrefs = &pending_externrefs,
         .owner = @ptrCast(&dummy_owner),
     };
-    const stack = [_]value.WasmSlot{
+    var stack = [_]value.WasmSlot{
         .{ .numeric = @intFromPtr(&numeric_only) },
         .{ .funcref = @ptrCast(&funcref_only) },
         .{ .externref = Value.obj(&stack_ref) },
@@ -2780,8 +3044,8 @@ test "gc traces direct and exception-payload WebAssembly roots" {
         .{ .hostref = Value.obj(&host_ref) },
         .{ .externalized_gcref = &aggregate_header },
     };
-    const locals = [_]value.WasmSlot{.{ .externref = Value.obj(&local_ref) }};
-    const roots: value.WasmExecutionRoots = .{
+    var locals = [_]value.WasmSlot{.{ .externref = Value.obj(&local_ref) }};
+    var roots: value.WasmExecutionRoots = .{
         .stack = &stack,
         .locals = &locals,
         .exceptions = &.{&pending_exception},
@@ -2796,4 +3060,30 @@ test "gc traces direct and exception-payload WebAssembly roots" {
     try std.testing.expect(recorder.contains(&host_ref));
     try std.testing.expect(!recorder.contains(&numeric_only));
     try std.testing.expect(!recorder.contains(&funcref_only));
+
+    const Plan = struct {
+        old: [6]*Object,
+        new: [6]*Object,
+
+        pub fn resolve(self: *const @This(), pointer: *anyopaque) *anyopaque {
+            for (self.old, self.new) |old, new|
+                if (pointer == @as(*anyopaque, @ptrCast(old))) return @ptrCast(new);
+            return pointer;
+        }
+    };
+    const plan = Plan{
+        .old = .{ &stack_ref, &local_ref, &nested_ref, &pending_ref, &aggregate_ref, &host_ref },
+        .new = .{ &new_stack_ref, &new_local_ref, &new_nested_ref, &new_pending_ref, &new_aggregate_ref, &new_host_ref },
+    };
+    relocateWasmExecutionRoots(&roots, &plan);
+    try std.testing.expectEqual(&new_stack_ref, stack[2].externref.asObj());
+    try std.testing.expectEqual(&new_nested_ref, nested_payload[0].externref.asObj());
+    try std.testing.expectEqual(&new_nested_ref, nested_externrefs[0].asObj());
+    try std.testing.expectEqual(&new_aggregate_ref, aggregate_value.asObj());
+    try std.testing.expectEqual(&new_host_ref, stack[5].hostref.asObj());
+    try std.testing.expectEqual(&new_local_ref, locals[0].externref.asObj());
+    try std.testing.expectEqual(&new_pending_ref, pending_payload[0].externref.asObj());
+    try std.testing.expectEqual(&new_pending_ref, pending_externrefs[0].asObj());
+    try std.testing.expectEqual(@intFromPtr(&numeric_only), stack[0].numeric);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&funcref_only)), stack[1].funcref);
 }
