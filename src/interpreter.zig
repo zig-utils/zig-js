@@ -41466,6 +41466,14 @@ pub fn urlSerialize(arena: std.mem.Allocator, p: UrlParts, exclude_fragment: boo
     return out.items;
 }
 fn urlOrigin(arena: std.mem.Allocator, p: UrlParts) EvalError![]const u8 {
+    // A blob: URL's origin is the origin of the URL serialized in its path, but
+    // only when that inner URL's scheme is http(s)/file; otherwise opaque.
+    if (std.mem.eql(u8, p.scheme, "blob")) {
+        const inner = (try urlParse(arena, p.path, null)) orelse return "null";
+        if (std.mem.eql(u8, inner.scheme, "http") or std.mem.eql(u8, inner.scheme, "https") or
+            std.mem.eql(u8, inner.scheme, "file")) return try urlOrigin(arena, inner);
+        return "null";
+    }
     // Tuple origin for special (non-file) schemes; "null" otherwise.
     if (std.mem.eql(u8, p.scheme, "file") or p.host == null or !urlIsSpecialScheme(p.scheme)) return "null";
     var out: std.ArrayListUnmanaged(u8) = .empty;
