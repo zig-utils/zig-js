@@ -186,13 +186,11 @@ git submodule update --init wasm-spec-wg3
 zig build wasm-core-3 -Dwasm-core-3-converter=/path/to/wasm-tools
 ```
 
-The profile declares all 258 integrated Core 3 `.wast` files and records every
-command. Typed function references
+The terminal profile declares all 258 integrated Core 3 `.wast` files and
+records every command. Typed function references
 [#384](https://github.com/zig-utils/zig-js/issues/384), explicit exception
 references [#385](https://github.com/zig-utils/zig-js/issues/385), and relaxed
-SIMD [#386](https://github.com/zig-utils/zig-js/issues/386) are complete. The
-profile stays outside the published green aggregate until the remaining exact
-inventory is implemented and audited under
+SIMD [#386](https://github.com/zig-utils/zig-js/issues/386) are complete under
 [#366](https://github.com/zig-utils/zig-js/issues/366).
 
 Current upstream `main` is observed separately by the non-blocking
@@ -200,38 +198,33 @@ Current upstream `main` is observed separately by the non-blocking
 trees without advancing `wg-3.0` or changing the accepted score; CI refreshes
 the observation as informational output and tolerates network/report failures.
 
-The latest complete ReleaseFast audit, followed by exact reruns of every
-corrected slice, reaches **63,958 / 63,964 applicable commands** with 1,235
-text-format commands classified N/A and no harness runner errors. The remaining
-6 semantic assertions are isolated to two files under
-[#389](https://github.com/zig-utils/zig-js/issues/389); Core 3 therefore remains
-outside the accepted aggregate.
+The accepted ReleaseFast audit reaches **63,964 / 63,964 applicable commands**
+with 1,235 binary-API-inapplicable text-format commands, zero failures, and zero
+runner errors. The exact 258-file result is checked in as the
+[Core 3 inventory](.data/wasm-core-3-inventory.json).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 14 selected proposal/spec revisions by exact
 commit. It distinguishes finished WebAssembly 2.0/3.0 features from the active
 Phase-4 Threads proposal, declares dependency closure and host constraints, and
-keeps MVP as the only default complete profile until all features in a named
-post-MVP profile are implemented. Validate registry drift with:
+keeps MVP as the only default profile while recording Core 3 as implemented.
+Validate registry drift with:
 
 ```sh
 zig build wasm-feature-profiles-check
 ```
 
 The generated [terminal conformance matrix](.data/wasm-conformance-matrix.json)
-combines all nine scored profiles: **87,838/87,838 applicable commands pass**,
-with 1,627 explicit N/A and zero failures or runner errors. It records each
+combines all ten scored profiles: **151,802/151,802 applicable commands pass**,
+with 2,862 explicit N/A and zero failures or runner errors. It records each
 inventory, proposal pin, converter, execution-mode counts, host requirements,
 and architecture-independent interpreter scope. The same CI command above
 rejects matrix drift; regenerate intentional inventory changes with
 `python3 tools/wasm-conformance-matrix.py --write`.
 
 CI also rebuilds exact proposal checkouts and converters for every profile.
-Two bounded post-MVP jobs execute 208 WABT-backed commands across tail calls,
-exception handling, and multi-memory, plus 391 wasm-tools-backed commands
-across Memory64 and GC. The deliberate commands below remain authoritative for
-the complete inventories; the smoke set prevents a checked-in green artifact
-from masking pin, converter, or representative runtime drift.
+Bounded smoke slices cover every post-MVP family; the deliberate complete
+commands remain authoritative and keep long-tail corpus work off every push.
 
 The tail-call binary, validation, and bounded execution foundation is pinned
 independently to
@@ -305,6 +298,12 @@ Core 3 reference refinement accepts a nullable branch label when
 fallthrough and unreachable-polymorphic rules. Explicit typed `select` results
 also validate concrete heap indices even when operands are unreachable. The
 exact `br_on_non_null.wast` and `ref.wast` files pass 12/12 and 13/13.
+
+Legacy function-index element segments decode to their exact non-null
+`(ref func)` type, so they can initialize non-null tables. Cross-instance
+immutable global imports are covariant through canonical recursive type
+identity; mutable imports remain invariant. The exact `elem.wast` and
+`linking.wast` files pass 151/151 and 163/163.
 
 Reproduce those execution and root-safety witnesses with:
 

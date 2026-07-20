@@ -16,8 +16,7 @@ const value = try ctx.evaluate("let x = 40; x + 2");
 | profile | result | evidence |
 | --- | ---: | --- |
 | configured test262 | **53,175 / 53,175** | [run](docs/.data/test262-run-2026-07-05.txt) · [data](docs/.data/test262.json) |
-| nine-profile WebAssembly matrix | **87,838 / 87,838 applicable** | [matrix](docs/.data/wasm-conformance-matrix.json) · [reproduce](docs/wasm.md) |
-| Core 3 exact audit | **63,958 / 63,964 applicable** | 6 residual assertions in 2 files · [evidence](docs/wasm.md#beyond-the-mvp) |
+| ten-profile WebAssembly matrix | **151,802 / 151,802 applicable** | Core 3: 63,964/63,964 · [matrix](docs/.data/wasm-conformance-matrix.json) · [reproduce](docs/wasm.md) |
 
 ## Performance
 
