@@ -2550,6 +2550,10 @@ pub const Context = struct {
     /// from the debugger hook so transport plumbing never impersonates a pause.
     host_statement_ctx: ?*anyopaque = null,
     host_statement_hook: ?interp.HostStatementHook = null,
+    /// Cooperative profiler checkpoint, deliberately independent from the
+    /// inspector and embedder transport hooks so all three compose.
+    profile_statement_ctx: ?*anyopaque = null,
+    profile_statement_hook: ?interp.ProfileStatementHook = null,
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Guards the script-id/list and statement-location registry only in a
@@ -3550,11 +3554,13 @@ pub const Context = struct {
         return .{
             .arena = self.arena(),
             .env = &self.env,
-            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null and self.profile_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
             .host_statement_ctx = self.host_statement_ctx,
             .host_statement_hook = self.host_statement_hook,
+            .profile_statement_ctx = self.profile_statement_ctx,
+            .profile_statement_hook = self.profile_statement_hook,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
             .debug_script_ctx = self,
@@ -5798,7 +5804,10 @@ pub const Context = struct {
         // Top-level strictness from the program's directive prologue (the parser
         // leaves `strict` set if it saw a leading `"use strict"`).
         machine.strict = parser.strict;
-        var stack_trace_frame = interp.StackTraceCallFrame{ .code_type = .global };
+        var stack_trace_frame = interp.StackTraceCallFrame{
+            .function_identity = @intFromPtr(self.global_object),
+            .code_type = .global,
+        };
         machine.stack_trace_call_frame = &stack_trace_frame;
         self.exception = null;
         // Top-level-script dynamic `import()`: when a module host is installed,
@@ -6867,6 +6876,7 @@ pub const Context = struct {
         const saved_import_meta_obj = machine.import_meta_obj;
         const saved_stack_trace_call_frame = machine.stack_trace_call_frame;
         var stack_trace_call_frame = interp.StackTraceCallFrame{
+            .function_identity = @intFromPtr(m),
             .code_type = .module,
             .caller = saved_stack_trace_call_frame,
         };

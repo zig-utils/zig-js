@@ -706,6 +706,60 @@ const ReachabilityVisitor = struct {
     }
 };
 
+const PrivateCPUProfileFrame = struct {
+    function_name: []const u8,
+    function_identity: usize = 0,
+    source_url: []const u8,
+    script_id: u64,
+    line_zero_based: i32,
+    column_zero_based: i32,
+    sample_line_one_based: u32,
+    is_async: bool,
+};
+
+const PrivateCPUProfileSample = struct {
+    wall_time_us: i64,
+    frames: []PrivateCPUProfileFrame,
+};
+
+const PrivateCPUProfiler = struct {
+    lock: std.atomic.Mutex = .unlocked,
+    running: std.atomic.Value(bool) = .init(false),
+    start_wall_us: i64 = 0,
+    next_sample_mono_ns: i128 = 0,
+    interval_us: u32 = 1000,
+    samples: std.ArrayListUnmanaged(PrivateCPUProfileSample) = .empty,
+    dropped_samples: usize = 0,
+
+    fn acquire(self: *PrivateCPUProfiler) void {
+        var spins: usize = 0;
+        while (!self.lock.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    fn release(self: *PrivateCPUProfiler) void {
+        self.lock.unlock();
+    }
+
+    fn clearSamples(self: *PrivateCPUProfiler, allocator: std.mem.Allocator) void {
+        for (self.samples.items) |sample| allocator.free(sample.frames);
+        self.samples.clearRetainingCapacity();
+        self.dropped_samples = 0;
+    }
+
+    fn deinit(self: *PrivateCPUProfiler, allocator: std.mem.Allocator) void {
+        self.clearSamples(allocator);
+        self.samples.deinit(allocator);
+    }
+};
+
+/// Process-wide publication matches Bun's VM-less setter ABI. Each VM snapshots
+/// the current value at start, so lifecycle and collected samples remain
+/// isolated even when multiple profilers are used sequentially or concurrently.
+const private_cpu_sampling_interval_us_default: u32 = 1000;
+var private_cpu_sampling_interval_us: std.atomic.Value(u32) = .init(private_cpu_sampling_interval_us_default);
+
 /// One public JavaScriptCore VM lifetime. The hidden primary Context owns the
 /// shared arena/JIT runtime; every exposed global context is a distinct realm on
 /// that runtime and retains this record until its own final release.
@@ -719,6 +773,7 @@ const CContextGroup = struct {
     private_vm_owner_released: std.atomic.Value(bool) = .init(true),
     heap_type: u8 = 0,
     control_flow_profiler_enabled: std.atomic.Value(bool) = .init(false),
+    cpu_profiler: PrivateCPUProfiler = .{},
     /// Nesting depth for the synchronous `JSC::DeferGC` callback boundary.
     /// Attempts made inside it remain queued in `async_gc_requested`.
     gc_defer_depth: std.atomic.Value(usize) = .init(0),
@@ -842,6 +897,7 @@ const CContextGroup = struct {
         }
         self.zig_string_views.deinit(gpa);
         self.heap_snapshot_ids.deinit(gpa);
+        self.cpu_profiler.deinit(gpa);
         self.record_allocator.destroy(self);
     }
 };
@@ -12703,6 +12759,467 @@ export fn JSGlobalObject__clearException(global: JSContextRef) callconv(.c) void
     group.primary.private_pending_exception_root = null;
 }
 
+fn privateCPUProfilerSetHooks(group: *CContextGroup, enabled: bool) void {
+    const hook: ?interp.ProfileStatementHook = if (enabled) privateCPUProfilerStatementBoundary else null;
+    group.primary.profile_statement_ctx = if (enabled) group else null;
+    group.primary.profile_statement_hook = hook;
+    for (group.contexts.items) |context| {
+        context.profile_statement_ctx = if (enabled) group else null;
+        context.profile_statement_hook = hook;
+    }
+}
+
+fn privateCPUProfilerStatementBoundary(
+    opaque_group: *anyopaque,
+    machine: *interp.Interpreter,
+    location: interp.DebugStatementLocation,
+) void {
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    const profiler = &group.cpu_profiler;
+    if (!profiler.running.load(.acquire)) return;
+
+    const now_mono: i128 = @intCast(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds);
+    profiler.acquire();
+    defer profiler.release();
+    if (!profiler.running.load(.acquire)) return;
+
+    const published_interval = private_cpu_sampling_interval_us.load(.acquire);
+    if (published_interval != profiler.interval_us) {
+        profiler.interval_us = published_interval;
+        profiler.next_sample_mono_ns = now_mono;
+    }
+    if (now_mono < profiler.next_sample_mono_ns) return;
+    profiler.next_sample_mono_ns = now_mono + @as(i128, profiler.interval_us) * std.time.ns_per_us;
+
+    var frame_count: usize = 0;
+    var current = machine.stack_trace_call_frame;
+    while (current) |frame| : (current = frame.caller) {
+        frame_count += 1;
+        if (frame_count == 1024) break;
+    }
+    if (frame_count == 0) frame_count = 1;
+    const frames = gpa.alloc(PrivateCPUProfileFrame, frame_count) catch {
+        profiler.dropped_samples += 1;
+        return;
+    };
+    current = machine.stack_trace_call_frame;
+    var index: usize = 0;
+    while (current) |frame| : (current = frame.caller) {
+        const retained = interp.Interpreter.errorStackFrameFromCallFrame(frame, index);
+        const frame_location = frame.location orelse location;
+        const definition_location = frame.definition_location orelse frame_location;
+        frames[index] = .{
+            .function_name = if (retained.function_name.len == 0)
+                if (frame.code_type == .global) "(global)" else "(anonymous)"
+            else
+                retained.function_name,
+            .function_identity = frame.function_identity,
+            .source_url = definition_location.source_url,
+            .script_id = definition_location.script_id,
+            .line_zero_based = std.math.cast(i32, definition_location.location.line -| 1) orelse std.math.maxInt(i32),
+            .column_zero_based = std.math.cast(i32, definition_location.location.column -| 1) orelse std.math.maxInt(i32),
+            .sample_line_one_based = std.math.cast(u32, frame_location.location.line) orelse std.math.maxInt(u32),
+            .is_async = frame.is_async,
+        };
+        index += 1;
+        if (index == frames.len) break;
+    }
+    if (index == 0) {
+        frames[0] = .{
+            .function_name = "(global)",
+            .source_url = location.source_url,
+            .script_id = location.script_id,
+            .line_zero_based = std.math.cast(i32, location.location.line -| 1) orelse std.math.maxInt(i32),
+            .column_zero_based = std.math.cast(i32, location.location.column -| 1) orelse std.math.maxInt(i32),
+            .sample_line_one_based = std.math.cast(u32, location.location.line) orelse std.math.maxInt(u32),
+            .is_async = false,
+        };
+    }
+    profiler.samples.append(gpa, .{
+        .wall_time_us = @intCast(@divTrunc(std.Io.Timestamp.now(agent.engineIo(), .real).nanoseconds, std.time.ns_per_us)),
+        .frames = frames,
+    }) catch {
+        gpa.free(frames);
+        profiler.dropped_samples += 1;
+    };
+}
+
+const PrivateCPUProfileTick = struct {
+    line: u32,
+    ticks: u32,
+};
+
+const PrivateCPUProfileNode = struct {
+    id: u32,
+    parent_id: u32,
+    frame: PrivateCPUProfileFrame,
+    hit_count: u32 = 0,
+    children: std.ArrayListUnmanaged(u32) = .empty,
+    position_ticks: std.ArrayListUnmanaged(PrivateCPUProfileTick) = .empty,
+
+    fn deinit(self: *PrivateCPUProfileNode, allocator: std.mem.Allocator) void {
+        self.children.deinit(allocator);
+        self.position_ticks.deinit(allocator);
+    }
+};
+
+fn privateCPUProfileFrameEqual(left: PrivateCPUProfileFrame, right: PrivateCPUProfileFrame) bool {
+    const same_identity = if (left.function_identity != 0 and right.function_identity != 0)
+        left.function_identity == right.function_identity
+    else
+        left.line_zero_based == right.line_zero_based and left.column_zero_based == right.column_zero_based;
+    return same_identity and left.script_id == right.script_id and
+        left.is_async == right.is_async and
+        std.mem.eql(u8, left.function_name, right.function_name) and
+        std.mem.eql(u8, left.source_url, right.source_url);
+}
+
+fn privateCPUProfileAppendURL(
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    url: []const u8,
+) !void {
+    if (url.len > 0 and url[0] == '/') {
+        const normalized = try std.fmt.allocPrint(allocator, "file://{s}", .{url});
+        defer allocator.free(normalized);
+        return privateSnapshotAppendJsonValue(output, allocator, normalized);
+    }
+    return privateSnapshotAppendJsonValue(output, allocator, url);
+}
+
+fn privateBuildCPUProfileNodes(
+    samples: []const PrivateCPUProfileSample,
+    allocator: std.mem.Allocator,
+) !struct {
+    nodes: std.ArrayListUnmanaged(PrivateCPUProfileNode),
+    sample_ids: std.ArrayListUnmanaged(u32),
+} {
+    var nodes: std.ArrayListUnmanaged(PrivateCPUProfileNode) = .empty;
+    errdefer {
+        for (nodes.items) |*node| node.deinit(allocator);
+        nodes.deinit(allocator);
+    }
+    var sample_ids: std.ArrayListUnmanaged(u32) = .empty;
+    errdefer sample_ids.deinit(allocator);
+    const root_frame = PrivateCPUProfileFrame{
+        .function_name = "(root)",
+        .source_url = "",
+        .script_id = 0,
+        .line_zero_based = -1,
+        .column_zero_based = -1,
+        .sample_line_one_based = 0,
+        .is_async = false,
+    };
+    try nodes.append(allocator, .{ .id = 1, .parent_id = 0, .frame = root_frame });
+
+    for (samples) |sample| {
+        var parent_id: u32 = 1;
+        var reverse_index = sample.frames.len;
+        while (reverse_index > 0) {
+            reverse_index -= 1;
+            const frame = sample.frames[reverse_index];
+            var node_id: ?u32 = null;
+            for (nodes.items[1..]) |node| {
+                if (node.parent_id == parent_id and privateCPUProfileFrameEqual(node.frame, frame)) {
+                    node_id = node.id;
+                    break;
+                }
+            }
+            if (node_id == null) {
+                const id: u32 = @intCast(nodes.items.len + 1);
+                try nodes.append(allocator, .{ .id = id, .parent_id = parent_id, .frame = frame });
+                try nodes.items[parent_id - 1].children.append(allocator, id);
+                node_id = id;
+            }
+            parent_id = node_id.?;
+            if (reverse_index == 0) {
+                const leaf = &nodes.items[parent_id - 1];
+                leaf.hit_count +|= 1;
+                if (frame.sample_line_one_based != 0) {
+                    for (leaf.position_ticks.items) |*tick| {
+                        if (tick.line == frame.sample_line_one_based) {
+                            tick.ticks +|= 1;
+                            break;
+                        }
+                    } else try leaf.position_ticks.append(allocator, .{
+                        .line = frame.sample_line_one_based,
+                        .ticks = 1,
+                    });
+                }
+            }
+        }
+        try sample_ids.append(allocator, parent_id);
+    }
+    return .{ .nodes = nodes, .sample_ids = sample_ids };
+}
+
+fn privateGenerateCPUProfileJSON(
+    samples: []const PrivateCPUProfileSample,
+    start_wall_us: i64,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    var profile = try privateBuildCPUProfileNodes(samples, allocator);
+    defer {
+        for (profile.nodes.items) |*node| node.deinit(allocator);
+        profile.nodes.deinit(allocator);
+        profile.sample_ids.deinit(allocator);
+    }
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"nodes\":[");
+    for (profile.nodes.items, 0..) |node, node_index| {
+        if (node_index != 0) try output.append(allocator, ',');
+        try privateSnapshotAppendFmt(&output, allocator, "{{\"id\":{d},\"callFrame\":{{\"functionName\":", .{node.id});
+        try privateSnapshotAppendJsonValue(&output, allocator, node.frame.function_name);
+        try privateSnapshotAppendFmt(&output, allocator, ",\"scriptId\":\"{d}\",\"url\":", .{node.frame.script_id});
+        try privateCPUProfileAppendURL(&output, allocator, node.frame.source_url);
+        try privateSnapshotAppendFmt(&output, allocator, ",\"lineNumber\":{d},\"columnNumber\":{d}}},\"hitCount\":{d}", .{
+            node.frame.line_zero_based,
+            node.frame.column_zero_based,
+            node.hit_count,
+        });
+        if (node.children.items.len != 0 or node.id == 1) {
+            try output.appendSlice(allocator, ",\"children\":");
+            try privateSnapshotAppendJsonValue(&output, allocator, node.children.items);
+        }
+        if (node.position_ticks.items.len != 0) {
+            std.mem.sort(PrivateCPUProfileTick, node.position_ticks.items, {}, struct {
+                fn lessThan(_: void, left: PrivateCPUProfileTick, right: PrivateCPUProfileTick) bool {
+                    return left.line < right.line;
+                }
+            }.lessThan);
+            try output.appendSlice(allocator, ",\"positionTicks\":[");
+            for (node.position_ticks.items, 0..) |tick, tick_index| {
+                if (tick_index != 0) try output.append(allocator, ',');
+                try privateSnapshotAppendFmt(&output, allocator, "{{\"line\":{d},\"ticks\":{d}}}", .{ tick.line, tick.ticks });
+            }
+            try output.append(allocator, ']');
+        }
+        try output.append(allocator, '}');
+    }
+    const end_wall_us = if (samples.len == 0) start_wall_us else @max(start_wall_us, samples[samples.len - 1].wall_time_us);
+    try privateSnapshotAppendFmt(&output, allocator, "],\"startTime\":{d},\"endTime\":{d},\"samples\":", .{ start_wall_us, end_wall_us });
+    try privateSnapshotAppendJsonValue(&output, allocator, profile.sample_ids.items);
+    try output.appendSlice(allocator, ",\"timeDeltas\":[");
+    var previous = start_wall_us;
+    for (samples, 0..) |sample, index| {
+        if (index != 0) try output.append(allocator, ',');
+        const delta = @max(@as(i64, 0), sample.wall_time_us - previous);
+        try privateSnapshotAppendFmt(&output, allocator, "{d}", .{delta});
+        previous = @max(previous, sample.wall_time_us);
+    }
+    try output.appendSlice(allocator, "]}");
+    return output.toOwnedSlice(allocator);
+}
+
+const PrivateCPUFunctionStats = struct {
+    frame: PrivateCPUProfileFrame,
+    self_time_us: i64 = 0,
+    total_time_us: i64 = 0,
+    self_samples: usize = 0,
+    total_samples: usize = 0,
+};
+
+fn privateCPUDisplayName(frame: PrivateCPUProfileFrame) []const u8 {
+    return frame.function_name;
+}
+
+fn privateCPUAppendCode(
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) !void {
+    try output.append(allocator, '`');
+    try privateSnapshotAppendMarkdownText(output, allocator, text);
+    try output.append(allocator, '`');
+}
+
+fn privateCPUAppendLocation(
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    frame: PrivateCPUProfileFrame,
+) !void {
+    try output.append(allocator, '`');
+    if (frame.source_url.len == 0) {
+        try output.appendSlice(allocator, "[native code]");
+    } else {
+        try privateSnapshotAppendMarkdownText(output, allocator, frame.source_url);
+        if (frame.sample_line_one_based != 0)
+            try privateSnapshotAppendFmt(output, allocator, ":{d}", .{frame.sample_line_one_based});
+    }
+    try output.append(allocator, '`');
+}
+
+fn privateCPUAppendTime(output: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, micros: i64) !void {
+    if (micros >= 1_000_000) {
+        try privateSnapshotAppendFmt(output, allocator, "{d}.{d:0>2}s", .{ @divTrunc(micros, 1_000_000), @divTrunc(@mod(micros, 1_000_000), 10_000) });
+    } else if (micros >= 1000) {
+        try privateSnapshotAppendFmt(output, allocator, "{d}.{d}ms", .{ @divTrunc(micros, 1000), @divTrunc(@mod(micros, 1000), 100) });
+    } else {
+        try privateSnapshotAppendFmt(output, allocator, "{d}us", .{micros});
+    }
+}
+
+fn privateCPUAppendPercent(output: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value_: i64, total: i64) !void {
+    const tenths: i64 = if (total <= 0) 0 else @min(@as(i64, 1000), @divTrunc(value_ * 1000, total));
+    try privateSnapshotAppendFmt(output, allocator, "{d}.{d}%", .{ @divTrunc(tenths, 10), @mod(tenths, 10) });
+}
+
+fn privateGenerateCPUProfileMarkdown(
+    samples: []const PrivateCPUProfileSample,
+    start_wall_us: i64,
+    interval_us: u32,
+    dropped_samples: usize,
+    allocator: std.mem.Allocator,
+) ![]u8 {
+    if (samples.len == 0) return allocator.dupe(u8, "No samples collected.\n");
+    var stats: std.ArrayListUnmanaged(PrivateCPUFunctionStats) = .empty;
+    defer stats.deinit(allocator);
+    var previous = start_wall_us;
+    var total_time_us: i64 = 0;
+    for (samples) |sample| {
+        const delta = @max(@as(i64, 0), sample.wall_time_us - previous);
+        previous = @max(previous, sample.wall_time_us);
+        total_time_us +|= delta;
+        for (sample.frames, 0..) |frame, depth| {
+            var stats_index: ?usize = null;
+            for (stats.items, 0..) |entry, index| {
+                if (privateCPUProfileFrameEqual(entry.frame, frame)) {
+                    stats_index = index;
+                    break;
+                }
+            }
+            if (stats_index == null) {
+                try stats.append(allocator, .{ .frame = frame });
+                stats_index = stats.items.len - 1;
+            }
+            const entry = &stats.items[stats_index.?];
+            entry.total_samples += 1;
+            entry.total_time_us +|= delta;
+            if (depth == 0) {
+                entry.self_samples += 1;
+                entry.self_time_us +|= delta;
+            }
+        }
+    }
+    std.mem.sort(PrivateCPUFunctionStats, stats.items, {}, struct {
+        fn lessThan(_: void, left: PrivateCPUFunctionStats, right: PrivateCPUFunctionStats) bool {
+            if (left.self_time_us != right.self_time_us) return left.self_time_us > right.self_time_us;
+            return std.mem.lessThan(u8, left.frame.function_name, right.frame.function_name);
+        }
+    }.lessThan);
+
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "# CPU Profile\n\n| Duration | Samples | Interval | Functions | Dropped |\n|----------|--------:|---------:|----------:|--------:|\n| ");
+    try privateCPUAppendTime(&output, allocator, total_time_us);
+    try privateSnapshotAppendFmt(&output, allocator, " | {d} | ", .{samples.len});
+    try privateCPUAppendTime(&output, allocator, @intCast(interval_us));
+    try privateSnapshotAppendFmt(&output, allocator, " | {d} | {d} |\n\n", .{ stats.items.len, dropped_samples });
+
+    try output.appendSlice(allocator, "## Hot Functions (Self Time)\n\n| Self% | Self | Total% | Total | Function | Location |\n|------:|-----:|-------:|------:|----------|----------|\n");
+    for (stats.items) |entry| {
+        if (entry.self_time_us == 0) continue;
+        try output.appendSlice(allocator, "| ");
+        try privateCPUAppendPercent(&output, allocator, entry.self_time_us, total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendTime(&output, allocator, entry.self_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendPercent(&output, allocator, entry.total_time_us, total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendTime(&output, allocator, entry.total_time_us);
+        try output.appendSlice(allocator, " | ");
+        if (entry.frame.is_async) try output.appendSlice(allocator, "`async ") else try output.append(allocator, '`');
+        try privateSnapshotAppendMarkdownText(&output, allocator, privateCPUDisplayName(entry.frame));
+        try output.appendSlice(allocator, "` | ");
+        try privateCPUAppendLocation(&output, allocator, entry.frame);
+        try output.appendSlice(allocator, " |\n");
+    }
+
+    try output.appendSlice(allocator, "\n## Call Tree (Total Time)\n\n| Total% | Total | Self% | Self | Function | Location |\n|-------:|------:|------:|-----:|----------|----------|\n");
+    for (stats.items) |entry| {
+        try output.appendSlice(allocator, "| ");
+        try privateCPUAppendPercent(&output, allocator, entry.total_time_us, total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendTime(&output, allocator, entry.total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendPercent(&output, allocator, entry.self_time_us, total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendTime(&output, allocator, entry.self_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendCode(&output, allocator, privateCPUDisplayName(entry.frame));
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendLocation(&output, allocator, entry.frame);
+        try output.appendSlice(allocator, " |\n");
+    }
+
+    try output.appendSlice(allocator, "\n## Function Details\n\n");
+    for (stats.items) |entry| {
+        try output.appendSlice(allocator, "### ");
+        try privateCPUAppendCode(&output, allocator, privateCPUDisplayName(entry.frame));
+        try output.appendSlice(allocator, "\n\n");
+        try privateCPUAppendLocation(&output, allocator, entry.frame);
+        try output.appendSlice(allocator, " | Self: ");
+        try privateCPUAppendPercent(&output, allocator, entry.self_time_us, total_time_us);
+        try output.appendSlice(allocator, " | Total: ");
+        try privateCPUAppendPercent(&output, allocator, entry.total_time_us, total_time_us);
+        try privateSnapshotAppendFmt(&output, allocator, " | Samples: {d}\n\n", .{entry.self_samples});
+        try output.appendSlice(allocator, "**Called by:**\n");
+        var any_caller = false;
+        for (samples) |sample| {
+            for (sample.frames, 0..) |frame, depth| {
+                if (!privateCPUProfileFrameEqual(frame, entry.frame) or depth + 1 >= sample.frames.len) continue;
+                try output.appendSlice(allocator, "- ");
+                try privateCPUAppendCode(&output, allocator, privateCPUDisplayName(sample.frames[depth + 1]));
+                try output.append(allocator, '\n');
+                any_caller = true;
+                break;
+            }
+        }
+        if (!any_caller) try output.appendSlice(allocator, "- `(root)`\n");
+        try output.appendSlice(allocator, "\n**Calls:**\n");
+        var any_callee = false;
+        for (samples) |sample| {
+            for (sample.frames, 0..) |frame, depth| {
+                if (!privateCPUProfileFrameEqual(frame, entry.frame) or depth == 0) continue;
+                try output.appendSlice(allocator, "- ");
+                try privateCPUAppendCode(&output, allocator, privateCPUDisplayName(sample.frames[depth - 1]));
+                try output.append(allocator, '\n');
+                any_callee = true;
+                break;
+            }
+        }
+        if (!any_callee) try output.appendSlice(allocator, "- None\n");
+        try output.append(allocator, '\n');
+    }
+
+    try output.appendSlice(allocator, "## Files\n\n| Self% | Self | File |\n|------:|-----:|------|\n");
+    for (stats.items, 0..) |entry, index| {
+        if (entry.self_time_us == 0 or entry.frame.source_url.len == 0) continue;
+        var already_emitted = false;
+        for (stats.items[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.frame.source_url, entry.frame.source_url)) {
+                already_emitted = true;
+                break;
+            }
+        }
+        if (already_emitted) continue;
+        var file_time: i64 = 0;
+        for (stats.items) |candidate| {
+            if (std.mem.eql(u8, candidate.frame.source_url, entry.frame.source_url))
+                file_time +|= candidate.self_time_us;
+        }
+        try output.appendSlice(allocator, "| ");
+        try privateCPUAppendPercent(&output, allocator, file_time, total_time_us);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendTime(&output, allocator, file_time);
+        try output.appendSlice(allocator, " | ");
+        try privateCPUAppendCode(&output, allocator, entry.frame.source_url);
+        try output.appendSlice(allocator, " |\n");
+    }
+    return output.toOwnedSlice(allocator);
+}
+
 fn privateGroupFromVM(vm_ref: ?*anyopaque) ?*CContextGroup {
     return @ptrCast(@alignCast(vm_ref orelse return null));
 }
@@ -12778,6 +13295,99 @@ export fn Bun__generateHeapProfile(vm_ref: ?*anyopaque) callconv(.c) PrivateHeap
     const profile = privateGenerateHeapProfile(group, gpa) catch return privateEmptyHeapProfilerString();
     defer gpa.free(profile);
     return privateOwnedHeapProfilerString(profile);
+}
+
+fn privateOwnedCPUProfileString(bytes: []const u8) !PrivateHeapProfilerString {
+    const string = try privateOwnedWTF8String(bytes);
+    if (comptime private_abi_options.is_bun) return string;
+    return if (string.tag == .wtf_string_impl) string.value.wtf_string_impl else null;
+}
+
+fn privateReleaseCPUProfileString(string: PrivateHeapProfilerString) void {
+    if (comptime private_abi_options.is_bun) {
+        privateDerefBunString(string);
+    } else {
+        Bun__WTFStringImpl__deref(string);
+    }
+}
+
+/// Publish a validated process default. The VM-less ABI cannot target one
+/// profiler; active VMs observe the new interval independently at their next
+/// cooperative checkpoint.
+export fn Bun__setSamplingInterval(interval_microseconds: c_int) callconv(.c) void {
+    const validated: u32 = if (interval_microseconds <= 0)
+        private_cpu_sampling_interval_us_default
+    else
+        @intCast(@min(interval_microseconds, 60 * 1_000_000));
+    private_cpu_sampling_interval_us.store(validated, .release);
+}
+
+/// Start (or restart) a clean per-VM session. Restarting intentionally discards
+/// unconsumed samples; it never appends a second timeline onto the first.
+export fn Bun__startCPUProfiler(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.primary.assertOwnerThread();
+    const profiler = &group.cpu_profiler;
+    profiler.running.store(false, .release);
+    privateCPUProfilerSetHooks(group, false);
+    profiler.acquire();
+    profiler.clearSamples(gpa);
+    profiler.start_wall_us = @intCast(@divTrunc(std.Io.Timestamp.now(agent.engineIo(), .real).nanoseconds, std.time.ns_per_us));
+    profiler.interval_us = private_cpu_sampling_interval_us.load(.acquire);
+    profiler.next_sample_mono_ns = @intCast(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds);
+    profiler.release();
+    privateCPUProfilerSetHooks(group, true);
+    profiler.running.store(true, .release);
+}
+
+/// Stop one VM and serialize a single immutable sample set into either or both
+/// pinned ownership layouts. Output publication is atomic: on any allocation
+/// failure neither caller-visible slot receives a partial profile.
+export fn Bun__stopCPUProfiler(
+    vm_ref: ?*anyopaque,
+    out_json: ?*PrivateHeapProfilerString,
+    out_text: ?*PrivateHeapProfilerString,
+) callconv(.c) void {
+    if (out_json) |slot| slot.* = privateEmptyHeapProfilerString();
+    if (out_text) |slot| slot.* = privateEmptyHeapProfilerString();
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.primary.assertOwnerThread();
+    const profiler = &group.cpu_profiler;
+    if (!profiler.running.swap(false, .acq_rel)) return;
+    privateCPUProfilerSetHooks(group, false);
+
+    profiler.acquire();
+    var samples = profiler.samples;
+    profiler.samples = .empty;
+    const start_wall_us = profiler.start_wall_us;
+    const interval_us = profiler.interval_us;
+    const dropped_samples = profiler.dropped_samples;
+    profiler.dropped_samples = 0;
+    profiler.release();
+    defer {
+        for (samples.items) |sample| gpa.free(sample.frames);
+        samples.deinit(gpa);
+    }
+    if (out_json == null and out_text == null) return;
+
+    const json = if (out_json != null)
+        privateGenerateCPUProfileJSON(samples.items, start_wall_us, gpa) catch return
+    else
+        null;
+    defer if (json) |bytes| gpa.free(bytes);
+    const text_profile = if (out_text != null)
+        privateGenerateCPUProfileMarkdown(samples.items, start_wall_us, interval_us, dropped_samples, gpa) catch return
+    else
+        null;
+    defer if (text_profile) |bytes| gpa.free(bytes);
+
+    const json_string = if (json) |bytes| privateOwnedCPUProfileString(bytes) catch return else null;
+    const text_string = if (text_profile) |bytes| privateOwnedCPUProfileString(bytes) catch {
+        if (json_string) |string| privateReleaseCPUProfileString(string);
+        return;
+    } else null;
+    if (out_json) |slot| slot.* = json_string.?;
+    if (out_text) |slot| slot.* = text_string.?;
 }
 
 /// Release the single owner reference published by `JSC__VM__create`.
@@ -15306,6 +15916,10 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         return null;
     };
     ctx.c_api_group = @ptrCast(group);
+    if (group.cpu_profiler.running.load(.acquire)) {
+        ctx.profile_statement_ctx = group;
+        ctx.profile_statement_hook = privateCPUProfilerStatementBoundary;
+    }
     ctx.watchdog_check_flag = &group.need_watchdog_check;
     ctx.watchdog_deadline_ns = &group.execution_deadline_ns;
     ctx.initCApiRef();
@@ -31199,4 +31813,79 @@ test "private heap snapshot retained sizes use exact graph dominators" {
     const retained = try privateHeapSnapshotRetainedSizes(&cells, &edges, std.testing.allocator);
     defer std.testing.allocator.free(retained);
     try std.testing.expectEqualSlices(usize, &.{ 60, 60, 20, 30 }, retained);
+}
+
+test "private CPU profile serializers preserve stacks timing positions and reports" {
+    const main_frames = [_]PrivateCPUProfileFrame{
+        .{ .function_name = "leaf404", .source_url = "/tmp/profile404.js", .script_id = 4, .line_zero_based = 8, .column_zero_based = 2, .sample_line_one_based = 9, .is_async = false },
+        .{ .function_name = "recur404", .source_url = "/tmp/profile404.js", .script_id = 4, .line_zero_based = 4, .column_zero_based = 0, .sample_line_one_based = 5, .is_async = false },
+        .{ .function_name = "recur404", .source_url = "/tmp/profile404.js", .script_id = 4, .line_zero_based = 4, .column_zero_based = 0, .sample_line_one_based = 5, .is_async = false },
+        .{ .function_name = "(global)", .source_url = "/tmp/profile404.js", .script_id = 4, .line_zero_based = 12, .column_zero_based = 0, .sample_line_one_based = 13, .is_async = false },
+    };
+    const async_frames = [_]PrivateCPUProfileFrame{
+        .{ .function_name = "worker404", .source_url = "async404.js", .script_id = 5, .line_zero_based = 2, .column_zero_based = 1, .sample_line_one_based = 3, .is_async = true },
+        .{ .function_name = "(global)", .source_url = "async404.js", .script_id = 5, .line_zero_based = 5, .column_zero_based = 0, .sample_line_one_based = 6, .is_async = false },
+    };
+    const samples = [_]PrivateCPUProfileSample{
+        .{ .wall_time_us = 1_001_000, .frames = @constCast(&main_frames) },
+        .{ .wall_time_us = 1_002_250, .frames = @constCast(&async_frames) },
+    };
+    const json = try privateGenerateCPUProfileJSON(&samples, 1_000_000, std.testing.allocator);
+    defer std.testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    try std.testing.expectEqual(@as(usize, 2), object.get("samples").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 2), object.get("timeDeltas").?.array.items.len);
+    try std.testing.expect(object.get("nodes").?.array.items.len >= 6);
+    try std.testing.expect(std.mem.indexOf(u8, json, "file:///tmp/profile404.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"positionTicks\"") != null);
+
+    const markdown = try privateGenerateCPUProfileMarkdown(&samples, 1_000_000, 1000, 2, std.testing.allocator);
+    defer std.testing.allocator.free(markdown);
+    inline for (.{ "# CPU Profile", "## Hot Functions (Self Time)", "## Call Tree (Total Time)", "## Function Details", "**Called by:**", "**Calls:**", "## Files", "async worker404", "| 2 |" }) |needle|
+        try std.testing.expect(std.mem.indexOf(u8, markdown, needle) != null);
+
+    const empty_json = try privateGenerateCPUProfileJSON(&.{}, 404, std.testing.allocator);
+    defer std.testing.allocator.free(empty_json);
+    try std.testing.expectEqualStrings(
+        "{\"nodes\":[{\"id\":1,\"callFrame\":{\"functionName\":\"(root)\",\"scriptId\":\"0\",\"url\":\"\",\"lineNumber\":-1,\"columnNumber\":-1},\"hitCount\":0,\"children\":[]}],\"startTime\":404,\"endTime\":404,\"samples\":[],\"timeDeltas\":[]}",
+        empty_json,
+    );
+    const empty_markdown = try privateGenerateCPUProfileMarkdown(&.{}, 404, 1000, 0, std.testing.allocator);
+    defer std.testing.allocator.free(empty_markdown);
+    try std.testing.expectEqualStrings("No samples collected.\n", empty_markdown);
+}
+
+test "private CPU profile serializers fail without partial allocations" {
+    const frames = [_]PrivateCPUProfileFrame{
+        .{ .function_name = "sample404", .source_url = "sample404.js", .script_id = 4, .line_zero_based = 3, .column_zero_based = 2, .sample_line_one_based = 4, .is_async = false },
+    };
+    const samples = [_]PrivateCPUProfileSample{
+        .{ .wall_time_us = 1404, .frames = @constCast(&frames) },
+    };
+    {
+        var saw_oom = false;
+        for ([_]usize{ 0, 3, 12 }) |fail_index| {
+            var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+            const allocator = failing.allocator();
+            if (privateGenerateCPUProfileJSON(&samples, 1000, allocator)) |bytes| allocator.free(bytes) else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                saw_oom = true;
+            }
+        }
+        try std.testing.expect(saw_oom);
+    }
+    {
+        var saw_oom = false;
+        for ([_]usize{ 0, 3, 12 }) |fail_index| {
+            var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+            const allocator = failing.allocator();
+            if (privateGenerateCPUProfileMarkdown(&samples, 1000, 1000, 0, allocator)) |bytes| allocator.free(bytes) else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                saw_oom = true;
+            }
+        }
+        try std.testing.expect(saw_oom);
+    }
 }

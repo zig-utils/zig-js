@@ -245,6 +245,8 @@ pub const Generator = struct {
     backing_lock: std.atomic.Mutex = .unlocked,
     chunk: *Chunk,
     function_name: []const u8 = "",
+    function_identity: usize = 0,
+    definition_location: ?interp.DebugStatementLocation = null,
     strict: bool = false,
     exec: Exec = .{},
     env: *Environment,
@@ -3751,6 +3753,8 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     if (gen) |activation| {
         stack_trace_call_frame = .{
             .function_name = activation.function_name,
+            .function_identity = activation.function_identity,
+            .definition_location = activation.definition_location,
             .code_type = .function,
             .is_async = activation.is_async or activation.is_async_gen,
             .caller = saved_stack_trace_call_frame,
@@ -3834,6 +3838,8 @@ fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
     };
     vm.debug_current_location = location;
     if (vm.stack_trace_call_frame) |frame| frame.location = location;
+    if (vm.profile_statement_hook) |hook|
+        hook(vm.profile_statement_ctx.?, vm, location);
 }
 
 /// The instruction loop proper. Operates on `exec.stack` directly so the
@@ -3848,7 +3854,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     const code = chunk.code.items;
     const location_execution = chunk.debug_nodes.len != 0;
     const debug_execution = location_execution and
-        (vm.debug_statement_hook != null or vm.host_statement_hook != null);
+        (vm.debug_statement_hook != null or vm.host_statement_hook != null or vm.profile_statement_hook != null);
     // Parallel-mode flag hoisted out of the hot loop: in the default engine this
     // is false, so frame slots and monomorphic property IC hits avoid locks and
     // repeated atomic mode loads. Shared/concurrent-GC contexts enable the flag
@@ -5058,6 +5064,8 @@ pub fn makeGenerator(vm: *Interpreter, func: *Function, args: []const Value, thi
     g.* = .{
         .chunk = chunk,
         .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+        .definition_location = func.definition_location,
         .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
@@ -5359,6 +5367,8 @@ pub fn runAsync(vm: *Interpreter, func: *Function, args: []const Value, this_val
     g.* = .{
         .chunk = chunk,
         .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+        .definition_location = func.definition_location,
         .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
@@ -5645,6 +5655,8 @@ pub fn makeAsyncGenerator(vm: *Interpreter, func: *Function, args: []const Value
     g.* = .{
         .chunk = chunk,
         .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+        .definition_location = func.definition_location,
         .strict = func.is_strict,
         .env = lexical_env,
         .this_value = bound_this,
@@ -6413,6 +6425,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     }
     act.stack_trace_call_frame = .{
         .function_name = func.name,
+        .function_identity = @intFromPtr(func),
+        .definition_location = func.definition_location,
         .code_type = if (!new_target.isUndefined() or func.is_class_constructor) .constructor else .function,
         .is_async = func.is_async,
         .caller = vm.stack_trace_call_frame,

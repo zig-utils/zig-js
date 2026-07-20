@@ -440,6 +440,17 @@ pub const DebugStatementHook = *const fn (
 /// onto the runtime thread before the debugger observes the same statement.
 pub const HostStatementHook = *const fn (ctx: *anyopaque, interpreter: *Interpreter) void;
 
+/// Runtime-owned cooperative sampling checkpoint. It runs only after the
+/// current source location and always-on stack metadata have been published,
+/// so consumers can copy the live stack without racing activation teardown.
+/// Unlike the debugger hook it neither creates mutable scope mirrors nor
+/// changes pause/exception semantics.
+pub const ProfileStatementHook = *const fn (
+    ctx: *anyopaque,
+    interpreter: *Interpreter,
+    location: DebugStatementLocation,
+) void;
+
 pub const DebugExceptionHook = *const fn (
     ctx: *anyopaque,
     interpreter: *Interpreter,
@@ -468,9 +479,14 @@ pub const DebugCallFrame = struct {
 /// must not allocate inspector Environment mirrors just to retain a trace.
 pub const StackTraceCallFrame = struct {
     function_name: []const u8 = "",
+    /// Stable runtime identity used by cooperative profilers to aggregate a
+    /// function across changing sample positions. Zero is reserved for frames
+    /// synthesized without a live function/global owner.
+    function_identity: usize = 0,
     code_type: value.ErrorStackFrameCode = .function,
     is_async: bool = false,
     location: ?DebugStatementLocation = null,
+    definition_location: ?DebugStatementLocation = null,
     caller: ?*StackTraceCallFrame = null,
 };
 
@@ -905,6 +921,9 @@ pub const Function = struct {
     /// `globalThis` property through the closure environment.
     realm_global: ?*value.Object = null,
     name: []const u8 = "",
+    /// Fixed source location captured when the function value is created.
+    /// Sampling positions advance through the body independently.
+    definition_location: ?DebugStatementLocation = null,
     /// Exact source text of the function definition, for `Function.prototype.
     /// toString`. Empty when the parser didn't capture it (then toString falls
     /// back to native-function syntax).
@@ -1070,6 +1089,8 @@ pub const Interpreter = struct {
     debug_statement_hook: ?DebugStatementHook = null,
     host_statement_ctx: ?*anyopaque = null,
     host_statement_hook: ?HostStatementHook = null,
+    profile_statement_ctx: ?*anyopaque = null,
+    profile_statement_hook: ?ProfileStatementHook = null,
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     /// Non-null only for a no-GIL shared realm. Script publication mutates one
     /// Context-owned registry while every interpreter reads it at statement
@@ -3499,6 +3520,8 @@ pub const Interpreter = struct {
                     }
                     try hook(self.debug_statement_ctx.?, self, location);
                 }
+                if (self.profile_statement_hook) |hook|
+                    hook(self.profile_statement_ctx.?, self, location);
             }
         }
     }
@@ -4674,6 +4697,7 @@ pub const Interpreter = struct {
             .closure = closure,
             .realm_global = functionRealmGlobal(closure, self.global_object),
             .name = fnode.name,
+            .definition_location = self.debug_current_location,
             .source = fnode.source,
             .is_generator = fnode.is_generator,
             .is_async = fnode.is_async,
@@ -6255,6 +6279,8 @@ pub const Interpreter = struct {
         };
         var stack_trace_call_frame = StackTraceCallFrame{
             .function_name = func.name,
+            .function_identity = @intFromPtr(func),
+            .definition_location = func.definition_location,
             .code_type = if (!new_target.isUndefined() or func.is_class_constructor) .constructor else .function,
             .is_async = func.is_async,
             .caller = saved_stack_trace_call_frame,
