@@ -41177,20 +41177,28 @@ pub fn urlParse(arena: std.mem.Allocator, input_raw: []const u8, base: ?UrlParts
                 p.username = ub.items;
             }
         }
-        // host[:port] — IPv6 literal in brackets keeps its colons.
+        // host[:port] — an IPv6 literal in brackets is parsed and re-serialized
+        // to its canonical compressed form (`[2001:db8:0:0:0:0:0:1]` → `[2001:db8::1]`).
         var host_str = hostport;
+        var ipv6_host: ?[]const u8 = null;
         if (hostport.len > 0 and hostport[0] == '[') {
             const close = std.mem.indexOfScalar(u8, hostport, ']') orelse return null;
-            host_str = hostport[0 .. close + 1];
+            const addr = urlParseIPv6(hostport[1..close]) orelse return null;
+            ipv6_host = try urlSerializeIPv6(arena, addr);
             const tail = hostport[close + 1 ..];
-            if (tail.len > 0 and tail[0] == ':') p.port = try urlNormalizePort(arena, p.scheme, tail[1..]) orelse return null;
+            if (tail.len > 0) {
+                if (tail[0] != ':') return null; // junk after `]` is invalid
+                p.port = try urlNormalizePort(arena, p.scheme, tail[1..]) orelse return null;
+            }
         } else if (std.mem.lastIndexOfScalar(u8, hostport, ':')) |colon| {
             host_str = hostport[0..colon];
             p.port = try urlNormalizePort(arena, p.scheme, hostport[colon + 1 ..]) orelse return null;
         }
         // Host: a special scheme's host is a domain (ASCII-lowercased); a
         // non-special scheme's is an opaque host (case preserved, only C0-encoded).
-        if (host_str.len == 0) {
+        if (ipv6_host) |h6| {
+            p.host = h6;
+        } else if (host_str.len == 0) {
             if (special and !std.mem.eql(u8, p.scheme, "file")) return null;
             p.host = "";
         } else if (special) {
@@ -41315,6 +41323,120 @@ fn urlParseIPv4(arena: std.mem.Allocator, host: []const u8) EvalError!?[]const u
     return try std.fmt.allocPrint(arena, "{d}.{d}.{d}.{d}", .{
         (ipv4 >> 24) & 0xff, (ipv4 >> 16) & 0xff, (ipv4 >> 8) & 0xff, ipv4 & 0xff,
     });
+}
+
+/// WHATWG IPv6 parser: `input` is the text between the `[` `]` brackets. Returns
+/// the 8 16-bit pieces, or null on any malformation (too many pieces, a second
+/// `::`, a bad hextet, a malformed embedded IPv4 tail).
+fn urlParseIPv6(input: []const u8) ?[8]u16 {
+    var address = std.mem.zeroes([8]u16);
+    var piece_index: usize = 0;
+    var compress: ?usize = null;
+    var i: usize = 0;
+    const n = input.len;
+    if (i < n and input[i] == ':') {
+        if (i + 1 >= n or input[i + 1] != ':') return null;
+        i += 2;
+        piece_index += 1;
+        compress = piece_index;
+    }
+    while (i < n) {
+        if (piece_index == 8) return null;
+        if (input[i] == ':') {
+            if (compress != null) return null;
+            i += 1;
+            piece_index += 1;
+            compress = piece_index;
+            continue;
+        }
+        var hextet: u16 = 0;
+        var length: usize = 0;
+        while (length < 4 and i < n and std.ascii.isHex(input[i])) : (length += 1) {
+            hextet = hextet *% 0x10 + @as(u16, std.fmt.charToDigit(input[i], 16) catch return null);
+            i += 1;
+        }
+        if (i < n and input[i] == '.') {
+            if (length == 0) return null;
+            i -= length; // rewind over the digits just consumed as hex
+            if (piece_index > 6) return null;
+            var numbers_seen: usize = 0;
+            while (i < n) {
+                var ipv4_piece: ?u16 = null;
+                if (numbers_seen > 0) {
+                    if (input[i] == '.' and numbers_seen < 4) i += 1 else return null;
+                }
+                if (i >= n or !std.ascii.isDigit(input[i])) return null;
+                while (i < n and std.ascii.isDigit(input[i])) : (i += 1) {
+                    const d: u16 = input[i] - '0';
+                    if (ipv4_piece == null) {
+                        ipv4_piece = d;
+                    } else if (ipv4_piece.? == 0) {
+                        return null; // no leading zeros
+                    } else ipv4_piece = ipv4_piece.? * 10 + d;
+                    if (ipv4_piece.? > 255) return null;
+                }
+                address[piece_index] = address[piece_index] * 0x100 + ipv4_piece.?;
+                numbers_seen += 1;
+                if (numbers_seen == 2 or numbers_seen == 4) piece_index += 1;
+            }
+            if (numbers_seen != 4) return null;
+            break;
+        } else if (i < n and input[i] == ':') {
+            i += 1;
+            if (i >= n) return null;
+        } else if (i < n) return null;
+        address[piece_index] = hextet;
+        piece_index += 1;
+    }
+    if (compress) |c| {
+        var swaps = piece_index - c;
+        piece_index = 7;
+        while (piece_index != 0 and swaps > 0) {
+            const tmp = address[piece_index];
+            address[piece_index] = address[c + swaps - 1];
+            address[c + swaps - 1] = tmp;
+            piece_index -= 1;
+            swaps -= 1;
+        }
+    } else if (piece_index != 8) return null;
+    return address;
+}
+
+/// WHATWG IPv6 serializer: compress the first longest run (>1) of zero pieces to
+/// `::`, lowercase hex, no embedded IPv4. Returns the bracketed `[…]` form.
+fn urlSerializeIPv6(arena: std.mem.Allocator, address: [8]u16) EvalError![]const u8 {
+    var compress: ?usize = null;
+    var best_len: usize = 1;
+    var idx: usize = 0;
+    while (idx < 8) {
+        if (address[idx] == 0) {
+            var j = idx;
+            while (j < 8 and address[j] == 0) : (j += 1) {}
+            if (j - idx > best_len) {
+                best_len = j - idx;
+                compress = idx;
+            }
+            idx = j;
+        } else idx += 1;
+    }
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    try out.append(arena, '[');
+    var ignore0 = false;
+    var pi: usize = 0;
+    while (pi < 8) : (pi += 1) {
+        if (ignore0 and address[pi] == 0) continue;
+        ignore0 = false;
+        if (compress == pi) {
+            try out.appendSlice(arena, if (pi == 0) "::" else ":");
+            ignore0 = true;
+            continue;
+        }
+        var buf: [4]u8 = undefined;
+        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{x}", .{address[pi]}) catch unreachable);
+        if (pi != 7) try out.append(arena, ':');
+    }
+    try out.append(arena, ']');
+    return out.items;
 }
 fn urlParsePathQueryFrag(arena: std.mem.Allocator, p: *UrlParts, s_in: []const u8, special: bool, has_host: bool) EvalError!void {
     var s = s_in;
