@@ -56,7 +56,8 @@ EXPLICIT_CASE_CATEGORIES = {
         "JSC shared-GC mark-list hooks",
     ),
     "w16-c1-prevent-collection.js": (
-        "JSC heap snapshot/preventCollection hooks",
+        "portable snapshot graph/parse/ownership promoted by test-private-heap-snapshot",
+        "JSC shared-collector preventCollection election hook remains reference-only",
     ),
 }
 
@@ -127,6 +128,7 @@ DEPENDENCY_CATALOG = {
     "jsc-heap-snapshot": {
         "description": "JSC-private heap snapshot and preventCollection controls",
         "owner_issues": [143, 144],
+        "resolution": "partial: portable snapshot serialization promoted by #403; JSC shared-collector gate remains reference-only",
     },
     "jsc-mark-list": {
         "description": "JSC-private shared-GC mark-list storage and shell controls",

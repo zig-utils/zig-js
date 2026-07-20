@@ -402,9 +402,11 @@ value. It reports semantic reachability and does not reclaim storage.
 `Bun__generateHeapSnapshotV8`, and `Bun__generateHeapProfile` reuse that exact
 VM-wide strong graph with property, index, variable, and internal edge labels.
 They publish WebKit GCDebugging v3, Chrome/V8 `.heapsnapshot`, and a complete
-Markdown cell/edge inventory respectively. Stable IDs survive repeated arena
-snapshots and precise-GC compaction; Home and Bun retain their distinct pointer
-and by-value string ownership ABIs. Run `zig build test-private-heap-snapshot`.
+Markdown cell/edge inventory respectively. The profile accounts ArrayBuffer
+backing bytes and computes retained sizes from the graph's dominator tree.
+Stable IDs survive repeated arena snapshots and precise-GC compaction; Home and
+Bun retain their distinct pointer and by-value string ownership ABIs. Run
+`zig build test-private-heap-snapshot`.
 
 ## Objective-C bridge target
 

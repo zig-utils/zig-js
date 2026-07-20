@@ -712,8 +712,11 @@ Issue #1 remains the umbrella status page.
   behavior and the file is reliable under Zig `0.17-dev`, especially the
   WebAssembly-required files, the incompatible JSC worker-Wasm refusal policy,
   JIT/shell-hook witnesses, JSC-specific mark-list
-  or heap-snapshot/preventCollection probes, detached-buffer fresh-view
+  or the shared-collector `preventCollection` probe, detached-buffer fresh-view
   reference assumptions, and typed-array race-shape probes.
+  The portable graph/parse/ownership portion of the heap-snapshot case is now
+  covered by `zig build test-private-heap-snapshot`; the JSC-only collector
+  election gate remains explicitly outside that promotion.
   Run
   `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
   to keep the nearest-probe negative baseline honest: it passes only while

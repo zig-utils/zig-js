@@ -912,9 +912,13 @@ PR-249 files stay reference-only for concrete reasons:
   child-created `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit,
   sibling reads, GC pressure, post-creator resize, and post-creator
   `ArrayBuffer.transfer()`.
-- `dw2-marklistset-storm.js` and `w16-c1-prevent-collection.js` remain out
-  because they target JSC shared-GC mark-list and heap-snapshot
-  `preventCollection` hooks rather than portable zig-js behavior.
+- `dw2-marklistset-storm.js` remains out because it targets JSC's shared-GC
+  mark-list machinery. The portable graph/parse/ownership half of
+  `w16-c1-prevent-collection.js` is promoted by
+  `zig build test-private-heap-snapshot`: both WebKit and V8 forms are parsed
+  across repeated snapshots under Debug, ReleaseSafe, and TSan. The original
+  concurrent `Heap::preventCollection` gate remains reference-only because it
+  is a JSC shared-collector election hook, not a portable snapshot property.
 - Helper/preload files such as `harness.js`, `bench/harness.js`,
   `scaling/harness.js`, `resources/assert.js`, and
   `vmstate/resources/workload.js` are not counted as standalone remaining

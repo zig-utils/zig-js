@@ -544,8 +544,9 @@ realms. The graph preserves cycles, follows property/index/variable/internal
 edges, omits weak-only targets, and uses relocation-stable zig-gc identities or
 VM-lifetime arena identities. It is emitted as WebKit GCDebugging JSON parsed
 into a genuine JS object, Chrome/V8 heap-snapshot JSON, or a complete Markdown
-cell/edge inventory. Home receives an owned StringImpl pointer while Bun uses
-its by-value BunString. The pinned sources and cross-profile fixture are in
+cell/edge inventory with ArrayBuffer external bytes and dominator-derived
+retained sizes. Home receives an owned StringImpl pointer while Bun uses its
+by-value BunString. The pinned sources and cross-profile fixture are in
 [`heap-snapshot-serialization-403.json`](heap-snapshot-serialization-403.json);
 run `zig build test-private-heap-snapshot`.
 
