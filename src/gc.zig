@@ -22,6 +22,7 @@ const ast = @import("ast.zig");
 const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const vm = @import("vm.zig");
+const bytecode = @import("bytecode.zig");
 const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
 const gc_runtime = @import("gc_runtime.zig");
@@ -675,14 +676,41 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.env);
     for (g.exec.stack.items) |s| markValue(v, s);
     markValue(v, g.exec.acc);
+    var frame = g.exec.frame;
+    while (frame) |current| : (frame = current.parent)
+        for (current.slots) |slot| markValue(v, slot);
     markValue(v, g.this_value);
     v.mark(g.home_object);
     v.mark(g.super_ctor);
+    if (g.import_meta_slot) |slot| v.mark(slot.obj);
     v.mark(g.result);
     if (g.async_parent_promise) |parent| markManaged(v, parent);
     for (g.pendingRequests()) |req| {
         markValue(v, req.value);
         v.mark(req.result);
+    }
+}
+
+/// Generator tracing is deferred to the world-stopped finish pass during a
+/// concurrent mark; relocation runs at that same boundary, so no mutator can
+/// race these arena-owned stacks, frames, or request records.
+pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
+    gc_relocation.rewriteRequiredSlot(v, Environment, &g.env);
+    for (g.exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    gc_relocation.rewriteValueSlot(v, &g.exec.acc);
+    var frame = g.exec.frame;
+    while (frame) |current| : (frame = current.parent)
+        for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
+    gc_relocation.rewriteValueSlot(v, &g.this_value);
+    gc_relocation.rewriteOptionalSlot(v, Object, &g.home_object);
+    gc_relocation.rewriteOptionalSlot(v, Object, &g.super_ctor);
+    if (g.import_meta_slot) |slot|
+        gc_relocation.rewriteOptionalSlot(v, Object, &slot.obj);
+    gc_relocation.rewriteOptionalSlot(v, Object, &g.result);
+    gc_relocation.rewriteOptionalSlot(v, promise.Promise, &g.async_parent_promise);
+    for (@constCast(g.pendingRequests())) |*request| {
+        gc_relocation.rewriteValueSlot(v, &request.value);
+        gc_relocation.rewriteRequiredSlot(v, Object, &request.result);
     }
 }
 
@@ -720,6 +748,137 @@ pub fn traceIterHelper(h: *value.IterHelper, v: anytype) void {
     markValueOpt(v, h.inner);
     markValue(v, h.inner_next);
     markValue(v, h.padding);
+}
+
+pub fn relocateIterHelper(h: *value.IterHelper, v: anytype) void {
+    gc_relocation.rewriteValueSlot(v, &h.src);
+    gc_relocation.rewriteValueSlot(v, &h.next_method);
+    gc_relocation.rewriteValueSlot(v, &h.func);
+    gc_relocation.rewriteOptionalValueSlot(v, &h.inner);
+    gc_relocation.rewriteValueSlot(v, &h.inner_next);
+    gc_relocation.rewriteValueSlot(v, &h.padding);
+}
+
+test "Generator and IteratorHelper marking and relocation cover every managed slot" {
+    var old_objects: [20]Object = undefined;
+    var new_objects: [20]Object = undefined;
+    var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
+    var old_promise = promise.Promise{ .gc_owned = true };
+    var new_promise = promise.Promise{ .gc_owned = true };
+    var chunk: bytecode.Chunk = undefined;
+    var stack = [_]Value{
+        Value.obj(&old_objects[0]),
+        Value.obj(&old_objects[1]),
+    };
+    var parent_frame_slots = [_]Value{Value.obj(&old_objects[3])};
+    var child_frame_slots = [_]Value{Value.obj(&old_objects[4])};
+    var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
+    var child_frame = vm.Frame{ .slots = &child_frame_slots, .parent = &parent_frame };
+    var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[8] };
+    var requests = [_]vm.AsyncGenRequest{
+        .{ .kind = .send, .value = Value.obj(&old_objects[10]), .result = &old_objects[11] },
+        .{ .kind = .return_, .value = Value.obj(&old_objects[12]), .result = &old_objects[13] },
+    };
+    var generator = vm.Generator{
+        .chunk = &chunk,
+        .exec = .{
+            .stack = .{ .items = &stack, .capacity = stack.len },
+            .acc = Value.obj(&old_objects[2]),
+            .frame = &child_frame,
+        },
+        .env = &old_environment,
+        .this_value = Value.obj(&old_objects[5]),
+        .home_object = &old_objects[6],
+        .super_ctor = &old_objects[7],
+        .import_meta_slot = &import_meta,
+        .result = &old_objects[9],
+        .async_parent_promise = &old_promise,
+        .requests = .{ .items = &requests, .capacity = requests.len },
+    };
+    var helper = value.IterHelper{
+        .src = Value.obj(&old_objects[14]),
+        .next_method = Value.obj(&old_objects[15]),
+        .kind = .map,
+        .func = Value.obj(&old_objects[16]),
+        .inner = Value.obj(&old_objects[17]),
+        .inner_next = Value.obj(&old_objects[18]),
+        .padding = Value.obj(&old_objects[19]),
+    };
+
+    const TraceVisitor = struct {
+        seen: std.AutoHashMap(usize, void),
+
+        fn mark(self: *@This(), maybe_cell: anytype) void {
+            const cell = switch (@typeInfo(@TypeOf(maybe_cell))) {
+                .optional => maybe_cell orelse return,
+                .pointer => maybe_cell,
+                else => @compileError("Generator trace test expects a cell pointer"),
+            };
+            self.seen.put(@intFromPtr(cell), {}) catch @panic("trace test allocation failed");
+        }
+    };
+    var trace = TraceVisitor{ .seen = .init(std.testing.allocator) };
+    defer trace.seen.deinit();
+    traceGenerator(&generator, &trace);
+    try std.testing.expect(trace.seen.contains(@intFromPtr(&old_environment)));
+    try std.testing.expect(trace.seen.contains(@intFromPtr(&old_promise)));
+    for (old_objects[0..14]) |*object|
+        try std.testing.expect(trace.seen.contains(@intFromPtr(object)));
+    try std.testing.expectEqual(@as(usize, 16), trace.seen.count());
+
+    const Plan = struct {
+        old_objects: *[20]Object,
+        new_objects: *[20]Object,
+        old_environment: *Environment,
+        new_environment: *Environment,
+        old_promise: *promise.Promise,
+        new_promise: *promise.Promise,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
+                return @ptrCast(self.new_environment);
+            if (old == @as(*anyopaque, @ptrCast(self.old_promise)))
+                return @ptrCast(self.new_promise);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_environment = &old_environment,
+        .new_environment = &new_environment,
+        .old_promise = &old_promise,
+        .new_promise = &new_promise,
+    };
+    relocateGenerator(&generator, &plan);
+    relocateIterHelper(&helper, &plan);
+
+    try std.testing.expectEqual(&new_environment, generator.env);
+    try std.testing.expectEqual(&new_objects[0], stack[0].asObj());
+    try std.testing.expectEqual(&new_objects[1], stack[1].asObj());
+    try std.testing.expectEqual(&new_objects[2], generator.exec.acc.asObj());
+    try std.testing.expectEqual(&new_objects[3], parent_frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_objects[4], child_frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_objects[5], generator.this_value.asObj());
+    try std.testing.expectEqual(&new_objects[6], generator.home_object.?);
+    try std.testing.expectEqual(&new_objects[7], generator.super_ctor.?);
+    try std.testing.expectEqual(&new_objects[8], import_meta.obj.?);
+    try std.testing.expectEqual(&new_objects[9], generator.result.?);
+    try std.testing.expectEqual(&new_promise, generator.async_parent_promise.?);
+    try std.testing.expectEqual(&new_objects[10], requests[0].value.asObj());
+    try std.testing.expectEqual(&new_objects[11], requests[0].result);
+    try std.testing.expectEqual(&new_objects[12], requests[1].value.asObj());
+    try std.testing.expectEqual(&new_objects[13], requests[1].result);
+    try std.testing.expectEqual(&new_objects[14], helper.src.asObj());
+    try std.testing.expectEqual(&new_objects[15], helper.next_method.asObj());
+    try std.testing.expectEqual(&new_objects[16], helper.func.asObj());
+    try std.testing.expectEqual(&new_objects[17], helper.inner.?.asObj());
+    try std.testing.expectEqual(&new_objects[18], helper.inner_next.asObj());
+    try std.testing.expectEqual(&new_objects[19], helper.padding.asObj());
 }
 
 pub fn traceModuleNs(m: *interp.ModuleNs, v: anytype) void {

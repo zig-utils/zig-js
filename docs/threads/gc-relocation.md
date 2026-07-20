@@ -70,6 +70,13 @@ captured `this`, and every bound argument, while module namespaces rewrite each
 environment pointer and preserve their arena-owned name/deferred-module
 metadata.
 
+The mutable suspension graphs follow under
+[#340](https://github.com/zig-utils/zig-js/issues/340): generator marking and
+relocation share environment, operand-stack, accumulator, persisted frame,
+realm, `import.meta`, async-parent, and pending-request coverage; iterator
+helpers rewrite all six `Value` slots. Both remain world-stopped during the
+rewrite, matching their existing concurrent-mark finish deferral.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
