@@ -16488,6 +16488,55 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
 }
 
+test "parallel_js: multi-age cooperative nursery retains old-owner graph" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.gc_cooperative_tranche_bytes = 256 * 1024;
+
+    _ = try ctx.evaluate("globalThis.multiAgeShared = { child: null }");
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    const collections_before = ctx.gc_cooperative_collections.load(.monotonic);
+    const attempts_before = ctx.gc_cooperative_attempts.load(.monotonic);
+    const parks_before = ctx.gc_cooperative_peer_parks.load(.monotonic);
+    const promoted_before = heap.promoted_cells;
+
+    const result = try ctx.evaluate(
+        \\multiAgeShared.child = { value: 41 };
+        \\function multiAgeChurn(lane) {
+        \\  const ring = [];
+        \\  for (let i = 0; i < 64; i++) ring.push({ value: i, lane });
+        \\  for (let i = 0; i < 6000; i++) {
+        \\    const index = i & 63;
+        \\    ring[index] = { value: ring[index].value + i + lane, lane };
+        \\    if ((i & 255) === 0 && multiAgeShared.child.value !== 41)
+        \\      throw new Error("multi-age child changed");
+        \\  }
+        \\  return 100 + lane;
+        \\}
+        \\const first = new Thread(multiAgeChurn, 0);
+        \\const second = new Thread(multiAgeChurn, 1);
+        \\multiAgeShared.child.value + first.join() + second.join();
+    );
+    try std.testing.expectEqual(@as(f64, 242), result.asNum());
+    try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) - collections_before >= runtime_gc_tenuring_age);
+    try std.testing.expect(ctx.gc_cooperative_attempts.load(.monotonic) > attempts_before);
+    try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > parks_before);
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
+    try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+    try std.testing.expect(heap.promoted_cells > promoted_before);
+    try std.testing.expect(heap.last_minor_survived_cells > 0);
+    try std.testing.expectEqual(@as(f64, 41), (try ctx.evaluate("multiAgeShared.child.value")).asNum());
+}
+
 test "parallel_js: cooperative rendezvous releases peers after collector exit" {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,

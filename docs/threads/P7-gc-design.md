@@ -721,8 +721,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   owners, applies weak/ephemeron processing, reclaims dead young cells at every
   age, and promotes threshold survivors. Nursery sizing adapts from all surviving
   young bytes; exact survivor, reclamation, promotion, and policy telemetry is
-  available from `Heap.accounting()`. Parallel mid-script collection still needs
-  its dedicated bounded mutator-coordination slice.
+  available from `Heap.accounting()`. The cooperative no-GIL rendezvous parks
+  peers with a bounded timeout and now carries an unchanged old-owner graph
+  through all three ages; production trigger tuning remains benchmark work.
 - **String ownership:** the runtime foundation tracked by #325 is in place:
   GC-enabled contexts allocate immutable StringCells as a first-class cell
   kind, trace string-valued roots/edges, and finalize canonical byte storage. Static

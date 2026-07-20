@@ -124,7 +124,8 @@ Issue #1 remains the umbrella status page.
   FinalizationRegistry semantics, and mutable type-erased side-cell kinds are
   conservatively rescanned. Remembered-set allocation failure falls back to the
   precise full collector. Explicit `collectGarbage()` remains a full-heap tenure
-  boundary, while parallel mid-script minor coordination remains tracked by #145.
+  boundary. The bounded no-GIL cooperative rendezvous exercises repeated minors;
+  its production trigger and terminal pause/throughput evidence remain in #145.
   GC cells also use a reusable size-class slab backing instead of calling the
   backing allocator for every cell. Fresh chunks now use lazy bump cursors with
   a per-bucket bump hint instead of pre-linking every unused slot during
