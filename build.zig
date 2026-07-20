@@ -976,4 +976,30 @@ pub fn build(b: *std.Build) void {
     if (gc_profile_case) |case| run_gc_profile.addArg(case);
     const gc_profile_step = b.step("gc-profile", "Profile GC allocation and Context lifecycle costs");
     gc_profile_step.dependOn(&run_gc_profile.step);
+
+    // Reproducible fragmentation evidence for explicit stop-the-world
+    // compaction. The Python driver alternates control/compact process order,
+    // validates the heap/checksum contract, and optionally preserves raw TSV.
+    const gc_compaction_runner = b.addExecutable(.{
+        .name = "gc-compaction-benchmark-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/gc_compaction.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const run_gc_compaction = b.addSystemCommand(&.{ "python3", "tools/gc-compaction-benchmark.py" });
+    run_gc_compaction.addArtifactArg(gc_compaction_runner);
+    if (b.option(usize, "gc-compaction-benchmark-samples", "GC compaction samples per mode")) |samples|
+        run_gc_compaction.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+    if (b.option(bool, "gc-compaction-benchmark-quick", "Run one reduced GC compaction sample") orelse false)
+        run_gc_compaction.addArg("--quick");
+    if (b.option([]const u8, "gc-compaction-benchmark-raw-out", "Write raw GC compaction samples to this TSV path")) |path|
+        run_gc_compaction.addArgs(&.{ "--raw-out", path });
+    if (b.option([]const u8, "gc-compaction-benchmark-markdown-out", "Write the GC compaction report to this Markdown path")) |path|
+        run_gc_compaction.addArgs(&.{ "--markdown-out", path });
+    const gc_compaction_step = b.step("gc-compaction-benchmark", "Benchmark retained backing and pause cost after explicit compaction");
+    gc_compaction_step.dependOn(&run_gc_compaction.step);
 }
