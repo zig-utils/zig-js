@@ -45,7 +45,7 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 ### Garbage collection
 
 <!-- gc-generation:start -->
-- **Generational GC:** a three-minor survivor policy with adaptive nursery sizing, persistent old-to-young cards, and exact generation telemetry ([design](docs/threads/P7-gc-design.md)).
+- **Generational GC:** age-three policy is 0.96–1.01x the age-one control across accepted single-mutator rows; shared no-GIL minor pause max 0.39 ms with 0 timeouts ([report](docs/.data/gc-generation-2026-07-20.md) · [samples](docs/.data/gc-generation-2026-07-20.tsv)).
 <!-- gc-generation:end -->
 - **Explicit compaction:** 90.8% less retained fragmented backing (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).
 
