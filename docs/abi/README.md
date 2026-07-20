@@ -495,6 +495,15 @@ quotes are escaped. Callable naming is non-observable, whereas object
 Proxy throws, foreign VMs, allocation failure, and existing pending exceptions
 return a dead string without publishing partial output. Both exact profile
 libraries run the same consumer via `zig build test-private-error-code`.
+When the observable constructor lookup is falsy, the boundary follows the
+pinned Bun inspector path: null-prototype identity, own-key order, descriptor
+tags, nested quoting, functions, Symbols, BigInts, sparse arrays, cycles,
+Proxy-target projection, depth limits, and `nodejs.util.inspect.custom` are
+formatted without leaking `constructor`. The exact upstream files, digests,
+call chain, and semantic checklist are recorded in
+[`bun-diagnostic-inspector-4982b91e.json`](bun-diagnostic-inspector-4982b91e.json)
+and are rechecked by `zig build bun-private-abi-audit
+-Dbun-source-root=$HOME/Code/bun`.
 
 The proxy internal-field projection returns exact live target/handler cells
 without ordinary property access or userland traps. Revoked fields become

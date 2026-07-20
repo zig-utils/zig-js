@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "contract": "received-value-diagnostic-inspector",
+  "issue": 394,
+  "consumer": "Bun",
+  "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+  "sources": {
+    "src/jsc/bindings/ErrorCode.cpp": "35a30b3cb745bff71cefe523fb769784c35cccb1d60ef174689b80d6ab1b2318",
+    "src/jsc/ConsoleObject.zig": "88bdc2f50420549b3ed667f10cdd0fb9fe6661c0d1d7756f666af2f6967e2407",
+    "src/runtime/api/BunObject.zig": "7bce5871ac0103869b743c858b9b51214e70f43666745ee296706904eb33f02d"
+  },
+  "entry_path": "Bun__ErrorCode__determineSpecificType -> JSValueToStringSafe -> Bun__inspect -> ConsoleObject.Formatter",
+  "semantics": [
+    "constructor is read observably before the inspector fallback and abrupt completion is preserved",
+    "falsy constructor values enter the no-color formatter with max depth 8 and quoted nested strings",
+    "ordinary own keys retain ECMAScript order and the constructor key is suppressed",
+    "ordinary accessors render as Getter, Setter, or Getter/Setter without invocation",
+    "active recursion paths render Circular while repeated non-cyclic references render again",
+    "Proxy values render their target without invoking ownKeys or descriptor traps during formatting",
+    "nodejs.util.inspect.custom is read observably on non-Proxy objects and called with depth, options, and inspect",
+    "custom inspect string results are emitted directly while non-string results recurse",
+    "the custom inspect helper uses single-line output and inspect-style string quoting",
+    "UTF-16 strings and keys preserve lone surrogates through escaped JSON-compatible output",
+    "formatting allocation failure returns no partial owned BunString and keeps the first pending exception"
+  ]
+}

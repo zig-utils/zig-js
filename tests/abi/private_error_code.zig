@@ -99,6 +99,17 @@ pub fn main() void {
     expectDiagnostic(context, evaluate(context, "(function fixtureName(){})"), "'function fixtureName'");
     expectDiagnostic(context, evaluate(context, "\"a'b\\\"c\""), "`type string (\"a'b\\\\\"c\")`");
     expectDiagnostic(sibling, evaluate(context, "new (class SharedWidget {})"), "'an instance of SharedWidget'");
+    expectDiagnostic(context, evaluate(context, "Object.create(null)"), "'[Object: null prototype] {}'");
+    expectDiagnostic(
+        context,
+        evaluate(context, "Object.assign(Object.create(null), { a: 1 })"),
+        "`[Object: null prototype] {\\n  a: 1,\\n}`",
+    );
+    expectDiagnostic(
+        context,
+        evaluate(context, "(() => { const value = Object.create(null); value[Symbol.for('nodejs.util.inspect.custom')] = function(depth, options, inspect) { return 'custom:' + depth + ':' + inspect({ x: 2 }, options); }; return value; })()"),
+        "'custom:8:{ x: 2 }'",
+    );
 
     const abrupt = Bun__ErrorCode__determineSpecificType(
         context,

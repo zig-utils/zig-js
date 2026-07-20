@@ -73,6 +73,11 @@ display names. They keep VM-inquiry class calculation non-invoking, perform one
 observable `@@toStringTag` read where the pinned name paths require it, and
 preserve exact borrowed ZigString versus owned UTF-16-capable BunString
 lifetimes.
+The received-value ErrorCode export additionally owns its BunString result and
+uses the exact Bun diagnostic inspector when an observable constructor lookup
+is falsy. It preserves null prototypes, descriptors, cycles, Proxy targets,
+custom inspection, and WTF-16 strings while suppressing `constructor`; abrupt
+completion and allocation failure publish no partial string.
 The normal and fast JSON exports share the full serializer but preserve the
 pinned numeric-indent versus undefined-space distinction. They retain
 observable `toJSON`/getter/proxy behavior, order and omission rules, exact

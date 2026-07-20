@@ -106,6 +106,11 @@ constructor-derived class names and observable display-name projection. Their
 borrowed ZigString views remain group-owned, while BunString output owns exact
 Latin-1 or UTF-16 storage; VM-inquiry class calculation does not invoke tag
 getters, and the pinned name paths perform one observable `@@toStringTag` read.
+The shared ErrorCode shim returns an owned BunString and uses the pinned Bun
+diagnostic inspector after a falsy observable constructor lookup. Its focused
+fixture covers null-prototype objects, descriptor-only accessors, cycles,
+Proxy targets, custom inspection, UTF-16 escaping, failure atomicity, and
+first-exception preservation in both Home and Bun profiles.
 The paired JSON shims use the runtime's complete serializer with either the
 pinned unsigned indentation request or undefined space for compact output.
 They preserve `toJSON`, getter/proxy effects, ordering, omission/null behavior,
