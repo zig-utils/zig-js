@@ -266,7 +266,7 @@ jobs:
         if: matrix.wasm_spec == true
         working-directory: zig-js
         run: |
-          git submodule update --init wasm-spec
+          git submodule update --init wasm-spec-wg1
           curl --fail --location --silent --show-error \
             https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz \
             --output "$RUNNER_TEMP/wabt-1.0.12-linux.tar.gz"
