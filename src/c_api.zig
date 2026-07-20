@@ -980,6 +980,7 @@ const CInspectorSession = struct {
     lifecycle_reporter_enabled: bool = false,
     lifecycle_preventing_exit: bool = false,
     test_reporter_enabled: bool = false,
+    http_server_enabled: bool = false,
     release_requested: bool = false,
     /// Process-wide broadcasts retain a session across arbitrary frontend
     /// callbacks. A callback may release this or a later snapshotted session;
@@ -14770,6 +14771,46 @@ const PrivateTestReporterStatus = enum(u8) {
     _,
 };
 
+const PrivateHTTPMethod = enum(u8) {
+    acl = 0,
+    bind = 1,
+    checkout = 2,
+    connect = 3,
+    copy = 4,
+    delete = 5,
+    get = 6,
+    head = 7,
+    link = 8,
+    lock = 9,
+    m_search = 10,
+    merge = 11,
+    mkactivity = 12,
+    mkaddressbook = 13,
+    mkcalendar = 14,
+    mkcol = 15,
+    move = 16,
+    notify = 17,
+    options = 18,
+    patch = 19,
+    post = 20,
+    propfind = 21,
+    proppatch = 22,
+    purge = 23,
+    put = 24,
+    query = 25,
+    rebind = 26,
+    report = 27,
+    search = 28,
+    source = 29,
+    subscribe = 30,
+    trace = 31,
+    unbind = 32,
+    unlink = 33,
+    unlock = 34,
+    unsubscribe = 35,
+    _,
+};
+
 fn privateTestReporterTypeName(item_type: PrivateTestReporterType) ?[]const u8 {
     return switch (item_type) {
         .test_ => "test",
@@ -15028,6 +15069,222 @@ export fn Bun__TestReporterAgentReportTestEnd(
         .method = "TestReporter.end",
         .params = .{ .id = test_id, .status = status_name, .elapsed = elapsed },
     });
+}
+
+const PrivateHTTPServerPayloadError = PrivateBunStringError || error{InvalidJson};
+
+fn privateHTTPJsonStringArray(
+    allocator: std.mem.Allocator,
+    string: ?*const PrivateBunString,
+    optional: bool,
+) PrivateHTTPServerPayloadError!?std.json.Value {
+    const bytes = try privateInspectorAgentString(allocator, string);
+    if (optional and bytes.len == 0) return null;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, allocator, bytes, .{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidJson,
+    };
+    const items = switch (parsed) {
+        .array => |array| array.items,
+        else => return error.InvalidJson,
+    };
+    if (items.len % 2 != 0) return error.InvalidJson;
+    for (items) |item| if (item != .string) return error.InvalidJson;
+    return parsed;
+}
+
+fn privateHTTPServerEventSession(agent_ref: ?*anyopaque) ?*CInspectorSession {
+    const session = acquirePrivateInspectorAgent(agent_ref) orelse return null;
+    if (!session.http_server_enabled) {
+        releasePrivateInspectorBroadcastRef(session);
+        return null;
+    }
+    return session;
+}
+
+export fn Bun__HTTPServerAgent__notifyRequestWillBeSent(
+    agent_ref: ?*anyopaque,
+    request_id: c_int,
+    server_id: c_int,
+    route_id: c_int,
+    url_string: ?*const PrivateBunString,
+    full_url_string: ?*const PrivateBunString,
+    method: PrivateHTTPMethod,
+    headers_json_string: ?*const PrivateBunString,
+    params_json_string: ?*const PrivateBunString,
+    has_body: bool,
+    timestamp: f64,
+) callconv(.c) void {
+    const session = privateHTTPServerEventSession(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (@intFromEnum(method) > @intFromEnum(PrivateHTTPMethod.unsubscribe) or !std.math.isFinite(timestamp)) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const url = privateInspectorAgentString(allocator, url_string) catch return;
+    const full_url = privateInspectorAgentString(allocator, full_url_string) catch return;
+    const headers = privateHTTPJsonStringArray(allocator, headers_json_string, false) catch return orelse return;
+    const params = privateHTTPJsonStringArray(allocator, params_json_string, true) catch return;
+    if (params) |values| {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestWillBeSent",
+            .params = .{ .request = .{
+                .requestId = request_id,
+                .serverId = server_id,
+                .routeId = route_id,
+                .url = url,
+                .fullUrl = full_url,
+                .method = @intFromEnum(method),
+                .headers = headers,
+                .params = values,
+                .hasBody = has_body,
+                .timestamp = timestamp,
+            } },
+        });
+    } else {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestWillBeSent",
+            .params = .{ .request = .{
+                .requestId = request_id,
+                .serverId = server_id,
+                .routeId = route_id,
+                .url = url,
+                .fullUrl = full_url,
+                .method = @intFromEnum(method),
+                .headers = headers,
+                .hasBody = has_body,
+                .timestamp = timestamp,
+            } },
+        });
+    }
+}
+
+export fn Bun__HTTPServerAgent__notifyResponseReceived(
+    agent_ref: ?*anyopaque,
+    request_id: c_int,
+    server_id: c_int,
+    status_code: i32,
+    status_text_string: ?*const PrivateBunString,
+    headers_json_string: ?*const PrivateBunString,
+    has_body: bool,
+    timestamp: f64,
+) callconv(.c) void {
+    const session = privateHTTPServerEventSession(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!std.math.isFinite(timestamp)) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const status_text = privateInspectorAgentString(allocator, status_text_string) catch return;
+    const headers = privateHTTPJsonStringArray(allocator, headers_json_string, false) catch return orelse return;
+    _ = sendInspectorJson(session, .{
+        .method = "HTTPServer.responseReceived",
+        .params = .{ .response = .{
+            .requestId = request_id,
+            .serverId = server_id,
+            .statusCode = status_code,
+            .statusText = status_text,
+            .headers = headers,
+            .hasBody = has_body,
+            .timestamp = timestamp,
+        } },
+    });
+}
+
+export fn Bun__HTTPServerAgent__notifyBodyChunkReceived(
+    agent_ref: ?*anyopaque,
+    request_id: c_int,
+    server_id: c_int,
+    flags: i32,
+    chunk_string: ?*const PrivateBunString,
+    timestamp: f64,
+) callconv(.c) void {
+    const session = privateHTTPServerEventSession(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!std.math.isFinite(timestamp)) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const chunk = privateInspectorAgentString(arena_state.allocator(), chunk_string) catch return;
+    _ = sendInspectorJson(session, .{
+        .method = "HTTPServer.bodyChunkReceived",
+        .params = .{ .chunk = .{
+            .requestId = request_id,
+            .serverId = server_id,
+            .flags = flags,
+            .chunk = chunk,
+            .timestamp = timestamp,
+        } },
+    });
+}
+
+export fn Bun__HTTPServerAgent__notifyRequestFinished(
+    agent_ref: ?*anyopaque,
+    request_id: c_int,
+    server_id: c_int,
+    timestamp: f64,
+    duration: f64,
+) callconv(.c) void {
+    const session = privateHTTPServerEventSession(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!std.math.isFinite(timestamp) or std.math.isPositiveInf(duration)) return;
+    if (std.math.isFinite(duration) and duration >= 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestFinished",
+            .params = .{ .requestId = request_id, .serverId = server_id, .timestamp = timestamp, .duration = duration },
+        });
+    } else {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestFinished",
+            .params = .{ .requestId = request_id, .serverId = server_id, .timestamp = timestamp },
+        });
+    }
+}
+
+export fn Bun__HTTPServerAgent__notifyRequestHandlerException(
+    agent_ref: ?*anyopaque,
+    request_id: c_int,
+    server_id: c_int,
+    message_string: ?*const PrivateBunString,
+    url_string: ?*const PrivateBunString,
+    line: i32,
+    timestamp: f64,
+) callconv(.c) void {
+    const session = privateHTTPServerEventSession(agent_ref) orelse return;
+    defer releasePrivateInspectorBroadcastRef(session);
+    if (!std.math.isFinite(timestamp)) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const allocator = arena_state.allocator();
+    const message = privateInspectorAgentString(allocator, message_string) catch return;
+    const url = privateInspectorAgentString(allocator, url_string) catch return;
+    if (url.len != 0) {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestHandlerException",
+            .params = .{ .@"error" = .{
+                .requestId = request_id,
+                .serverId = server_id,
+                .message = message,
+                .timestamp = timestamp,
+                .url = url,
+                .line = line,
+            } },
+        });
+    } else {
+        _ = sendInspectorJson(session, .{
+            .method = "HTTPServer.requestHandlerException",
+            .params = .{ .@"error" = .{
+                .requestId = request_id,
+                .serverId = server_id,
+                .message = message,
+                .timestamp = timestamp,
+                .line = line,
+            } },
+        });
+    }
 }
 
 /// Notify every live inspector connection that a hot reload may proceed. The
@@ -16126,6 +16383,7 @@ export fn ZJSInspectorSessionRelease(session_ref: ZJSInspectorSessionRef) callco
     session.lifecycle_reporter_enabled = false;
     session.lifecycle_preventing_exit = false;
     session.test_reporter_enabled = false;
+    session.http_server_enabled = false;
     const broadcast_refs = session.broadcast_refs;
     private_inspector_sessions_lock.unlock();
     if (state.operation_depth > 0 or state.callback_depth > 0 or broadcast_refs != 0) {
@@ -16187,6 +16445,7 @@ export fn ZJSInspectorSessionDispatch(
                 .{ .name = "Debugger", .version = "0.1" },
                 .{ .name = "LifecycleReporter", .version = "1.0" },
                 .{ .name = "TestReporter", .version = "1.0" },
+                .{ .name = "HTTPServer", .version = "1.0" },
                 .{ .name = "Schema", .version = "1.0" },
             } },
         });
@@ -16214,6 +16473,14 @@ export fn ZJSInspectorSessionDispatch(
     }
     if (std.mem.eql(u8, method, "TestReporter.disable")) {
         session.test_reporter_enabled = false;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "HTTPServer.enable")) {
+        session.http_server_enabled = true;
+        return sendInspectorJson(session, .{ .id = id, .result = .{} });
+    }
+    if (std.mem.eql(u8, method, "HTTPServer.disable")) {
+        session.http_server_enabled = false;
         return sendInspectorJson(session, .{ .id = id, .result = .{} });
     }
     if (std.mem.eql(u8, method, "Runtime.enable")) {
@@ -20107,6 +20374,171 @@ test "private lifecycle and test reporter agents are session exact and reentrant
     Bun__LifecycleAgentReportReload(reentrant.session);
     try std.testing.expect(reentrant.session == null);
     try std.testing.expect(reentrant.contains("LifecycleReporter.reload"));
+}
+
+test "private HTTP server inspector events are exact failure atomic and session safe" {
+    const Capture = struct {
+        bytes: [48 * 1024]u8 = undefined,
+        len: usize = 0,
+        session: ZJSInspectorSessionRef = null,
+        release_on_response: bool = false,
+
+        fn receive(message: [*]const u8, message_len: usize, user_data: ?*anyopaque) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(user_data.?));
+            std.debug.assert(self.len + message_len + 1 <= self.bytes.len);
+            @memcpy(self.bytes[self.len .. self.len + message_len], message[0..message_len]);
+            self.len += message_len;
+            self.bytes[self.len] = '\n';
+            self.len += 1;
+            if (self.release_on_response and std.mem.indexOf(u8, message[0..message_len], "HTTPServer.responseReceived") != null) {
+                self.release_on_response = false;
+                const doomed = self.session;
+                self.session = null;
+                ZJSInspectorSessionRelease(doomed);
+            }
+        }
+
+        fn containsFrom(self: *const @This(), start: usize, needle: []const u8) bool {
+            return std.mem.indexOf(u8, self.bytes[start..self.len], needle) != null;
+        }
+
+        fn bunString(bytes: []const u8) PrivateBunString {
+            return .{
+                .tag = .static_zig_string,
+                .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(bytes.ptr), .len = bytes.len } },
+            };
+        }
+    };
+
+    const context = JSGlobalContextCreate(null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    JSGlobalContextSetInspectable(context, true);
+    var first: Capture = .{};
+    var second: Capture = .{};
+    first.session = ZJSInspectorSessionCreate(context, Capture.receive, &first) orelse return error.SessionCreateFailed;
+    defer if (first.session != null) ZJSInspectorSessionRelease(first.session);
+    second.session = ZJSInspectorSessionCreate(context, Capture.receive, &second) orelse return error.SessionCreateFailed;
+    defer if (second.session != null) ZJSInspectorSessionRelease(second.session);
+
+    const before_enable = first.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(first.session, 1, 2, 10, 4);
+    try std.testing.expectEqual(before_enable, first.len);
+    const enable = "{\"id\":1,\"method\":\"HTTPServer.enable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first.session, enable, enable.len));
+    try std.testing.expect(inspectorSession(first.session).?.http_server_enabled);
+
+    const url = Capture.bunString("/users/42?q=yes");
+    const full_url = Capture.bunString("https://example.test/users/42?q=yes");
+    const headers = Capture.bunString("[\"accept\",\"application/json\",\"x-test\",\"yes\"]");
+    const params = Capture.bunString("[\"id\",\"42\"]");
+    const request_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestWillBeSent(
+        first.session,
+        41,
+        7,
+        3,
+        &url,
+        &full_url,
+        .get,
+        &headers,
+        &params,
+        true,
+        1234.5,
+    );
+    try std.testing.expect(first.containsFrom(request_start, "\"method\":\"HTTPServer.requestWillBeSent\""));
+    try std.testing.expect(first.containsFrom(request_start, "\"request\":{\"requestId\":41,\"serverId\":7,\"routeId\":3"));
+    try std.testing.expect(first.containsFrom(request_start, "\"fullUrl\":\"https://example.test/users/42?q=yes\""));
+    try std.testing.expect(first.containsFrom(request_start, "\"method\":6"));
+    try std.testing.expect(first.containsFrom(request_start, "\"headers\":[\"accept\",\"application/json\",\"x-test\",\"yes\"]"));
+    try std.testing.expect(first.containsFrom(request_start, "\"params\":[\"id\",\"42\"]"));
+    try std.testing.expect(!second.containsFrom(0, "HTTPServer.requestWillBeSent"));
+
+    const status_text = Capture.bunString("Created");
+    const response_headers = Capture.bunString("[\"content-type\",\"text/plain\"]");
+    const response_start = first.len;
+    Bun__HTTPServerAgent__notifyResponseReceived(first.session, 41, 7, 201, &status_text, &response_headers, true, 1240);
+    try std.testing.expect(first.containsFrom(response_start, "\"method\":\"HTTPServer.responseReceived\""));
+    try std.testing.expect(first.containsFrom(response_start, "\"statusCode\":201"));
+    try std.testing.expect(first.containsFrom(response_start, "\"statusText\":\"Created\""));
+
+    const chunk = Capture.bunString("SGVsbG8=");
+    const chunk_start = first.len;
+    Bun__HTTPServerAgent__notifyBodyChunkReceived(first.session, 41, 7, 6, &chunk, 1241);
+    try std.testing.expect(first.containsFrom(chunk_start, "\"method\":\"HTTPServer.bodyChunkReceived\""));
+    try std.testing.expect(first.containsFrom(chunk_start, "\"flags\":6"));
+    try std.testing.expect(first.containsFrom(chunk_start, "\"chunk\":\"SGVsbG8=\""));
+
+    const finished_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(first.session, 41, 7, 1245, 10.5);
+    try std.testing.expect(first.containsFrom(finished_start, "\"method\":\"HTTPServer.requestFinished\""));
+    try std.testing.expect(first.containsFrom(finished_start, "\"duration\":10.5"));
+    const no_duration_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(first.session, 42, 7, 1246, std.math.nan(f64));
+    try std.testing.expect(first.containsFrom(no_duration_start, "\"requestId\":42"));
+    try std.testing.expect(!first.containsFrom(no_duration_start, "\"duration\""));
+
+    const message = Capture.bunString("handler failed");
+    const source_url = Capture.bunString("file:///server.ts");
+    const error_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestHandlerException(first.session, 41, 7, &message, &source_url, 19, 1242);
+    try std.testing.expect(first.containsFrom(error_start, "\"method\":\"HTTPServer.requestHandlerException\""));
+    try std.testing.expect(first.containsFrom(error_start, "\"error\":{\"requestId\":41,\"serverId\":7,\"message\":\"handler failed\""));
+    try std.testing.expect(first.containsFrom(error_start, "\"url\":\"file:///server.ts\""));
+    try std.testing.expect(first.containsFrom(error_start, "\"line\":19"));
+    const no_url = Capture.bunString("");
+    const no_url_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestHandlerException(first.session, 43, 7, &message, &no_url, 20, 1243);
+    try std.testing.expect(first.containsFrom(no_url_start, "\"requestId\":43"));
+    try std.testing.expect(!first.containsFrom(no_url_start, "\"url\""));
+
+    const empty_params = Capture.bunString("");
+    const no_params_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestWillBeSent(first.session, 44, 7, 0, &url, &full_url, .post, &headers, &empty_params, false, 1250);
+    try std.testing.expect(first.containsFrom(no_params_start, "\"requestId\":44"));
+    try std.testing.expect(!first.containsFrom(no_params_start, "\"params\":["));
+
+    const invalid_start = first.len;
+    const malformed = Capture.bunString("not-json");
+    const odd = Capture.bunString("[\"name\"]");
+    const non_string = Capture.bunString("[\"name\",1]");
+    Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &malformed, false, 1251);
+    Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &odd, false, 1251);
+    Bun__HTTPServerAgent__notifyResponseReceived(first.session, 45, 7, 200, &status_text, &non_string, false, 1251);
+    Bun__HTTPServerAgent__notifyRequestWillBeSent(first.session, 45, 7, 0, &url, &full_url, @enumFromInt(255), &headers, &empty_params, false, 1251);
+    Bun__HTTPServerAgent__notifyBodyChunkReceived(first.session, 45, 7, 0, &chunk, std.math.inf(f64));
+    Bun__HTTPServerAgent__notifyRequestFinished(second.session, 45, 7, 1251, 1);
+    Bun__HTTPServerAgent__notifyRequestFinished(@ptrFromInt(1), 45, 7, 1251, 1);
+    try std.testing.expectEqual(invalid_start, first.len);
+
+    var saw_json_oom = false;
+    var saw_json_success = false;
+    for (0..32) |fail_index| {
+        var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = fail_index });
+        var arena_state = std.heap.ArenaAllocator.init(failing.allocator());
+        defer arena_state.deinit();
+        if (privateHTTPJsonStringArray(arena_state.allocator(), &headers, false)) |result| {
+            try std.testing.expect(result != null);
+            saw_json_success = true;
+            break;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_json_oom = true;
+        }
+    }
+    try std.testing.expect(saw_json_oom and saw_json_success);
+
+    const disable = "{\"id\":2,\"method\":\"HTTPServer.disable\"}";
+    try std.testing.expect(ZJSInspectorSessionDispatch(first.session, disable, disable.len));
+    const disabled_start = first.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(first.session, 46, 7, 1252, 1);
+    try std.testing.expectEqual(disabled_start, first.len);
+
+    var reentrant: Capture = .{ .release_on_response = true };
+    reentrant.session = ZJSInspectorSessionCreate(context, Capture.receive, &reentrant) orelse return error.SessionCreateFailed;
+    try std.testing.expect(ZJSInspectorSessionDispatch(reentrant.session, enable, enable.len));
+    Bun__HTTPServerAgent__notifyResponseReceived(reentrant.session, 47, 7, 200, &status_text, &response_headers, false, 1253);
+    try std.testing.expect(reentrant.session == null);
+    try std.testing.expect(reentrant.containsFrom(0, "HTTPServer.responseReceived"));
 }
 
 test "C-API: inspectability gates concurrent in-process protocol sessions" {

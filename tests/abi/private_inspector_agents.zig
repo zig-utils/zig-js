@@ -90,6 +90,44 @@ const TestStatus = enum(u8) {
     todo = 4,
     skipped_because_label = 5,
 };
+const HTTPMethod = enum(u8) {
+    acl = 0,
+    bind = 1,
+    checkout = 2,
+    connect = 3,
+    copy = 4,
+    delete = 5,
+    get = 6,
+    head = 7,
+    link = 8,
+    lock = 9,
+    m_search = 10,
+    merge = 11,
+    mkactivity = 12,
+    mkaddressbook = 13,
+    mkcalendar = 14,
+    mkcol = 15,
+    move = 16,
+    notify = 17,
+    options = 18,
+    patch = 19,
+    post = 20,
+    propfind = 21,
+    proppatch = 22,
+    purge = 23,
+    put = 24,
+    query = 25,
+    rebind = 26,
+    report = 27,
+    search = 28,
+    source = 29,
+    subscribe = 30,
+    trace = 31,
+    unbind = 32,
+    unlink = 33,
+    unlock = 34,
+    unsubscribe = 35,
+};
 
 extern "c" fn JSGlobalContextCreate(global_class: ?*anyopaque) ?*JSGlobalObject;
 extern "c" fn JSGlobalContextRelease(global: ?*JSGlobalObject) void;
@@ -132,6 +170,53 @@ extern "c" fn Bun__TestReporterAgentReportTestEnd(
     test_id: c_int,
     status: TestStatus,
     elapsed: f64,
+) void;
+extern "c" fn Bun__HTTPServerAgent__notifyRequestWillBeSent(
+    agent: *InspectorSession,
+    request_id: c_int,
+    server_id: c_int,
+    route_id: c_int,
+    url: *const BunString,
+    full_url: *const BunString,
+    method: HTTPMethod,
+    headers_json: *const BunString,
+    params_json: *const BunString,
+    has_body: bool,
+    timestamp: f64,
+) void;
+extern "c" fn Bun__HTTPServerAgent__notifyResponseReceived(
+    agent: *InspectorSession,
+    request_id: c_int,
+    server_id: c_int,
+    status_code: i32,
+    status_text: *const BunString,
+    headers_json: *const BunString,
+    has_body: bool,
+    timestamp: f64,
+) void;
+extern "c" fn Bun__HTTPServerAgent__notifyBodyChunkReceived(
+    agent: *InspectorSession,
+    request_id: c_int,
+    server_id: c_int,
+    flags: i32,
+    chunk: *const BunString,
+    timestamp: f64,
+) void;
+extern "c" fn Bun__HTTPServerAgent__notifyRequestFinished(
+    agent: *InspectorSession,
+    request_id: c_int,
+    server_id: c_int,
+    timestamp: f64,
+    duration: f64,
+) void;
+extern "c" fn Bun__HTTPServerAgent__notifyRequestHandlerException(
+    agent: *InspectorSession,
+    request_id: c_int,
+    server_id: c_int,
+    message: *const BunString,
+    url: *const BunString,
+    line: i32,
+    timestamp: f64,
 ) void;
 
 const Capture = struct {
@@ -244,4 +329,38 @@ pub fn main() !void {
     Bun__LifecycleAgentReportReload(session);
     Bun__TestReporterAgentReportTestStart(session, 43);
     try std.testing.expectEqual(disabled_start, capture.len);
+
+    const http_before_enable = capture.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(session, 51, 9, 2000, 3);
+    try std.testing.expectEqual(http_before_enable, capture.len);
+    try dispatch(session, "{\"id\":6,\"method\":\"HTTPServer.enable\"}");
+    var request_url = BunString.static("/fixture/9");
+    var full_url = BunString.static("https://example.test/fixture/9");
+    var headers_json = BunString.static("[\"accept\",\"application/json\"]");
+    var params_json = BunString.static("[\"id\",\"9\"]");
+    var response_status = BunString.static("No Content");
+    var chunk = BunString.static("Zml4dHVyZQ==");
+    var handler_message = BunString.static("fixture handler failed");
+    var handler_url = BunString.static("file:///fixture-server.ts");
+    const http_start = capture.len;
+    Bun__HTTPServerAgent__notifyRequestWillBeSent(session, 51, 9, 4, &request_url, &full_url, .get, &headers_json, &params_json, true, 2000);
+    Bun__HTTPServerAgent__notifyResponseReceived(session, 51, 9, 204, &response_status, &headers_json, false, 2001);
+    Bun__HTTPServerAgent__notifyBodyChunkReceived(session, 51, 9, 6, &chunk, 2002);
+    Bun__HTTPServerAgent__notifyRequestFinished(session, 51, 9, 2003, 3);
+    Bun__HTTPServerAgent__notifyRequestHandlerException(session, 52, 9, &handler_message, &handler_url, 17, 2004);
+    try std.testing.expect(capture.containsFrom(http_start, "\"method\":\"HTTPServer.requestWillBeSent\""));
+    try std.testing.expect(capture.containsFrom(http_start, "\"headers\":[\"accept\",\"application/json\"]"));
+    try std.testing.expect(capture.containsFrom(http_start, "\"params\":[\"id\",\"9\"]"));
+    try std.testing.expect(capture.containsFrom(http_start, "\"method\":\"HTTPServer.responseReceived\""));
+    try std.testing.expect(capture.containsFrom(http_start, "\"statusCode\":204"));
+    try std.testing.expect(capture.containsFrom(http_start, "\"method\":\"HTTPServer.bodyChunkReceived\""));
+    try std.testing.expect(capture.containsFrom(http_start, "\"flags\":6"));
+    try std.testing.expect(capture.containsFrom(http_start, "\"method\":\"HTTPServer.requestFinished\""));
+    try std.testing.expect(capture.containsFrom(http_start, "\"duration\":3"));
+    try std.testing.expect(capture.containsFrom(http_start, "\"method\":\"HTTPServer.requestHandlerException\""));
+    try std.testing.expect(capture.containsFrom(http_start, "\"message\":\"fixture handler failed\""));
+    try dispatch(session, "{\"id\":7,\"method\":\"HTTPServer.disable\"}");
+    const http_disabled = capture.len;
+    Bun__HTTPServerAgent__notifyRequestFinished(session, 53, 9, 2005, 1);
+    try std.testing.expectEqual(http_disabled, capture.len);
 }

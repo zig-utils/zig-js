@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "contract": "http-server-inspector-request-lifecycle",
+  "revision": "4982b91e3702094330f3be3883354c52b8c01323",
+  "webkit_revision": "cd821fecca0d39c8bac874c283d956868c7f0de0",
+  "issue": 398,
+  "parent_issue": 140,
+  "sources": {
+    "src/http_types/Method.rs": "5dca8cb5b0d5a35fa736c0e94bf1a36109c05c64798a76d126a1eaad150369b2",
+    "src/jsc/HTTPServerAgent.rs": "85a8f40702e9dd7f803c5f2dd3918ca741d36ddb33c6730ede4da695adc9c6f5",
+    "src/jsc/HTTPServerAgent.zig": "0b0c9ad3ca496a8b2a8fd790ce3fab663b6572e2b73418afe786f337ebb44383",
+    "src/jsc/bindings/InspectorHTTPServerAgent.cpp": "c782aff7c26fcde9c994e64d35f3d78675762c528ec3bc25bafe41a5a768d366",
+    "scripts/build/deps/webkit.ts": "385729d8e943a61dbd315c8ffdd22aa45afffc041ddd7d1f052f7f9324188162"
+  },
+  "webkit_protocol": {
+    "path": "Source/JavaScriptCore/inspector/protocol/HTTPServer.json",
+    "sha256": "d758684a03ced8989a0377fa3323a3b91df6b32236f49bc39afc62e631a98cc0"
+  },
+  "exports": [
+    "Bun__HTTPServerAgent__notifyRequestWillBeSent",
+    "Bun__HTTPServerAgent__notifyResponseReceived",
+    "Bun__HTTPServerAgent__notifyBodyChunkReceived",
+    "Bun__HTTPServerAgent__notifyRequestFinished",
+    "Bun__HTTPServerAgent__notifyRequestHandlerException"
+  ],
+  "domain": {
+    "name": "HTTPServer",
+    "commands": [
+      "enable",
+      "disable"
+    ],
+    "events": [
+      "requestWillBeSent",
+      "responseReceived",
+      "bodyChunkReceived",
+      "requestFinished",
+      "requestHandlerException"
+    ],
+    "http_method_range": [
+      0,
+      35
+    ]
+  },
+  "semantics": [
+    "The opaque agent handle maps to one live ZJS inspector session and events never cross sessions.",
+    "Every event is suppressed until HTTPServer.enable and again after HTTPServer.disable, detach, or release.",
+    "Request and response headers are parsed from JSON as even-length flat arrays containing only strings.",
+    "Optional request params are omitted for an empty BunString; otherwise they must be an even-length flat JSON string array.",
+    "HTTP method values preserve Bun Method.rs repr(u8) ordinals 0 through 35; every other value is rejected.",
+    "Request, response, body chunk, and handler error metadata are nested under the exact protocol object field.",
+    "Handler error url is omitted when empty rather than serialized as null or an empty placeholder.",
+    "A finite non-negative duration is emitted; NaN, negative, or negative-infinite duration means the optional field is absent.",
+    "Every required timestamp must be finite; invalid scalar, string, or JSON input emits no partial event.",
+    "Agent handles are registry-validated before dereference and retained across callbacks, including callback-driven release.",
+    "The Home and Bun profile libraries compile, link, and run one external consumer against all five exports."
+  ]
+}

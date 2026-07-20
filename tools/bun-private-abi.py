@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "docs/abi/bun-private-core-4982b91e-inventory.json"
 DIAGNOSTIC_CONTRACT = ROOT / "docs/abi/bun-diagnostic-inspector-4982b91e.json"
 INSPECTOR_AGENTS_CONTRACT = ROOT / "docs/abi/bun-inspector-agents-4982b91e.json"
+HTTP_SERVER_INSPECTOR_CONTRACT = ROOT / "docs/abi/bun-http-server-inspector-4982b91e.json"
 HOME_INVENTORY = ROOT / "docs/abi/home-private-7ed99c02-inventory.json"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -317,6 +318,77 @@ def validate_inspector_agents_contract(bun_root: Path | None) -> None:
         fail("inspector agents semantic inventory is incomplete or duplicated")
 
 
+def validate_http_server_inspector_contract(bun_root: Path | None) -> None:
+    if not HTTP_SERVER_INSPECTOR_CONTRACT.is_file():
+        fail(f"missing checked-in HTTP server inspector contract {HTTP_SERVER_INSPECTOR_CONTRACT}")
+    contract = json.loads(HTTP_SERVER_INSPECTOR_CONTRACT.read_text())
+    webkit_revision = "cd821fecca0d39c8bac874c283d956868c7f0de0"
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "http-server-inspector-request-lifecycle"
+        or contract.get("revision") != REVISION
+        or contract.get("webkit_revision") != webkit_revision
+        or contract.get("issue") != 398
+        or contract.get("parent_issue") != 140
+    ):
+        fail("HTTP server inspector contract schema, revision, or issue drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "src/http_types/Method.rs",
+        "src/jsc/HTTPServerAgent.rs",
+        "src/jsc/HTTPServerAgent.zig",
+        "src/jsc/bindings/InspectorHTTPServerAgent.cpp",
+        "scripts/build/deps/webkit.ts",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("HTTP server inspector source set drift")
+    for relative, digest in sources.items():
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            fail(f"invalid HTTP server inspector digest for {relative}")
+        if bun_root is not None:
+            path = bun_root / relative
+            if not path.is_file() or sha256(path) != digest:
+                fail(f"HTTP server inspector source drift for {relative}")
+    if bun_root is not None:
+        webkit_config = (bun_root / "scripts/build/deps/webkit.ts").read_text()
+        if f'WEBKIT_VERSION = "{webkit_revision}"' not in webkit_config:
+            fail("HTTP server inspector WebKit revision drift")
+    protocol = contract.get("webkit_protocol")
+    if protocol != {
+        "path": "Source/JavaScriptCore/inspector/protocol/HTTPServer.json",
+        "sha256": "d758684a03ced8989a0377fa3323a3b91df6b32236f49bc39afc62e631a98cc0",
+    }:
+        fail("HTTP server inspector protocol identity drift")
+    expected_exports = {
+        "Bun__HTTPServerAgent__notifyRequestWillBeSent",
+        "Bun__HTTPServerAgent__notifyResponseReceived",
+        "Bun__HTTPServerAgent__notifyBodyChunkReceived",
+        "Bun__HTTPServerAgent__notifyRequestFinished",
+        "Bun__HTTPServerAgent__notifyRequestHandlerException",
+    }
+    exports = contract.get("exports")
+    if not isinstance(exports, list) or set(exports) != expected_exports or len(exports) != len(expected_exports):
+        fail("HTTP server inspector export inventory drift")
+    domain = contract.get("domain")
+    if not isinstance(domain, dict) or domain.get("name") != "HTTPServer":
+        fail("HTTP server inspector domain identity drift")
+    if domain.get("commands") != ["enable", "disable"]:
+        fail("HTTP server inspector command contract drift")
+    if domain.get("events") != [
+        "requestWillBeSent",
+        "responseReceived",
+        "bodyChunkReceived",
+        "requestFinished",
+        "requestHandlerException",
+    ]:
+        fail("HTTP server inspector event contract drift")
+    if domain.get("http_method_range") != [0, 35]:
+        fail("HTTP server inspector method range drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("HTTP server inspector semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bun-root", type=Path)
@@ -342,6 +414,7 @@ def main() -> None:
     validate(stored)
     validate_diagnostic_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_inspector_agents_contract(args.bun_root.resolve() if args.bun_root else None)
+    validate_http_server_inspector_contract(args.bun_root.resolve() if args.bun_root else None)
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

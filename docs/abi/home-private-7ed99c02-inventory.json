@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 477,
-      "pending": 53
+      "implemented": 482,
+      "pending": 48
     }
   },
   "declarations": [
@@ -349,10 +349,10 @@
       "line": 74,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__HTTPServerAgent__notifyBodyChunkReceived(agent: *InspectorHTTPServerAgent, requestId: RequestId, serverId: ServerId, flags: i32, chunk: *const BunString, timestamp: f64) void;",
       "declaration_sha256": "32db005408ea4f3aa3292af0f0dedba4d22657498109d46eef6851a271e51fd6",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__HTTPServerAgent__notifyRequestFinished",
@@ -360,10 +360,10 @@
       "line": 75,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__HTTPServerAgent__notifyRequestFinished(agent: *InspectorHTTPServerAgent, requestId: RequestId, serverId: ServerId, timestamp: f64, duration: f64) void;",
       "declaration_sha256": "08ebbae43d4a9595f40e540018b439754ca4ea7614cedfc5fafb66ee3ac22948",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__HTTPServerAgent__notifyRequestHandlerException",
@@ -371,10 +371,10 @@
       "line": 76,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__HTTPServerAgent__notifyRequestHandlerException(agent: *InspectorHTTPServerAgent, requestId: RequestId, serverId: ServerId, message: *const BunString, url: *const BunString, line: i32, timestamp: f64) void;",
       "declaration_sha256": "8bc40f7dc0cb9da3a78f34b978fbdef5919a46a5ce5bd830fe53469611a58c9c",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__HTTPServerAgent__notifyRequestWillBeSent",
@@ -382,10 +382,10 @@
       "line": 72,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__HTTPServerAgent__notifyRequestWillBeSent(agent: *InspectorHTTPServerAgent, requestId: RequestId, serverId: ServerId, routeId: RouteId, url: *const BunString, fullUrl: *const BunString, method: HTTPMethod, headersJson: *const BunString, paramsJson: *const BunString, hasBody: bool, timestamp: f64) void;",
       "declaration_sha256": "0b4192ff9ac8d823e79e59309066f642d0eb86af73f1d46df5f9c8193ed5dbe2",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__HTTPServerAgent__notifyResponseReceived",
@@ -393,10 +393,10 @@
       "line": 73,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Bun__HTTPServerAgent__notifyResponseReceived(agent: *InspectorHTTPServerAgent, requestId: RequestId, serverId: ServerId, statusCode: i32, statusText: *const BunString, headersJson: *const BunString, hasBody: bool, timestamp: f64) void;",
       "declaration_sha256": "66067f838b2120ba77c1be25b0f2ab587d6243d740a8a8d8fb6233a90f253279",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSArray__contiguousVectorIsStillValid",
