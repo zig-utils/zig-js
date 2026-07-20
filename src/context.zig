@@ -2622,6 +2622,10 @@ pub const Context = struct {
     /// slots, so scanning those stacks is not TSan-clean. GIL mid-script GC can
     /// opt in when it has established the stronger park protocol it expects.
     gc_scan_parked_stacks: bool = false,
+    /// True only inside `compactGarbage` after its quiescent/native/JIT gates
+    /// succeed. `GcBinding.canRelocate` consults this token so a caller cannot
+    /// bypass the Context safepoint policy through the otherwise-public heap.
+    gc_relocation_active: std.atomic.Value(bool) = .init(false),
     /// Realm-wide source for unique class private-name storage keys. Parallel
     /// class evaluation can mint names concurrently, so checked atomic minting
     /// refuses both raced duplicates and wrap into a previously-issued brand.
@@ -4729,6 +4733,37 @@ pub const Context = struct {
         wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
         self.gc_requested.store(false, .monotonic);
+    }
+
+    /// Explicit stop-the-world compaction for a fully quiescent, interpreter-
+    /// free realm. Raw `Value`/cell pointers held outside the registered Context
+    /// roots are not discoverable, so callers must use stable protected/private
+    /// handles across this boundary. JIT-enabled realms fail closed until native
+    /// stack maps exist; ordinary `collectGarbage` remains the non-moving path.
+    pub fn compactGarbage(self: *Context) GcHeap.CompactionResult {
+        const h = self.gc orelse return .{ .status = .unsupported };
+        if (self.enable_jit or self.gc_scan_native_stack or self.gc_scan_parked_stacks)
+            return .{ .status = .unsupported };
+        if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
+            return .{ .status = .unsupported };
+
+        self.lockActiveInterpreters();
+        const has_active_interpreter = self.active_interpreters.items.len != 0;
+        self.unlockActiveInterpreters();
+        if (has_active_interpreter) return .{ .status = .unsupported };
+
+        self.finishConcurrentGCIfActive();
+        if (h.marking.load(.acquire) or h.concurrent.load(.acquire))
+            return .{ .status = .unsupported };
+
+        if (self.gc_relocation_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+            return .{ .status = .unsupported };
+        defer self.gc_relocation_active.store(false, .release);
+        const result = h.collectAndCompact();
+        wasm_api.collectWasmGarbage(self);
+        if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        self.gc_requested.store(false, .monotonic);
+        return result;
     }
 
     /// Automatic quiescent policy used at evaluation boundaries. Young space is
@@ -14085,6 +14120,116 @@ test "enable_gc: collector scratch allocator follows the context concurrency pol
         defer ctx.destroy();
         try Identity.expect(ctx.gc.?.aux, std.heap.page_allocator);
     }
+}
+
+test "GC compaction is fail-closed and rewrites a protected cyclic graph repeatedly" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+
+    var boxed = try ctx.evaluate(
+        \\(() => {
+        \\  globalThis.compactClosure = (() => {
+        \\    const captured = { value: 40 };
+        \\    return () => captured.value + 2;
+        \\  })();
+        \\  globalThis.compactPromise = Promise.resolve(9);
+        \\  globalThis.compactGenerator = (function* () { yield 7; })();
+        \\  globalThis.compactDynamicString = "move".repeat(25);
+        \\  const root = { name: "root" };
+        \\  const peer = { name: "peer" };
+        \\  root.peer = peer;
+        \\  root.alias = peer;
+        \\  peer.root = root;
+        \\  return root;
+        \\})()
+    );
+    try ctx.reserveCApiHandlesLocked(1);
+    ctx.c_api_handles.appendAssumeCapacity(.{ .ref = &boxed, .count = 1 });
+    defer ctx.c_api_handles.clearRetainingCapacity();
+
+    // Each unrewritable execution boundary refuses movement without even
+    // entering the collector's compaction phase.
+    ctx.enable_jit = true;
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
+    ctx.enable_jit = false;
+    ctx.gc_scan_native_stack = true;
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
+    ctx.gc_scan_native_stack = false;
+    var active = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&active);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, ctx.compactGarbage().status);
+    ctx.popActiveInterpreter(&active);
+
+    // Stabilize liveness first so before/after accounting measures relocation,
+    // not unrelated garbage reclaimed from evaluation setup.
+    ctx.collectGarbage();
+    const before = ctx.gc.?.accounting();
+    const old_root_address = @intFromPtr(boxed.asObj());
+    const old_peer_address = @intFromPtr(boxed.asObj().getOwn("peer").?.asObj());
+
+    const first = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, first.status);
+    try std.testing.expectEqual(before.live_cells, first.moved_cells);
+    try std.testing.expectEqual(before.live_bytes, first.moved_bytes);
+    try std.testing.expect(old_root_address != @intFromPtr(boxed.asObj()));
+    const first_root = boxed.asObj();
+    const first_peer = first_root.getOwn("peer").?.asObj();
+    try std.testing.expect(old_peer_address != @intFromPtr(first_peer));
+    try std.testing.expectEqual(first_peer, first_root.getOwn("alias").?.asObj());
+    try std.testing.expectEqual(first_root, first_peer.getOwn("root").?.asObj());
+    const after_first = ctx.gc.?.accounting();
+    try std.testing.expectEqual(before.live_cells, after_first.live_cells);
+    try std.testing.expectEqual(before.live_bytes, after_first.live_bytes);
+
+    const first_root_address = @intFromPtr(first_root);
+    const second = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
+    try std.testing.expectEqual(before.live_cells, second.moved_cells);
+    try std.testing.expect(first_root_address != @intFromPtr(boxed.asObj()));
+    const second_root = boxed.asObj();
+    const second_peer = second_root.getOwn("peer").?.asObj();
+    try std.testing.expectEqual(second_peer, second_root.getOwn("alias").?.asObj());
+    try std.testing.expectEqual(second_root, second_peer.getOwn("root").?.asObj());
+    const after_second = ctx.gc.?.accounting();
+    try std.testing.expectEqual(before.live_cells, after_second.live_cells);
+    try std.testing.expectEqual(before.live_bytes, after_second.live_bytes);
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+
+    // These values were all created before either move. Running them only now
+    // proves the Function/Environment/Promise/Generator/String representatives,
+    // not just the directly inspected Object cycle, survived both compactions.
+    _ = try ctx.evaluate(
+        "compactPromise.then(value => { globalThis.compactPromiseValue = value; })",
+    );
+    const representatives = try ctx.evaluate(
+        "compactClosure() + compactGenerator.next().value + compactDynamicString.length + compactPromiseValue",
+    );
+    try std.testing.expectEqual(@as(f64, 158), representatives.asNum());
+
+    // Planning scratch must succeed before any destination/root/edge mutation.
+    // Replacing only the collector scratch allocator deterministically fails
+    // the first plan-capacity reservation while leaving cell backing available.
+    ctx.collectGarbage();
+    const before_failure = ctx.gc.?.accounting();
+    const root_before_failure = boxed.asObj();
+    var no_scratch: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&no_scratch);
+    const saved_aux = ctx.gc.?.aux;
+    ctx.gc.?.aux = fixed.allocator();
+    const failed = ctx.compactGarbage();
+    ctx.gc.?.aux = saved_aux;
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.out_of_memory, failed.status);
+    try std.testing.expectEqual(root_before_failure, boxed.asObj());
+    const after_failure = ctx.gc.?.accounting();
+    try std.testing.expectEqual(before_failure.live_cells, after_failure.live_cells);
+    try std.testing.expectEqual(before_failure.live_bytes, after_failure.live_bytes);
+    try std.testing.expectEqual(
+        boxed.asObj().getOwn("peer").?.asObj(),
+        boxed.asObj().getOwn("alias").?.asObj(),
+    );
 }
 
 test "enable_gc nursery: quick object replacement keeps exact-managed children" {

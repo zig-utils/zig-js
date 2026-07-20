@@ -2725,10 +2725,11 @@ pub const Binding = struct {
         return true;
     }
 
-    /// The complete dispatch is executable, but candidate selection stays
-    /// fail-closed until #350's quiescent/native/JIT eligibility gate lands.
-    pub fn canRelocate(_: *Binding, _: *anyopaque, _: Kind) bool {
-        return false;
+    /// `Context.compactGarbage` opens this token only after rejecting every
+    /// unrewritable native/JIT/conservative boundary. All managed CellKinds use
+    /// the exact dispatch below once that realm-wide proof holds.
+    pub fn canRelocate(self: *Binding, _: *anyopaque, _: Kind) bool {
+        return self.context.gc_relocation_active.load(.acquire);
     }
 
     pub fn relocateRoots(self: *Binding, v: anytype) void {
@@ -3042,7 +3043,7 @@ pub const Binding = struct {
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
 
-test "GC relocation binding dispatch is complete and policy-disabled" {
+test "GC relocation binding dispatch is complete" {
     var object = Object{};
     object.initInlineSlots();
     var binding = Binding{ .context = undefined };
@@ -3054,7 +3055,7 @@ test "GC relocation binding dispatch is complete and policy-disabled" {
     const plan = IdentityPlan{};
 
     binding.relocateCell(&object, .object, &plan);
-    try std.testing.expect(!binding.canRelocate(&object, .object));
+    try std.testing.expect(@hasDecl(Binding, "canRelocate"));
     try std.testing.expect(@hasDecl(Binding, "relocateRoots"));
     try std.testing.expect(@hasDecl(Binding, "relocateCell"));
 }

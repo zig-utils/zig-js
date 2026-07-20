@@ -1,9 +1,9 @@
 # GC Relocation Contract
 
-Moving collection is not enabled. Issue
-[#333](https://github.com/zig-utils/zig-js/issues/333) first makes the pointer
-contract auditable so a later compactor cannot rely on an accidental stable
-address.
+Moving collection is available only through explicit `Context.compactGarbage`
+on a quiescent GC realm created with JIT disabled. The checked policy refuses
+active interpreters, running JS threads, conservative native-stack scans, and
+in-flight concurrent/parallel collections.
 
 The checked-in
 [`gc-relocation-inventory.json`](../.data/gc-relocation-inventory.json) covers
@@ -20,9 +20,9 @@ zig build gc-relocation-inventory-check
 ```
 
 The verifier derives the live `CellKind` enum from `src/gc.zig`, requires exact
-ordered coverage, validates every source anchor and boundary tag, and rejects
-any claim that movement is already active. It is deliberately cheap enough for
-ordinary CI.
+ordered coverage and an executable rewriter for each kind, validates every
+source anchor/boundary tag, and checks the fail-closed activation gates. It is
+deliberately cheap enough for ordinary CI.
 
 ## Code Contract
 
@@ -37,8 +37,8 @@ later phases must use:
 - atomic strong and tagged-`Value` slots use compare/exchange rewriting;
 - interior projections preserve a proven byte offset from a relocated base;
 - unmanaged static, arena, and interned strings remain unchanged;
-- conservatively discovered cells are pinned because a scanned machine word
-  does not carry a precise base/slot to rewrite.
+- compaction is rejected while conservative scanning is active because a
+  scanned machine word does not carry a precise base/slot to rewrite.
 
 These types do not allocate destinations, copy cells, mutate the heap, or make
 raw native/JIT pointers safe. The ordered follow-ups are stop-the-world
@@ -52,8 +52,9 @@ back on OOM, rewrites moved and pinned cells, and commits live storage without
 running finalizers. zig-js's owned `GcCellBacking` provides a matching
 unpublished reserve/release/commit trio: relocation does not inflate mutator
 allocation pressure, publication swaps under one size-class lock, and live-slot
-accounting stays unchanged. Production movement remains off until #334/#335
-finish the engine cell policy and complete root/edge rewrite implementation.
+accounting stays unchanged. The engine now invokes this mechanism only through
+the checked explicit stop-the-world policy; automatic and mid-script movement
+remain off.
 
 The first engine rewrite slice is complete under
 [#338](https://github.com/zig-utils/zig-js/issues/338): `Function` marking and
@@ -61,8 +62,6 @@ relocation now cover its closure, realm, home/super/wrapper objects,
 `import.meta`, lexical `this`/`new.target`, shared derived-constructor `this`
 cell, and captured `with` objects. Old functions are rescanned by minor GC
 because `super()` can initialize the shared `this` cell after publication.
-Movement is still disabled until every cell kind and root surface has the same
-complete treatment.
 
 [#339](https://github.com/zig-utils/zig-js/issues/339) also completes the two
 small immutable side-cell graphs: bound functions rewrite their target,
@@ -135,15 +134,19 @@ waiters, and the host exception slot. Queue, handle, and native-record addresses
 and ordering remain stable; only their managed payloads change.
 
 [#350](https://github.com/zig-utils/zig-js/issues/350) composes those helpers
-into the collector-facing root and exact nine-kind cell dispatch. Candidate
-selection still returns false for every cell: this makes the executable wiring
-compile-checked without permitting a move before the quiescent/native/JIT
-eligibility policy and end-to-end compaction witnesses land.
+into the collector-facing root and exact nine-kind cell dispatch. Its Context
+entrypoint opens a short-lived relocation token only after every fail-closed
+gate passes. A protected cyclic/aliased graph is moved repeatedly with exact
+live-cell/live-byte accounting, and deterministic scratch OOM proves the plan
+leaves its original graph and accounting untouched. The same witness executes
+pre-move Function/Environment/Promise/Generator/String representatives after
+two moves. Ordinary collection stays non-moving.
 
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held
 and its forwarding record remains live. Long-lived embedding references must
 use stable handle storage whose contained value is rewritten; the handle's own
-address does not move. Native frames without precise pointer stack maps and any
-cell reached only by conservative stack scanning remain pinned until #336.
+address does not move. Native frames without precise pointer stack maps and
+conservative stack scans reject compaction until #336 supplies a safe rewrite
+or per-cell pinning mechanism.

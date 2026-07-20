@@ -38,11 +38,11 @@ def main() -> int:
     document = json.loads(args.inventory.read_text())
     require(document.get("schema_version") == 1, "unsupported schema")
     require(document.get("issue") == 333, "issue owner drift")
-    require(document.get("status") == "contract_only", "movement must not be claimed by the inventory gate")
-    require(document.get("movement_enabled") is False, "movement cannot be enabled by the audit-only slice")
+    require(document.get("status") == "explicit_stop_the_world", "relocation status drift")
+    require(document.get("movement_enabled") is True, "explicit compaction must remain inventoried")
 
     identity = document.get("identity", {})
-    require(identity.get("forwarding_state") == "contract_defined", "forwarding contract status drift")
+    require(identity.get("forwarding_state") == "executable", "forwarding contract status drift")
     require("logical allocation" in identity.get("rule", ""), "stable identity rule missing")
     require("safepoint" in identity.get("old_address_lifetime", ""), "old-address lifetime is not bounded")
 
@@ -64,11 +64,21 @@ def main() -> int:
     require(len(set(inventoried_kinds)) == len(inventoried_kinds), "duplicate CellKind entry")
     for entry in entries:
         require(entry.get("ownership") in ALLOWED_OWNERSHIP, f"{entry.get('kind')}: invalid ownership")
-        require(str(entry.get("mobility", "")).startswith("planned_movable"), f"{entry.get('kind')}: mobility is not explicit")
+        require(entry.get("mobility") == "movable_when_policy_active", f"{entry.get('kind')}: mobility policy drift")
         require(str(entry.get("rewrite", "")).startswith("relocate"), f"{entry.get('kind')}: rewrite operation missing")
         source = ROOT / entry.get("source", "")
         require(source.is_file(), f"{entry.get('kind')}: source missing")
         require(entry.get("anchor", "") in source.read_text(), f"{entry.get('kind')}: source anchor drift")
+        require(entry.get("rewrite", "") in gc_source, f"{entry.get('kind')}: executable rewriter missing")
+
+    context_source = (ROOT / "src/context.zig").read_text()
+    for hook in ("pub fn canRelocate", "pub fn relocateRoots", "pub fn relocateCell"):
+        require(hook in gc_source, f"collector binding hook missing: {hook}")
+    require("pub fn compactGarbage" in context_source, "checked Context compaction entrypoint missing")
+    require("gc_relocation_active" in context_source, "relocation activation token missing")
+    require("self.enable_jit" in context_source, "JIT fail-closed gate missing")
+    require("self.gc_scan_native_stack" in context_source, "conservative-stack fail-closed gate missing")
+    require("has_active_interpreter" in context_source, "active-interpreter fail-closed gate missing")
 
     surfaces = document.get("pointer_surfaces", [])
     ids = [entry.get("id") for entry in surfaces]
@@ -98,7 +108,7 @@ def main() -> int:
     print(
         "gc-relocation-inventory: "
         f"{len(entries)} cell kinds, {len(surfaces)} pointer surfaces, "
-        f"{len(required_tags)} boundary tags; movement disabled"
+        f"{len(required_tags)} boundary tags; explicit stop-the-world movement enabled"
     )
     return 0
 
