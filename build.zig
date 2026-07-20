@@ -54,6 +54,28 @@ pub fn build(b: *std.Build) void {
     private_abi_options.addOption(bool, "is_bun", private_abi_is_bun);
     mod.addOptions("private_abi_options", private_abi_options);
     lib.root_module.addOptions("private_abi_options", private_abi_options);
+
+    // Focused Home and Bun fixtures may run together. Compile the opposite
+    // private-tag profile once so neither fixture inherits the command-line
+    // profile intended for the installed library.
+    const fixture_private_abi_options = b.addOptions();
+    fixture_private_abi_options.addOption(bool, "is_bun", !private_abi_is_bun);
+    const fixture_private_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = if (private_abi_is_bun) "zig-js-private-home" else "zig-js-private-bun",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "regex", .module = regex_mod },
+                .{ .name = "gc", .module = gc_mod },
+            },
+        }),
+    });
+    fixture_private_lib.root_module.addOptions("private_abi_options", fixture_private_abi_options);
+    const home_private_lib = if (private_abi_is_bun) fixture_private_lib else lib;
+    const bun_private_lib = if (private_abi_is_bun) lib else fixture_private_lib;
     var installed_library: ?std.Build.LazyPath = null;
     var objc_bridge_object: ?std.Build.LazyPath = null;
     if (target.result.os.tag == .macos) {
@@ -358,7 +380,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    home_private_value_fixture.root_module.linkLibrary(lib);
+    home_private_value_fixture.root_module.linkLibrary(home_private_lib);
     const run_home_private_value_fixture = b.addRunArtifact(home_private_value_fixture);
     run_home_private_value_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
     const home_private_abi_test_step = b.step(
@@ -376,7 +398,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    bun_private_abort_signal_fixture.root_module.linkLibrary(lib);
+    bun_private_abort_signal_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_abort_signal_fixture = b.addRunArtifact(bun_private_abort_signal_fixture);
     run_bun_private_abort_signal_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_abort_signal_test_step = b.step(
@@ -393,7 +415,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bun_private_property_iterator_fixture.root_module.linkLibrary(lib);
+    bun_private_property_iterator_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_property_iterator_fixture = b.addRunArtifact(bun_private_property_iterator_fixture);
     run_bun_private_property_iterator_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_property_iterator_test_step = b.step(
@@ -410,7 +432,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bun_private_c_api_extensions_fixture.root_module.linkLibrary(lib);
+    bun_private_c_api_extensions_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_c_api_extensions_fixture = b.addRunArtifact(bun_private_c_api_extensions_fixture);
     run_bun_private_c_api_extensions_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_c_api_extensions_test_step = b.step(
@@ -428,7 +450,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    bun_private_array_buffer_fixture.root_module.linkLibrary(lib);
+    bun_private_array_buffer_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_array_buffer_fixture = b.addRunArtifact(bun_private_array_buffer_fixture);
     run_bun_private_array_buffer_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_array_buffer_test_step = b.step(
@@ -445,7 +467,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bun_private_dom_form_data_fixture.root_module.linkLibrary(lib);
+    bun_private_dom_form_data_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_dom_form_data_fixture = b.addRunArtifact(bun_private_dom_form_data_fixture);
     run_bun_private_dom_form_data_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_dom_form_data_test_step = b.step(
@@ -462,7 +484,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bun_private_fetch_headers_fixture.root_module.linkLibrary(lib);
+    bun_private_fetch_headers_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_fetch_headers_fixture = b.addRunArtifact(bun_private_fetch_headers_fixture);
     run_bun_private_fetch_headers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_fetch_headers_bridge_absent_fixture = b.addExecutable(.{
@@ -473,7 +495,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    bun_private_fetch_headers_bridge_absent_fixture.root_module.linkLibrary(lib);
+    bun_private_fetch_headers_bridge_absent_fixture.root_module.linkLibrary(bun_private_lib);
     const run_bun_private_fetch_headers_bridge_absent_fixture = b.addRunArtifact(bun_private_fetch_headers_bridge_absent_fixture);
     run_bun_private_fetch_headers_bridge_absent_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_fetch_headers_test_step = b.step(
@@ -482,6 +504,19 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_fixture.step);
     bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_bridge_absent_fixture.step);
+
+    const repeat_home_private_value_fixture = b.addRunArtifact(home_private_value_fixture);
+    repeat_home_private_value_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+    const repeat_bun_private_fetch_headers_fixture = b.addRunArtifact(bun_private_fetch_headers_fixture);
+    repeat_bun_private_fetch_headers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const mixed_private_abi_test_step = b.step(
+        "test-private-abi-mixed-profiles",
+        "Run repeated Home and Bun private fixtures together with isolated tag profiles",
+    );
+    mixed_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
+    mixed_private_abi_test_step.dependOn(&repeat_home_private_value_fixture.step);
+    mixed_private_abi_test_step.dependOn(&run_bun_private_fetch_headers_fixture.step);
+    mixed_private_abi_test_step.dependOn(&repeat_bun_private_fetch_headers_fixture.step);
 
     const private_jstype_fixture = b.addExecutable(.{
         .name = "private-jstype-shims",

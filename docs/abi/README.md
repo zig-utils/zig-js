@@ -138,6 +138,16 @@ invalid/non-exact boundary. Public accounting stays unchanged at 117 functions
 and 22 extensions; private-profile exports are counted only in their pinned
 inventories.
 
+Home and Bun use distinct private `JSType` tag layouts. Focused fixtures always
+link the library compiled for their own profile, even when both run in one Zig
+build invocation. The mixed-profile gate runs two instances of each boundary
+fixture together and may be invoked with either command-line profile:
+
+```sh
+zig build test-private-abi-mixed-profiles -Dprivate-abi-consumer=bun
+zig build test-private-abi-mixed-profiles -Dprivate-abi-consumer=home
+```
+
 The opaque BigInt cell slice additionally exports `JSC__JSBigInt__fromJS`, the
 three signed/unsigned/double ordering functions, and `JSC__JSBigInt__toInt64`.
 It reuses zig-js's arbitrary-precision integer comparison rather than narrowing

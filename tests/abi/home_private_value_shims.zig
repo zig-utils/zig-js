@@ -2431,6 +2431,8 @@ pub fn main() void {
         const shared_fd: i64 = shared_native_fd;
 
         const shared_array_buffer = ArrayBuffer__fromSharedMemfd(shared_fd, context, 2, 5, shared_source.len, 48);
+        if (shared_array_buffer == .empty)
+            fail("shared memfd ArrayBuffer construction failed");
         const shared_array_buffer_ptr = JSObjectGetArrayBufferBytesPtr(context, shared_array_buffer.cellPointer(), &typed_exception) orelse
             fail("shared memfd ArrayBuffer pointer lookup failed");
         const shared_array_buffer_bytes = @as([*]u8, @ptrCast(shared_array_buffer_ptr))[0..5];
@@ -2445,6 +2447,8 @@ pub fn main() void {
             fail("shared memfd mapping was not private");
 
         const shared_uint8 = ArrayBuffer__fromSharedMemfd(shared_fd, context, 4, 3, shared_source.len, 50);
+        if (shared_uint8 == .empty)
+            fail("shared memfd Uint8Array construction failed");
         const shared_uint8_ptr = JSObjectGetTypedArrayBytesPtr(context, shared_uint8.cellPointer(), &typed_exception) orelse
             fail("shared memfd Uint8Array pointer lookup failed");
         if (typed_exception != null or JSBuffer__isBuffer(context, shared_uint8) or
