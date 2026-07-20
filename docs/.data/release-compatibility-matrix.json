@@ -90,20 +90,24 @@
     {
       "id": "moving_gc",
       "issue": 144,
-      "status": "open",
+      "status": "green",
       "evidence": [
         "docs/threads/gc-relocation.md",
         "docs/.data/gc-relocation-inventory.json",
         "docs/.data/gc-compaction-2026-07-19.md"
       ],
-      "blockers": ["complete the terminal stress and compatibility matrix in #337"]
+      "blockers": []
     },
     {
       "id": "generational_gc",
       "issue": 145,
-      "status": "open",
-      "evidence": ["docs/threads/P7-gc-design.md"],
-      "blockers": ["implement multi-age generations and parallel mid-script minor collection"]
+      "status": "green",
+      "evidence": [
+        "docs/threads/P7-gc-design.md",
+        "docs/.data/gc-generation-2026-07-20.md",
+        "docs/.data/gc-generation-2026-07-20.tsv"
+      ],
+      "blockers": []
     },
     {
       "id": "optimizing_jit",
