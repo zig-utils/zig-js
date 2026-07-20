@@ -5,12 +5,13 @@ description: Reproduce and interpret zig-js direct, independent-context, shared-
 
 # Performance Benchmarks
 
-zig-js keeps four benchmark families separate:
+zig-js keeps five benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
 - `python3 tools/wasm-simd-benchmark.py` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
+- `zig build gc-generation-benchmark` compares age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, automatic-threshold, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
 
@@ -37,6 +38,11 @@ zig build gc-compaction-benchmark -Dgc-compaction-benchmark-quick=true
 zig build gc-compaction-benchmark \
   -Dgc-compaction-benchmark-raw-out=docs/.data/gc-compaction-YYYY-MM-DD.tsv \
   -Dgc-compaction-benchmark-markdown-out=docs/.data/gc-compaction-YYYY-MM-DD.md
+zig build gc-generation-benchmark -Dgc-generation-benchmark-quick=true
+zig build gc-generation-benchmark \
+  -Dgc-generation-benchmark-raw-out=docs/.data/gc-generation-YYYY-MM-DD.tsv \
+  -Dgc-generation-benchmark-markdown-out=docs/.data/gc-generation-YYYY-MM-DD.md \
+  -Dgc-generation-benchmark-update-readme=true
 ```
 
 ## Latest WebAssembly SIMD comparison

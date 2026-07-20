@@ -1002,4 +1002,32 @@ pub fn build(b: *std.Build) void {
         run_gc_compaction.addArgs(&.{ "--markdown-out", path });
     const gc_compaction_step = b.step("gc-compaction-benchmark", "Benchmark retained backing and pause cost after explicit compaction");
     gc_compaction_step.dependOn(&run_gc_compaction.step);
+
+    // Reproducible age/trigger-policy evidence for the generational nursery.
+    // The Python driver alternates policy order, validates exact checksums and
+    // byte conservation, and can preserve the raw TSV plus generated report.
+    const gc_generation_runner = b.addExecutable(.{
+        .name = "gc-generation-benchmark-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/gc_generation.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .link_libc = true,
+            .imports = &.{.{ .name = "js", .module = bench_js_mod }},
+        }),
+    });
+    const run_gc_generation = b.addSystemCommand(&.{ "python3", "tools/gc-generation-benchmark.py" });
+    run_gc_generation.addArtifactArg(gc_generation_runner);
+    if (b.option(usize, "gc-generation-benchmark-samples", "GC generation samples per matrix row")) |samples|
+        run_gc_generation.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+    if (b.option(bool, "gc-generation-benchmark-quick", "Run one reduced GC generation matrix") orelse false)
+        run_gc_generation.addArg("--quick");
+    if (b.option([]const u8, "gc-generation-benchmark-raw-out", "Write raw GC generation samples to this TSV path")) |path|
+        run_gc_generation.addArgs(&.{ "--raw-out", path });
+    if (b.option([]const u8, "gc-generation-benchmark-markdown-out", "Write the GC generation report to this Markdown path")) |path|
+        run_gc_generation.addArgs(&.{ "--markdown-out", path });
+    if (b.option(bool, "gc-generation-benchmark-update-readme", "Regenerate the README GC generation headline") orelse false)
+        run_gc_generation.addArgs(&.{ "--readme", "README.md" });
+    const gc_generation_step = b.step("gc-generation-benchmark", "Benchmark nursery ages, triggers, pauses, and no-GIL rendezvous");
+    gc_generation_step.dependOn(&run_gc_generation.step);
 }
