@@ -250,6 +250,15 @@ slots through module-aware initialization and GC root checkpoints. The exact
 `return_call_ref.wast` commands, including million-step tail recursion. CI
 runs both exact files in the shared pinned wasm-tools smoke leg.
 
+Core 3 exception references add the disjoint `exn`/`noexn` heap hierarchy,
+including `exnref`, `nullexnref`, `(ref exn)`, and `(ref null exn)` forms.
+Catch branches validate payload and exception-reference subtyping, runtime
+slots preserve exception identity and precise payload roots, and JavaScript
+boundaries reuse canonical `WebAssembly.Exception` wrappers. Tag imports also
+retain nominal recursive type identity. All 98 applicable commands in the
+four-file `test/core/exceptions` directory pass; the remaining two commands
+are text-parser assertions that the binary-backed runner records as N/A.
+
 Reproduce those execution and root-safety witnesses with:
 
 ```sh

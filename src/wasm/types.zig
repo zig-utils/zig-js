@@ -107,9 +107,10 @@ pub const Diagnostic = struct {
 };
 
 /// Heap types use the low u32 range for concrete module type indices and a
-/// disjoint high range for the ten abstract GC hierarchy nodes. This keeps
+/// disjoint high range for the abstract reference hierarchy nodes. This keeps
 /// them compact, directly comparable, and allocation-free in every IR use.
 pub const HeapType = enum(u64) {
+    noexn = (@as(u64, 1) << 32) | 0x74,
     nofunc = (@as(u64, 1) << 32) | 0x73,
     noextern = (@as(u64, 1) << 32) | 0x72,
     none = (@as(u64, 1) << 32) | 0x71,
@@ -120,6 +121,7 @@ pub const HeapType = enum(u64) {
     i31 = (@as(u64, 1) << 32) | 0x6C,
     struct_ = (@as(u64, 1) << 32) | 0x6B,
     array = (@as(u64, 1) << 32) | 0x6A,
+    exn = (@as(u64, 1) << 32) | 0x69,
     _,
 
     pub fn concrete(index: u32) HeapType {
@@ -133,6 +135,7 @@ pub const HeapType = enum(u64) {
 
     pub fn fromAbstractByte(byte: u8) ?HeapType {
         return switch (byte) {
+            0x74 => .noexn,
             0x73 => .nofunc,
             0x72 => .noextern,
             0x71 => .none,
@@ -143,6 +146,7 @@ pub const HeapType = enum(u64) {
             0x6C => .i31,
             0x6B => .struct_,
             0x6A => .array,
+            0x69 => .exn,
             else => null,
         };
     }
@@ -169,6 +173,7 @@ pub const ValType = enum(u64) {
     f32 = 0x7D,
     f64 = 0x7C,
     v128 = 0x7B,
+    nullexnref = 0x74,
     nofuncref = 0x73,
     noexternref = 0x72,
     nullref = 0x71,
@@ -193,6 +198,7 @@ pub const ValType = enum(u64) {
             0x7D => .f32,
             0x7C => .f64,
             0x7B => .v128,
+            0x74 => .nullexnref,
             0x73 => .nofuncref,
             0x72 => .noexternref,
             0x71 => .nullref,
@@ -236,6 +242,7 @@ pub const ValType = enum(u64) {
             .f64 => "f64",
             .v128 => "v128",
             .exnref => "exnref",
+            .nullexnref => "nullexnref",
             .funcref => "funcref",
             .externref => "externref",
             .nofuncref => "nofuncref",
@@ -257,9 +264,14 @@ pub const ValType = enum(u64) {
     pub fn isGcReference(self: ValType) bool {
         const ref_type = self.refType() orelse return false;
         return switch (ref_type.heap) {
-            .func, .nofunc, .extern_, .noextern => false,
+            .func, .nofunc, .extern_, .noextern, .exn, .noexn => false,
             else => true,
         };
+    }
+
+    pub fn isExceptionReference(self: ValType) bool {
+        const ref_type = self.refType() orelse return false;
+        return ref_type.heap == .exn or ref_type.heap == .noexn;
     }
 
     pub fn isAbstractGcReference(self: ValType) bool {
@@ -289,6 +301,7 @@ pub const BlockType = union(enum) {
                 .f64 => &.{.f64},
                 .v128 => &.{.v128},
                 .exnref => &.{.exnref},
+                .nullexnref => &.{.nullexnref},
                 .externref => &.{.externref},
                 .funcref => &.{.funcref},
                 .nofuncref => &.{.nofuncref},

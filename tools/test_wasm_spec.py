@@ -256,6 +256,8 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn("relaxed_simd", core_3["features"])
         self.assertIn("item.type === 'eqref'", wasm_spec.PRELUDE)
         self.assertIn("item.type === 'refnull'", wasm_spec.PRELUDE)
+        self.assertIn("item.type === 'exnref'", wasm_spec.PRELUDE)
+        self.assertIn("item.type === 'nullexnref'", wasm_spec.PRELUDE)
         self.assertIn("return typeof actual === 'function'", wasm_spec.PRELUDE)
         self.assertIn("Object.defineProperty(__spectest, 'table64'", wasm_spec.PRELUDE)
         self.assertIn("return __spectestTable64 ??= new WebAssembly.Table({", wasm_spec.PRELUDE)

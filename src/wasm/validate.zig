@@ -26,13 +26,13 @@ fn unsupportedFeature(mod: *const types.Module, diag: *types.Diagnostic, feature
 }
 
 fn validateValType(mod: *const types.Module, value_type: types.ValType, diag: *types.Diagnostic) Error!void {
-    if (value_type == .exnref and !mod.features.exception_handling)
+    if (value_type.isExceptionReference() and !mod.features.exception_handling)
         return unsupportedFeature(mod, diag, .exception_handling);
     if (value_type == .v128 and !mod.features.fixed_width_simd)
         return unsupportedFeature(mod, diag, .fixed_width_simd);
     const ref_type = value_type.refType() orelse return;
     const explicit_reference = @intFromEnum(value_type) > std.math.maxInt(u32);
-    if ((explicit_reference or value_type == .nofuncref or value_type == .noexternref) and
+    if ((explicit_reference or value_type == .nofuncref or value_type == .noexternref or value_type == .nullexnref) and
         !mod.features.typed_function_references)
         return unsupportedFeature(mod, diag, .typed_function_references);
     const concrete_index = ref_type.heap.concreteIndex();
@@ -65,6 +65,7 @@ fn topHeapType(mod: *const types.Module, heap: types.HeapType) types.HeapType {
     return switch (heap) {
         .func, .nofunc => .func,
         .extern_, .noextern => .extern_,
+        .exn, .noexn => .exn,
         .any, .eq, .i31, .struct_, .array, .none => .any,
         else => unreachable,
     };
@@ -450,6 +451,7 @@ pub fn heapTypeMatches(mod: *const types.Module, sub: types.HeapType, super: typ
     return switch (sub) {
         .nofunc => super == .func,
         .noextern => super == .extern_,
+        .noexn => super == .exn,
         .none => super == .i31 or super == .struct_ or super == .array or super == .eq or super == .any,
         .i31 => super == .eq or super == .any,
         .struct_, .array => super == .eq or super == .any,
@@ -1125,18 +1127,25 @@ const FuncValidator = struct {
         switch (catch_clause) {
             .catch_tag => |tagged| {
                 const tag_type = try self.catchTagType(tagged.tag_index);
-                if (!std.mem.eql(types.ValType, target_types, tag_type.params))
-                    return self.fail("type mismatch");
+                if (target_types.len != tag_type.params.len) return self.fail("type mismatch");
+                for (tag_type.params, target_types) |payload, target_type|
+                    if (!valTypeMatches(self.mod, payload, target_type)) return self.fail("type mismatch");
             },
             .catch_ref => |tagged| {
                 const tag_type = try self.catchTagType(tagged.tag_index);
-                if (target_types.len != tag_type.params.len + 1 or target_types[target_types.len - 1] != .exnref or
-                    !std.mem.eql(types.ValType, target_types[0..tag_type.params.len], tag_type.params))
+                if (target_types.len != tag_type.params.len + 1) return self.fail("type mismatch");
+                for (tag_type.params, target_types[0..tag_type.params.len]) |payload, target_type|
+                    if (!valTypeMatches(self.mod, payload, target_type)) return self.fail("type mismatch");
+                const caught = types.ValType.fromRef(.{ .nullable = false, .heap = .exn });
+                if (!valTypeMatches(self.mod, caught, target_types[target_types.len - 1]))
                     return self.fail("type mismatch");
             },
             .catch_all => if (target_types.len != 0) return self.fail("type mismatch"),
-            .catch_all_ref => if (target_types.len != 1 or target_types[0] != .exnref)
-                return self.fail("type mismatch"),
+            .catch_all_ref => {
+                const caught = types.ValType.fromRef(.{ .nullable = false, .heap = .exn });
+                if (target_types.len != 1 or !valTypeMatches(self.mod, caught, target_types[0]))
+                    return self.fail("type mismatch");
+            },
         }
     }
 

@@ -766,6 +766,12 @@ function __sameOne(actual, item) {
     if (item.value === 'null') return actual === null;
     return typeof actual === 'function';
   }
+  if (item.type === 'exnref') {
+    if (item.value === 'null') return actual === null;
+    return actual !== null && typeof actual === 'object';
+  }
+  if (item.type === 'nullref' || item.type === 'nullfuncref' ||
+      item.type === 'nullexnref' || item.type === 'nullexternref') return actual === null;
   return false;
 }
 function __same(actual, expected) {

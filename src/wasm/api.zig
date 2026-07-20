@@ -735,9 +735,13 @@ fn tableRefFromValue(self: *Interpreter, store: *context.Context, inst: ?*exec.I
         const slot = jsToWasmExternReference(input);
         return .{ .value = if (slot == .externref) input else Value.nul(), .slot = slot };
     }
-    if (elem_type.refType()) |reference| if (reference.heap != .func and reference.heap != .nofunc) {
-        const slot = try jsToWasmGcReference(self, inst, elem_type, input);
-        return .{ .value = Value.nul(), .slot = slot };
+    if (elem_type.refType()) |reference| if (!isFunctionReferenceType(inst, elem_type)) {
+        const is_exception = reference.heap == .exn or reference.heap == .noexn;
+        const slot = if (is_exception)
+            try jsToWasmExceptionReference(self, elem_type, input)
+        else
+            try jsToWasmGcReference(self, inst, elem_type, input);
+        return .{ .value = if (is_exception) input else Value.nul(), .slot = slot };
     };
     if (input.isNull()) return .{ .value = Value.nul(), .slot = .{ .funcref = null } };
     const object = languageObject(input) orelse return self.throwError("TypeError", "WebAssembly.Table value must be null or a WebAssembly function");
@@ -852,7 +856,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                     return resolved;
                 }
             },
-            .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {
+            .exnref, .i31ref, .gcref, .externalized_gcref, .externalized_i31 => {
                 const resolved = try wasmSlotToJs(self, owner.table.type, slot, owner.table.owner_instance);
                 owner.lockOwner();
                 owner.table.lockTable();
@@ -861,7 +865,7 @@ fn tableGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
                 owner.unlockOwner();
                 if (unchanged) return resolved;
             },
-            .numeric, .vector, .exnref => unreachable,
+            .numeric, .vector => unreachable,
         }
     }
 }
@@ -925,13 +929,19 @@ fn globalTypeFromDescriptor(self: *Interpreter, descriptor: *Object) value.HostE
 }
 
 fn coerceGlobalSlot(self: *Interpreter, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    if (kind.refType()) |reference| {
+        if (isFunctionReferenceType(inst, kind))
+            return (try tableRefFromValue(self, try storeFor(self), inst, kind, input)).slot;
+        if (reference.heap == .exn or reference.heap == .noexn)
+            return jsToWasmExceptionReference(self, kind, input);
+        if (reference.heap == .extern_ or reference.heap == .noextern)
+            return jsToWasmExternReference(input);
+        return jsToWasmGcReference(self, inst, kind, input);
+    }
     return switch (kind) {
-        .externref => jsToWasmExternReference(input),
-        .funcref => unreachable,
-        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
-        else => jsToWasmGcReference(self, inst, kind, input),
+        else => self.throwError("TypeError", "reference value cannot cross the JavaScript Global boundary"),
     };
 }
 
@@ -969,6 +979,48 @@ fn functionInstance(func: *exec.FuncInst, fallback: ?*exec.Instance) ?*exec.Inst
         .defined => |defined| defined.inst,
         .imported => |imported| imported.owner_instance orelse fallback,
     };
+}
+
+fn isFunctionReferenceType(inst: ?*exec.Instance, kind: types.ValType) bool {
+    const reference = kind.refType() orelse return false;
+    if (reference.heap == .func or reference.heap == .nofunc) return true;
+    const type_index = reference.heap.concreteIndex() orelse return false;
+    return inst != null and inst.?.module.funcTypeAt(type_index) != null;
+}
+
+fn wasmFunctionReferenceToJs(self: *Interpreter, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
+    const raw = switch (slot) {
+        .funcref => |function| function orelse return Value.nul(),
+        else => return self.throwError("TypeError", "value is not a WebAssembly function reference"),
+    };
+    const func: *exec.FuncInst = @ptrCast(@alignCast(raw));
+    const inst = functionInstance(func, fallback) orelse
+        return self.throwError("TypeError", "WebAssembly function reference has no owning instance");
+    const host = inst.function_host orelse
+        return self.throwError("TypeError", "WebAssembly function reference is unavailable");
+    return host.resolve(host.ctx, func);
+}
+
+fn wasmExceptionReferenceToJs(self: *Interpreter, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
+    const exception = switch (slot) {
+        .exnref => |reference| reference orelse return Value.nul(),
+        else => return self.throwError("TypeError", "value is not a WebAssembly exception reference"),
+    };
+    if (exception.is_js_exception) return exception.js_exception;
+    if (exception.wrapper.load(.acquire)) |wrapper| return Value.obj(wrapper);
+    const hooks = if (fallback) |inst| inst.root_hooks orelse
+        return self.throwError("TypeError", "WebAssembly exception reference is unavailable") else return self.throwError("TypeError", "WebAssembly exception reference is unavailable");
+    const descriptor: *InstanceDescriptor = @ptrCast(@alignCast(hooks.uncaught_ctx orelse
+        return self.throwError("TypeError", "WebAssembly exception reference is unavailable")));
+    const candidate = try gc.allocObj(self.arena);
+    candidate.* = .{ .proto = descriptor.exception_proto };
+    const state = try candidate.wasmExceptionState(self.arena);
+    state.exception = exception;
+    const wrapper = if (exception.wrapper.cmpxchgStrong(null, candidate, .acq_rel, .acquire)) |existing|
+        existing orelse candidate
+    else
+        candidate;
+    return Value.obj(wrapper);
 }
 
 fn wasmGcReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostError!Value {
@@ -1011,24 +1063,33 @@ fn wasmExternReferenceToJs(self: *Interpreter, slot: exec.ValueSlot) value.HostE
 }
 
 fn wasmSlotToJs(self: *Interpreter, kind: types.ValType, slot: exec.ValueSlot, fallback: ?*exec.Instance) value.HostError!Value {
+    if (kind.refType()) |reference| {
+        if (isFunctionReferenceType(fallback, kind)) return wasmFunctionReferenceToJs(self, slot, fallback);
+        if (reference.heap == .exn or reference.heap == .noexn)
+            return wasmExceptionReferenceToJs(self, slot, fallback);
+        if (reference.heap == .extern_ or reference.heap == .noextern)
+            return wasmExternReferenceToJs(self, slot);
+        return wasmGcReferenceToJs(self, slot);
+    }
     return switch (kind) {
         .i32, .i64, .f32, .f64 => wasmBitsToJs(self, kind, slot.numericBits()),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
-        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
-        .externref => wasmExternReferenceToJs(self, slot),
-        .funcref => if (slot.funcref) |raw| blk: {
-            const func: *exec.FuncInst = @ptrCast(@alignCast(raw));
-            const inst = functionInstance(func, fallback) orelse
-                return self.throwError("TypeError", "WebAssembly function reference has no owning instance");
-            const host = inst.function_host orelse
-                return self.throwError("TypeError", "WebAssembly function reference is unavailable");
-            break :blk try host.resolve(host.ctx, func);
-        } else Value.nul(),
-        else => if (kind.refType() != null)
-            wasmGcReferenceToJs(self, slot)
-        else
-            self.throwError("TypeError", "GC reference value cannot cross the JavaScript function boundary"),
+        else => self.throwError("TypeError", "reference value cannot cross the JavaScript function boundary"),
     };
+}
+
+fn jsToWasmExceptionReference(self: *Interpreter, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    const target = kind.refType().?;
+    if (input.isNull()) {
+        if (!target.nullable) return self.throwError("TypeError", "null does not match a non-nullable WebAssembly reference");
+        return .{ .exnref = null };
+    }
+    const object = languageObject(input) orelse
+        return self.throwError("TypeError", "JavaScript value is not a WebAssembly.Exception");
+    const state = object.wasmException() orelse
+        return self.throwError("TypeError", "JavaScript value is not a WebAssembly.Exception");
+    return .{ .exnref = state.exception orelse
+        return self.throwError("TypeError", "WebAssembly.Exception is unavailable") };
 }
 
 fn jsToWasmGcReference(self: *Interpreter, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
@@ -1054,13 +1115,18 @@ fn jsToWasmGcReference(self: *Interpreter, inst: ?*exec.Instance, kind: types.Va
 }
 
 fn jsToWasmSlot(self: *Interpreter, store: *context.Context, inst: ?*exec.Instance, kind: types.ValType, input: Value) value.HostError!exec.ValueSlot {
+    if (kind.refType()) |reference| {
+        if (isFunctionReferenceType(inst, kind)) return (try tableRefFromValue(self, store, inst, kind, input)).slot;
+        if (reference.heap == .exn or reference.heap == .noexn)
+            return jsToWasmExceptionReference(self, kind, input);
+        if (reference.heap == .extern_ or reference.heap == .noextern)
+            return jsToWasmExternReference(input);
+        return jsToWasmGcReference(self, inst, kind, input);
+    }
     return switch (kind) {
         .i32, .i64, .f32, .f64 => .{ .numeric = try coerceGlobalBits(self, kind, input) },
         .v128 => return self.throwError("TypeError", "v128 value cannot cross the JavaScript function boundary"),
-        .exnref => return self.throwError("TypeError", "exnref value cannot cross the JavaScript function boundary"),
-        .externref => jsToWasmExternReference(input),
-        .funcref => (try tableRefFromValue(self, store, inst, .funcref, input)).slot,
-        else => jsToWasmGcReference(self, inst, kind, input),
+        else => return self.throwError("TypeError", "reference value cannot cross the JavaScript function boundary"),
     };
 }
 
@@ -1254,16 +1320,15 @@ fn wasmSpecInvokeBits(ctx: *anyopaque, _: Value, args: []const Value) value.Host
 }
 
 fn globalValue(self: *Interpreter, glob: *exec.GlobalInst) value.HostError!Value {
+    if (glob.type.val.refType() != null)
+        return wasmSlotToJs(self, glob.type.val, glob.value, glob.owner_instance);
     return switch (glob.type.val) {
         .i32 => Value.num(@floatFromInt(@as(i32, @bitCast(@as(u32, @truncate(glob.value.numericBits())))))),
         .i64 => try self.makeBigInt(@as(i64, @bitCast(glob.value.numericBits()))),
         .f32 => Value.num(@as(f32, @bitCast(@as(u32, @truncate(glob.value.numericBits()))))),
         .f64 => Value.num(@bitCast(glob.value.numericBits())),
-        .externref => wasmExternReferenceToJs(self, glob.value),
-        .funcref => unreachable,
-        .exnref => self.throwError("TypeError", "exnref value cannot cross the JavaScript Global boundary"),
         .v128 => self.throwError("TypeError", "v128 value cannot cross the JavaScript Global boundary"),
-        else => wasmGcReferenceToJs(self, glob.value),
+        else => self.throwError("TypeError", "reference value cannot cross the JavaScript Global boundary"),
     };
 }
 

@@ -273,6 +273,8 @@ pub const GlobalInst = struct {
 pub const TagInst = struct {
     type: types.FuncType,
     owner_instance: ?*Instance = null,
+    nominal_type_owner: ?*const types.Module = null,
+    nominal_type_index: ?u32 = null,
 };
 
 pub const ElemSegmentInst = struct {
@@ -976,6 +978,7 @@ fn nullTableSlot(elem_type: types.ValType) ValueSlot {
     return switch (reference.heap) {
         .func, .nofunc => .{ .funcref = null },
         .extern_, .noextern => .{ .externref = js_value.Value.nul() },
+        .exn, .noexn => .{ .exnref = null },
         else => .{ .gcref = null },
     };
 }
@@ -1079,6 +1082,15 @@ fn importedFunctionSubtype(imported: ImportFunc, target_mod: *const types.Module
     }
     const declared = target_mod.funcTypeAt(target_index) orelse return false;
     return types.funcTypeEql(imported.type, declared);
+}
+
+fn importedTagTypeCompatible(tag: *const TagInst, target_mod: *const types.Module, target_index: u32) bool {
+    if (tag.nominal_type_owner) |actual_mod| {
+        const actual_index = tag.nominal_type_index orelse return false;
+        return validate.definedTypesEquivalentAcross(actual_mod, actual_index, target_mod, target_index);
+    }
+    const declared = target_mod.funcTypeAt(target_index) orelse return false;
+    return types.funcTypeEql(tag.type, declared);
 }
 
 fn evalConstExpr(inst: *Instance, ce: types.ConstExpr) error{OutOfMemory}!ValueSlot {
@@ -1248,11 +1260,11 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
                     gi += 1;
                 },
                 .tag => |tag_decl| {
-                    const function_type = mod.funcTypeAt(tag_decl.type_index) orelse {
+                    _ = mod.funcTypeAt(tag_decl.type_index) orelse {
                         diag.set(types.Diagnostic.no_offset, "tag references a non-function type", .{});
                         return error.Link;
                     };
-                    if (!importedFuncTypeCompatible(imports.tags[tag_i].owner_instance, imports.tags[tag_i].type, mod, function_type)) {
+                    if (!importedTagTypeCompatible(imports.tags[tag_i], mod, tag_decl.type_index)) {
                         diag.set(types.Diagnostic.no_offset, "incompatible import type", .{});
                         return error.Link;
                     }
@@ -1345,6 +1357,8 @@ pub fn instantiateStore(gpa: Allocator, mod: *const types.Module, imports: Impor
     for (mod.tags, 0..) |tag_decl, j| {
         const tag = try createTag(gpa, mod.funcTypeAt(tag_decl.type_index).?);
         tag.owner_instance = inst;
+        tag.nominal_type_owner = mod;
+        tag.nominal_type_index = tag_decl.type_index;
         created_tags += 1;
         inst.tags[mod.imported_tags + j] = tag;
     }
@@ -1480,6 +1494,7 @@ fn slotMatchesType(mod: ?*const types.Module, slot: ValueSlot, val_type: types.V
         return switch (reference.heap) {
             .func, .nofunc => slot == .funcref,
             .extern_, .noextern => slot == .externref or slot == .externalized_gcref or slot == .externalized_i31,
+            .exn, .noexn => slot == .exnref,
             .i31 => slot == .i31ref or (reference.nullable and slot == .gcref and slot.gcref == null),
             .eq => slot == .i31ref or slot == .gcref,
             .any => slot == .i31ref or slot == .gcref or slot == .hostref,
@@ -1732,6 +1747,7 @@ fn gcReferenceMatches(inst: ?*const Instance, slot: WasmSlot, target: types.RefT
             break :blk target.heap == .func;
         },
         .externref, .externalized_gcref, .externalized_i31 => target.heap == .extern_,
+        .exnref => target.heap == .exn,
         .i31ref => target.heap == .i31 or target.heap == .eq or target.heap == .any,
         .hostref => target.heap == .any,
         .gcref => |raw| blk: {
@@ -3078,6 +3094,7 @@ fn zeroSlotIn(mod: ?*const types.Module, val_type: types.ValType) WasmSlot {
     if (val_type.refType()) |reference| return switch (reference.heap) {
         .func, .nofunc => .{ .funcref = null },
         .extern_, .noextern => .{ .externref = js_value.Value.nul() },
+        .exn, .noexn => .{ .exnref = null },
         else => if (reference.heap.concreteIndex()) |type_index|
             if (mod != null and mod.?.funcTypeAt(type_index) != null)
                 .{ .funcref = null }

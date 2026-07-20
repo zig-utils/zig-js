@@ -309,17 +309,20 @@ const Reader = struct {
                 .heap = try self.readHeapType(),
             };
             const value_type = types.ValType.fromRef(ref_type);
+            if (value_type.isExceptionReference() and !self.features.exception_handling)
+                return self.unsupportedFeature(off, .exception_handling);
             if (value_type.isAbstractGcReference() and !self.features.gc)
                 return self.unsupportedFeature(off, .gc);
             return value_type;
         }
         const value_type = types.ValType.fromByte(b) orelse
             return self.failAt(off, "invalid value type", .{});
-        if (value_type == .exnref and !self.features.exception_handling)
+        if (value_type.isExceptionReference() and !self.features.exception_handling)
             return self.unsupportedFeature(off, .exception_handling);
         if (value_type == .v128 and !self.features.fixed_width_simd)
             return self.unsupportedFeature(off, .fixed_width_simd);
-        if ((value_type == .nofuncref or value_type == .noexternref) and !self.features.typed_function_references)
+        if ((value_type == .nofuncref or value_type == .noexternref or value_type == .nullexnref) and
+            !self.features.typed_function_references)
             return self.unsupportedFeature(off, .typed_function_references);
         if (value_type.isAbstractGcReference() and !self.features.gc)
             return self.unsupportedFeature(off, .gc);
@@ -336,8 +339,11 @@ const Reader = struct {
         const byte_signed = encoded + 0x80;
         if (byte_signed < 0 or byte_signed > std.math.maxInt(u8))
             return self.failAt(off, "invalid heap type", .{});
-        return types.HeapType.fromAbstractByte(@intCast(byte_signed)) orelse
-            self.failAt(off, "invalid heap type", .{});
+        const heap = types.HeapType.fromAbstractByte(@intCast(byte_signed)) orelse
+            return self.failAt(off, "invalid heap type", .{});
+        if ((heap == .exn or heap == .noexn) and !self.features.exception_handling)
+            return self.unsupportedFeature(off, .exception_handling);
+        return heap;
     }
 
     fn readTag(self: *Reader) DecodeError!types.Tag {
@@ -388,6 +394,8 @@ const Reader = struct {
                     return self.failAt(off, "invalid block type", .{});
                 const decoded = types.ValType.fromByte(@intCast(byte_signed)) orelse
                     return self.failAt(off, "invalid block type", .{});
+                if (decoded.isExceptionReference() and !self.features.exception_handling)
+                    return self.unsupportedFeature(off, .exception_handling);
                 if (decoded.isAbstractGcReference() and !self.features.gc)
                     return self.unsupportedFeature(off, .gc);
                 break :blk .{ .value = decoded };
@@ -1983,6 +1991,39 @@ test "wasm.decode modern exception instruction immediates and catches" {
 
     const malformed = comptime (hdr ++ func_sec_1 ++ testCode("\x1F\x40\x01\x04"));
     try expectMalformedWithFeatures(malformed, features, 20, "invalid catch kind");
+}
+
+test "wasm.decode Core 3 explicit exception heap references" {
+    const bytes = comptime (hdr ++ testSection(
+        1,
+        "\x01\x60\x04" ++
+            "\x64\x69" ++ // (ref exn)
+            "\x63\x69" ++ // (ref null exn) / exnref
+            "\x63\x74" ++ // (ref null noexn) / nullexnref
+            "\x74" ++ // nullexnref shorthand
+            "\x00",
+    ));
+    var diag: types.Diagnostic = .{};
+    const mod = try decodeWithFeatures(
+        std.testing.allocator,
+        bytes,
+        .{
+            .reference_types = true,
+            .typed_function_references = true,
+            .exception_handling = true,
+        },
+        &diag,
+    );
+    defer destroyModule(std.testing.allocator, mod);
+    const params = mod.funcTypeAt(0).?.params;
+    try std.testing.expectEqual(@as(usize, 4), params.len);
+    try std.testing.expectEqualDeep(
+        types.RefType{ .nullable = false, .heap = .exn },
+        params[0].refType().?,
+    );
+    try std.testing.expectEqual(types.ValType.exnref, params[1]);
+    try std.testing.expectEqual(types.ValType.nullexnref, params[2]);
+    try std.testing.expectEqual(types.ValType.nullexnref, params[3]);
 }
 
 test "wasm.decode fixed-width SIMD opcode inventory and immediates" {
