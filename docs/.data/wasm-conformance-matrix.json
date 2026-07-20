@@ -1,10 +1,10 @@
 {
   "combined_totals": {
     "fail": 0,
-    "not_applicable": 1627,
-    "pass": 87838,
+    "not_applicable": 2862,
+    "pass": 151802,
     "runner_error": 0,
-    "total": 89465
+    "total": 154664
   },
   "kind": "zig_js_webassembly_conformance_matrix",
   "profiles": [
@@ -448,6 +448,69 @@
         "pass": 697,
         "runner_error": 0,
         "total": 698
+      }
+    },
+    {
+      "architecture_scope": [
+        "architecture-independent-interpreter"
+      ],
+      "converter": {
+        "commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "kind": "wasm-tools",
+        "repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "version": "1.253.0"
+      },
+      "default": false,
+      "engine_commit": "0b23e3fead4f5be63c43d2575a6c8fe7c8703266",
+      "execution_modes": {
+        "bit_exact": 2113,
+        "javascript_api": 37704,
+        "not_applicable": 1235,
+        "vector_bits": 22549,
+        "vector_nan_policy": 1598
+      },
+      "features": [
+        "sign_extension_ops",
+        "nontrapping_float_to_int",
+        "multi_value",
+        "reference_types",
+        "bulk_memory",
+        "fixed_width_simd",
+        "relaxed_simd",
+        "tail_calls",
+        "typed_function_references",
+        "gc",
+        "exception_handling",
+        "memory64",
+        "multi_memory"
+      ],
+      "host_scope": {
+        "decode_validate": [
+          "pointer-width-32",
+          "pointer-width-64"
+        ],
+        "execute": [
+          "pointer-width-64"
+        ]
+      },
+      "id": "core-3",
+      "inventory": "docs/.data/wasm-core-3-inventory.json",
+      "not_applicable_reasons": {
+        "text-format syntax is not exposed by the JavaScript binary API": 1235
+      },
+      "spec": {
+        "commit": "9d36019973201a19f9c9ebb0f10828b2fe2374aa",
+        "files_scored": 258,
+        "repository": "https://github.com/WebAssembly/spec.git",
+        "tag": "wg-3.0"
+      },
+      "status": "terminal",
+      "totals": {
+        "fail": 0,
+        "not_applicable": 1235,
+        "pass": 63964,
+        "runner_error": 0,
+        "total": 65199
       }
     }
   ],

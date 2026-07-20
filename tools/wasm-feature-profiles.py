@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import re
@@ -215,6 +216,11 @@ def main() -> int:
         type=Path,
         default=ROOT / "docs/.data/wasm-core-3-upstream-drift.json",
     )
+    parser.add_argument(
+        "--core-3-terminal-inventory",
+        type=Path,
+        default=ROOT / "docs/.data/wasm-core-3-inventory.json",
+    )
     args = parser.parse_args()
     document = json.loads(args.registry.read_text())
 
@@ -235,6 +241,8 @@ def main() -> int:
         "--profile memory64",
         "--profile gc",
         "test/core/relaxed-simd/",
+        "test/core/elem.wast",
+        "test/core/linking.wast",
         "tools/wasm-core3-drift.py",
     )
     require(
@@ -333,6 +341,51 @@ def main() -> int:
     drift_entries = core_3_drift.get("core_test_diff", {}).get("entries", [])
     require(core_3_drift.get("core_test_diff", {}).get("changed_files") == len(drift_entries), "Core 3 drift report: changed-file count drift")
     require(all(entry.get("path", "").startswith("test/core/") for entry in drift_entries), "Core 3 drift report: path outside Core corpus")
+
+    core_3 = json.loads(args.core_3_terminal_inventory.read_text())
+    require(core_3.get("schema_version") == 2, "Core 3 terminal inventory: unsupported schema version")
+    require(core_3.get("kind") == "webassembly_core_3_0_inventory", "Core 3 terminal inventory: invalid kind")
+    require(core_3.get("profile") == "core-3", "Core 3 terminal inventory: profile drift")
+    require(SHA.fullmatch(core_3.get("engine_commit", "")) is not None, "Core 3 terminal inventory: invalid engine commit")
+    core_3_spec = core_3.get("spec", {})
+    require(core_3_spec.get("repository") == relaxed_feature["repository"], "Core 3 terminal inventory: repository drift")
+    require(core_3_spec.get("commit") == relaxed_feature["commit"], "Core 3 terminal inventory: commit drift")
+    require(core_3_spec.get("tag") == "wg-3.0", "Core 3 terminal inventory: tag drift")
+    require(
+        core_3_spec.get("files_available") == core_3_spec.get("files_declared") == core_3_spec.get("files_scored") == 258,
+        "Core 3 terminal inventory: corpus coverage drift",
+    )
+    core_3_converter = core_3.get("converter", {})
+    require(core_3_converter.get("kind") == "wasm-tools", "Core 3 terminal inventory: converter kind drift")
+    require(core_3_converter.get("version") == "1.253.0", "Core 3 terminal inventory: converter version drift")
+    require(core_3_converter.get("commit") == "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38", "Core 3 terminal inventory: converter commit drift")
+    require(core_3.get("totals") == {
+        "fail": 0,
+        "not_applicable": 1235,
+        "pass": 63964,
+        "runner_error": 0,
+        "total": 65199,
+    }, "Core 3 terminal inventory: totals are not exact and green")
+    core_3_files = core_3.get("files", [])
+    declared_core_3 = core_3_spec.get("declared_files", [])
+    require(len(core_3_files) == len(declared_core_3) == 258, "Core 3 terminal inventory: file count drift")
+    require(
+        [Path(entry.get("path", "")).name for entry in core_3_files] == declared_core_3,
+        "Core 3 terminal inventory: scored file order drift",
+    )
+    available_core_3 = {path.name for path in (ROOT / "wasm-spec-wg3/test/core").rglob("*.wast")}
+    require(set(declared_core_3) == available_core_3, "Core 3 terminal inventory: hidden or undeclared corpus file")
+    for entry in core_3_files:
+        commands = entry.get("commands", [])
+        counts = Counter(command.get("status") for command in commands)
+        require(entry.get("counts") == {
+            "fail": counts["fail"],
+            "not_applicable": counts["not_applicable"],
+            "pass": counts["pass"],
+            "runner_error": counts["runner_error"],
+            "total": len(commands),
+        }, f"Core 3 terminal inventory: per-file count drift in {entry.get('path')}")
+        require(counts["fail"] == counts["runner_error"] == 0, f"Core 3 terminal inventory: non-green command in {entry.get('path')}")
 
     threads_feature = next(feature for feature in features if feature["id"] == "threads")
     atomic_inventory = json.loads(args.atomic_inventory.read_text())
@@ -966,7 +1019,10 @@ def main() -> int:
                             changed = True
         require(closure == set(selected), f"{profile_id}: missing dependency closure {sorted(closure - set(selected))}")
         if profile.get("status") == "implemented":
-            require(profile_id == "mvp", f"{profile_id}: implementation status is ahead of runtime")
+            require(
+                profile_id in {"mvp", "core_3_0_selected"},
+                f"{profile_id}: implementation status is ahead of terminal evidence",
+            )
 
     print(f"WebAssembly feature registry: {len(profiles)} profiles, {len(features)} pinned features")
     return 0

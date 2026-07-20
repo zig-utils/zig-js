@@ -22,6 +22,7 @@ PROFILES = [
     ("multi-memory", "wasm-multi-memory-runtime-inventory.json", {"decode_validate": ["portable"], "execute": ["portable"]}),
     ("memory64", "wasm-memory64-runtime-inventory.json", {"decode_validate": ["pointer-width-32", "pointer-width-64"], "execute": ["pointer-width-64"]}),
     ("gc", "wasm-gc-runtime-inventory.json", {"decode_validate": ["portable"], "execute": ["portable"]}),
+    ("core-3", "wasm-core-3-inventory.json", {"decode_validate": ["pointer-width-32", "pointer-width-64"], "execute": ["pointer-width-64"]}),
 ]
 
 

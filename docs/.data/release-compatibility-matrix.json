@@ -23,9 +23,9 @@
     },
     "webassembly": {
       "artifact": "docs/.data/wasm-conformance-matrix.json",
-      "profiles": 9,
-      "pass": 87838,
-      "not_applicable": 1627,
+      "profiles": 10,
+      "pass": 151802,
+      "not_applicable": 2862,
       "fail": 0,
       "runner_error": 0
     }

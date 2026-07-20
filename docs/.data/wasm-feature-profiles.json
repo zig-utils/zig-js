@@ -33,7 +33,7 @@
     {
       "id": "core_3_0_selected",
       "default": false,
-      "status": "planned",
+      "status": "implemented",
       "features": [
         "reference_types",
         "fixed_width_simd",
