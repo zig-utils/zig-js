@@ -28,6 +28,138 @@ const Shape = shape.Shape;
 /// saving/restoring the prior value around every boundary.
 threadlocal var active_wasm_interp: ?*anyopaque = null;
 
+pub const StreamingCompilerStatus = enum(c_uint) {
+    ok = 0,
+    invalid_handle = 1,
+    foreign_vm = 2,
+    invalid_bytes = 3,
+    out_of_memory = 4,
+    overflow = 5,
+    buffer_too_small = 6,
+    invalid_output = 7,
+};
+
+const StreamingCompilerEntry = struct {
+    owner_context: usize,
+    owner_vm: usize,
+    bytes: std.ArrayListUnmanaged(u8) = .empty,
+    failure: ?StreamingCompilerStatus = null,
+    finalized: bool = false,
+};
+
+const streaming_compiler_allocator = std.heap.page_allocator;
+var streaming_compiler_lock: std.atomic.Mutex = .unlocked;
+var streaming_compilers: std.AutoHashMapUnmanaged(usize, StreamingCompilerEntry) = .empty;
+var next_streaming_compiler_token: usize = 1;
+
+fn lockStreamingCompilers() void {
+    var spins: usize = 0;
+    while (!streaming_compiler_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn streamingCompilerVm(store: *context.Context) usize {
+    return if (store.c_api_group) |group| @intFromPtr(group) else @intFromPtr(store);
+}
+
+pub fn createStreamingCompiler(store: *context.Context) ?*anyopaque {
+    lockStreamingCompilers();
+    defer streaming_compiler_lock.unlock();
+    const token = next_streaming_compiler_token;
+    next_streaming_compiler_token = std.math.add(usize, token, 1) catch return null;
+    streaming_compilers.putNoClobber(streaming_compiler_allocator, token, .{
+        .owner_context = @intFromPtr(store),
+        .owner_vm = streamingCompilerVm(store),
+    }) catch return null;
+    return @ptrFromInt(token);
+}
+
+pub fn addStreamingCompilerBytes(raw: ?*anyopaque, bytes_ptr: ?[*]const u8, bytes_len: usize) StreamingCompilerStatus {
+    const token = @intFromPtr(raw orelse return .invalid_handle);
+    lockStreamingCompilers();
+    defer streaming_compiler_lock.unlock();
+    const entry = streaming_compilers.getPtr(token) orelse return .invalid_handle;
+    if (entry.finalized) return .invalid_handle;
+    if (entry.failure) |failure| return failure;
+    if (bytes_len == 0) return .ok;
+    const source = bytes_ptr orelse {
+        entry.failure = .invalid_bytes;
+        return .invalid_bytes;
+    };
+    const new_len = std.math.add(usize, entry.bytes.items.len, bytes_len) catch {
+        entry.failure = .overflow;
+        return .overflow;
+    };
+    entry.bytes.ensureTotalCapacity(streaming_compiler_allocator, new_len) catch {
+        entry.failure = .out_of_memory;
+        return .out_of_memory;
+    };
+    entry.bytes.appendSliceAssumeCapacity(source[0..bytes_len]);
+    return .ok;
+}
+
+pub fn finalizeStreamingCompiler(
+    store: *context.Context,
+    raw: ?*anyopaque,
+    output: ?[*]u8,
+    output_capacity: usize,
+    output_len: ?*usize,
+) StreamingCompilerStatus {
+    if (output_len) |len| len.* = 0;
+    const token = @intFromPtr(raw orelse return .invalid_handle);
+    lockStreamingCompilers();
+    defer streaming_compiler_lock.unlock();
+    const entry = streaming_compilers.getPtr(token) orelse return .invalid_handle;
+    if (entry.owner_vm != streamingCompilerVm(store)) return .foreign_vm;
+    if (entry.failure) |failure| return failure;
+    entry.finalized = true;
+    if (output_len) |len| len.* = entry.bytes.items.len;
+    if (output_capacity < entry.bytes.items.len) return .buffer_too_small;
+    if (entry.bytes.items.len == 0) return .ok;
+    const destination = output orelse return .invalid_output;
+    @memcpy(destination[0..entry.bytes.items.len], entry.bytes.items);
+    return .ok;
+}
+
+pub fn releaseStreamingCompiler(store: *context.Context, raw: ?*anyopaque) StreamingCompilerStatus {
+    const token = @intFromPtr(raw orelse return .invalid_handle);
+    lockStreamingCompilers();
+    defer streaming_compiler_lock.unlock();
+    const entry = streaming_compilers.get(token) orelse return .invalid_handle;
+    if (entry.owner_vm != streamingCompilerVm(store)) return .foreign_vm;
+    var removed = streaming_compilers.fetchRemove(token).?.value;
+    removed.bytes.deinit(streaming_compiler_allocator);
+    if (streaming_compilers.count() == 0) {
+        streaming_compilers.deinit(streaming_compiler_allocator);
+        streaming_compilers = .empty;
+    }
+    return .ok;
+}
+
+fn retireStreamingCompilers(store: *context.Context) void {
+    const owner_context = @intFromPtr(store);
+    lockStreamingCompilers();
+    defer streaming_compiler_lock.unlock();
+    while (true) {
+        var token: ?usize = null;
+        var iterator = streaming_compilers.iterator();
+        while (iterator.next()) |entry| {
+            if (entry.value_ptr.owner_context == owner_context) {
+                token = entry.key_ptr.*;
+                break;
+            }
+        }
+        const found = token orelse break;
+        var removed = streaming_compilers.fetchRemove(found).?.value;
+        removed.bytes.deinit(streaming_compiler_allocator);
+    }
+    if (streaming_compilers.count() == 0) {
+        streaming_compilers.deinit(streaming_compiler_allocator);
+        streaming_compilers = .empty;
+    }
+}
+
 fn enterExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) error{OutOfMemory}!void {
     _ = raw;
     const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
@@ -2188,6 +2320,27 @@ fn stableBufferSource(self: *Interpreter, input: Value) value.HostError!Value {
     return Value.obj(stable);
 }
 
+fn stableStreamingBufferSource(self: *Interpreter, input: Value) value.HostError!Value {
+    const copy = try copyBufferSource(self, input);
+    defer copy.deinit();
+    const store = try storeFor(self);
+    const handle = createStreamingCompiler(store) orelse return error.OutOfMemory;
+    defer _ = releaseStreamingCompiler(store, handle);
+    const add_status = addStreamingCompilerBytes(handle, copy.bytes.ptr, copy.bytes.len);
+    switch (add_status) {
+        .ok => {},
+        .out_of_memory, .overflow => return error.OutOfMemory,
+        else => return self.throwError("TypeError", "WebAssembly streaming compiler rejected body bytes"),
+    }
+    const stable = try self.makeArrayBuffer(copy.bytes.len);
+    const stable_bytes = stable.arrayBuffer().?.bytes();
+    var finalized_len: usize = 0;
+    const finalize_status = finalizeStreamingCompiler(store, handle, stable_bytes.ptr, stable_bytes.len, &finalized_len);
+    if (finalize_status != .ok or finalized_len != stable_bytes.len)
+        return self.throwError("TypeError", "WebAssembly streaming compiler failed to finalize body bytes");
+    return Value.obj(stable);
+}
+
 fn queueAsyncJob(
     self: *Interpreter,
     native: value.NativeFn,
@@ -2341,7 +2494,7 @@ fn streamingBodyFulfilled(ctx: *anyopaque, _: Value, args: []const Value) value.
     const self = activeInterpreter(ctx);
     const state = streamingState(args) orelse return Value.undef();
     const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
-    const stable = stableBufferSource(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+    const stable = stableStreamingBufferSource(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
         try rejectStreamingFailure(self, state, failure);
         return Value.undef();
     };
@@ -2553,6 +2706,7 @@ pub fn installSpecHarness(env: *Environment, rs: *Shape) value.HostError!void {
 }
 
 pub fn teardownWasmStore(store: *context.Context) void {
+    retireStreamingCompilers(store);
     var index = store.wasm_registry.items.len;
     while (index > 0) {
         index -= 1;

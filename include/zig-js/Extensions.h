@@ -29,6 +29,28 @@ JS_EXPORT ZJSGCCompactionStatus ZJSContextCompactGarbage(
 JS_EXPORT uint64_t ZJSContextGetCollectionEpoch(JSContextRef ctx);
 JS_EXPORT bool ZJSValueIsReachable(JSContextRef ctx, JSValueRef value);
 
+/* Lifetime-safe owner for the pinned Home/Bun
+ * JSC__Wasm__StreamingCompiler__addBytes bridge. Finalize copies into caller
+ * storage and may be repeated; release and context teardown retire the token. */
+typedef struct OpaqueZJSWasmStreamingCompiler* ZJSWasmStreamingCompilerRef;
+typedef enum ZJSWasmStreamingCompilerStatus {
+    kZJSWasmStreamingCompilerOK = 0,
+    kZJSWasmStreamingCompilerInvalidHandle = 1,
+    kZJSWasmStreamingCompilerForeignVM = 2,
+    kZJSWasmStreamingCompilerInvalidBytes = 3,
+    kZJSWasmStreamingCompilerOutOfMemory = 4,
+    kZJSWasmStreamingCompilerOverflow = 5,
+    kZJSWasmStreamingCompilerBufferTooSmall = 6,
+    kZJSWasmStreamingCompilerInvalidOutput = 7,
+} ZJSWasmStreamingCompilerStatus;
+JS_EXPORT ZJSWasmStreamingCompilerRef ZJSWasmStreamingCompilerCreate(
+    JSContextRef ctx);
+JS_EXPORT ZJSWasmStreamingCompilerStatus ZJSWasmStreamingCompilerFinalize(
+    JSContextRef ctx, ZJSWasmStreamingCompilerRef compiler,
+    uint8_t* output, size_t outputCapacity, size_t* outputLength);
+JS_EXPORT ZJSWasmStreamingCompilerStatus ZJSWasmStreamingCompilerRelease(
+    JSContextRef ctx, ZJSWasmStreamingCompilerRef compiler);
+
 typedef void (*ZJSInspectorMessageCallback)(
     const char* message, size_t messageLength, void* userData);
 

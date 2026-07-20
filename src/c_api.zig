@@ -43,6 +43,7 @@ const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
 const fetch_headers = @import("fetch_headers.zig");
+const wasm_api = @import("wasm/api.zig");
 const parser_mod = @import("parser.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
 const private_jstype = @import("private_abi/jstype.zig");
@@ -16136,6 +16137,45 @@ export fn Zig__GlobalObject__resetModuleRegistryMap(global: JSContextRef, map: ?
     _ = global;
     _ = map;
     return false;
+}
+
+/// Exact pinned Home/Bun bridge. The opaque value is a never-reused registry
+/// token, not a dereferenceable compiler pointer; invalid, stale, failed, or
+/// finalized handles are inert because the upstream ABI has no result channel.
+export fn JSC__Wasm__StreamingCompiler__addBytes(
+    streaming_compiler: ?*anyopaque,
+    bytes_ptr: ?[*]const u8,
+    bytes_len: usize,
+) callconv(.c) void {
+    _ = wasm_api.addStreamingCompilerBytes(streaming_compiler, bytes_ptr, bytes_len);
+}
+
+/// zig-js lifecycle extension used when JSC's C++ StreamingCompiler owner is
+/// absent. The handle stays VM-affine and is retired automatically with its
+/// creating Context even if the consumer omits an explicit release.
+export fn ZJSWasmStreamingCompilerCreate(ctx: JSContextRef) callconv(.c) ?*anyopaque {
+    return wasm_api.createStreamingCompiler(ctxFrom(ctx) orelse return null);
+}
+
+export fn ZJSWasmStreamingCompilerFinalize(
+    ctx: JSContextRef,
+    streaming_compiler: ?*anyopaque,
+    output: ?[*]u8,
+    output_capacity: usize,
+    output_len: ?*usize,
+) callconv(.c) wasm_api.StreamingCompilerStatus {
+    const store = ctxFrom(ctx) orelse {
+        if (output_len) |len| len.* = 0;
+        return .invalid_handle;
+    };
+    return wasm_api.finalizeStreamingCompiler(store, streaming_compiler, output, output_capacity, output_len);
+}
+
+export fn ZJSWasmStreamingCompilerRelease(
+    ctx: JSContextRef,
+    streaming_compiler: ?*anyopaque,
+) callconv(.c) wasm_api.StreamingCompilerStatus {
+    return wasm_api.releaseStreamingCompiler(ctxFrom(ctx) orelse return .invalid_handle, streaming_compiler);
 }
 
 export fn JSGlobalContextCopyName(ctx: JSContextRef) callconv(.c) JSStringRef {
