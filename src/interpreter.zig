@@ -32,6 +32,7 @@ const Compiler = @import("compiler.zig").Compiler;
 const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
 const unicode_normalize = @import("unicode_normalize.zig");
+const idna = @import("idna.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
@@ -41144,9 +41145,18 @@ pub fn urlParse(arena: std.mem.Allocator, input_raw: []const u8, base: ?UrlParts
     const special = urlIsSpecialScheme(p.scheme);
     const has_authority = std.mem.startsWith(u8, rest, "//") or (special and std.mem.startsWith(u8, rest, "/"));
     if (special or std.mem.startsWith(u8, rest, "//")) {
-        // Skip "//" (special schemes tolerate any number of leading slashes).
+        // A special non-file scheme tolerates ANY number of leading `/`/`\`
+        // before the authority (`http:///path` → host `path`). A non-special
+        // scheme takes exactly the `//` that introduced the authority. `file`
+        // keeps its original handling (strip the `//`, else skip slashes) so its
+        // Windows-drive-letter path logic is unaffected.
         var body = rest;
-        if (std.mem.startsWith(u8, body, "//")) body = body[2..] else if (special) {
+        const is_file = std.mem.eql(u8, p.scheme, "file");
+        if (special and !is_file) {
+            while (body.len > 0 and (body[0] == '/' or body[0] == '\\')) body = body[1..];
+        } else if (std.mem.startsWith(u8, body, "//")) {
+            body = body[2..];
+        } else if (special) { // file, no leading "//"
             while (body.len > 0 and (body[0] == '/' or body[0] == '\\')) body = body[1..];
         }
         // Authority ends at the first / \ ? #
@@ -41201,21 +41211,10 @@ pub fn urlParse(arena: std.mem.Allocator, input_raw: []const u8, base: ?UrlParts
         } else if (host_str.len == 0) {
             if (special and !std.mem.eql(u8, p.scheme, "file")) return null;
             p.host = "";
-        } else if (special) {
-            var hb: std.ArrayListUnmanaged(u8) = .empty;
-            for (host_str) |c| try hb.append(arena, std.ascii.toLower(c));
-            const domain = hb.items;
-            // A special-scheme host that ends in a number is an IPv4 address:
-            // parse (decimal/hex/octal parts) and re-serialize as dotted decimal,
-            // or fail the whole URL (`999.999.999.999` → TypeError). A bracketed
-            // IPv6 literal never reaches here as "ends in a number".
-            if (urlHostEndsInNumber(domain)) {
-                p.host = (try urlParseIPv4(arena, domain)) orelse return null;
-            } else p.host = domain;
         } else {
-            var hb: std.ArrayListUnmanaged(u8) = .empty;
-            try urlPercentEncode(arena, &hb, host_str, .c0);
-            p.host = hb.items;
+            // Special: lowercase / IDNA-to-ASCII / IPv4. Non-special: opaque host
+            // (C0-percent-encoded). Shared with the host/hostname setters.
+            p.host = (try urlCanonHost(arena, p.scheme, host_str)) orelse return null;
         }
         // A file URL may not carry credentials or a port.
         if (std.mem.eql(u8, p.scheme, "file") and (p.username.len > 0 or p.password.len > 0 or p.port.len > 0)) return null;
@@ -41449,9 +41448,10 @@ fn urlCanonHost(arena: std.mem.Allocator, scheme: []const u8, host_str: []const 
         return try urlSerializeIPv6(arena, urlParseIPv6(host_str[1..close]) orelse return null);
     }
     if (urlIsSpecialScheme(scheme)) {
-        var hb: std.ArrayListUnmanaged(u8) = .empty;
-        for (host_str) |c| try hb.append(arena, std.ascii.toLower(c));
-        const domain = hb.items;
+        // WHATWG domain-to-ASCII: UTS-46 mapping + NFC + Punycode, lowercasing
+        // ASCII, validating `xn--` labels, and rejecting forbidden domain code
+        // points. IPv4 detection then runs on the resulting ASCII domain.
+        const domain = (try idna.domainToAscii(arena, host_str)) orelse return null;
         if (urlHostEndsInNumber(domain)) return (try urlParseIPv4(arena, domain)) orelse return null;
         return domain;
     }
