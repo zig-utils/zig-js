@@ -465,11 +465,23 @@ pub fn build(b: *std.Build) void {
     bun_private_fetch_headers_fixture.root_module.linkLibrary(lib);
     const run_bun_private_fetch_headers_fixture = b.addRunArtifact(bun_private_fetch_headers_fixture);
     run_bun_private_fetch_headers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_fetch_headers_bridge_absent_fixture = b.addExecutable(.{
+        .name = "bun-private-fetch-headers-bridge-absent",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_fetch_headers_bridge_absent.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    bun_private_fetch_headers_bridge_absent_fixture.root_module.linkLibrary(lib);
+    const run_bun_private_fetch_headers_bridge_absent_fixture = b.addRunArtifact(bun_private_fetch_headers_bridge_absent_fixture);
+    run_bun_private_fetch_headers_bridge_absent_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
     const bun_private_fetch_headers_test_step = b.step(
         "test-bun-private-fetch-headers",
         "Compile, link, and run Bun's private FetchHeaders boundary",
     );
     bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_fixture.step);
+    bun_private_fetch_headers_test_step.dependOn(&run_bun_private_fetch_headers_bridge_absent_fixture.step);
 
     const private_jstype_fixture = b.addExecutable(.{
         .name = "private-jstype-shims",

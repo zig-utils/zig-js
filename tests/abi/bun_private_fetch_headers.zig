@@ -21,6 +21,12 @@ const FetchHeaders = opaque {};
 const PicoSlice = extern struct { ptr: [*c]const u8, len: usize };
 const PicoHTTPHeader = extern struct { name: PicoSlice, value: PicoSlice };
 const PicoHTTPHeaders = extern struct { ptr: [*c]const PicoHTTPHeader, len: usize };
+const FetchHeadersBridgeVisitorV1 = *const fn (?*anyopaque, PicoSlice, PicoSlice) callconv(.c) bool;
+const FakeBridgeRequest = extern struct {
+    rows: [*c]const PicoHTTPHeader,
+    len: usize,
+    fail_after: usize,
+};
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
@@ -39,8 +45,10 @@ extern "c" fn WebCore__FetchHeaders__cloneThis(*FetchHeaders, JSContextRef) ?*Fe
 extern "c" fn WebCore__FetchHeaders__copyTo(*FetchHeaders, [*]StringPointer, [*]StringPointer, [*]u8) void;
 extern "c" fn WebCore__FetchHeaders__count(*FetchHeaders, *u32, *u32) void;
 extern "c" fn WebCore__FetchHeaders__createEmpty() *FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createFromH3(*anyopaque) *FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createFromPicoHeaders_(?*const anyopaque) *FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createFromJS(JSContextRef, EncodedValue) ?*FetchHeaders;
+extern "c" fn WebCore__FetchHeaders__createFromUWS(*anyopaque) *FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__createValue(JSContextRef, [*c]const StringPointer, [*c]const StringPointer, *const ZigString, u32) EncodedValue;
 extern "c" fn WebCore__FetchHeaders__createValueNotJS(JSContextRef, [*c]const StringPointer, [*c]const StringPointer, *const ZigString, u32) ?*FetchHeaders;
 extern "c" fn WebCore__FetchHeaders__deref(*FetchHeaders) void;
@@ -74,6 +82,36 @@ fn zigString(bytes: []const u8) ZigString {
 
 fn picoSlice(bytes: []const u8) PicoSlice {
     return .{ .ptr = if (bytes.len == 0) null else bytes.ptr, .len = bytes.len };
+}
+
+fn visitFakeBridgeRequest(
+    raw_request: ?*anyopaque,
+    context: ?*anyopaque,
+    visitor: FetchHeadersBridgeVisitorV1,
+) bool {
+    const request: *const FakeBridgeRequest = @ptrCast(@alignCast(raw_request orelse return false));
+    if (request.len != 0 and request.rows == null) return false;
+    for (request.rows[0..request.len], 0..) |row, index| {
+        if (index == request.fail_after) return false;
+        if (!visitor(context, row.name, row.value)) return false;
+    }
+    return request.fail_after >= request.len;
+}
+
+export fn ZigJS__FetchHeadersBridge__visitUWSRequestV1(
+    raw_request: ?*anyopaque,
+    context: ?*anyopaque,
+    visitor: FetchHeadersBridgeVisitorV1,
+) callconv(.c) bool {
+    return visitFakeBridgeRequest(raw_request, context, visitor);
+}
+
+export fn ZigJS__FetchHeadersBridge__visitH3RequestV1(
+    raw_request: ?*anyopaque,
+    context: ?*anyopaque,
+    visitor: FetchHeadersBridgeVisitorV1,
+) callconv(.c) bool {
+    return visitFakeBridgeRequest(raw_request, context, visitor);
 }
 
 fn zigStringEquals(actual: ZigString, expected: []const u8) bool {
@@ -247,7 +285,43 @@ pub fn main() void {
     defer WebCore__FetchHeaders__deref(misaligned_pico);
     if (!WebCore__FetchHeaders__isEmpty(misaligned_pico)) fail("misaligned PicoHeaders record was not rejected");
 
+    var bridge_last = [_]u8{ 'l', 'a', 's', 't' };
+    const uws_rows = [_]PicoHTTPHeader{
+        .{ .name = picoSlice("Accept"), .value = picoSlice(" raw ") },
+        .{ .name = picoSlice("accept"), .value = picoSlice("two") },
+        .{ .name = picoSlice("X-UWS"), .value = picoSlice("first") },
+        .{ .name = picoSlice("x-uws"), .value = picoSlice(&bridge_last) },
+        .{ .name = picoSlice("X-Empty"), .value = picoSlice("") },
+    };
+    const uws_request = FakeBridgeRequest{ .rows = &uws_rows, .len = uws_rows.len, .fail_after = std.math.maxInt(usize) };
+    const uws_headers = WebCore__FetchHeaders__createFromUWS(@constCast(&uws_request));
+    defer WebCore__FetchHeaders__deref(uws_headers);
+    bridge_last[0] = 'X';
+    expectGet(uws_headers, context, "accept", " raw , two");
+    expectGet(uws_headers, context, "x-uws", "last");
+    var empty_name = zigString("X-Empty");
+    if (!WebCore__FetchHeaders__has(uws_headers, &empty_name, context)) fail("UWS bridge dropped an empty parsed value");
+
+    const h3_rows = [_]PicoHTTPHeader{
+        .{ .name = picoSlice(":method"), .value = picoSlice("GET") },
+        .{ .name = picoSlice("X-H3"), .value = picoSlice("one") },
+        .{ .name = picoSlice("x-h3"), .value = picoSlice("two") },
+    };
+    const h3_request = FakeBridgeRequest{ .rows = &h3_rows, .len = h3_rows.len, .fail_after = std.math.maxInt(usize) };
+    const h3_headers = WebCore__FetchHeaders__createFromH3(@constCast(&h3_request));
+    defer WebCore__FetchHeaders__deref(h3_headers);
+    expectGet(h3_headers, context, "x-h3", "two");
+    var h3_count: u32 = 0;
+    var h3_length: u32 = 0;
+    WebCore__FetchHeaders__count(h3_headers, &h3_count, &h3_length);
+    if (h3_count != 2 or h3_length == 0) fail("H3 bridge pseudo-header or duplicate semantics mismatch");
+
+    const failing_request = FakeBridgeRequest{ .rows = &uws_rows, .len = uws_rows.len, .fail_after = 1 };
+    const failed_headers = WebCore__FetchHeaders__createFromUWS(@constCast(&failing_request));
+    defer WebCore__FetchHeaders__deref(failed_headers);
+    if (!WebCore__FetchHeaders__isEmpty(failed_headers)) fail("aborted UWS bridge import was not atomic");
+
     WebCore__FetchHeaders__remove(headers, &custom_name, context);
     if (WebCore__FetchHeaders__has(headers, &custom_name, context)) fail("FetchHeaders remove mismatch");
-    std.debug.print("Bun private FetchHeaders: 22/22 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Bun private FetchHeaders: 24/24 symbols linked; runtime matrix passed\n", .{});
 }

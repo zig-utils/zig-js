@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 398
-implemented and 73 pending private symbols; `zig build test-home-private-abi` and
+or extension totals. The pinned Home inventory currently reports 400
+implemented and 71 pending private symbols; `zig build test-home-private-abi` and
 `zig build test-private-jstype` are their focused compile-link-runtime gates.
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
@@ -359,9 +359,10 @@ The FetchHeaders projection shares one branded ref-counted record with the
 JavaScript `Headers` implementation. Its 21 core exports cover lifecycle,
 JS/native conversion, cloning, validated mutation/query, the 94-value fast-name
 enum, and checked sorted buffer projection. A 22nd export copies the pinned
-PicoHeaders `{ptr,len}` rows with raw HTTP-map duplicate semantics. The three
-opaque UWS/H3 object adapters remain isolated under #381 behind a versioned C
-bridge.
+PicoHeaders `{ptr,len}` rows with raw HTTP-map duplicate semantics. Two request
+imports use optional version-1 consumer visitors for the real UWS/H3 C++
+objects; missing or failed bridges return an empty handle atomically. The
+remaining response writer is #383.
 
 `Bun__attachAsyncStackFromPromise` reconstructs stackless native Errors from
 pending async-await chains. Promise links retain only suspended activations,
@@ -371,7 +372,7 @@ settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
 Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 390 shims are implemented and 71 remain pending. Its
+of which 392 shims are implemented and 69 remain pending. Its
 source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
 and generated bindings are outside that first core profile. The inventoried
 `JSFunctionCall` declaration is consumer-provided because each runtime-compiled
