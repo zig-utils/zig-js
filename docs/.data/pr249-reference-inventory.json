@@ -36,7 +36,8 @@
       "owner_issues": [
         143,
         144
-      ]
+      ],
+      "resolution": "partial: portable snapshot serialization promoted by #403; JSC shared-collector gate remains reference-only"
     },
     "jsc-mark-list": {
       "description": "JSC-private shared-GC mark-list storage and shell controls",
