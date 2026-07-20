@@ -117,15 +117,14 @@ and
 [PR-249 promotions #11](https://github.com/zig-utils/zig-js/issues/11).
 Issue #1 remains the umbrella status page.
 
-- **GC allocation fast path / nursery.** The first generational policy has
-  landed: new GC cells enter a non-moving, one-cycle nursery; quiescent minor
-  collection reclaims unreachable young cells and immediately tenures every
-  survivor. Owner-aware strong barriers remember dirty old Object/Environment
-  containers, weak-container barriers preserve exact WeakRef/WeakMap/
+- **GC allocation fast path / nursery.** New GC cells enter a non-moving,
+  three-minor nursery. Each quiescent minor reclaims unreachable cells, advances
+  survivors, and promotes only at the configured age. Owner-aware cards persist
+  across repeated minors; weak-container barriers preserve exact WeakRef/WeakMap/
   FinalizationRegistry semantics, and mutable type-erased side-cell kinds are
   conservatively rescanned. Remembered-set allocation failure falls back to the
-  existing precise full collector. Explicit `collectGarbage()` remains full-heap,
-  and parallel mid-script collection remains on the full concurrent protocol.
+  precise full collector. Explicit `collectGarbage()` remains a full-heap tenure
+  boundary, while parallel mid-script minor coordination remains tracked by #145.
   GC cells also use a reusable size-class slab backing instead of calling the
   backing allocator for every cell. Fresh chunks now use lazy bump cursors with
   a per-bucket bump hint instead of pre-linking every unused slot during

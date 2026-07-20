@@ -62,9 +62,9 @@ record: object/property/element storage, weak collections, FinalizationRegistry
 records, async waiter arrays, the microtask queue, GC roots/barriers, and
 thread lifecycle queues have synchronization/tracing paths and are covered by
 the issue #1 TSan/fuzzer/corpus gates. Remaining work in this document is
-performance and GC maturity: tuning and potentially deepening the landed
-one-cycle nursery, context create/destroy cost, contention reductions, and
-broader stress coverage.
+performance and GC maturity: tuning the landed three-age nursery, parallel
+mid-script minor coordination, context create/destroy cost, contention
+reductions, and broader stress coverage.
 
 ## Historical blocker map
 

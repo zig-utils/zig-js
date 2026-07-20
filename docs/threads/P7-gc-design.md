@@ -542,9 +542,9 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   fall back to reclaim-at-destroy lifetime. NaN-box `Value` (#7) has landed; the
   M2 incremental-marking + write-barrier mechanism now exists in `zig-gc` (see
   M2 below) and now drives GC-on mid-script collections incrementally. M3 and the
-  no-GIL execution path have landed, as has the first quiescent one-cycle nursery;
-  remaining maturity work is nursery tuning/depth and broader parallel-GC pause
-  reduction.
+  no-GIL execution path have landed, as has a quiescent three-age nursery with
+  adaptive sizing and persistent remembered owners; remaining maturity work is
+  policy benchmarking and broader parallel-GC pause reduction.
 - **M2 — incremental.** Insertion write barrier; incremental mark + lazy sweep
   to bound pause times. Still GIL'd.
   *Mechanism landed in `zig-gc`* (`startMarking` / `markStep(budget)` /
@@ -716,12 +716,13 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
 
 ## Open questions
 
-- **Nursery/generational policy for M3:** the first policy is implemented as a
-  non-moving one-cycle nursery. Quiescent minor collection scans roots plus dirty
-  old owners, applies weak/ephemeron processing, reclaims dead young cells, and
-  immediately tenures survivors. Parallel mid-script collection intentionally
-  remains full-heap; future work is sizing, pause tuning, and deciding whether a
-  multi-age or moving nursery earns its complexity.
+- **Nursery/generational policy for M3:** zig-js selects a non-moving three-minor
+  tenuring age. Quiescent minor collection scans roots plus persistent dirty old
+  owners, applies weak/ephemeron processing, reclaims dead young cells at every
+  age, and promotes threshold survivors. Nursery sizing adapts from all surviving
+  young bytes; exact survivor, reclamation, promotion, and policy telemetry is
+  available from `Heap.accounting()`. Parallel mid-script collection still needs
+  its dedicated bounded mutator-coordination slice.
 - **String ownership:** the runtime foundation tracked by #325 is in place:
   GC-enabled contexts allocate immutable StringCells as a first-class cell
   kind, trace string-valued roots/edges, and finalize canonical byte storage. Static
@@ -732,6 +733,6 @@ Do this once the engine's `context.zig`/`interpreter.zig` surface is settled
   publication state are restored. The exact Latin-1/UTF-16 external StringCell
   adapters use that lifecycle and preserve their original pointer, unit count,
   callback context, and exact-once release obligation (#324).
-- **Generational depth?** Measure the landed one-cycle nursery first. Add ages,
-  copying/moving storage, or parallel minor collection only with demonstrated
-  pause/throughput gains and equivalent weak/no-GIL correctness gates.
+- **Generational depth?** Three minor survivals is the initial explicit policy.
+  Terminal #145 evidence must compare ages and nursery thresholds from committed
+  pause/throughput samples before treating that value as tuned rather than safe.

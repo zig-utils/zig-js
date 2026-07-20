@@ -32,6 +32,7 @@ pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
+const runtime_gc_tenuring_age: u8 = 3;
 
 /// Serializes calls into an embedder allocator that may not itself be safe for
 /// concurrent use. Under no-GIL execution, otherwise-independent engine locks
@@ -3416,6 +3417,7 @@ pub const Context = struct {
             const private_gc_scratch = !options.enable_threads and
                 !options.concurrent_gc and !options.parallel_gc;
             h.setAuxAllocator(if (private_gc_scratch) gpa else std.heap.page_allocator);
+            h.setNurseryTenuringAge(runtime_gc_tenuring_age);
             h.setNurseryEnabled(true);
             self.gc = h;
             self.gc_binding = &gc_state.binding;
@@ -14838,7 +14840,7 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     try std.testing.expectEqual(@as(f64, 4), r.asNum()); // 1 + 3
 }
 
-test "enable_gc nursery: quiescent minor collection reclaims young garbage and records promotion" {
+test "enable_gc nursery: quiescent minor collection reclaims young garbage" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
     ctx.collectGarbage(); // tenure bootstrap roots and establish the full threshold
@@ -14860,6 +14862,41 @@ test "enable_gc nursery: quiescent minor collection reclaims young garbage and r
     try std.testing.expectEqual(full_before, heap.full_collections);
 }
 
+test "enable_gc nursery: old roots retain multi-age strong and weak graphs" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    const promoted_before = heap.promoted_cells;
+    _ = try ctx.evaluate(
+        \\globalThis.multiAgeHolder = {
+        \\  child: { value: 40 },
+        \\  weakTarget: { value: 2 }
+        \\};
+        \\globalThis.multiAgeWeak = new WeakRef(multiAgeHolder.weakTarget);
+    );
+
+    heap.collectYoung();
+    try std.testing.expectEqual(runtime_gc_tenuring_age, heap.accounting().tenuring_age);
+    try std.testing.expect(heap.accounting().last_minor_survived_cells > 0);
+    try std.testing.expectEqual(@as(usize, 0), heap.accounting().last_minor_promoted_bytes);
+    try std.testing.expectEqual(@as(f64, 42), (try ctx.evaluate(
+        "multiAgeHolder.child.value + multiAgeWeak.deref().value",
+    )).asNum());
+
+    _ = try ctx.evaluate("delete multiAgeHolder.weakTarget");
+    heap.collectYoung();
+    try std.testing.expect((try ctx.evaluate("multiAgeWeak.deref() === undefined")).asBool());
+    try std.testing.expectEqual(@as(f64, 40), (try ctx.evaluate("multiAgeHolder.child.value")).asNum());
+
+    heap.collectYoung();
+    try std.testing.expect(heap.promoted_cells > promoted_before);
+    try std.testing.expect(heap.last_minor_promoted_bytes > 0);
+    try std.testing.expectEqual(@as(f64, 40), (try ctx.evaluate("multiAgeHolder.child.value")).asNum());
+}
+
 test "enable_gc nursery: owner barriers preserve old object, environment, and promise edges" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
@@ -14870,7 +14907,7 @@ test "enable_gc nursery: owner barriers preserve old object, environment, and pr
         \\globalThis.resolveNurseryPromise = undefined;
         \\globalThis.nurseryPromise = new Promise(r => { resolveNurseryPromise = r; });
     );
-    ctx.gc.?.collectYoung(); // holder/promise become old
+    for (0..runtime_gc_tenuring_age) |_| ctx.gc.?.collectYoung();
 
     _ = try ctx.evaluate(
         \\holder.child = { value: 40 };
@@ -14908,7 +14945,7 @@ test "enable_gc nursery: promoted functions retain immutable closure and home-ob
         \\  return { closure: () => captured.value, receiver };
         \\})();
     );
-    ctx.gc.?.collectYoung(); // promote each function with its immutable edges
+    for (0..runtime_gc_tenuring_age) |_| ctx.gc.?.collectYoung();
 
     for (0..3) |_| {
         _ = try ctx.evaluate(
@@ -14950,7 +14987,7 @@ test "enable_gc nursery: weak refs, ephemerons, and finalization stay weak" {
         \\globalThis.cleaned = [];
         \\globalThis.fr = new FinalizationRegistry(v => cleaned.push(v));
     );
-    ctx.gc.?.collectYoung(); // weak containers become old
+    for (0..runtime_gc_tenuring_age) |_| ctx.gc.?.collectYoung();
 
     _ = try ctx.evaluate(
         \\globalThis.temporaryKey = {};
