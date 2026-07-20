@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (424 implemented, 47 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (425 implemented, 46 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -527,9 +527,12 @@ A per-VM canonical object-handle table keeps re-published EncodedJSValues
 bit-identical across sibling realms while isolating independent VMs.
 
 The script-execution-context identifier boundary lazily assigns a stable,
-nonzero 32-bit process identifier to each global context. Atomic allocation
-keeps parallel independent creation unique; sibling realms in one VM remain
-distinct, null handles return zero, and reads do not alter pending exceptions.
+nonzero 32-bit process identifier to each global context. The process registry
+keeps parallel creation unique and resolves only live contexts; explicit Home
+worker removal and every natural teardown retire the mapping before context
+storage is freed. Sibling realms remain isolated, while zero, unknown, and
+already-retired IDs are inert. The pinned teardown/UAF-prevention contract is
+in [`home-script-execution-context-7ed99c02.json`](home-script-execution-context-7ed99c02.json).
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
