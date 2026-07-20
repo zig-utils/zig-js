@@ -96,8 +96,8 @@ zig build test -Dtest-filter=wasm
 
 Reproduce the deliberate complete corpus run with the live-WABT evaluator
 (WABT 1.0.12 at the pinned commit above, plus a `WebAssembly/spec` checkout at
-the pinned commit — the initialized `wasm-spec` submodule is the default
-`--spec-root`):
+the pinned commit — the initialized `wasm-spec` submodule is the intentionally
+MVP-only default `--spec-root`, not a checkout of upstream `main`):
 
 ```sh
 zig build wasm-spec-eval
@@ -175,6 +175,8 @@ Post-Core-2 feature profiles are tracked separately by
 [issue #142](https://github.com/zig-utils/zig-js/issues/142), and PR-249
 WebAssembly/JIT shell hooks by
 [issue #143](https://github.com/zig-utils/zig-js/issues/143).
+The stable Core 3 corpus is tracked as a separately pinned profile by
+[issue #366](https://github.com/zig-utils/zig-js/issues/366).
 
 The machine-readable [feature registry](.data/wasm-feature-profiles.json) pins
 the official proposal tracker and 13 selected proposal repositories by exact
