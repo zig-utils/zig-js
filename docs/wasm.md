@@ -49,8 +49,9 @@ The JS-facing runtime provides:
   exact error classes, and the specified Module-versus-bytes result shapes;
 - `WebAssembly.compileStreaming` and `instantiateStreaming` over
   `Response`/`Promise<Response>`, with the exact `application/wasm` MIME and
-  successful-status checks, coherent body disturbance, stable byte ownership,
-  imports, sibling realms, and the ordinary parser/linker error classes; and
+  successful-status checks, direct ordered compiler feeding for each body
+  chunk, coherent disturbance, stable byte ownership, imports, sibling realms,
+  and the ordinary parser/linker error classes; and
 - `WebAssembly`, `Module`, `Instance`, `Memory`, `Table`, and `Global` branding
   and derived constructor prototypes.
 
@@ -59,14 +60,15 @@ during deterministic context teardown. `customSections` returns fresh
 `ArrayBuffer` copies. Detached or out-of-bounds views and direct
 `SharedArrayBuffer` inputs are rejected.
 
-The streaming methods deliberately follow the observable specification model:
-consume the complete body, take a stable byte copy, then compile through the
-same decoder used by every feature profile. The private incremental feed uses a
-VM-affine opaque-token lifecycle shared by the JavaScript path, with external
-Home/Bun consumers and deterministic teardown. The WG3 API contract is
+The streaming methods feed each normalized Response chunk into a VM-affine
+opaque compiler lifecycle, finalize one stable byte snapshot at EOF, then use
+the same decoder as every feature profile. External Home/Bun consumers share
+that lifecycle and deterministic teardown. The WG3 API contract is
 [`abi/wasm-streaming-api-408.json`](abi/wasm-streaming-api-408.json); the feed
 contract is
-[`abi/wasm-streaming-compiler-feed-409.json`](abi/wasm-streaming-compiler-feed-409.json).
+[`abi/wasm-streaming-compiler-feed-409.json`](abi/wasm-streaming-compiler-feed-409.json),
+and the Response bridge is
+[`abi/wasm-streaming-response-feed-410.json`](abi/wasm-streaming-response-feed-410.json).
 
 ## Evidence
 

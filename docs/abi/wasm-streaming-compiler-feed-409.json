@@ -42,7 +42,7 @@
     "Finalization is idempotent, freezes the byte vector exactly once, reports the required size, and copies only into sufficient caller-owned storage.",
     "Release validates VM ownership, removes the registry record exactly once, and makes every later feed, finalize, or release fail closed.",
     "Context teardown retires every unreleased compiler created by that Context before its Wasm store and allocator disappear.",
-    "The JavaScript compileStreaming and instantiateStreaming path creates, feeds, finalizes, and releases this same lifecycle before dispatching the ordinary compiler jobs.",
+    "The JavaScript compileStreaming and instantiateStreaming path creates this lifecycle before the first body pull, feeds each actual Response chunk in order, finalizes at EOF, releases it, and then dispatches the ordinary compiler jobs.",
     "The registry and every state transition are protected by one process-wide lock and use a thread-safe allocator, making cross-VM calls and concurrent feed operations TSan-clean.",
     "External Home and Bun fixtures link the exact pinned symbol and exercise ordered, zero-length, invalid-pointer, overflow, finalized, stale, forged, sibling, foreign, concurrent, and teardown boundaries.",
     "Focused Debug, ReleaseSafe, and TSan gates run both external ownership profiles and the JavaScript streaming compilation path."

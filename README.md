@@ -54,7 +54,7 @@ Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use
 
-`zig build` installs `libzig-js.a` and compatible headers under `zig-out/`. See the [Zig API](src/root.zig), [C API](docs/api.md), [timers](docs/timers.md), [WebAssembly and streaming compilation](docs/wasm.md), and [threads/GC](docs/threads/index.md).
+`zig build` installs `libzig-js.a` and compatible headers under `zig-out/`. See the [Zig API](src/root.zig), [C API](docs/api.md), [timers](docs/timers.md), [WebAssembly and direct-chunk streaming compilation](docs/wasm.md), and [threads/GC](docs/threads/index.md).
 
 ## Build And Test
 

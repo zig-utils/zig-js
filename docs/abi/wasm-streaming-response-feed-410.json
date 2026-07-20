@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "contract": "wasm-streaming-response-feed",
+  "issue": 410,
+  "parent_issue": 406,
+  "depends_on": [407, 409],
+  "related_issue": 408,
+  "implementation": [
+    "src/interpreter.zig",
+    "src/wasm/api.zig"
+  ],
+  "feature_profiles": [
+    "mvp",
+    "fixed-width-simd",
+    "threads",
+    "exception-handling",
+    "memory64",
+    "gc/core-3"
+  ],
+  "semantics": [
+    "The StreamingCompiler lifecycle is created before the first Response body pull and remains owned by the calling VM until success, failure, or Context teardown.",
+    "Each normalized string or BufferSource chunk is copied into the compiler lifecycle exactly once and in pull order; no aggregate body handoff occurs after EOF.",
+    "String chunks use the Fetch Body UTF-8 conversion, BufferSource chunks reject detached backing, and zero-length chunks are accepted as exact no-ops.",
+    "Chunk normalization and every user-observable stream operation happen before the compiler lock is entered; the lock only protects native registry lookup and byte copying.",
+    "EOF finalizes the lifecycle exactly once, obtains one stable engine-owned ArrayBuffer, releases the opaque handle, and queues the existing ordinary compile or instantiate job.",
+    "Source rejection, abrupt pulls, invalid chunks, sticky compiler failure, setup failure, finalization failure, and asynchronous allocation failure abort and release the lifecycle exactly once.",
+    "An abandoned outer Promise does not cancel the standard active Fetch Body read; its managed reaction graph retains the operation until settlement, while Context teardown retires any remaining compiler record.",
+    "Response status, exact application/wasm MIME validation, bodyUsed, locking, sibling-realm acceptance, imports, feature selection, diagnostics, result shapes, and error classes remain those of the pinned Web API contract.",
+    "Focused tests observe three actual MVP body spans and two actual spans for SIMD, threads, exception-handling, memory64, and GC/Core 3 modules, including a precise-GC request between pulls.",
+    "The focused streaming compilation gate passes in Debug, ReleaseSafe, and TSan without running the complete WebAssembly corpora or changing accepted benchmark and conformance scores."
+  ]
+}

@@ -574,13 +574,16 @@ cancellation. The pinned lifecycle contract is
 
 `WebAssembly.compileStreaming` and `instantiateStreaming` consume that body
 path, enforce the official status and exact `application/wasm` MIME boundary,
-then enter the ordinary parser/linker with a stable byte snapshot. The pinned
+and feed each normalized chunk into the VM-owned compiler lifecycle before EOF.
+They then enter the ordinary parser/linker with its stable byte snapshot. The pinned
 specification and Home/Bun evidence is
 [`wasm-streaming-api-408.json`](wasm-streaming-api-408.json); the unobservable
 incremental private compiler feed uses a never-dereferenced, VM-affine token
 registry with idempotent finalization and teardown. Its exact symbol, lifecycle
 extensions, sources, and external Home/Bun fixtures are pinned in
-[`wasm-streaming-compiler-feed-409.json`](wasm-streaming-compiler-feed-409.json).
+[`wasm-streaming-compiler-feed-409.json`](wasm-streaming-compiler-feed-409.json),
+and the direct Response-chunk bridge is pinned in
+[`wasm-streaming-response-feed-410.json`](wasm-streaming-response-feed-410.json).
 
 The pure fatal-diagnostic stringifier handles exact Number thresholds and
 special values, booleans, null, undefined, arbitrary-size BigInts, and
