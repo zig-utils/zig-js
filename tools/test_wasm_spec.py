@@ -239,5 +239,31 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertNotIn("table64: new WebAssembly.Table", wasm_spec.PRELUDE)
 
 
+class ToolVerificationTests(unittest.TestCase):
+    def test_wasm_tools_release_and_source_version_formats(self) -> None:
+        commit = "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38"
+        self.assertTrue(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.253.0", "1.253.0", commit,
+        ))
+        self.assertTrue(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.253.0 (c799bb87b)", "1.253.0", commit,
+        ))
+        self.assertTrue(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.253.0 (c799bb87b 2026-07-07)", "1.253.0", commit,
+        ))
+
+    def test_wasm_tools_version_rejects_drift(self) -> None:
+        commit = "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38"
+        self.assertFalse(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.254.0 (c799bb87b 2026-07-07)", "1.253.0", commit,
+        ))
+        self.assertFalse(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.253.0 (deadbee 2026-07-07)", "1.253.0", commit,
+        ))
+        self.assertFalse(wasm_spec.wasm_tools_version_matches(
+            "wasm-tools 1.253.0 (c799bb87b nightly)", "1.253.0", commit,
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -261,6 +262,25 @@ def converter_command(profile: dict, converter: Path, source: Path, output: Path
     return [str(converter), *profile.get("converter_args", []), str(source), "-o", str(output)]
 
 
+def wasm_tools_version_matches(
+    output: str,
+    expected_version: str,
+    expected_commit: str,
+) -> bool:
+    match = re.fullmatch(
+        r"wasm-tools (?P<version>\d+\.\d+\.\d+)"
+        r"(?: \((?P<commit>[0-9a-fA-F]{7,40})(?: \d{4}-\d{2}-\d{2})?\))?",
+        output,
+    )
+    if match is None or match.group("version") != expected_version:
+        return False
+    advertised_commit = match.group("commit")
+    return (
+        advertised_commit is None
+        or expected_commit.lower().startswith(advertised_commit.lower())
+    )
+
+
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     corpus_root = spec_root / profile.get("corpus_root", Path(profile["corpus_glob"]).parent)
     if not corpus_root.is_dir():
@@ -273,7 +293,7 @@ def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) 
         fail(f"missing {metadata['kind']} converter at {converter}; pass --converter")
     if metadata["kind"] == "wasm-tools":
         version = checked_output([str(converter), "--version"])
-        if version != f"wasm-tools {metadata['version']}":
+        if not wasm_tools_version_matches(version, metadata["version"], metadata["commit"]):
             fail(
                 f"converter version drift: expected wasm-tools {metadata['version']} "
                 f"({metadata['commit']}), found {version}"
