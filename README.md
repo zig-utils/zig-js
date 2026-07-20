@@ -42,6 +42,10 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 - **SIMD:** 3.67–4.58x eight-lane scaling; 0.10–0.14x JSC throughput ([report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)).
 - **Threads:** 17.23 M/s contended adds and 287,444 wait/notify handoffs/s at eight workers ([report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)).
 
+### Garbage collection
+
+- **Explicit compaction:** 90.8% less retained fragmented backing (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).
+
 Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Use

@@ -14,7 +14,14 @@ zig-js keeps four benchmark families separate:
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
 
-## GC fragmentation and compaction
+## Latest GC fragmentation and compaction
+
+The [July 19, 2026 report](.data/gc-compaction-2026-07-19.md) preserves all
+[14 raw samples](.data/gc-compaction-2026-07-19.tsv) from clean benchmark
+commit `9f296900abc8adf33da4e18b24d6e8f628feddb4`. Explicit compaction reduced
+retained backing from 8.81 MiB to 0.81 MiB and chunks from 141 to 13 (90.8%)
+while preserving 6,559 live slots. Its median pause was 0.99 ms, and the
+checksum-validated post-action probe was unchanged at 1.00x control throughput.
 
 The dedicated compaction harness creates identical fresh GC contexts, retains a
 large discard group followed by a smaller live tail, drops the first group, and
