@@ -44652,29 +44652,18 @@ fn rsCancelFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     return rsCancelInternal(self, stream, if (args.len > 0) args[0] else Value.undef());
 }
 
-fn rsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = this;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'ReadableStream': Please use the 'new' operator");
-    const source = if (args.len > 0 and !args[0].isUndefined()) args[0] else try self.newObject();
-    if (!source.isObject()) return self.throwError("TypeError", "ReadableStream underlying source must be an object");
-    const source_type = try self.getProperty(source, "type");
-    if (!source_type.isUndefined()) return self.throwError("RangeError", "Readable byte streams are not implemented");
-    const start = try self.getProperty(source, "start");
-    const pull = try self.getProperty(source, "pull");
-    const cancel = try self.getProperty(source, "cancel");
-    inline for (.{ start, pull, cancel }) |algorithm| {
-        if (!algorithm.isUndefined() and !algorithm.isCallable())
-            return self.throwError("TypeError", "ReadableStream underlying source algorithm is not callable");
-    }
-    var high_water: f64 = 1;
-    if (args.len > 1 and args[1].isObject()) {
-        const hwm = try self.getProperty(args[1], "highWaterMark");
-        if (!hwm.isUndefined()) high_water = try self.toNumberV(hwm);
-    }
-    if (std.math.isNan(high_water) or high_water < 0)
-        return self.throwError("RangeError", "ReadableStream highWaterMark must be non-negative");
+const RSAllocation = struct {
+    stream: *value.Object,
+    controller: *value.Object,
+};
 
+fn rsAllocateDefaultStream(
+    self: *Interpreter,
+    source: Value,
+    pull: Value,
+    cancel: Value,
+    high_water: f64,
+) EvalError!RSAllocation {
     const stream = try gc_mod.allocObj(self.arena);
     stream.* = .{};
     if (self.env.get("ReadableStream")) |ctor| if (ctor.isObject()) {
@@ -44704,6 +44693,244 @@ fn rsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     try stream.setOwn(self.arena, self.root_shape, "\x00rsCancel", cancel);
     try stream.setOwn(self.arena, self.root_shape, "\x00rsController", Value.obj(controller));
     try controller.setOwn(self.arena, self.root_shape, "\x00rcStream", Value.obj(stream));
+    return .{ .stream = stream, .controller = controller };
+}
+
+fn rsClosedStreamFromChunk(self: *Interpreter, chunk: ?Value) EvalError!*value.Object {
+    const source = try self.newObject();
+    const allocation = try rsAllocateDefaultStream(self, source, Value.undef(), Value.undef(), 1);
+    try allocation.stream.setOwn(self.arena, self.root_shape, "\x00rsStarted", Value.boolVal(true));
+    if (chunk) |value_| {
+        const queue = rsHiddenObject(allocation.stream, "\x00rsQueue") orelse return error.OutOfMemory;
+        try queue.appendInternalElement(self.arena, value_);
+        try allocation.stream.setOwn(self.arena, self.root_shape, "\x00rsCloseRequested", Value.boolVal(true));
+    } else {
+        try rsFinishClosed(self, allocation.stream);
+    }
+    return allocation.stream;
+}
+
+fn rsTeeState(self: *Interpreter) EvalError!*value.Object {
+    const native = self.active_native orelse return error.OutOfMemory;
+    const state = native.elementAt(0) orelse return error.OutOfMemory;
+    if (!state.isObject()) return error.OutOfMemory;
+    return state.asObj();
+}
+
+fn rsTeeBranch(state: *value.Object, index: usize) ?*value.Object {
+    const branches = rsHiddenObject(state, "\x00rstBranches") orelse return null;
+    const branch = branches.elementAt(index) orelse return null;
+    return if (rsIsStream(branch)) branch.asObj() else null;
+}
+
+fn rsTeeFinishPull(self: *Interpreter, state: *value.Object, rejected: ?Value) EvalError!void {
+    const pull = state.getOwn("\x00rstPullPromise") orelse Value.undef();
+    if (rejected) |reason|
+        try rsRejectStoredPromise(self, pull, reason)
+    else
+        try rsResolveStoredPromise(self, pull, Value.undef());
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReading", Value.boolVal(false));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstPullPromise", Value.undef());
+}
+
+fn rsTeeSettleCancel(self: *Interpreter, state: *value.Object, rejected: ?Value) EvalError!void {
+    if (!rsHiddenBool(state, "\x00rstCanceled1") and !rsHiddenBool(state, "\x00rstCanceled2")) return;
+    const cancel = state.getOwn("\x00rstCancelPromise") orelse Value.undef();
+    if (rejected) |reason|
+        try rsRejectStoredPromise(self, cancel, reason)
+    else
+        try rsResolveStoredPromise(self, cancel, Value.undef());
+}
+
+fn rsTeeReadFulfilledFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len < 2 or !args[1].isObject()) return Value.undef();
+    const state = args[1].asObj();
+    const result = if (args.len > 0) args[0] else Value.undef();
+    if (!result.isObject()) {
+        const reason = try self.makeError("TypeError", "ReadableStream tee received an invalid read result");
+        inline for (0..2) |index| if (rsTeeBranch(state, index)) |branch| try rsError(self, branch, reason);
+        try rsTeeFinishPull(self, state, reason);
+        try rsTeeSettleCancel(self, state, reason);
+        return Value.undef();
+    }
+    const done = (try self.getProperty(result, "done")).toBoolean();
+    if (done) {
+        inline for (0..2) |index| {
+            if (!rsHiddenBool(state, if (index == 0) "\x00rstCanceled1" else "\x00rstCanceled2")) {
+                if (rsTeeBranch(state, index)) |branch| {
+                    try branch.setOwn(self.arena, self.root_shape, "\x00rsCloseRequested", Value.boolVal(true));
+                    if (rsPendingCount(branch, "\x00rsQueue", "\x00rsQueueHead") == 0) try rsFinishClosed(self, branch);
+                }
+            }
+        }
+        try rsTeeFinishPull(self, state, null);
+        try rsTeeSettleCancel(self, state, null);
+        return Value.undef();
+    }
+    const chunk = try self.getProperty(result, "value");
+    inline for (0..2) |index| {
+        if (!rsHiddenBool(state, if (index == 0) "\x00rstCanceled1" else "\x00rstCanceled2")) {
+            if (rsTeeBranch(state, index)) |branch| {
+                const controller = branch.getOwn("\x00rsController") orelse Value.undef();
+                _ = try rsControllerEnqueueFn(@ptrCast(self), controller, &.{chunk});
+            }
+        }
+    }
+    try rsTeeFinishPull(self, state, null);
+    return Value.undef();
+}
+
+fn rsTeeReadRejectedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len < 2 or !args[1].isObject()) return Value.undef();
+    const state = args[1].asObj();
+    const reason = if (args.len > 0) args[0] else Value.undef();
+    inline for (0..2) |index| if (rsTeeBranch(state, index)) |branch| try rsError(self, branch, reason);
+    try rsTeeFinishPull(self, state, reason);
+    try rsTeeSettleCancel(self, state, reason);
+    return Value.undef();
+}
+
+fn rsTeePullFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const state = try rsTeeState(self);
+    if (rsHiddenBool(state, "\x00rstReading")) return state.getOwn("\x00rstPullPromise") orelse Value.undef();
+    const reader_value = state.getOwn("\x00rstReader") orelse Value.undef();
+    if (!reader_value.isObject()) return self.throwError("TypeError", "ReadableStream tee reader is unavailable");
+    const pull = try promise.newPromise(self);
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReading", Value.boolVal(true));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstPullPromise", Value.obj(pull));
+    const read = try rsReaderRead(self, reader_value.asObj());
+    const on_fulfilled = try rsNativeHandler(self, rsTeeReadFulfilledFn, "ReadableStream tee read fulfilled");
+    const on_rejected = try rsNativeHandler(self, rsTeeReadRejectedFn, "ReadableStream tee read rejected");
+    try promise.performThenDetached(self, promise.promiseOf(read).?, on_fulfilled, on_rejected, Value.obj(state));
+    return Value.obj(pull);
+}
+
+fn rsTeeCancelSettledFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len < 2 or !args[1].isObject()) return Value.undef();
+    try rsTeeSettleCancel(self, args[1].asObj(), null);
+    return Value.undef();
+}
+
+fn rsTeeCancelRejectedFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (args.len < 2 or !args[1].isObject()) return Value.undef();
+    try rsTeeSettleCancel(self, args[1].asObj(), if (args.len > 0) args[0] else Value.undef());
+    return Value.undef();
+}
+
+fn rsTeeCancelBranch(self: *Interpreter, state: *value.Object, index: usize, reason: Value) EvalError!Value {
+    const canceled_key: []const u8 = if (index == 0) "\x00rstCanceled1" else "\x00rstCanceled2";
+    const reason_key: []const u8 = if (index == 0) "\x00rstReason1" else "\x00rstReason2";
+    try state.setOwn(self.arena, self.root_shape, canceled_key, Value.boolVal(true));
+    try state.setOwn(self.arena, self.root_shape, reason_key, reason);
+    const cancel_promise = state.getOwn("\x00rstCancelPromise") orelse Value.undef();
+    if (!rsHiddenBool(state, "\x00rstCanceled1") or !rsHiddenBool(state, "\x00rstCanceled2")) return cancel_promise;
+    const reader = state.getOwn("\x00rstReader") orelse Value.undef();
+    if (!reader.isObject()) return cancel_promise;
+    const reasons = try self.newArray();
+    try reasons.asObj().appendElement(self.arena, state.getOwn("\x00rstReason1") orelse Value.undef());
+    try reasons.asObj().appendElement(self.arena, state.getOwn("\x00rstReason2") orelse Value.undef());
+    const underlying = try rsCancelInternal(self, try rsReaderStream(self, reader), reasons);
+    const on_fulfilled = try rsNativeHandler(self, rsTeeCancelSettledFn, "ReadableStream tee cancel fulfilled");
+    const on_rejected = try rsNativeHandler(self, rsTeeCancelRejectedFn, "ReadableStream tee cancel rejected");
+    try promise.performThenDetached(self, promise.promiseOf(underlying).?, on_fulfilled, on_rejected, Value.obj(state));
+    return cancel_promise;
+}
+
+fn rsTeeCancel1Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return rsTeeCancelBranch(self, try rsTeeState(self), 0, if (args.len > 0) args[0] else Value.undef());
+}
+
+fn rsTeeCancel2Fn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    return rsTeeCancelBranch(self, try rsTeeState(self), 1, if (args.len > 0) args[0] else Value.undef());
+}
+
+fn rsTeeStreams(self: *Interpreter, stream: *value.Object) EvalError![2]*value.Object {
+    if (rsReader(stream) != null) return self.throwError("TypeError", "ReadableStream is locked");
+    const reader = try rsCreateReader(self, stream);
+    const state = try gc_mod.allocObj(self.arena);
+    state.* = .{ .proto = null, .proto_explicit_null = true };
+    const branches = (try self.newArray()).asObj();
+    const cancel_promise = try promise.newPromise(self);
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReader", Value.obj(reader));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstBranches", Value.obj(branches));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReading", Value.boolVal(false));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstPullPromise", Value.undef());
+    try state.setOwn(self.arena, self.root_shape, "\x00rstCancelPromise", Value.obj(cancel_promise));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstCanceled1", Value.boolVal(false));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstCanceled2", Value.boolVal(false));
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReason1", Value.undef());
+    try state.setOwn(self.arena, self.root_shape, "\x00rstReason2", Value.undef());
+
+    const pull = try rsNativeHandler(self, rsTeePullFn, "ReadableStream tee pull");
+    try pull.asObj().appendInternalElement(self.arena, Value.obj(state));
+    const cancel1 = try rsNativeHandler(self, rsTeeCancel1Fn, "ReadableStream tee cancel branch 1");
+    try cancel1.asObj().appendInternalElement(self.arena, Value.obj(state));
+    const cancel2 = try rsNativeHandler(self, rsTeeCancel2Fn, "ReadableStream tee cancel branch 2");
+    try cancel2.asObj().appendInternalElement(self.arena, Value.obj(state));
+    var result: [2]*value.Object = undefined;
+    inline for (0..2) |index| {
+        const source = try self.newObject();
+        try source.asObj().setOwn(self.arena, self.root_shape, "pull", pull);
+        try source.asObj().setOwn(self.arena, self.root_shape, "cancel", if (index == 0) cancel1 else cancel2);
+        const allocation = try rsAllocateDefaultStream(self, source, pull, if (index == 0) cancel1 else cancel2, 1);
+        try allocation.stream.setOwn(self.arena, self.root_shape, "\x00rsStarted", Value.boolVal(true));
+        try branches.appendElement(self.arena, Value.obj(allocation.stream));
+        result[index] = allocation.stream;
+    }
+    return result;
+}
+
+fn rsTeeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const branches = try rsTeeStreams(self, try rsRequireStream(self, this));
+    const result = try self.newArray();
+    try result.asObj().appendElement(self.arena, Value.obj(branches[0]));
+    try result.asObj().appendElement(self.arena, Value.obj(branches[1]));
+    return result;
+}
+
+fn rsConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'ReadableStream': Please use the 'new' operator");
+    const source = if (args.len > 0 and !args[0].isUndefined()) args[0] else try self.newObject();
+    if (!source.isObject()) return self.throwError("TypeError", "ReadableStream underlying source must be an object");
+    const source_type = try self.getProperty(source, "type");
+    if (!source_type.isUndefined()) return self.throwError("RangeError", "Readable byte streams are not implemented");
+    const start = try self.getProperty(source, "start");
+    const pull = try self.getProperty(source, "pull");
+    const cancel = try self.getProperty(source, "cancel");
+    inline for (.{ start, pull, cancel }) |algorithm| {
+        if (!algorithm.isUndefined() and !algorithm.isCallable())
+            return self.throwError("TypeError", "ReadableStream underlying source algorithm is not callable");
+    }
+    var high_water: f64 = 1;
+    if (args.len > 1 and args[1].isObject()) {
+        const hwm = try self.getProperty(args[1], "highWaterMark");
+        if (!hwm.isUndefined()) high_water = try self.toNumberV(hwm);
+    }
+    if (std.math.isNan(high_water) or high_water < 0)
+        return self.throwError("RangeError", "ReadableStream highWaterMark must be non-negative");
+
+    const allocation = try rsAllocateDefaultStream(self, source, pull, cancel, high_water);
+    const stream = allocation.stream;
+    const controller = allocation.controller;
 
     const started = if (start.isCallable()) self.callValueWithThis(start, &.{Value.obj(controller)}, source) catch |err| {
         if (err == error.Throw) {
@@ -44745,6 +44972,7 @@ fn installReadableStream(env: *Environment, rs: *Shape, object_proto: *value.Obj
     try setNativeGetter(a, rs, stream_proto, "locked", rsLockedGet);
     try setNative(a, rs, stream_proto, "cancel", 1, rsCancelFn);
     try setNative(a, rs, stream_proto, "getReader", 0, rsGetReaderFn);
+    try setNative(a, rs, stream_proto, "tee", 0, rsTeeFn);
 
     const reader_proto = try gc_mod.allocObj(a);
     reader_proto.* = .{ .proto = object_proto };
@@ -44991,7 +45219,8 @@ fn rscFinalize(self: *Interpreter, state: *value.Object) EvalError!Value {
     if (std.mem.eql(u8, kind_name, "blob")) {
         const buffer = try self.makeArrayBuffer(try rscMeasureBytes(self, chunks));
         try rscWriteBytes(self, chunks, buffer.arrayBuffer().?.bytes());
-        return Value.obj(try blobMakeWithBuffer(self, "Blob", buffer, ""));
+        const content_type = try rscContentType(self, rscStateValue(state, "\x00rscContentType"));
+        return Value.obj(try blobMakeWithBuffer(self, "Blob", buffer, try blobNormalizeType(self, content_type)));
     }
     const bytes = try rscCollectBytes(self, chunks);
     if (std.mem.eql(u8, kind_name, "form_data")) {
@@ -45106,11 +45335,12 @@ pub fn readableStreamConsume(
 
 // ===== Request / Response (Fetch bodies) =============================
 // Response state: \x00Rstatus/RstatusText/Rheaders/Rtype/Rurl/Rredirected/
-// Rbody(ArrayBuffer|null)/RbodyUsed. Request state: \x00Qurl/Qmethod/Qheaders/
+// Rbody(ArrayBuffer|ReadableStream|null)/RbodyUsed. Request state: \x00Qurl/Qmethod/Qheaders/
 // Qbody/QbodyUsed + the request-init string slots (cache/credentials/…).
-const BodyExtract = struct { bytes: ?[]const u8, ctype: ?[]const u8 };
+const BodyExtract = struct { bytes: ?[]const u8, stream: ?Value = null, ctype: ?[]const u8 };
 fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
     if (body_v.isUndefined() or body_v.isNull()) return .{ .bytes = null, .ctype = null };
+    if (rsIsStream(body_v)) return .{ .bytes = null, .stream = body_v, .ctype = null };
     if (blobIsBlob(body_v)) {
         if (!blobHasBytes(body_v.asObj())) return self.throwError("TypeError", "Native Blob data is unavailable");
         const tv = body_v.asObj().getOwn("\x00blobtype");
@@ -45132,8 +45362,10 @@ fn fetchHeadersHasName(self: *Interpreter, headers: *value.Object, lower: []cons
     const record = try headersRecord(self, Value.obj(headers));
     return record.has(lower) catch |err| return headersThrow(self, err);
 }
-fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, bytes: ?[]const u8) EvalError!void {
-    if (bytes) |b| {
+fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, body: BodyExtract) EvalError!void {
+    if (body.stream) |stream| {
+        try obj.setOwn(self.arena, self.root_shape, slot, stream);
+    } else if (body.bytes) |b| {
         const buf = try self.makeArrayBuffer(b.len);
         if (b.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..b.len], b);
         try obj.setOwn(self.arena, self.root_shape, slot, Value.obj(buf));
@@ -45141,75 +45373,76 @@ fn fetchStoreBody(self: *Interpreter, obj: *value.Object, slot: []const u8, byte
         try obj.setOwn(self.arena, self.root_shape, slot, Value.nul());
     }
 }
-fn fetchBodyBytes(this: Value) []const u8 {
-    if (!this.isObject()) return &.{};
-    const o = this.asObj();
-    const bv = o.getOwn("\x00Rbody") orelse o.getOwn("\x00Qbody") orelse return &.{};
-    if (bv.isObject()) if (bv.asObj().arrayBuffer()) |ab| return ab.bytes();
-    return &.{};
+fn fetchBodyObject(self: *Interpreter, this: Value) EvalError!*value.Object {
+    if (!this.isObject()) return self.throwError("TypeError", "Body method called on an incompatible receiver");
+    const object = this.asObj();
+    if (object.getOwn("\x00Rbody") == null and object.getOwn("\x00Qbody") == null)
+        return self.throwError("TypeError", "Body method called on an incompatible receiver");
+    return object;
 }
-fn fetchMarkUsed(self: *Interpreter, this: Value) EvalError!void {
-    if (!this.isObject()) return;
-    const o = this.asObj();
-    const slot: []const u8 = if (o.getOwn("\x00Rbody") != null) "\x00RbodyUsed" else "\x00QbodyUsed";
-    try o.setOwn(self.arena, self.root_shape, slot, Value.boolVal(true));
+fn fetchBodyValue(object: *value.Object) Value {
+    return object.getOwn("\x00Rbody") orelse object.getOwn("\x00Qbody") orelse Value.undef();
 }
-fn bodyTextFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    try fetchMarkUsed(self, this);
-    return try promiseResolveValue(self, try Value.strAlloc(self.arena, fetchBodyBytes(this)));
+fn fetchBodyUsedSlot(object: *value.Object) []const u8 {
+    return if (object.getOwn("\x00Rbody") != null) "\x00RbodyUsed" else "\x00QbodyUsed";
 }
-fn bodyJsonFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    try fetchMarkUsed(self, this);
-    const s = try Value.strAlloc(self.arena, fetchBodyBytes(this));
-    const json = self.env.get("JSON") orelse return self.throwError("Error", "JSON unavailable");
-    const parse = try self.getProperty(json, "parse");
-    if (self.callValue(parse, &.{s})) |res| {
-        return try promiseResolveValue(self, res);
-    } else |err| {
-        if (err == error.Throw) {
-            const reason = self.exception;
-            self.exception = Value.undef();
-            return Value.obj(try promise.newRejectedPromise(self, reason));
+fn fetchBodyIsUsed(object: *value.Object) bool {
+    if (object.getOwn(fetchBodyUsedSlot(object))) |used| if (used.toBoolean()) return true;
+    const body = fetchBodyValue(object);
+    return rsIsStream(body) and rsHiddenBool(body.asObj(), "\x00rsDisturbed");
+}
+fn fetchBodyContentType(self: *Interpreter, object: *value.Object) EvalError!Value {
+    const headers_value = object.getOwn("\x00Rheaders") orelse object.getOwn("\x00Qheaders") orelse return Value.str("");
+    if (!headers_value.isObject()) return Value.str("");
+    const record = try headersRecord(self, headers_value);
+    const content_type = (record.getCopy(self.arena, "content-type") catch |err| return headersThrow(self, err)) orelse "";
+    return Value.strAlloc(self.arena, content_type);
+}
+fn fetchEnsureBodyStream(self: *Interpreter, object: *value.Object) EvalError!?*value.Object {
+    const body = fetchBodyValue(object);
+    if (body.isNull() or body.isUndefined()) return null;
+    if (rsIsStream(body)) return body.asObj();
+    if (!body.isObject() or body.asObj().arrayBuffer() == null)
+        return self.throwError("TypeError", "Fetch body storage is invalid");
+    const stream = try rsClosedStreamFromChunk(self, body);
+    const slot: []const u8 = if (object.getOwn("\x00Rbody") != null) "\x00Rbody" else "\x00Qbody";
+    try object.setOwn(self.arena, self.root_shape, slot, Value.obj(stream));
+    return stream;
+}
+fn fetchRejectedBodyPromise(self: *Interpreter, message: []const u8) EvalError!Value {
+    return Value.obj(try promise.newRejectedPromise(self, try self.makeError("TypeError", message)));
+}
+fn fetchConsumeBody(self: *Interpreter, this: Value, kind: ReadableStreamConsumeKind) EvalError!Value {
+    const object = try fetchBodyObject(self, this);
+    const stored = fetchBodyValue(object);
+    const has_body = !stored.isNull() and !stored.isUndefined();
+    if (has_body and fetchBodyIsUsed(object)) return fetchRejectedBodyPromise(self, "Body has already been consumed");
+    if (rsIsStream(stored) and rsReader(stored.asObj()) != null)
+        return fetchRejectedBodyPromise(self, "Body stream is locked");
+    const stream = (try fetchEnsureBodyStream(self, object)) orelse try rsClosedStreamFromChunk(self, null);
+    const content_type = if (kind == .blob or kind == .form_data) try fetchBodyContentType(self, object) else Value.undef();
+    return readableStreamConsume(self, Value.obj(stream), kind, content_type);
+}
+fn fetchBodyMethod(comptime kind: ReadableStreamConsumeKind) value.NativeFn {
+    return struct {
+        fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+            _ = args;
+            const self: *Interpreter = @ptrCast(@alignCast(ctx));
+            return fetchConsumeBody(self, this, kind);
         }
-        return err;
-    }
+    }.call;
 }
-fn bodyArrayBufferFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+fn fetchBodyGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    try fetchMarkUsed(self, this);
-    const bytes = fetchBodyBytes(this);
-    const buf = try self.makeArrayBuffer(bytes.len);
-    if (bytes.len > 0) @memcpy(buf.arrayBuffer().?.bytes()[0..bytes.len], bytes);
-    return try promiseResolveValue(self, Value.obj(buf));
+    const object = try fetchBodyObject(self, this);
+    const stream = try fetchEnsureBodyStream(self, object);
+    return if (stream) |body| Value.obj(body) else Value.nul();
 }
-fn bodyBytesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+fn fetchBodyUsedGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    try fetchMarkUsed(self, this);
-    const bytes = fetchBodyBytes(this);
-    const ta = try newTypedArray(self, .u8, bytes.len);
-    if (bytes.len > 0) @memcpy(ta.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
-    return try promiseResolveValue(self, Value.obj(ta));
-}
-fn bodyBlobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
-    _ = args;
-    const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    try fetchMarkUsed(self, this);
-    // Content-type comes from the body's own headers when present.
-    var ct: []const u8 = "";
-    if (this.isObject()) {
-        const hv = this.asObj().getOwn("\x00Rheaders") orelse this.asObj().getOwn("\x00Qheaders");
-        if (hv != null and hv.?.isObject()) {
-            const record = try headersRecord(self, hv.?);
-            ct = (record.getCopy(self.arena, "content-type") catch |err| return headersThrow(self, err)) orelse "";
-        }
-    }
-    return try promiseResolveValue(self, Value.obj(try blobMake(self, "Blob", fetchBodyBytes(this), ct)));
+    return Value.boolVal(fetchBodyIsUsed(try fetchBodyObject(self, this)));
 }
 fn fetchSlotStrGetter(comptime slot: []const u8, comptime dflt: []const u8) value.NativeFn {
     return struct {
@@ -45233,7 +45466,7 @@ fn fetchBoolSlotGetter(comptime slot: []const u8) value.NativeFn {
     }.call;
 }
 // ---- Response -------------------------------------------------------
-fn responseMake(self: *Interpreter, status: u32, status_text: []const u8, headers: *value.Object, body: ?[]const u8, rtype: []const u8, url: []const u8, redirected: bool) EvalError!*value.Object {
+fn responseMake(self: *Interpreter, status: u32, status_text: []const u8, headers: *value.Object, body: BodyExtract, rtype: []const u8, url: []const u8, redirected: bool) EvalError!*value.Object {
     const obj = try gc_mod.allocObj(self.arena);
     obj.* = .{};
     if (self.env.get("Response")) |c| if (c.isObject()) if (c.asObj().getOwn("prototype")) |pp| if (pp.isObject()) obj.setProtoAtomic(pp.asObj());
@@ -45273,10 +45506,10 @@ fn responseConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     const st: u32 = @intFromFloat(status);
     const headers = try fetchMakeHeaders(self, headers_init);
     const be = try fetchExtractBody(self, body_v);
-    if (be.bytes != null and (st == 204 or st == 205 or st == 304))
+    if ((be.bytes != null or be.stream != null) and (st == 204 or st == 205 or st == 304))
         return self.throwError("TypeError", "Response with null body status cannot have body");
     try responseApplyBodyCT(self, headers, be);
-    return Value.obj(try responseMake(self, st, status_text, headers, be.bytes, "default", "", false));
+    return Value.obj(try responseMake(self, st, status_text, headers, be, "default", "", false));
 }
 fn responseStatusGet(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
@@ -45297,11 +45530,49 @@ fn responseHeadersGet(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (!this.isObject()) return self.throwError("TypeError", "Illegal invocation");
     return this.asObj().getOwn("\x00Rheaders") orelse Value.undef();
 }
+fn fetchCloneBody(self: *Interpreter, source: *value.Object) EvalError!BodyExtract {
+    const body = fetchBodyValue(source);
+    if (body.isNull() or body.isUndefined()) return .{ .bytes = null, .ctype = null };
+    if (fetchBodyIsUsed(source)) return self.throwError("TypeError", "Cannot clone a consumed body");
+    if (rsIsStream(body)) {
+        if (rsReader(body.asObj()) != null) return self.throwError("TypeError", "Cannot clone a locked body");
+        const branches = try rsTeeStreams(self, body.asObj());
+        const slot: []const u8 = if (source.getOwn("\x00Rbody") != null) "\x00Rbody" else "\x00Qbody";
+        try source.setOwn(self.arena, self.root_shape, slot, Value.obj(branches[0]));
+        return .{ .bytes = null, .stream = Value.obj(branches[1]), .ctype = null };
+    }
+    if (body.isObject()) if (body.asObj().arrayBuffer()) |buffer|
+        return .{ .bytes = buffer.bytes(), .ctype = null };
+    return self.throwError("TypeError", "Cannot clone invalid body storage");
+}
+fn responseCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    const source = try fetchBodyObject(self, this);
+    if (source.getOwn("\x00Rstatus") == null) return self.throwError("TypeError", "Response.clone called on an incompatible receiver");
+    const headers = try fetchMakeHeaders(self, source.getOwn("\x00Rheaders") orelse Value.undef());
+    const status_value = source.getOwn("\x00Rstatus") orelse Value.num(200);
+    const status: u32 = if (status_value.isNumber()) @intFromFloat(status_value.asNum()) else 200;
+    const status_text = source.getOwn("\x00RstatusText") orelse Value.str("");
+    const response_type = source.getOwn("\x00Rtype") orelse Value.str("default");
+    const url = source.getOwn("\x00Rurl") orelse Value.str("");
+    const redirected = source.getOwn("\x00Rredirected") orelse Value.boolVal(false);
+    return Value.obj(try responseMake(
+        self,
+        status,
+        if (status_text.isString()) status_text.asStr() else "",
+        headers,
+        try fetchCloneBody(self, source),
+        if (response_type.isString()) response_type.asStr() else "default",
+        if (url.isString()) url.asStr() else "",
+        redirected.toBoolean(),
+    ));
+}
 fn responseErrorStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    return Value.obj(try responseMake(self, 0, "", try fetchMakeHeaders(self, Value.undef()), null, "error", "", false));
+    return Value.obj(try responseMake(self, 0, "", try fetchMakeHeaders(self, Value.undef()), .{ .bytes = null, .ctype = null }, "error", "", false));
 }
 fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -45324,7 +45595,7 @@ fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const headers = try fetchMakeHeaders(self, headers_init);
     if (!try fetchHeadersHasName(self, headers, "content-type"))
         try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), Value.str("application/json"));
-    return Value.obj(try responseMake(self, status, status_text, headers, bytes, "default", "", false));
+    return Value.obj(try responseMake(self, status, status_text, headers, .{ .bytes = bytes, .ctype = "application/json" }, "default", "", false));
 }
 fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
@@ -45338,7 +45609,7 @@ fn responseRedirectStaticFn(ctx: *anyopaque, this: Value, args: []const Value) v
         return self.throwError("RangeError", "Failed to execute 'redirect' on 'Response': Invalid status code");
     const headers = try fetchMakeHeaders(self, Value.undef());
     try headersAppendRaw(self, Value.obj(headers), Value.str("location"), try Value.strAlloc(self.arena, url));
-    return Value.obj(try responseMake(self, status, "", headers, null, "default", "", false));
+    return Value.obj(try responseMake(self, status, "", headers, .{ .bytes = null, .ctype = null }, "default", "", false));
 }
 // ---- Request --------------------------------------------------------
 fn requestNormalizeMethod(m: []const u8) []const u8 {
@@ -45356,12 +45627,17 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     var method: []const u8 = "GET";
     var headers_init: Value = Value.undef();
     var body_v: Value = Value.undef();
+    var inherited_body: Value = Value.undef();
+    var inherited_source: ?*value.Object = null;
     if (input.isObject() and input.asObj().getOwn("\x00Qurl") != null) {
         // Copy from an existing Request.
         const src = input.asObj();
+        if (fetchBodyIsUsed(src)) return self.throwError("TypeError", "Cannot construct a Request from a consumed body");
         url = (src.getOwn("\x00Qurl") orelse Value.str("")).asStr();
         method = (src.getOwn("\x00Qmethod") orelse Value.str("GET")).asStr();
         if (src.getOwn("\x00Qheaders")) |h| headers_init = h;
+        inherited_body = fetchBodyValue(src);
+        inherited_source = src;
     } else {
         const parsed = (try urlParse(self.arena, try self.toStringV(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
         url = try urlSerialize(self.arena, parsed, false);
@@ -45392,7 +45668,13 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         if (!kv.isUndefined()) keepalive = kv.toBoolean();
     }
     const headers = try fetchMakeHeaders(self, headers_init);
-    const be = try fetchExtractBody(self, body_v);
+    const be = if (body_v.isUndefined() and !inherited_body.isUndefined()) blk: {
+        if (rsIsStream(inherited_body) and rsReader(inherited_body.asObj()) != null)
+            return self.throwError("TypeError", "Cannot construct a Request from a locked body");
+        if (!inherited_body.isNull()) if (inherited_source) |source|
+            try source.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(true));
+        break :blk try fetchExtractBody(self, inherited_body);
+    } else try fetchExtractBody(self, body_v);
     if (be.ctype) |ct| {
         if (!try fetchHeadersHasName(self, headers, "content-type"))
             try headersAppendRaw(self, Value.obj(headers), Value.str("content-type"), try Value.strAlloc(self.arena, ct));
@@ -45405,7 +45687,7 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
     try obj.setOwn(self.arena, rs, "\x00Qmethod", try Value.strAlloc(self.arena, method));
     try obj.setOwn(self.arena, rs, "\x00Qheaders", Value.obj(headers));
     try obj.setOwn(self.arena, rs, "\x00QbodyUsed", Value.boolVal(false));
-    try fetchStoreBody(self, obj, "\x00Qbody", be.bytes);
+    try fetchStoreBody(self, obj, "\x00Qbody", be);
     try obj.setOwn(self.arena, rs, "\x00Qcache", try Value.strAlloc(self.arena, cache));
     try obj.setOwn(self.arena, rs, "\x00Qcredentials", try Value.strAlloc(self.arena, credentials));
     try obj.setOwn(self.arena, rs, "\x00Qmode", try Value.strAlloc(self.arena, mode));
@@ -45427,9 +45709,27 @@ fn requestSlotGetter(comptime slot: []const u8) value.NativeFn {
 fn requestCloneFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    if (!this.isObject() or this.asObj().getOwn("\x00Qurl") == null) return self.throwError("TypeError", "Illegal invocation");
-    if (self.env.get("Request")) |c| return try self.construct(c, &.{this});
-    return self.throwError("Error", "Request unavailable");
+    const source = try fetchBodyObject(self, this);
+    if (source.getOwn("\x00Qurl") == null) return self.throwError("TypeError", "Request.clone called on an incompatible receiver");
+    const obj = try gc_mod.allocObj(self.arena);
+    obj.* = .{};
+    if (self.env.get("Request")) |constructor| if (constructor.isObject()) {
+        if (constructor.asObj().getOwn("prototype")) |proto| if (proto.isObject()) obj.setProtoAtomic(proto.asObj());
+    };
+    inline for (.{
+        "\x00Qurl",
+        "\x00Qmethod",
+        "\x00Qcache",
+        "\x00Qcredentials",
+        "\x00Qmode",
+        "\x00Qredirect",
+        "\x00Qintegrity",
+        "\x00Qkeepalive",
+    }) |slot| try obj.setOwn(self.arena, self.root_shape, slot, source.getOwn(slot) orelse Value.undef());
+    try obj.setOwn(self.arena, self.root_shape, "\x00Qheaders", Value.obj(try fetchMakeHeaders(self, source.getOwn("\x00Qheaders") orelse Value.undef())));
+    try obj.setOwn(self.arena, self.root_shape, "\x00QbodyUsed", Value.boolVal(false));
+    try fetchStoreBody(self, obj, "\x00Qbody", try fetchCloneBody(self, source));
+    return Value.obj(obj);
 }
 fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
@@ -45451,15 +45751,18 @@ fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object)
     try setNativeGetter(a, rs, rp, "type", fetchSlotStrGetter("\x00Rtype", "default"));
     try setNativeGetter(a, rs, rp, "url", fetchSlotStrGetter("\x00Rurl", ""));
     try setNativeGetter(a, rs, rp, "redirected", fetchBoolSlotGetter("\x00Rredirected"));
-    try setNativeGetter(a, rs, rp, "bodyUsed", fetchBoolSlotGetter("\x00RbodyUsed"));
-    inline for (.{ "status", "ok", "statusText", "headers", "type", "url", "redirected", "bodyUsed" }) |g| {
+    try setNativeGetter(a, rs, rp, "body", fetchBodyGet);
+    try setNativeGetter(a, rs, rp, "bodyUsed", fetchBodyUsedGet);
+    inline for (.{ "status", "ok", "statusText", "headers", "type", "url", "redirected", "body", "bodyUsed" }) |g| {
         try rp.setAttr(a, g, .{ .enumerable = true, .configurable = true });
     }
-    try setNative(a, rs, rp, "text", 0, bodyTextFn);
-    try setNative(a, rs, rp, "json", 0, bodyJsonFn);
-    try setNative(a, rs, rp, "arrayBuffer", 0, bodyArrayBufferFn);
-    try setNative(a, rs, rp, "bytes", 0, bodyBytesFn);
-    try setNative(a, rs, rp, "blob", 0, bodyBlobFn);
+    try setNative(a, rs, rp, "text", 0, fetchBodyMethod(.text));
+    try setNative(a, rs, rp, "json", 0, fetchBodyMethod(.json));
+    try setNative(a, rs, rp, "arrayBuffer", 0, fetchBodyMethod(.array_buffer));
+    try setNative(a, rs, rp, "bytes", 0, fetchBodyMethod(.bytes));
+    try setNative(a, rs, rp, "blob", 0, fetchBodyMethod(.blob));
+    try setNative(a, rs, rp, "formData", 0, fetchBodyMethod(.form_data));
+    try setNative(a, rs, rp, "clone", 0, responseCloneFn);
     if (symKey(env, "toStringTag")) |k| {
         try rp.setOwn(a, rs, k, Value.str("Response"));
         try rp.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });
@@ -45480,7 +45783,8 @@ fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object)
     try setNativeGetter(a, rs, qp, "url", requestSlotGetter("\x00Qurl"));
     try setNativeGetter(a, rs, qp, "method", requestSlotGetter("\x00Qmethod"));
     try setNativeGetter(a, rs, qp, "headers", requestSlotGetter("\x00Qheaders"));
-    try setNativeGetter(a, rs, qp, "bodyUsed", fetchBoolSlotGetter("\x00QbodyUsed"));
+    try setNativeGetter(a, rs, qp, "body", fetchBodyGet);
+    try setNativeGetter(a, rs, qp, "bodyUsed", fetchBodyUsedGet);
     try setNativeGetter(a, rs, qp, "cache", fetchSlotStrGetter("\x00Qcache", "default"));
     try setNativeGetter(a, rs, qp, "credentials", fetchSlotStrGetter("\x00Qcredentials", "same-origin"));
     try setNativeGetter(a, rs, qp, "mode", fetchSlotStrGetter("\x00Qmode", "cors"));
@@ -45489,15 +45793,16 @@ fn installFetchTypes(env: *Environment, rs: *Shape, object_proto: *value.Object)
     try setNativeGetter(a, rs, qp, "keepalive", fetchBoolSlotGetter("\x00Qkeepalive"));
     try setNativeGetter(a, rs, qp, "destination", fetchSlotStrGetter("\x00__none", ""));
     try setNativeGetter(a, rs, qp, "referrer", fetchSlotStrGetter("\x00__none2", "about:client"));
-    inline for (.{ "url", "method", "headers", "bodyUsed", "cache", "credentials", "mode", "redirect", "integrity", "keepalive", "destination", "referrer" }) |g| {
+    inline for (.{ "url", "method", "headers", "body", "bodyUsed", "cache", "credentials", "mode", "redirect", "integrity", "keepalive", "destination", "referrer" }) |g| {
         try qp.setAttr(a, g, .{ .enumerable = true, .configurable = true });
     }
     try setNative(a, rs, qp, "clone", 0, requestCloneFn);
-    try setNative(a, rs, qp, "text", 0, bodyTextFn);
-    try setNative(a, rs, qp, "json", 0, bodyJsonFn);
-    try setNative(a, rs, qp, "arrayBuffer", 0, bodyArrayBufferFn);
-    try setNative(a, rs, qp, "bytes", 0, bodyBytesFn);
-    try setNative(a, rs, qp, "blob", 0, bodyBlobFn);
+    try setNative(a, rs, qp, "text", 0, fetchBodyMethod(.text));
+    try setNative(a, rs, qp, "json", 0, fetchBodyMethod(.json));
+    try setNative(a, rs, qp, "arrayBuffer", 0, fetchBodyMethod(.array_buffer));
+    try setNative(a, rs, qp, "bytes", 0, fetchBodyMethod(.bytes));
+    try setNative(a, rs, qp, "blob", 0, fetchBodyMethod(.blob));
+    try setNative(a, rs, qp, "formData", 0, fetchBodyMethod(.form_data));
     if (symKey(env, "toStringTag")) |k| {
         try qp.setOwn(a, rs, k, Value.str("Request"));
         try qp.setAttr(a, k, .{ .writable = false, .enumerable = false, .configurable = true });

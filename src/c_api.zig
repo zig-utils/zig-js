@@ -32206,3 +32206,121 @@ test "private ReadableStream FormData, locking, errors, and cancellation" {
     try std.testing.expect(JSGlobalObject__hasException(context));
     JSGlobalObject__clearException(context);
 }
+
+test "Fetch Body preserves ReadableStream lifecycle" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const context = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(context);
+    const internal = ctxForEvaluation(context) orelse return error.ContextCreateFailed;
+
+    _ = try internal.evaluate(
+        \\globalThis.__body407 = {};
+        \\let source407 = new ReadableStream({ pull(c) {
+        \\  return Promise.resolve().then(function () { c.enqueue("streamed"); c.close(); });
+        \\} });
+        \\let response407 = new Response(source407, { headers: { "content-type": "text/plain" } });
+        \\__body407.identity = response407.body === source407;
+        \\__body407.unused = response407.bodyUsed === false;
+        \\response407.text().then(function (text) { __body407.text = text; __body407.used = response407.bodyUsed; });
+        \\response407.bytes().then(
+        \\  function () { __body407.repeat = false; },
+        \\  function (error) { __body407.repeat = error instanceof TypeError; }
+        \\);
+        \\let buffered407 = new Response("abc", { headers: { "content-type": "Text/Plain" } });
+        \\__body407.bufferedStream = buffered407.body instanceof ReadableStream && !buffered407.bodyUsed;
+        \\buffered407.blob().then(function (blob) {
+        \\  __body407.blob = blob instanceof Blob && blob.size === 3 && blob.type === "text/plain";
+        \\});
+        \\let form407 = new Response("a=one&a=two", {
+        \\  headers: { "content-type": "application/x-www-form-urlencoded" }
+        \\});
+        \\form407.formData().then(function (form) {
+        \\  __body407.form = form instanceof FormData && form.getAll("a").join(",") === "one,two";
+        \\});
+        \\let lockedStream407 = new ReadableStream({});
+        \\let lockedResponse407 = new Response(lockedStream407);
+        \\let lockedReader407 = lockedStream407.getReader();
+        \\lockedResponse407.text().then(
+        \\  function () { __body407.locked = false; },
+        \\  function (error) { __body407.locked = error instanceof TypeError && !lockedResponse407.bodyUsed; }
+        \\);
+        \\let nullResponse407 = new Response();
+        \\nullResponse407.text().then(function (first) {
+        \\  nullResponse407.text().then(function (second) {
+        \\    __body407.nullBody = first === "" && second === "" && nullResponse407.body === null && !nullResponse407.bodyUsed;
+        \\  });
+        \\});
+        \\let requestStream407 = new ReadableStream({ start(c) { c.enqueue("request"); c.close(); } });
+        \\let request407 = new Request("https://example.test/", { method: "POST", body: requestStream407 });
+        \\__body407.requestIdentity = request407.body === requestStream407;
+        \\request407.text().then(function (text) { __body407.request = text === "request" && request407.bodyUsed; });
+        \\let cloneStream407 = new ReadableStream({ start(c) {
+        \\  Promise.resolve().then(function () { c.enqueue("cloned"); c.close(); });
+        \\} });
+        \\let cloneSource407 = new Response(cloneStream407, { headers: { "x-clone": "yes" } });
+        \\let cloneResponse407 = cloneSource407.clone();
+        \\gc();
+        \\cloneSource407.text().then(function (text) { __body407.cloneSource = text === "cloned"; });
+        \\cloneResponse407.text().then(function (text) {
+        \\  __body407.cloneResponse = text === "cloned" && cloneResponse407.headers.get("x-clone") === "yes";
+        \\});
+        \\let requestCloneStream407 = new ReadableStream({ start(c) { c.enqueue("request-clone"); c.close(); } });
+        \\let requestCloneSource407 = new Request("https://example.test/", { method: "POST", body: requestCloneStream407 });
+        \\let requestClone407 = requestCloneSource407.clone();
+        \\requestCloneSource407.text().then(function (text) { __body407.requestCloneSource = text === "request-clone"; });
+        \\requestClone407.text().then(function (text) { __body407.requestClone = text === "request-clone"; });
+        \\let transferredRequest407 = new Request("https://example.test/", { method: "POST", body: "transfer" });
+        \\let receivingRequest407 = new Request(transferredRequest407);
+        \\receivingRequest407.text().then(function (text) {
+        \\  __body407.requestTransfer = text === "transfer" && transferredRequest407.bodyUsed;
+        \\});
+        \\let errorResponse407 = new Response(new ReadableStream({ pull() { throw new Error("body-407"); } }));
+        \\errorResponse407.text().then(
+        \\  function () { __body407.error = false; },
+        \\  function (error) { __body407.error = error.message === "body-407" && errorResponse407.bodyUsed; }
+        \\);
+        \\globalThis.__cancelReasons407 = null;
+        \\let teeCancelSource407 = new ReadableStream({ cancel(reasons) { __cancelReasons407 = reasons; } });
+        \\let teeCancelBranches407 = teeCancelSource407.tee();
+        \\teeCancelBranches407[0].cancel("one").then(function () { __body407.teeCancel1 = true; });
+        \\teeCancelBranches407[1].cancel("two").then(function () { __body407.teeCancel2 = true; });
+        \\Promise.resolve().then(function () {
+        \\  __body407.teeReasons = __cancelReasons407[0] === "one" && __cancelReasons407[1] === "two";
+        \\});
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate(
+        \\Object.keys(__body407).length === 21 &&
+        \\Object.values(__body407).every(Boolean) &&
+        \\__body407.text === "streamed"
+    )).asBool());
+
+    const detached = try internal.evaluate(
+        \\globalThis.__detachedChunk407 = new Uint8Array([4, 0, 7]);
+        \\globalThis.__detachedResponse407 = new Response(new ReadableStream({ start(c) {
+        \\  c.enqueue(__detachedChunk407); c.close();
+        \\} }));
+        \\__detachedChunk407
+    );
+    detached.asObj().typedArray().?.buffer.arrayBuffer().?.setDetached(true);
+    _ = try internal.evaluate(
+        \\globalThis.__detachedRejected407 = false;
+        \\__detachedResponse407.bytes().catch(function (error) {
+        \\  __detachedRejected407 = error instanceof TypeError && __detachedResponse407.bodyUsed;
+        \\});
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(context);
+    try std.testing.expect((try internal.evaluate("__detachedRejected407")).asBool());
+
+    const sibling = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(sibling);
+    const sibling_internal = ctxForEvaluation(sibling) orelse return error.ContextCreateFailed;
+    _ = try sibling_internal.evaluate(
+        \\globalThis.__siblingBody407 = false;
+        \\new Response(new ReadableStream({ start(c) { c.enqueue("sibling"); c.close(); } }))
+        \\  .text().then(function (text) { __siblingBody407 = text === "sibling"; });
+    );
+    _ = JSC__JSGlobalObject__drainMicrotasks(sibling);
+    try std.testing.expect((try sibling_internal.evaluate("__siblingBody407")).asBool());
+}
