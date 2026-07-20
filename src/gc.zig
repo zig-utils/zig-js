@@ -629,6 +629,13 @@ pub fn relocateObjectWeakState(o: *Object, v: anytype) void {
     };
 }
 
+pub fn relocateObjectNativePrivateData(o: *Object, v: anytype) void {
+    promise.relocateNativePrivateData(o, v);
+    interp.relocateNativePrivateData(o, v);
+    jsthread.relocateNativePrivateData(o, v);
+    vm.relocateNativePrivateData(o, v);
+}
+
 test "weak and finalization relocation never resolves dead targets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

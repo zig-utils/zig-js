@@ -15,6 +15,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gc_mod = @import("gc.zig");
+const gc_relocation = @import("gc_relocation.zig");
 const ast = @import("ast.zig");
 const bc = @import("bytecode.zig");
 const value = @import("value.zig");
@@ -6032,6 +6033,51 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         const result: *value.Object = @ptrCast(@alignCast(pd));
         v.mark(result);
     }
+}
+
+pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
+    const nf = o.native orelse return;
+    if (o.private_data == null) return;
+    if (nf == asyncOnFulfill or nf == asyncOnReject or
+        nf == agOnFulfill or nf == agOnReject or
+        nf == agReturnFulfill or nf == agReturnReject or
+        nf == agDoneReturnFulfill or nf == agDoneReturnReject)
+    {
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+    }
+}
+
+test "vm native private relocation mirrors async resume tracing" {
+    var old_generator: Generator = undefined;
+    var new_generator: Generator = undefined;
+    var old_result: value.Object = undefined;
+    var new_result: value.Object = undefined;
+    var resume_object = value.Object{ .native = asyncOnFulfill, .private_data = @ptrCast(&old_generator) };
+    var done = value.Object{ .native = agDoneReturnFulfill, .private_data = @ptrCast(&old_result) };
+
+    const Plan = struct {
+        old_generator: *Generator,
+        new_generator: *Generator,
+        old_result: *value.Object,
+        new_result: *value.Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            if (old == @as(*anyopaque, @ptrCast(self.old_generator))) return @ptrCast(self.new_generator);
+            if (old == @as(*anyopaque, @ptrCast(self.old_result))) return @ptrCast(self.new_result);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_generator = &old_generator,
+        .new_generator = &new_generator,
+        .old_result = &old_result,
+        .new_result = &new_result,
+    };
+    relocateNativePrivateData(&resume_object, &plan);
+    relocateNativePrivateData(&done, &plan);
+
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_generator)), resume_object.private_data.?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_result)), done.private_data.?);
 }
 
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors

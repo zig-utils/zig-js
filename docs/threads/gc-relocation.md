@@ -110,6 +110,13 @@ weak-collection, ephemeron, callback/held, and unregister-token slots rewrite.
 The pointer-keyed weak lookup cache is cleared because its old-address hashes
 are invalid; linear lookup remains correct and later mutations repopulate it.
 
+Engine-owned native payloads gain paired mutating hooks in
+[#347](https://github.com/zig-utils/zig-js/issues/347). Promise resolver state,
+interpreter Promise/iterator/combinator captures, VM async-resume links, and
+Thread lock/condition/TLS/release queues now rewrite their hidden roots while
+host-opaque payloads remain untouched. The audit also added the previously
+missing `Promise.prototype.finally` constructor edge to marking.
+
 ## Safepoint Rule
 
 A raw old-space address is valid only while the relocation safepoint is held

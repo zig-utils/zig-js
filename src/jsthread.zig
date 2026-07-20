@@ -14,6 +14,7 @@
 const std = @import("std");
 const io_compat = @import("io_compat.zig");
 const gc_mod = @import("gc.zig");
+const gc_relocation = @import("gc_relocation.zig");
 const stack_scan = @import("stack_scan.zig");
 const value = @import("value.zig");
 const strcell = @import("strcell.zig");
@@ -1492,6 +1493,114 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         },
         .jsthread_thread, .jsthread_unlock_token, .abort_signal, .host, .none => {},
     }
+}
+
+fn relocateHoldJob(job: *HoldJob, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, value.Object, &job.lock.owner);
+    gc_relocation.rewriteRequiredSlot(v, value.Object, &job.outer);
+    gc_relocation.rewriteOptionalValueSlot(v, &job.cb);
+}
+
+fn relocateLockRecordRoots(record: *LockRecord, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, value.Object, &record.owner);
+    for (record.pending_front.items) |job| relocateHoldJob(job, v);
+    for (record.pending.items[record.pending_head..]) |job| relocateHoldJob(job, v);
+}
+
+fn relocateCondRecordRoots(record: *CondRecord, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, value.Object, &record.owner);
+    for (record.queue.items[record.queue_head..]) |entry| switch (entry) {
+        .sync => {},
+        .asynchronous => |waiter| {
+            gc_relocation.rewriteOptionalSlot(v, value.Object, &waiter.lock.owner);
+            gc_relocation.rewriteRequiredSlot(v, value.Object, &waiter.outer);
+        },
+    };
+}
+
+fn relocateThreadLocalRoots(record: *TLRecord, v: anytype) void {
+    gc_relocation.rewriteOptionalSlot(v, value.Object, &record.owner);
+    var it = record.map.valueIterator();
+    while (it.next()) |slot| gc_relocation.rewriteValueSlot(v, slot);
+}
+
+pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
+    const pd = o.private_data orelse return;
+    switch (o.private_data_tag) {
+        .jsthread_lock => relocateLockRecordRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_condition => relocateCondRecordRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_thread_local => relocateThreadLocalRoots(@ptrCast(@alignCast(pd)), v),
+        .jsthread_release_state => {
+            const state: *ReleaseState = @ptrCast(@alignCast(pd));
+            relocateLockRecordRoots(state.lock, v);
+        },
+        .jsthread_thread, .jsthread_unlock_token, .abort_signal, .host, .none => {},
+    }
+}
+
+test "jsthread native private relocation mirrors every traced payload" {
+    var old_objects: [9]value.Object = undefined;
+    var new_objects: [9]value.Object = undefined;
+    var lock = LockRecord{ .gil = undefined, .owner = &old_objects[0] };
+    var hold = HoldJob{
+        .lock = &lock,
+        .outer = &old_objects[1],
+        .cb = Value.obj(&old_objects[2]),
+        .release_state = .{ .lock = &lock },
+    };
+    var pending = [_]*HoldJob{&hold};
+    lock.pending = .{ .items = &pending, .capacity = pending.len };
+
+    var waiter_lock = LockRecord{ .gil = undefined, .owner = &old_objects[4] };
+    var waiter = AsyncCondWaiter{ .lock = &waiter_lock, .outer = &old_objects[5] };
+    var queue = [_]CondEntry{.{ .asynchronous = &waiter }};
+    var condition = CondRecord{
+        .gil = undefined,
+        .owner = &old_objects[3],
+        .queue = .{ .items = &queue, .capacity = queue.len },
+    };
+
+    var thread_local = TLRecord{
+        .gil = undefined,
+        .arena = std.testing.allocator,
+        .owner = &old_objects[6],
+    };
+    defer thread_local.map.deinit(std.testing.allocator);
+    try thread_local.map.put(std.testing.allocator, 7, Value.obj(&old_objects[7]));
+    var release_lock = LockRecord{ .gil = undefined, .owner = &old_objects[8] };
+    var release = ReleaseState{ .lock = &release_lock };
+
+    var lock_object = value.Object{ .private_data = &lock, .private_data_tag = .jsthread_lock };
+    var condition_object = value.Object{ .private_data = &condition, .private_data_tag = .jsthread_condition };
+    var local_object = value.Object{ .private_data = &thread_local, .private_data_tag = .jsthread_thread_local };
+    var release_object = value.Object{ .private_data = &release, .private_data_tag = .jsthread_release_state };
+
+    const Plan = struct {
+        old_objects: *[9]value.Object,
+        new_objects: *[9]value.Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            return old;
+        }
+    };
+    const plan = Plan{ .old_objects = &old_objects, .new_objects = &new_objects };
+    relocateNativePrivateData(&lock_object, &plan);
+    relocateNativePrivateData(&condition_object, &plan);
+    relocateNativePrivateData(&local_object, &plan);
+    relocateNativePrivateData(&release_object, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], lock.owner.?);
+    try std.testing.expectEqual(&new_objects[1], hold.outer);
+    try std.testing.expectEqual(&new_objects[2], hold.cb.?.asObj());
+    try std.testing.expectEqual(&new_objects[3], condition.owner.?);
+    try std.testing.expectEqual(&new_objects[4], waiter_lock.owner.?);
+    try std.testing.expectEqual(&new_objects[5], waiter.outer);
+    try std.testing.expectEqual(&new_objects[6], thread_local.owner.?);
+    try std.testing.expectEqual(&new_objects[7], thread_local.map.get(7).?.asObj());
+    try std.testing.expectEqual(&new_objects[8], release_lock.owner.?);
 }
 
 test "jsthread private-data tracer ignores unowned opaque data" {

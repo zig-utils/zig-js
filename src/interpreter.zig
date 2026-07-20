@@ -17,6 +17,7 @@ const gil_mod = @import("gil.zig");
 const stack_scan = @import("stack_scan.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
+const gc_relocation = @import("gc_relocation.zig");
 const jit = @import("jit.zig");
 const jsthread = @import("jsthread.zig");
 const parser_mod = @import("parser.zig");
@@ -16381,6 +16382,7 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
     if (nf == finallyReactionFn or nf == finallyThunkFn) {
         const data: *FinallyData = @ptrCast(@alignCast(pd));
         tracePrivateValue(v, data.on_finally);
+        tracePrivateValue(v, data.ctor);
         tracePrivateValue(v, data.captured);
         return;
     }
@@ -16406,6 +16408,115 @@ pub fn traceNativePrivateData(o: *value.Object, v: anytype) void {
         tracePrivateValue(v, cap.resolve);
         tracePrivateValue(v, cap.reject);
     }
+}
+
+pub fn relocateNativePrivateData(o: *value.Object, v: anytype) void {
+    const nf = o.native orelse return;
+    const pd = o.private_data orelse return;
+
+    if (nf == finallyReactionFn or nf == finallyThunkFn) {
+        const data: *FinallyData = @ptrCast(@alignCast(pd));
+        gc_relocation.rewriteValueSlot(v, &data.on_finally);
+        gc_relocation.rewriteValueSlot(v, &data.ctor);
+        gc_relocation.rewriteValueSlot(v, &data.captured);
+        return;
+    }
+    if (nf == asyncFromSyncFulfillFn or nf == asyncFromSyncRejectFn) {
+        const data: *AsyncFromSyncData = @ptrCast(@alignCast(pd));
+        gc_relocation.rewriteValueSlot(v, &data.sync_iter);
+        gc_relocation.rewriteRequiredSlot(v, promise.Promise, &data.promise);
+        return;
+    }
+    if (nf == combineElemFn) {
+        const elem: *promise.Elem = @ptrCast(@alignCast(pd));
+        const combine = elem.combine;
+        gc_relocation.rewriteValueSlot(v, &combine.resolve);
+        gc_relocation.rewriteValueSlot(v, &combine.reject);
+        gc_relocation.rewriteRequiredSlot(v, value.Object, &combine.values);
+        return;
+    }
+    if (nf == capabilityExecutorFn) {
+        const capture: *CapCapture = @ptrCast(@alignCast(pd));
+        gc_relocation.rewriteValueSlot(v, &capture.resolve);
+        gc_relocation.rewriteValueSlot(v, &capture.reject);
+    }
+}
+
+test "interpreter native private relocation mirrors every traced payload" {
+    var old_objects: [9]value.Object = undefined;
+    var new_objects: [9]value.Object = undefined;
+    var old_promise: promise.Promise = .{};
+    var new_promise: promise.Promise = .{};
+    var finally_data = FinallyData{
+        .on_finally = Value.obj(&old_objects[0]),
+        .ctor = Value.obj(&old_objects[1]),
+        .captured = Value.obj(&old_objects[2]),
+        .is_catch = false,
+    };
+    var async_data = AsyncFromSyncData{
+        .sync_iter = Value.obj(&old_objects[3]),
+        .promise = &old_promise,
+        .done = false,
+        .close_on_rejection = true,
+    };
+    var combine = promise.Combine{
+        .resolve = Value.obj(&old_objects[4]),
+        .reject = Value.obj(&old_objects[5]),
+        .values = &old_objects[6],
+        .remaining = 1,
+        .kind = .all,
+    };
+    var already = false;
+    var elem = promise.Elem{
+        .combine = &combine,
+        .index = 0,
+        .is_reject = false,
+        .already = &already,
+    };
+    var capture = CapCapture{
+        .resolve = Value.obj(&old_objects[7]),
+        .reject = Value.obj(&old_objects[8]),
+    };
+    var finally_object = value.Object{ .native = finallyReactionFn, .private_data = &finally_data };
+    var async_object = value.Object{ .native = asyncFromSyncFulfillFn, .private_data = &async_data };
+    var combine_object = value.Object{ .native = combineElemFn, .private_data = &elem };
+    var capture_object = value.Object{ .native = capabilityExecutorFn, .private_data = &capture };
+
+    const Plan = struct {
+        old_objects: *[9]value.Object,
+        new_objects: *[9]value.Object,
+        old_promise: *promise.Promise,
+        new_promise: *promise.Promise,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            for (self.old_objects, 0..) |*object, index|
+                if (old == @as(*anyopaque, @ptrCast(object)))
+                    return @ptrCast(&self.new_objects[index]);
+            if (old == @as(*anyopaque, @ptrCast(self.old_promise))) return @ptrCast(self.new_promise);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_objects = &old_objects,
+        .new_objects = &new_objects,
+        .old_promise = &old_promise,
+        .new_promise = &new_promise,
+    };
+    relocateNativePrivateData(&finally_object, &plan);
+    relocateNativePrivateData(&async_object, &plan);
+    relocateNativePrivateData(&combine_object, &plan);
+    relocateNativePrivateData(&capture_object, &plan);
+
+    try std.testing.expectEqual(&new_objects[0], finally_data.on_finally.asObj());
+    try std.testing.expectEqual(&new_objects[1], finally_data.ctor.asObj());
+    try std.testing.expectEqual(&new_objects[2], finally_data.captured.asObj());
+    try std.testing.expectEqual(&new_objects[3], async_data.sync_iter.asObj());
+    try std.testing.expectEqual(&new_promise, async_data.promise);
+    try std.testing.expectEqual(&new_objects[4], combine.resolve.asObj());
+    try std.testing.expectEqual(&new_objects[5], combine.reject.asObj());
+    try std.testing.expectEqual(&new_objects[6], combine.values);
+    try std.testing.expectEqual(&new_objects[7], capture.resolve.asObj());
+    try std.testing.expectEqual(&new_objects[8], capture.reject.asObj());
 }
 
 /// IteratorStep + IteratorValue: advance `iter`, returning the next value or

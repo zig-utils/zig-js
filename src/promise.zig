@@ -13,6 +13,7 @@
 const std = @import("std");
 const gc_runtime = @import("gc_runtime.zig");
 const gc_mod = @import("gc.zig");
+const gc_relocation = @import("gc_relocation.zig");
 const value = @import("value.zig");
 const interp = @import("interpreter.zig");
 const promise_profile = @import("promise_profile.zig");
@@ -471,6 +472,53 @@ pub fn traceNativePrivateData(o: *Object, v: anytype) void {
         v.mark(state);
         if (resolvingTarget(state)) |p| v.mark(p);
     }
+}
+
+pub fn relocateNativePrivateData(o: *Object, v: anytype) void {
+    const nf = o.native orelse return;
+    if (nf == resolveThunk) {
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+        return;
+    }
+    if (nf == rejectThunk) {
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &o.private_data);
+        const state: *Object = @ptrCast(@alignCast(o.private_data orelse return));
+        gc_relocation.rewriteOptionalSlot(v, anyopaque, &state.private_data);
+    }
+}
+
+test "promise native private relocation mirrors resolving closure tracing" {
+    var old_promise: Promise = .{};
+    var new_promise: Promise = .{};
+    var old_state = Object{ .native = resolveThunk, .private_data = @ptrCast(&old_promise) };
+    var new_state = Object{ .native = resolveThunk, .private_data = @ptrCast(&old_promise) };
+    var resolve_object = Object{ .native = resolveThunk, .private_data = @ptrCast(&old_promise) };
+    var reject_object = Object{ .native = rejectThunk, .private_data = @ptrCast(&old_state) };
+
+    const Plan = struct {
+        old_promise: *Promise,
+        new_promise: *Promise,
+        old_state: *Object,
+        new_state: *Object,
+
+        pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
+            if (old == @as(*anyopaque, @ptrCast(self.old_promise))) return @ptrCast(self.new_promise);
+            if (old == @as(*anyopaque, @ptrCast(self.old_state))) return @ptrCast(self.new_state);
+            return old;
+        }
+    };
+    const plan = Plan{
+        .old_promise = &old_promise,
+        .new_promise = &new_promise,
+        .old_state = &old_state,
+        .new_state = &new_state,
+    };
+    relocateNativePrivateData(&resolve_object, &plan);
+    relocateNativePrivateData(&reject_object, &plan);
+
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), resolve_object.private_data.?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_state)), reject_object.private_data.?);
+    try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_promise)), new_state.private_data.?);
 }
 
 /// Allocate a fresh pending Promise object (proto = `Promise.prototype`).
