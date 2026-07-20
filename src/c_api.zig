@@ -849,6 +849,7 @@ const CContextGroup = struct {
 const PrivateHeapSnapshotNode = struct {
     id: u64,
     size: usize,
+    external_size: usize,
     name: []const u8,
     kind: gc_mod.CellKind,
     pointer: *anyopaque,
@@ -882,6 +883,9 @@ fn privateHeapSnapshotObjectName(object: *const Object) []const u8 {
     if (object.is_bigint) return "BigInt";
     if (object.is_array) return "Array";
     if (object.is_arguments) return "Arguments";
+    if (object.typedArray()) |typed| return privateTypedArrayClassInfoName(typed.kind);
+    if (object.dataView() != null) return "DataView";
+    if (object.arrayBuffer()) |buffer| return if (buffer.is_shared) "SharedArrayBuffer" else "ArrayBuffer";
     if (object.behavior.is_regex) return "RegExp";
     if (object.behavior.is_date) return "Date";
     if (object.behavior.is_error) return object.errorName();
@@ -914,26 +918,45 @@ fn privateHeapSnapshotNodeName(cell: ReachabilityCell) []const u8 {
     };
 }
 
-fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) usize {
+const PrivateHeapSnapshotSize = struct {
+    shallow: usize,
+    external: usize = 0,
+};
+
+fn privateHeapSnapshotFallbackSize(cell: ReachabilityCell) !PrivateHeapSnapshotSize {
     return switch (cell.kind) {
         .object => blk: {
             const object: *Object = @ptrCast(@alignCast(cell.pointer));
             const external_slots = object.slotsItems().len -| Object.inline_slot_capacity;
-            break :blk @sizeOf(Object) +
-                external_slots * @sizeOf(Value) +
-                object.elementsItems().len * @sizeOf(Value);
+            var shallow = try std.math.add(
+                usize,
+                @sizeOf(Object),
+                try std.math.mul(usize, external_slots, @sizeOf(Value)),
+            );
+            shallow = try std.math.add(
+                usize,
+                shallow,
+                try std.math.mul(usize, object.elementsItems().len, @sizeOf(Value)),
+            );
+            var external: usize = 0;
+            if (object.arrayBuffer()) |buffer| {
+                shallow = try std.math.add(usize, shallow, @sizeOf(value.ArrayBufferData));
+                external = if (buffer.isDetached()) 0 else buffer.bytes().len;
+                shallow = try std.math.add(usize, shallow, external);
+            }
+            break :blk .{ .shallow = shallow, .external = external };
         },
         .string => blk: {
             const string: *strcell.StringCell = @ptrCast(@alignCast(cell.pointer));
-            break :blk @sizeOf(strcell.StringCell) + string.bytes.len;
+            break :blk .{ .shallow = try std.math.add(usize, @sizeOf(strcell.StringCell), string.bytes.len) };
         },
-        .environment => @sizeOf(interp.Environment),
-        .function => @sizeOf(interp.Function),
-        .bound_fn => @sizeOf(interp.Interpreter.BoundFn),
-        .promise => @sizeOf(promise.Promise),
-        .generator => @sizeOf(vm.Generator),
-        .iter_helper => @sizeOf(value.IterHelper),
-        .module_ns => @sizeOf(interp.ModuleNs),
+        .environment => .{ .shallow = @sizeOf(interp.Environment) },
+        .function => .{ .shallow = @sizeOf(interp.Function) },
+        .bound_fn => .{ .shallow = @sizeOf(interp.Interpreter.BoundFn) },
+        .promise => .{ .shallow = @sizeOf(promise.Promise) },
+        .generator => .{ .shallow = @sizeOf(vm.Generator) },
+        .iter_helper => .{ .shallow = @sizeOf(value.IterHelper) },
+        .module_ns => .{ .shallow = @sizeOf(interp.ModuleNs) },
     };
 }
 
@@ -952,12 +975,12 @@ fn privateHeapSnapshotCellId(group: *CContextGroup, pointer: *anyopaque) !u64 {
     return id;
 }
 
-fn privateBuildHeapSnapshotGraph(group: *CContextGroup) !ReachabilityVisitor {
+fn privateBuildHeapSnapshotGraph(group: *CContextGroup, allocator: std.mem.Allocator) !ReachabilityVisitor {
     // GCDebugging snapshots are taken after a full collection. Arena VMs have
     // VM-lifetime storage, but use the same semantic root walk and weak-edge
     // policy, so their graph still contains exactly the strongly reachable set.
     if (group.primary.gc != null) group.primary.collectGarbage();
-    var visitor = ReachabilityVisitor{ .allocator = gpa };
+    var visitor = ReachabilityVisitor{ .allocator = allocator };
     errdefer visitor.deinit();
     var primary_binding = gc_mod.Binding{ .context = group.primary };
     primary_binding.traceRoots(&visitor);
@@ -978,13 +1001,19 @@ fn privateBuildHeapSnapshotGraph(group: *CContextGroup) !ReachabilityVisitor {
     return visitor;
 }
 
-fn privateHeapSnapshotNodes(group: *CContextGroup, visitor: *const ReachabilityVisitor) ![]PrivateHeapSnapshotNode {
-    const nodes = try gpa.alloc(PrivateHeapSnapshotNode, visitor.queue.items.len);
-    errdefer gpa.free(nodes);
+fn privateHeapSnapshotNodes(
+    group: *CContextGroup,
+    visitor: *const ReachabilityVisitor,
+    allocator: std.mem.Allocator,
+) ![]PrivateHeapSnapshotNode {
+    const nodes = try allocator.alloc(PrivateHeapSnapshotNode, visitor.queue.items.len);
+    errdefer allocator.free(nodes);
     for (visitor.queue.items, nodes) |cell, *node| {
+        const size = try privateHeapSnapshotFallbackSize(cell);
         node.* = .{
             .id = try privateHeapSnapshotCellId(group, cell.pointer),
-            .size = privateHeapSnapshotFallbackSize(cell),
+            .size = size.shallow,
+            .external_size = size.external,
             .name = privateHeapSnapshotNodeName(cell),
             .kind = cell.kind,
             .pointer = cell.pointer,
@@ -993,20 +1022,125 @@ fn privateHeapSnapshotNodes(group: *CContextGroup, visitor: *const ReachabilityV
     return nodes;
 }
 
+fn privateHeapSnapshotRetainedSizes(
+    nodes: []const PrivateHeapSnapshotNode,
+    edges: []const ReachabilityEdge,
+    allocator: std.mem.Allocator,
+) ![]usize {
+    const node_count = nodes.len + 1; // include the synthetic root
+    const Lists = std.ArrayListUnmanaged(usize);
+    const successors = try allocator.alloc(Lists, node_count);
+    defer allocator.free(successors);
+    const predecessors = try allocator.alloc(Lists, node_count);
+    defer allocator.free(predecessors);
+    @memset(successors, .empty);
+    @memset(predecessors, .empty);
+    defer {
+        for (successors) |*list| list.deinit(allocator);
+        for (predecessors) |*list| list.deinit(allocator);
+    }
+    for (edges) |edge| {
+        try successors[edge.from_index].append(allocator, edge.to_index);
+        try predecessors[edge.to_index].append(allocator, edge.from_index);
+    }
+
+    const visited = try allocator.alloc(bool, node_count);
+    defer allocator.free(visited);
+    @memset(visited, false);
+    const Frame = struct { node: usize, next_successor: usize = 0 };
+    var stack: std.ArrayListUnmanaged(Frame) = .empty;
+    defer stack.deinit(allocator);
+    var postorder: std.ArrayListUnmanaged(usize) = .empty;
+    defer postorder.deinit(allocator);
+    visited[0] = true;
+    try stack.append(allocator, .{ .node = 0 });
+    while (stack.items.len != 0) {
+        const frame = &stack.items[stack.items.len - 1];
+        if (frame.next_successor < successors[frame.node].items.len) {
+            const child = successors[frame.node].items[frame.next_successor];
+            frame.next_successor += 1;
+            if (!visited[child]) {
+                visited[child] = true;
+                try stack.append(allocator, .{ .node = child });
+            }
+        } else {
+            try postorder.append(allocator, frame.node);
+            _ = stack.pop();
+        }
+    }
+    if (postorder.items.len != node_count) return error.InvalidHeapSnapshotGraph;
+
+    const rpo_index = try allocator.alloc(usize, node_count);
+    defer allocator.free(rpo_index);
+    for (0..node_count) |index|
+        rpo_index[postorder.items[node_count - index - 1]] = index;
+    const immediate_dominator = try allocator.alloc(?usize, node_count);
+    defer allocator.free(immediate_dominator);
+    @memset(immediate_dominator, null);
+    immediate_dominator[0] = 0;
+
+    const intersect = struct {
+        fn call(idom: []const ?usize, order: []const usize, left_: usize, right_: usize) usize {
+            var left = left_;
+            var right = right_;
+            while (left != right) {
+                while (order[left] > order[right]) left = idom[left].?;
+                while (order[right] > order[left]) right = idom[right].?;
+            }
+            return left;
+        }
+    }.call;
+    var changed = true;
+    while (changed) {
+        changed = false;
+        var rpo: usize = 1;
+        while (rpo < node_count) : (rpo += 1) {
+            const node = postorder.items[node_count - rpo - 1];
+            var new_idom: ?usize = null;
+            for (predecessors[node].items) |predecessor| {
+                if (immediate_dominator[predecessor] == null) continue;
+                new_idom = if (new_idom) |current|
+                    intersect(immediate_dominator, rpo_index, predecessor, current)
+                else
+                    predecessor;
+            }
+            const candidate = new_idom orelse return error.InvalidHeapSnapshotGraph;
+            if (immediate_dominator[node] == null or immediate_dominator[node].? != candidate) {
+                immediate_dominator[node] = candidate;
+                changed = true;
+            }
+        }
+    }
+
+    const retained = try allocator.alloc(usize, node_count);
+    errdefer allocator.free(retained);
+    retained[0] = 0;
+    for (nodes, 1..) |node, index| retained[index] = node.size;
+    var rpo = node_count;
+    while (rpo > 1) {
+        rpo -= 1;
+        const node = postorder.items[node_count - rpo - 1];
+        const dominator = immediate_dominator[node].?;
+        retained[dominator] = try std.math.add(usize, retained[dominator], retained[node]);
+    }
+    return retained;
+}
+
 fn privateSnapshotAppendFmt(
     output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
     comptime format: []const u8,
     args: anytype,
 ) !void {
     var buffer: [192]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, format, args);
-    try output.appendSlice(gpa, text);
+    try output.appendSlice(allocator, text);
 }
 
-fn privateSnapshotAppendJsonValue(output: *std.ArrayListUnmanaged(u8), value_: anytype) !void {
-    const encoded = try std.json.Stringify.valueAlloc(gpa, value_, .{});
-    defer gpa.free(encoded);
-    try output.appendSlice(gpa, encoded);
+fn privateSnapshotAppendJsonValue(output: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, value_: anytype) !void {
+    const encoded = try std.json.Stringify.valueAlloc(allocator, value_, .{});
+    defer allocator.free(encoded);
+    try output.appendSlice(allocator, encoded);
 }
 
 fn privateHeapSnapshotEdgeName(strings: *PrivateHeapSnapshotStrings, edge: ReachabilityEdge) !u64 {
@@ -1040,28 +1174,28 @@ fn privateHeapSnapshotClassName(node: PrivateHeapSnapshotNode) []const u8 {
     };
 }
 
-fn privateGenerateHeapSnapshotV8(group: *CContextGroup) ![]u8 {
-    var visitor = try privateBuildHeapSnapshotGraph(group);
+fn privateGenerateHeapSnapshotV8(group: *CContextGroup, allocator: std.mem.Allocator) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group, allocator);
     defer visitor.deinit();
-    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor);
-    defer gpa.free(snapshot_nodes);
+    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor, allocator);
+    defer allocator.free(snapshot_nodes);
 
-    var strings = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    var strings = PrivateHeapSnapshotStrings{ .allocator = allocator };
     defer strings.deinit();
     const root_name = try strings.intern("(root)");
     var nodes: std.ArrayListUnmanaged(u64) = .empty;
-    defer nodes.deinit(gpa);
+    defer nodes.deinit(allocator);
     var edges: std.ArrayListUnmanaged(u64) = .empty;
-    defer edges.deinit(gpa);
-    const edge_counts = try gpa.alloc(u64, snapshot_nodes.len + 1);
-    defer gpa.free(edge_counts);
+    defer edges.deinit(allocator);
+    const edge_counts = try allocator.alloc(u64, snapshot_nodes.len + 1);
+    defer allocator.free(edge_counts);
     @memset(edge_counts, 0);
     for (visitor.edges.items) |edge| edge_counts[edge.from_index] += 1;
 
-    try nodes.appendSlice(gpa, &.{ 9, root_name, 1, 0, edge_counts[0], 0, 0 });
+    try nodes.appendSlice(allocator, &.{ 9, root_name, 1, 0, edge_counts[0], 0, 0 });
     for (snapshot_nodes, 1..) |node, node_index| {
         const name_index = try strings.intern(node.name);
-        try nodes.appendSlice(gpa, &.{
+        try nodes.appendSlice(allocator, &.{
             privateHeapSnapshotV8NodeType(node),
             name_index,
             node.id,
@@ -1078,7 +1212,7 @@ fn privateGenerateHeapSnapshotV8(group: *CContextGroup) ![]u8 {
             .property => 2,
             .internal => 3,
         };
-        try edges.appendSlice(gpa, &.{
+        try edges.appendSlice(allocator, &.{
             edge_type,
             try privateHeapSnapshotEdgeName(&strings, edge),
             edge.to_index * 7,
@@ -1086,40 +1220,40 @@ fn privateGenerateHeapSnapshotV8(group: *CContextGroup) ![]u8 {
     }
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer output.deinit(gpa);
-    try output.appendSlice(gpa, "{\"snapshot\":{\"meta\":{\"node_fields\":[\"type\",\"name\",\"id\",\"self_size\",\"edge_count\",\"trace_node_id\",\"detachedness\"]," ++
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"snapshot\":{\"meta\":{\"node_fields\":[\"type\",\"name\",\"id\",\"self_size\",\"edge_count\",\"trace_node_id\",\"detachedness\"]," ++
         "\"node_types\":[[\"hidden\",\"array\",\"string\",\"object\",\"code\",\"closure\",\"regexp\",\"number\",\"native\",\"synthetic\",\"concatenated string\",\"sliced string\",\"symbol\",\"bigint\",\"object shape\"],\"string\",\"number\",\"number\",\"number\",\"number\",\"number\"]," ++
         "\"edge_fields\":[\"type\",\"name_or_index\",\"to_node\"],\"edge_types\":[[\"context\",\"element\",\"property\",\"internal\",\"hidden\",\"shortcut\",\"weak\"],\"string_or_number\",\"node\"]," ++
         "\"trace_function_info_fields\":[\"function_id\",\"name\",\"script_name\",\"script_id\",\"line\",\"column\"],\"trace_node_fields\":[\"id\",\"function_info_index\",\"count\",\"size\",\"children\"],\"sample_fields\":[\"timestamp_us\",\"last_assigned_id\"],\"location_fields\":[\"object_index\",\"script_id\",\"line\",\"column\"]},\"node_count\":");
-    try privateSnapshotAppendFmt(&output, "{d},\"edge_count\":{d},\"trace_function_count\":0}},\"nodes\":", .{ snapshot_nodes.len + 1, visitor.edges.items.len });
-    try privateSnapshotAppendJsonValue(&output, nodes.items);
-    try output.appendSlice(gpa, ",\"edges\":");
-    try privateSnapshotAppendJsonValue(&output, edges.items);
-    try output.appendSlice(gpa, ",\"trace_function_infos\":[],\"trace_tree\":[],\"samples\":[],\"locations\":[],\"strings\":");
-    try privateSnapshotAppendJsonValue(&output, strings.items.items);
-    try output.append(gpa, '}');
-    return try output.toOwnedSlice(gpa);
+    try privateSnapshotAppendFmt(&output, allocator, "{d},\"edge_count\":{d},\"trace_function_count\":0}},\"nodes\":", .{ snapshot_nodes.len + 1, visitor.edges.items.len });
+    try privateSnapshotAppendJsonValue(&output, allocator, nodes.items);
+    try output.appendSlice(allocator, ",\"edges\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, edges.items);
+    try output.appendSlice(allocator, ",\"trace_function_infos\":[],\"trace_tree\":[],\"samples\":[],\"locations\":[],\"strings\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, strings.items.items);
+    try output.append(allocator, '}');
+    return try output.toOwnedSlice(allocator);
 }
 
-fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup) ![]u8 {
-    var visitor = try privateBuildHeapSnapshotGraph(group);
+fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup, allocator: std.mem.Allocator) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group, allocator);
     defer visitor.deinit();
-    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor);
-    defer gpa.free(snapshot_nodes);
+    const snapshot_nodes = try privateHeapSnapshotNodes(group, &visitor, allocator);
+    defer allocator.free(snapshot_nodes);
 
-    var class_names = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    var class_names = PrivateHeapSnapshotStrings{ .allocator = allocator };
     defer class_names.deinit();
-    var edge_names = PrivateHeapSnapshotStrings{ .allocator = gpa };
+    var edge_names = PrivateHeapSnapshotStrings{ .allocator = allocator };
     defer edge_names.deinit();
     const root_class = try class_names.intern("(root)");
     _ = try edge_names.intern("");
-    const class_indices = try gpa.alloc(u32, snapshot_nodes.len);
-    defer gpa.free(class_indices);
+    const class_indices = try allocator.alloc(u32, snapshot_nodes.len);
+    defer allocator.free(class_indices);
     for (snapshot_nodes, class_indices) |node, *index|
         index.* = try class_names.intern(privateHeapSnapshotClassName(node));
 
     var edges: std.ArrayListUnmanaged(u64) = .empty;
-    defer edges.deinit(gpa);
+    defer edges.deinit(allocator);
     for (visitor.edges.items) |edge| {
         if (edge.from_index == 0) continue;
         const edge_type: u64 = switch (edge.kind) {
@@ -1133,7 +1267,7 @@ fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup) ![]u8 {
             .string => |name| try edge_names.intern(name),
             .index => |index| index,
         };
-        try edges.appendSlice(gpa, &.{
+        try edges.appendSlice(allocator, &.{
             snapshot_nodes[edge.from_index - 1].id,
             snapshot_nodes[edge.to_index - 1].id,
             edge_type,
@@ -1141,18 +1275,18 @@ fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup) ![]u8 {
         });
     }
     var roots: std.ArrayListUnmanaged(u64) = .empty;
-    defer roots.deinit(gpa);
+    defer roots.deinit(allocator);
     for (visitor.roots.items) |root_index|
-        try roots.appendSlice(gpa, &.{ snapshot_nodes[root_index - 1].id, 0, 0 });
+        try roots.appendSlice(allocator, &.{ snapshot_nodes[root_index - 1].id, 0, 0 });
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer output.deinit(gpa);
-    try output.appendSlice(gpa, "{\"version\":3,\"type\":\"GCDebugging\",\"nodes\":[");
-    try privateSnapshotAppendFmt(&output, "0,0,{d},1,0,\"0x0\",\"0x0\"", .{root_class});
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "{\"version\":3,\"type\":\"GCDebugging\",\"nodes\":[");
+    try privateSnapshotAppendFmt(&output, allocator, "0,0,{d},1,0,\"0x0\",\"0x0\"", .{root_class});
     for (snapshot_nodes, class_indices) |node, class_index| {
         const internal: u8 = if (node.kind == .object or node.kind == .string or
             node.kind == .function or node.kind == .bound_fn) 0 else 1;
-        try privateSnapshotAppendFmt(&output, ",{d},{d},{d},{d},0,\"0x{x}\",\"0x0\"", .{
+        try privateSnapshotAppendFmt(&output, allocator, ",{d},{d},{d},{d},0,\"0x{x}\",\"0x0\"", .{
             node.id,
             node.size,
             class_index,
@@ -1160,89 +1294,95 @@ fn privateGenerateHeapSnapshotGCDebugging(group: *CContextGroup) ![]u8 {
             @intFromPtr(node.pointer),
         });
     }
-    try output.appendSlice(gpa, "],\"nodeClassNames\":");
-    try privateSnapshotAppendJsonValue(&output, class_names.items.items);
-    try output.appendSlice(gpa, ",\"edges\":");
-    try privateSnapshotAppendJsonValue(&output, edges.items);
-    try output.appendSlice(gpa, ",\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":");
-    try privateSnapshotAppendJsonValue(&output, edge_names.items.items);
-    try output.appendSlice(gpa, ",\"roots\":");
-    try privateSnapshotAppendJsonValue(&output, roots.items);
-    try output.appendSlice(gpa, ",\"labels\":[\"Strong root\"]}");
-    return try output.toOwnedSlice(gpa);
+    try output.appendSlice(allocator, "],\"nodeClassNames\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, class_names.items.items);
+    try output.appendSlice(allocator, ",\"edges\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, edges.items);
+    try output.appendSlice(allocator, ",\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, edge_names.items.items);
+    try output.appendSlice(allocator, ",\"roots\":");
+    try privateSnapshotAppendJsonValue(&output, allocator, roots.items);
+    try output.appendSlice(allocator, ",\"labels\":[\"Strong root\"]}");
+    return try output.toOwnedSlice(allocator);
 }
 
-fn privateSnapshotAppendMarkdownText(output: *std.ArrayListUnmanaged(u8), text: []const u8) !void {
+fn privateSnapshotAppendMarkdownText(
+    output: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    text: []const u8,
+) !void {
     for (text) |byte| switch (byte) {
         '|', '`', '\\' => {
-            try output.append(gpa, '\\');
-            try output.append(gpa, byte);
+            try output.append(allocator, '\\');
+            try output.append(allocator, byte);
         },
-        '\n', '\r', '\t' => try output.append(gpa, ' '),
-        else => if (byte >= 0x20) try output.append(gpa, byte),
+        '\n', '\r', '\t' => try output.append(allocator, ' '),
+        else => if (byte >= 0x20) try output.append(allocator, byte),
     };
 }
 
-fn privateGenerateHeapProfile(group: *CContextGroup) ![]u8 {
-    var visitor = try privateBuildHeapSnapshotGraph(group);
+fn privateGenerateHeapProfile(group: *CContextGroup, allocator: std.mem.Allocator) ![]u8 {
+    var visitor = try privateBuildHeapSnapshotGraph(group, allocator);
     defer visitor.deinit();
-    const nodes = try privateHeapSnapshotNodes(group, &visitor);
-    defer gpa.free(nodes);
+    const nodes = try privateHeapSnapshotNodes(group, &visitor, allocator);
+    defer allocator.free(nodes);
+    const retained = try privateHeapSnapshotRetainedSizes(nodes, visitor.edges.items, allocator);
+    defer allocator.free(retained);
 
     const TypeStats = struct { count: usize = 0, bytes: usize = 0 };
     var stats: std.StringHashMapUnmanaged(TypeStats) = .empty;
-    defer stats.deinit(gpa);
-    var total_bytes: usize = 0;
+    defer stats.deinit(allocator);
+    var total_external_bytes: usize = 0;
     for (nodes) |node| {
-        total_bytes += node.size;
-        const entry = try stats.getOrPut(gpa, privateHeapSnapshotClassName(node));
+        total_external_bytes = try std.math.add(usize, total_external_bytes, node.external_size);
+        const entry = try stats.getOrPut(allocator, privateHeapSnapshotClassName(node));
         if (!entry.found_existing) entry.value_ptr.* = .{};
         entry.value_ptr.count += 1;
         entry.value_ptr.bytes += node.size;
     }
 
     var output: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer output.deinit(gpa);
-    try output.appendSlice(gpa, "# Bun Heap Profile\n\n## Summary\n\n| Metric | Value |\n| --- | ---: |\n");
-    try privateSnapshotAppendFmt(&output, "| Reachable shallow size | {d} B |\n| Reachable cells | {d} |\n| Strong edges | {d} |\n| GC roots | {d} |\n| Cell classes | {d} |\n\n", .{ total_bytes, nodes.len, visitor.edges.items.len - visitor.roots.items.len, visitor.roots.items.len, stats.count() });
-    try output.appendSlice(gpa, "## Type Statistics\n\n| Type | Count | Shallow size |\n| --- | ---: | ---: |\n");
+    errdefer output.deinit(allocator);
+    try output.appendSlice(allocator, "# Bun Heap Profile\n\n## Summary\n\n| Metric | Value |\n| --- | ---: |\n");
+    try privateSnapshotAppendFmt(&output, allocator, "| Reachable retained size | {d} B |\n| External ArrayBuffer bytes | {d} B |\n| Reachable cells | {d} |\n| Strong edges | {d} |\n| GC roots | {d} |\n| Cell classes | {d} |\n\n", .{ retained[0], total_external_bytes, nodes.len, visitor.edges.items.len - visitor.roots.items.len, visitor.roots.items.len, stats.count() });
+    try output.appendSlice(allocator, "## Type Statistics\n\n| Type | Count | Shallow size |\n| --- | ---: | ---: |\n");
     var stat_iterator = stats.iterator();
     while (stat_iterator.next()) |entry| {
-        try output.appendSlice(gpa, "| `");
-        try privateSnapshotAppendMarkdownText(&output, entry.key_ptr.*);
-        try privateSnapshotAppendFmt(&output, "` | {d} | {d} B |\n", .{ entry.value_ptr.count, entry.value_ptr.bytes });
+        try output.appendSlice(allocator, "| `");
+        try privateSnapshotAppendMarkdownText(&output, allocator, entry.key_ptr.*);
+        try privateSnapshotAppendFmt(&output, allocator, "` | {d} | {d} B |\n", .{ entry.value_ptr.count, entry.value_ptr.bytes });
     }
-    try output.appendSlice(gpa, "\n## GC Roots\n\n| ID | Type | Name |\n| ---: | --- | --- |\n");
+    try output.appendSlice(allocator, "\n## GC Roots\n\n| ID | Type | Name |\n| ---: | --- | --- |\n");
     for (visitor.roots.items) |root_index| {
         const node = nodes[root_index - 1];
-        try privateSnapshotAppendFmt(&output, "| {d} | `", .{node.id});
-        try privateSnapshotAppendMarkdownText(&output, privateHeapSnapshotClassName(node));
-        try output.appendSlice(gpa, "` | `");
-        try privateSnapshotAppendMarkdownText(&output, node.name);
-        try output.appendSlice(gpa, "` |\n");
+        try privateSnapshotAppendFmt(&output, allocator, "| {d} | `", .{node.id});
+        try privateSnapshotAppendMarkdownText(&output, allocator, privateHeapSnapshotClassName(node));
+        try output.appendSlice(allocator, "` | `");
+        try privateSnapshotAppendMarkdownText(&output, allocator, node.name);
+        try output.appendSlice(allocator, "` |\n");
     }
-    try output.appendSlice(gpa, "\n## Complete Cells\n\n| ID | Type | Shallow size | Name |\n| ---: | --- | ---: | --- |\n");
-    for (nodes) |node| {
-        try privateSnapshotAppendFmt(&output, "| {d} | `", .{node.id});
-        try privateSnapshotAppendMarkdownText(&output, privateHeapSnapshotClassName(node));
-        try privateSnapshotAppendFmt(&output, "` | {d} B | `", .{node.size});
-        try privateSnapshotAppendMarkdownText(&output, node.name);
-        try output.appendSlice(gpa, "` |\n");
+    try output.appendSlice(allocator, "\n## Complete Cells\n\n| ID | Type | Shallow size | External bytes | Retained size | Name |\n| ---: | --- | ---: | ---: | ---: | --- |\n");
+    for (nodes, 1..) |node, node_index| {
+        try privateSnapshotAppendFmt(&output, allocator, "| {d} | `", .{node.id});
+        try privateSnapshotAppendMarkdownText(&output, allocator, privateHeapSnapshotClassName(node));
+        try privateSnapshotAppendFmt(&output, allocator, "` | {d} B | {d} B | {d} B | `", .{ node.size, node.external_size, retained[node_index] });
+        try privateSnapshotAppendMarkdownText(&output, allocator, node.name);
+        try output.appendSlice(allocator, "` |\n");
     }
-    try output.appendSlice(gpa, "\n## Complete Strong Edges\n\n| From | Kind | Name/index | To |\n| ---: | --- | --- | ---: |\n");
+    try output.appendSlice(allocator, "\n## Complete Strong Edges\n\n| From | Kind | Name/index | To |\n| ---: | --- | --- | ---: |\n");
     for (visitor.edges.items) |edge| {
         const from_id: u64 = if (edge.from_index == 0) 0 else nodes[edge.from_index - 1].id;
         const to_id = nodes[edge.to_index - 1].id;
-        try privateSnapshotAppendFmt(&output, "| {d} | {s} | `", .{ from_id, @tagName(edge.kind) });
+        try privateSnapshotAppendFmt(&output, allocator, "| {d} | {s} | `", .{ from_id, @tagName(edge.kind) });
         switch (edge.name) {
             .none => {},
-            .string => |name| try privateSnapshotAppendMarkdownText(&output, name),
-            .index => |index| try privateSnapshotAppendFmt(&output, "{d}", .{index}),
+            .string => |name| try privateSnapshotAppendMarkdownText(&output, allocator, name),
+            .index => |index| try privateSnapshotAppendFmt(&output, allocator, "{d}", .{index}),
         }
-        try privateSnapshotAppendFmt(&output, "` | {d} |\n", .{to_id});
+        try privateSnapshotAppendFmt(&output, allocator, "` | {d} |\n", .{to_id});
     }
-    try output.appendSlice(gpa, "\n---\n\n*End of heap profile*\n");
-    return try output.toOwnedSlice(gpa);
+    try output.appendSlice(allocator, "\n---\n\n*End of heap profile*\n");
+    return try output.toOwnedSlice(allocator);
 }
 
 /// Bun's `Strong.Impl` reads the first machine word directly as an
@@ -12592,7 +12732,7 @@ export fn JSC__JSGlobalObject__generateHeapSnapshot(global: JSContextRef) callco
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const json = privateGenerateHeapSnapshotGCDebugging(group) catch {
+    const json = privateGenerateHeapSnapshotGCDebugging(group, gpa) catch {
         var failed_machine = context.interpreter();
         privateSetPendingAbrupt(context, &failed_machine, error.OutOfMemory);
         return .empty;
@@ -12626,7 +12766,7 @@ export fn JSC__JSGlobalObject__generateHeapSnapshot(global: JSContextRef) callco
 /// `Bun__WTFStringImpl__deref` ownership boundary.
 export fn Bun__generateHeapSnapshotV8(vm_ref: ?*anyopaque) callconv(.c) PrivateHeapProfilerString {
     const group = privateGroupFromVM(vm_ref) orelse return privateEmptyHeapProfilerString();
-    const json = privateGenerateHeapSnapshotV8(group) catch return privateEmptyHeapProfilerString();
+    const json = privateGenerateHeapSnapshotV8(group, gpa) catch return privateEmptyHeapProfilerString();
     defer gpa.free(json);
     return privateOwnedHeapProfilerString(json);
 }
@@ -12635,7 +12775,7 @@ export fn Bun__generateHeapSnapshotV8(vm_ref: ?*anyopaque) callconv(.c) PrivateH
 /// roots, cells, and strong edges from the same graph used by both JSON forms.
 export fn Bun__generateHeapProfile(vm_ref: ?*anyopaque) callconv(.c) PrivateHeapProfilerString {
     const group = privateGroupFromVM(vm_ref) orelse return privateEmptyHeapProfilerString();
-    const profile = privateGenerateHeapProfile(group) catch return privateEmptyHeapProfilerString();
+    const profile = privateGenerateHeapProfile(group, gpa) catch return privateEmptyHeapProfilerString();
     defer gpa.free(profile);
     return privateOwnedHeapProfilerString(profile);
 }
@@ -31010,4 +31150,53 @@ test "private VM creation rolls back every allocation failure" {
         privateVmAllocationFailureProbe,
         .{},
     );
+}
+
+test "private heap snapshot serializers return no partial output on allocation failure" {
+    const vm_ref = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    defer JSContextGroupRelease(@ptrCast(vm_ref));
+    const group = privateGroupFromVM(vm_ref) orelse return error.MissingVM;
+
+    inline for (.{
+        privateGenerateHeapSnapshotV8,
+        privateGenerateHeapSnapshotGCDebugging,
+        privateGenerateHeapProfile,
+    }) |generate| {
+        var saw_oom = false;
+        for ([_]usize{ 0, 3, 12 }) |fail_index| {
+            var failing: std.testing.FailingAllocator = .init(
+                std.testing.allocator,
+                .{ .fail_index = fail_index },
+            );
+            const allocator = failing.allocator();
+            if (generate(group, allocator)) |bytes| {
+                allocator.free(bytes);
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                saw_oom = true;
+            }
+        }
+        try std.testing.expect(saw_oom);
+        const complete = try generate(group, std.testing.allocator);
+        try std.testing.expect(complete.len != 0);
+        std.testing.allocator.free(complete);
+    }
+}
+
+test "private heap snapshot retained sizes use exact graph dominators" {
+    const cells = [_]PrivateHeapSnapshotNode{
+        .{ .id = 2, .size = 10, .external_size = 0, .name = "A", .kind = .object, .pointer = @ptrFromInt(1) },
+        .{ .id = 4, .size = 20, .external_size = 0, .name = "B", .kind = .object, .pointer = @ptrFromInt(2) },
+        .{ .id = 6, .size = 30, .external_size = 0, .name = "C", .kind = .object, .pointer = @ptrFromInt(3) },
+    };
+    const edges = [_]ReachabilityEdge{
+        .{ .from_index = 0, .to_index = 1, .kind = .internal, .name = .none },
+        .{ .from_index = 1, .to_index = 2, .kind = .property, .name = .{ .string = "b" } },
+        .{ .from_index = 1, .to_index = 3, .kind = .property, .name = .{ .string = "c" } },
+        .{ .from_index = 2, .to_index = 3, .kind = .property, .name = .{ .string = "c" } },
+        .{ .from_index = 3, .to_index = 2, .kind = .property, .name = .{ .string = "b" } },
+    };
+    const retained = try privateHeapSnapshotRetainedSizes(&cells, &edges, std.testing.allocator);
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualSlices(usize, &.{ 60, 60, 20, 30 }, retained);
 }

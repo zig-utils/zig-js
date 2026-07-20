@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const tsan = b.option(bool, "tsan", "Build tests with ThreadSanitizer") orelse false;
 
     // Homegrown regex engine, used to back JS RegExp.
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
@@ -33,6 +34,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
                 .{ .name = "gc", .module = gc_mod },
@@ -67,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
             .imports = &.{
                 .{ .name = "regex", .module = regex_mod },
                 .{ .name = "gc", .module = gc_mod },
@@ -557,6 +560,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/home_private_heap_snapshot.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
             .link_libc = true,
         }),
     });
@@ -570,6 +574,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_heap_snapshot.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
             .link_libc = true,
         }),
     });
@@ -814,7 +819,6 @@ pub fn build(b: *std.Build) void {
     // Unit tests over the root module (engine core + C-API).
     // `-Dtsan` builds them under ThreadSanitizer — the concurrency gate for
     // the agent/worker/waiter machinery (issue #1).
-    const tsan = b.option(bool, "tsan", "Build unit tests with ThreadSanitizer") orelse false;
     const test_filter = b.option([]const u8, "test-filter", "Only run unit tests whose name contains this substring");
     const unit_shard_index = b.option(usize, "unit-shard-index", "Run only this zero-based unit-test shard index") orelse null;
     const unit_shard_count = b.option(usize, "unit-shard-count", "Split unit tests across this many shards") orelse null;

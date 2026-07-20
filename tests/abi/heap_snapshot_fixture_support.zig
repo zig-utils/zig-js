@@ -197,6 +197,16 @@ pub fn validateV8Snapshot(bytes: []const u8) !u64 {
     inline for (.{ "stableNode403", "cycle403", "bufferRoot403", "siblingRoot403", "siblingMarker403", "loneSurrogate403" }) |name|
         try std.testing.expect(stringIndex(snapshot, name) != null);
     try std.testing.expect(stringIndex(snapshot, "weakOnlyMarker403") == null);
+    const array_buffer_name = stringIndex(snapshot, "ArrayBuffer") orelse return error.MissingArrayBufferNode;
+    var found_external_buffer = false;
+    var array_buffer_offset: usize = 0;
+    while (array_buffer_offset < snapshot.nodes.len) : (array_buffer_offset += 7) {
+        if (snapshot.nodes[array_buffer_offset + 1] == array_buffer_name and snapshot.nodes[array_buffer_offset + 3] >= 64) {
+            found_external_buffer = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_external_buffer);
 
     const property_index = stringIndex(snapshot, "stableNode403") orelse return error.MissingStableProperty;
     var edge_offset: usize = 0;
@@ -212,7 +222,7 @@ pub fn validateV8Snapshot(bytes: []const u8) !u64 {
 }
 
 pub fn validateProfile(bytes: []const u8) !void {
-    inline for (.{ "# Bun Heap Profile", "## Type Statistics", "## GC Roots", "## Complete Cells", "## Complete Strong Edges", "stableNode403", "siblingRoot403" }) |needle|
+    inline for (.{ "# Bun Heap Profile", "Reachable retained size", "External ArrayBuffer bytes | 64 B", "Retained size", "## Type Statistics", "## GC Roots", "## Complete Cells", "## Complete Strong Edges", "stableNode403", "siblingRoot403" }) |needle|
         try std.testing.expect(std.mem.indexOf(u8, bytes, needle) != null);
     try std.testing.expect(std.mem.indexOf(u8, bytes, "weakOnlyMarker403") == null);
 }

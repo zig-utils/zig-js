@@ -27,7 +27,7 @@
     "Precise-GC cells use process-unique zig-gc identities that survive relocation; arena cells receive VM-lifetime identities that remain stable across repeated snapshots.",
     "The GCDebugging object uses version 3, the pinned seven-field node stride, four-field edge stride, class/name/type tables, and explicit roots.",
     "The V8 serializer publishes the pinned seven-field node and three-field edge schema with valid node offsets and string-table references.",
-    "The text profile reports exact reachable shallow totals, class statistics, roots, the complete cell inventory, and the complete strong-edge inventory.",
+    "The text profile reports exact reachable and external-byte totals, dominator-derived retained sizes, class statistics, roots, the complete cell inventory, and the complete strong-edge inventory.",
     "Property, index, variable, and internal edge labels are sourced from object shapes, dense elements, environments, and internal-slot tracing without invoking JavaScript.",
     "Home receives an owned StringImpl pointer while Bun receives an owned by-value BunString; both release through Bun__WTFStringImpl__deref.",
     "Focused external fixtures cover sibling realms, cycles, weak targets, ArrayBuffer ownership, lone-surrogate JSON safety, repeated stable IDs, and both ownership profiles."
