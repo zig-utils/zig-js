@@ -45025,6 +45025,17 @@ pub const ReadableStreamConsumeKind = enum {
     form_data,
 };
 
+pub const ReadableStreamByteSink = struct {
+    context: *anyopaque,
+    write: *const fn (*anyopaque, *Interpreter, []const u8) EvalError!void,
+    finish: *const fn (*anyopaque, *Interpreter) EvalError!Value,
+    abort: *const fn (*anyopaque) void,
+};
+
+fn rscByteSink(state: *value.Object) ?*ReadableStreamByteSink {
+    return @ptrCast(@alignCast(state.private_data orelse return null));
+}
+
 fn rscStateValue(state: *value.Object, key: []const u8) Value {
     return state.getOwn(key) orelse Value.undef();
 }
@@ -45045,6 +45056,7 @@ fn rscRelease(self: *Interpreter, state: *value.Object) EvalError!void {
 fn rscReject(self: *Interpreter, state: *value.Object, reason: Value) EvalError!void {
     if (rsHiddenBool(state, "\x00rscSettled")) return;
     try state.setOwn(self.arena, self.root_shape, "\x00rscSettled", Value.boolVal(true));
+    if (rscByteSink(state)) |sink| sink.abort(sink.context);
     try rscRelease(self, state);
     if (rscOutputPromise(state)) |output| try promise.reject(self, output, reason);
 }
@@ -45203,6 +45215,7 @@ fn rscContentType(self: *Interpreter, input: Value) EvalError![]const u8 {
 }
 
 fn rscFinalize(self: *Interpreter, state: *value.Object) EvalError!Value {
+    if (rscByteSink(state)) |sink| return sink.finish(sink.context, self);
     const chunks = rsHiddenObject(state, "\x00rscChunks") orelse return error.OutOfMemory;
     const kind_value = rscStateValue(state, "\x00rscKind");
     const kind_name = if (kind_value.isString()) kind_value.asStr() else "bytes";
@@ -45259,6 +45272,13 @@ fn rscReadFulfilled(self: *Interpreter, result: Value, state: *value.Object) Eva
         return;
     }
     const chunk = try rscNormalizeChunk(self, try self.getProperty(result, "value"));
+    if (rscByteSink(state)) |sink| {
+        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, chunk.asStr()) else bufferSourceBytes(chunk) orelse
+            return self.throwError("TypeError", "ReadableStream produced an invalid chunk");
+        try sink.write(sink.context, self, bytes);
+        try rscStep(self, state);
+        return;
+    }
     const chunks = rsHiddenObject(state, "\x00rscChunks") orelse return error.OutOfMemory;
     try chunks.appendInternalElement(self.arena, chunk);
     try rscStep(self, state);
@@ -45270,7 +45290,10 @@ fn rscReadFulfilledFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (args.len < 2 or !args[1].isObject()) return Value.undef();
     const state = args[1].asObj();
     rscReadFulfilled(self, if (args.len > 0) args[0] else Value.undef(), state) catch |err| {
-        if (err != error.Throw) return err;
+        if (err != error.Throw) {
+            if (rscByteSink(state)) |sink| sink.abort(sink.context);
+            return err;
+        }
         const reason = self.exception;
         self.exception = Value.undef();
         try rscReject(self, state, reason);
@@ -45295,6 +45318,24 @@ pub fn readableStreamConsume(
     kind: ReadableStreamConsumeKind,
     content_type: Value,
 ) EvalError!Value {
+    return readableStreamConsumeInner(self, stream_value, kind, content_type, null);
+}
+
+pub fn readableStreamConsumeToSink(
+    self: *Interpreter,
+    stream_value: Value,
+    sink: *ReadableStreamByteSink,
+) EvalError!Value {
+    return readableStreamConsumeInner(self, stream_value, .bytes, Value.undef(), sink);
+}
+
+fn readableStreamConsumeInner(
+    self: *Interpreter,
+    stream_value: Value,
+    kind: ReadableStreamConsumeKind,
+    content_type: Value,
+    sink: ?*ReadableStreamByteSink,
+) EvalError!Value {
     const stream = try rsRequireStream(self, stream_value);
     if (rsReader(stream) != null) {
         const reason = try self.makeError("TypeError", "ReadableStream is locked");
@@ -45304,6 +45345,7 @@ pub fn readableStreamConsume(
     const output = try promise.newPromise(self);
     const state = try gc_mod.allocObj(self.arena);
     state.* = .{ .proto = null, .proto_explicit_null = true };
+    state.private_data = if (sink) |configured| @ptrCast(configured) else null;
     const chunks = (try self.newArray()).asObj();
     const fulfilled = try rsNativeHandler(self, rscReadFulfilledFn, "ReadableStream consume fulfilled");
     const rejected = try rsNativeHandler(self, rscReadRejectedFn, "ReadableStream consume rejected");
@@ -45450,6 +45492,21 @@ fn fetchBodyUsedGet(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
 /// all response/body failures are raised for the caller to reject its outer
 /// compile Promise without switching parsers or exposing partial bytes.
 pub fn wasmStreamingResponseBytes(self: *Interpreter, response: Value) EvalError!Value {
+    const object = try wasmStreamingResponseObject(self, response);
+    return fetchConsumeBody(self, Value.obj(object), .bytes);
+}
+
+pub fn wasmStreamingResponseToSink(
+    self: *Interpreter,
+    response: Value,
+    sink: *ReadableStreamByteSink,
+) EvalError!Value {
+    const object = try wasmStreamingResponseObject(self, response);
+    const stream = (try fetchEnsureBodyStream(self, object)) orelse try rsClosedStreamFromChunk(self, null);
+    return readableStreamConsumeToSink(self, Value.obj(stream), sink);
+}
+
+fn wasmStreamingResponseObject(self: *Interpreter, response: Value) EvalError!*value.Object {
     if (!response.isObject() or response.asObj().getOwn("\x00Rstatus") == null)
         return self.throwError("TypeError", "WebAssembly streaming source must resolve to a Response");
     const object = response.asObj();
@@ -45466,7 +45523,7 @@ pub fn wasmStreamingResponseBytes(self: *Interpreter, response: Value) EvalError
     const body = fetchBodyValue(object);
     if (rsIsStream(body) and rsReader(body.asObj()) != null)
         return self.throwError("TypeError", "WebAssembly streaming response body is locked");
-    return fetchConsumeBody(self, response, .bytes);
+    return object;
 }
 fn fetchSlotStrGetter(comptime slot: []const u8, comptime dflt: []const u8) value.NativeFn {
     return struct {

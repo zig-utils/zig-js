@@ -4,6 +4,7 @@
 //! compilation/instantiation over the same context-owned native store.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("../value.zig");
 const shape = @import("../shape.zig");
 const gc = @import("../gc.zig");
@@ -51,6 +52,7 @@ const streaming_compiler_allocator = std.heap.page_allocator;
 var streaming_compiler_lock: std.atomic.Mutex = .unlocked;
 var streaming_compilers: std.AutoHashMapUnmanaged(usize, StreamingCompilerEntry) = .empty;
 var next_streaming_compiler_token: usize = 1;
+var streaming_compiler_test_spans: if (builtin.is_test) std.atomic.Value(usize) else void = if (builtin.is_test) .init(0) else {};
 
 fn lockStreamingCompilers() void {
     var spins: usize = 0;
@@ -96,6 +98,7 @@ pub fn addStreamingCompilerBytes(raw: ?*anyopaque, bytes_ptr: ?[*]const u8, byte
         return .out_of_memory;
     };
     entry.bytes.appendSliceAssumeCapacity(source[0..bytes_len]);
+    if (builtin.is_test) _ = streaming_compiler_test_spans.fetchAdd(1, .monotonic);
     return .ok;
 }
 
@@ -2320,27 +2323,6 @@ fn stableBufferSource(self: *Interpreter, input: Value) value.HostError!Value {
     return Value.obj(stable);
 }
 
-fn stableStreamingBufferSource(self: *Interpreter, input: Value) value.HostError!Value {
-    const copy = try copyBufferSource(self, input);
-    defer copy.deinit();
-    const store = try storeFor(self);
-    const handle = createStreamingCompiler(store) orelse return error.OutOfMemory;
-    defer _ = releaseStreamingCompiler(store, handle);
-    const add_status = addStreamingCompilerBytes(handle, copy.bytes.ptr, copy.bytes.len);
-    switch (add_status) {
-        .ok => {},
-        .out_of_memory, .overflow => return error.OutOfMemory,
-        else => return self.throwError("TypeError", "WebAssembly streaming compiler rejected body bytes"),
-    }
-    const stable = try self.makeArrayBuffer(copy.bytes.len);
-    const stable_bytes = stable.arrayBuffer().?.bytes();
-    var finalized_len: usize = 0;
-    const finalize_status = finalizeStreamingCompiler(store, handle, stable_bytes.ptr, stable_bytes.len, &finalized_len);
-    if (finalize_status != .ok or finalized_len != stable_bytes.len)
-        return self.throwError("TypeError", "WebAssembly streaming compiler failed to finalize body bytes");
-    return Value.obj(stable);
-}
-
 fn queueAsyncJob(
     self: *Interpreter,
     native: value.NativeFn,
@@ -2455,6 +2437,67 @@ fn asyncInstantiateBytesJob(ctx: *anyopaque, _: Value, _: []const Value) value.H
 
 const StreamingMode = enum { compile, instantiate };
 
+const WasmStreamingSink = struct {
+    store: *context.Context,
+    handle: ?*anyopaque,
+    callbacks: interpreter.ReadableStreamByteSink,
+};
+
+fn wasmStreamingSinkWrite(raw: *anyopaque, self: *Interpreter, bytes: []const u8) value.HostError!void {
+    const sink: *WasmStreamingSink = @ptrCast(@alignCast(raw));
+    switch (addStreamingCompilerBytes(sink.handle, bytes.ptr, bytes.len)) {
+        .ok => {},
+        .out_of_memory, .overflow => return error.OutOfMemory,
+        else => return self.throwError("TypeError", "WebAssembly streaming compiler rejected a body chunk"),
+    }
+}
+
+fn wasmStreamingSinkAbort(raw: *anyopaque) void {
+    const sink: *WasmStreamingSink = @ptrCast(@alignCast(raw));
+    const handle = sink.handle orelse return;
+    sink.handle = null;
+    _ = releaseStreamingCompiler(sink.store, handle);
+}
+
+fn wasmStreamingSinkFinish(raw: *anyopaque, self: *Interpreter) value.HostError!Value {
+    const sink: *WasmStreamingSink = @ptrCast(@alignCast(raw));
+    const handle = sink.handle orelse return self.throwError("TypeError", "WebAssembly streaming compiler is unavailable");
+    var required: usize = 0;
+    const query = finalizeStreamingCompiler(sink.store, handle, null, 0, &required);
+    if (query != .ok and query != .buffer_too_small)
+        return self.throwError("TypeError", "WebAssembly streaming compiler failed to finalize");
+    const stable = try self.makeArrayBuffer(required);
+    const bytes = stable.arrayBuffer().?.bytes();
+    var written: usize = 0;
+    const status = finalizeStreamingCompiler(sink.store, handle, bytes.ptr, bytes.len, &written);
+    if (status != .ok or written != bytes.len)
+        return self.throwError("TypeError", "WebAssembly streaming compiler produced an invalid byte snapshot");
+    sink.handle = null;
+    _ = releaseStreamingCompiler(sink.store, handle);
+    return Value.obj(stable);
+}
+
+fn createWasmStreamingSink(self: *Interpreter) value.HostError!*WasmStreamingSink {
+    const store = try storeFor(self);
+    const handle = createStreamingCompiler(store) orelse return error.OutOfMemory;
+    const sink = self.arena.create(WasmStreamingSink) catch {
+        _ = releaseStreamingCompiler(store, handle);
+        return error.OutOfMemory;
+    };
+    sink.* = .{
+        .store = store,
+        .handle = handle,
+        .callbacks = undefined,
+    };
+    sink.callbacks = .{
+        .context = sink,
+        .write = wasmStreamingSinkWrite,
+        .finish = wasmStreamingSinkFinish,
+        .abort = wasmStreamingSinkAbort,
+    };
+    return sink;
+}
+
 fn streamingHandler(self: *Interpreter, native: value.NativeFn, descriptor: *AsyncDescriptor, name: []const u8) value.HostError!Value {
     const handler = try gc.allocObj(self.arena);
     handler.* = .{ .native = native, .private_data = @ptrCast(descriptor) };
@@ -2494,10 +2537,12 @@ fn streamingBodyFulfilled(ctx: *anyopaque, _: Value, args: []const Value) value.
     const self = activeInterpreter(ctx);
     const state = streamingState(args) orelse return Value.undef();
     const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
-    const stable = stableStreamingBufferSource(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
-        try rejectStreamingFailure(self, state, failure);
+    const stable = if (args.len > 0) args[0] else Value.undef();
+    if (!stable.isObject() or stable.asObj().arrayBuffer() == null) {
+        const reason = try self.makeError("TypeError", "WebAssembly streaming compiler did not produce an ArrayBuffer");
+        try rejectStreamingState(self, state, reason);
         return Value.undef();
-    };
+    }
     const output = state.elementAt(0) orelse return Value.undef();
     const mode_value = state.elementAt(2) orelse Value.undef();
     if (mode_value.toBoolean()) {
@@ -2513,7 +2558,12 @@ fn streamingSourceFulfilled(ctx: *anyopaque, _: Value, args: []const Value) valu
     const self = activeInterpreter(ctx);
     const state = streamingState(args) orelse return Value.undef();
     const descriptor: *AsyncDescriptor = @ptrCast(@alignCast(self.active_native.?.private_data.?));
-    const body = interpreter.wasmStreamingResponseBytes(self, if (args.len > 0) args[0] else Value.undef()) catch |failure| {
+    const sink = createWasmStreamingSink(self) catch |failure| {
+        try rejectStreamingFailure(self, state, failure);
+        return Value.undef();
+    };
+    const body = interpreter.wasmStreamingResponseToSink(self, if (args.len > 0) args[0] else Value.undef(), &sink.callbacks) catch |failure| {
+        wasmStreamingSinkAbort(sink);
         try rejectStreamingFailure(self, state, failure);
         return Value.undef();
     };
@@ -3597,6 +3647,19 @@ test "wasm api streaming compilation consumes Response bodies and rejects bounda
         \\  function () { streamingWasm408.compileError = false; },
         \\  function (error) { streamingWasm408.compileError = error instanceof WebAssembly.CompileError; }
         \\);
+        \\const detachedBuffer408 = new ArrayBuffer(1);
+        \\const detachedChunk408 = new Uint8Array(detachedBuffer408);
+        \\structuredClone(detachedBuffer408, { transfer: [detachedBuffer408] });
+        \\WebAssembly.compileStreaming(response408(detachedChunk408)).then(
+        \\  function () { streamingWasm408.detached = false; },
+        \\  function (error) { streamingWasm408.detached = error instanceof TypeError; }
+        \\);
+        \\WebAssembly.compileStreaming(new Response(new ReadableStream({ start(c) {
+        \\  c.enqueue({ invalid: true }); c.close();
+        \\} }), { headers: { "content-type": "application/wasm" } })).then(
+        \\  function () { streamingWasm408.invalidChunk = false; },
+        \\  function (error) { streamingWasm408.invalidChunk = error instanceof TypeError; }
+        \\);
         \\const pullMarker408 = { pull: 408 };
         \\const abruptResponse408 = new Response(new ReadableStream({ pull() { throw pullMarker408; } }),
         \\  { headers: { "content-type": "application/wasm" } });
@@ -3627,11 +3690,166 @@ test "wasm api streaming compilation consumes Response bodies and rejects bounda
         \\streamingWasm408.order.push("after");
     );
     const result = try store.evaluate(
-        \\Object.keys(streamingWasm408).length === 21 &&
+        \\Object.keys(streamingWasm408).length === 23 &&
         \\Object.values(streamingWasm408).every(Boolean) &&
         \\streamingWasm408.order.join(",") === "before,after";
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api streaming compilation feeds each Response chunk directly" {
+    streaming_compiler_test_spans.store(0, .release);
+    const store = try context.Context.create(std.testing.allocator);
+    defer store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.directChunks410 = false;
+        \\const bytes410 = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);
+        \\const response410 = new Response(new ReadableStream({ start(c) {
+        \\  c.enqueue(String.fromCharCode(0, 97, 115, 109, 1, 0, 0, 0));
+        \\  c.enqueue(new Uint8Array(0));
+        \\  c.enqueue(bytes410.subarray(8, 24));
+        \\  c.enqueue(bytes410.subarray(24));
+        \\  c.close();
+        \\} }), { headers: { "content-type": "application/wasm" } });
+        \\WebAssembly.compileStreaming(response410).then(function (module) {
+        \\  directChunks410 = module instanceof WebAssembly.Module &&
+        \\    new WebAssembly.Instance(module).exports.add(20, 22) === 42 && response410.bodyUsed;
+        \\});
+    );
+    const result = try store.evaluate("directChunks410");
+    try std.testing.expect(result.isBoolean() and result.asBool());
+    try std.testing.expectEqual(@as(usize, 3), streaming_compiler_test_spans.load(.acquire));
+}
+
+test "wasm api streaming compilation spans representative feature profiles and precise GC" {
+    const Case = struct {
+        features: types.Features,
+        enable_threads: bool = false,
+        enable_gc: bool = false,
+        bytes_source: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .features = .{ .fixed_width_simd = true },
+            .bytes_source =
+            \\globalThis.profileBytes410 = new Uint8Array([
+            \\  0,97,115,109,1,0,0,0,
+            \\  1,6,1,96,1,123,1,123,
+            \\  3,2,1,0,
+            \\  6,22,1,123,0,253,12,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,11,
+            \\  7,9,2,1,102,0,0,1,103,3,0,
+            \\  10,6,1,4,0,32,0,11
+            \\]);
+            ,
+        },
+        .{
+            .features = .{ .threads = true },
+            .enable_threads = true,
+            .bytes_source =
+            \\globalThis.profileBytes410 = new Uint8Array([
+            \\  0,97,115,109,1,0,0,0,
+            \\  5,4,1,3,1,2,
+            \\  7,10,1,6,109,101,109,111,114,121,2,0
+            \\]);
+            ,
+        },
+        .{
+            .features = .{ .reference_types = true, .exception_handling = true },
+            .bytes_source =
+            \\globalThis.profileBytes410 = new Uint8Array([
+            \\  0,97,115,109,1,0,0,0,
+            \\  1,5,1,96,1,127,0,
+            \\  2,8,1,1,109,1,116,4,0,0,
+            \\  13,3,1,0,0,
+            \\  7,9,2,1,105,4,0,1,100,4,1
+            \\]);
+            ,
+        },
+        .{
+            .features = .{ .memory64 = true },
+            .bytes_source =
+            \\globalThis.profileBytes410 = new Uint8Array([
+            \\  0,97,115,109,1,0,0,0,
+            \\  5,4,1,5,1,2,
+            \\  7,10,1,6,109,101,109,111,114,121,2,0
+            \\]);
+            ,
+        },
+        .{
+            .features = .{
+                .reference_types = true,
+                .typed_function_references = true,
+                .gc = true,
+            },
+            .enable_gc = true,
+            .bytes_source =
+            \\globalThis.profileBytes410 = new Uint8Array([
+            \\  0,97,115,109,1,0,0,0,
+            \\  1,7,2,94,127,1,96,0,0,
+            \\  3,2,1,1,
+            \\  10,12,1,10,0,65,1,251,7,0,251,15,26,11
+            \\]);
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        streaming_compiler_test_spans.store(0, .release);
+        const store = try context.Context.createWith(std.testing.allocator, .{
+            .enable_threads = case.enable_threads,
+            .enable_gc = case.enable_gc,
+            .wasm_features = case.features,
+        });
+        defer store.destroy();
+        _ = try store.evaluate(case.bytes_source);
+        _ = try store.evaluate(
+            \\globalThis.profileCompiled410 = false;
+            \\let profileChunk410 = 0;
+            \\const profileResponse410 = new Response(new ReadableStream({ pull(controller) {
+            \\  if (profileChunk410 === 0) controller.enqueue(profileBytes410.subarray(0, 8));
+            \\  else if (profileChunk410 === 1) controller.enqueue(profileBytes410.subarray(8));
+            \\  else controller.close();
+            \\  profileChunk410++;
+            \\  if (typeof gc === 'function') gc();
+            \\} }), { headers: { 'content-type': 'application/wasm' } });
+            \\WebAssembly.compileStreaming(profileResponse410).then(function (module) {
+            \\  profileCompiled410 = module instanceof WebAssembly.Module && profileResponse410.bodyUsed;
+            \\});
+        );
+        const result = try store.evaluate("profileCompiled410");
+        try std.testing.expect(result.isBoolean() and result.asBool());
+        try std.testing.expectEqual(@as(usize, 2), streaming_compiler_test_spans.load(.acquire));
+    }
+}
+
+test "wasm api streaming compilation retires an abandoned active feed at context teardown" {
+    lockStreamingCompilers();
+    const before = streaming_compilers.count();
+    streaming_compiler_lock.unlock();
+
+    const store = try context.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    var destroyed = false;
+    defer if (!destroyed) store.destroy();
+    _ = try store.evaluate(
+        \\globalThis.abandonedStreaming410 = WebAssembly.compileStreaming(new Response(
+        \\  new ReadableStream({ pull() { return new Promise(function () {}); } }),
+        \\  { headers: { 'content-type': 'application/wasm' } },
+        \\));
+        \\globalThis.abandonedStreaming410 = undefined;
+        \\gc();
+    );
+
+    lockStreamingCompilers();
+    const active = streaming_compilers.count();
+    streaming_compiler_lock.unlock();
+    try std.testing.expectEqual(before + 1, active);
+
+    store.destroy();
+    destroyed = true;
+    lockStreamingCompilers();
+    const after = streaming_compilers.count();
+    streaming_compiler_lock.unlock();
+    try std.testing.expectEqual(before, after);
 }
 
 test "wasm api Memory grows failure-atomically and detaches the old buffer" {
