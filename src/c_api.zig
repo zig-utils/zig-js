@@ -14306,6 +14306,30 @@ fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     return false;
 }
 
+/// Private Home/Bun ABI: encoded cell handles carry their owning context, so
+/// this boundary does not take a separate global object. JavaScriptCore treats
+/// non-cell values as no-ops and counts repeated protections; reuse the public
+/// C-API root table to keep the same behavior under precise and parallel GC.
+fn privateSetValueProtected(encoded: EncodedValue, protected: bool) void {
+    const boxed = privateBoxedFrom(encoded) orelse return;
+    if (boxed.private_kind != .value) return;
+    const context: JSContextRef = @ptrCast(boxed.owner);
+    const value_ref: JSValueRef = @ptrCast(boxed);
+    if (protected) {
+        _ = valueProtect(context, value_ref);
+    } else {
+        _ = valueUnprotect(context, value_ref);
+    }
+}
+
+export fn Bun__JSValue__protect(encoded: EncodedValue) callconv(.c) void {
+    privateSetValueProtected(encoded, true);
+}
+
+export fn Bun__JSValue__unprotect(encoded: EncodedValue) callconv(.c) void {
+    privateSetValueProtected(encoded, false);
+}
+
 /// Public JSC ABI: protection failures are intentionally not returned.
 export fn JSValueProtect(ctx: JSContextRef, v: JSValueRef) callconv(.c) void {
     _ = valueProtect(ctx, v);
@@ -24213,6 +24237,60 @@ test "C-API: JSGarbageCollect honors JSValueProtect/Unprotect (GC on)" {
     JSGarbageCollect(ctx);
     try std.testing.expect(ctx_obj.gc.?.live_cells < with_protection);
     try std.testing.expect(!ZJSValueUnprotect(ctx, held));
+}
+
+test "private counted JSValue protection discovers its VM and releases on balance" {
+    const global = ZJSGlobalContextCreateGarbageCollected(false) orelse
+        return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(global);
+    const context = ctxForEvaluation(global) orelse return error.ContextCreateFailed;
+
+    const held = try context.evaluate("({ marker: 367 })");
+    const encoded = privateEncodedFromValue(context, held);
+    try std.testing.expect(encoded != .empty);
+    try std.testing.expectEqual(@as(usize, 0), context.c_api_handles.items.len);
+
+    Bun__JSValue__protect(.empty);
+    Bun__JSValue__protect(.deleted);
+    Bun__JSValue__protect(.undefined);
+    Bun__JSValue__protect(.null);
+    Bun__JSValue__protect(.false);
+    Bun__JSValue__protect(.true);
+    Bun__JSValue__protect(EncodedValue.fromInt32(367));
+    Bun__JSValue__protect(EncodedValue.fromDouble(36.7));
+    Bun__JSValue__unprotect(.empty);
+    try std.testing.expectEqual(@as(usize, 0), context.c_api_handles.items.len);
+
+    Bun__JSValue__protect(encoded);
+    Bun__JSValue__protect(encoded);
+    try std.testing.expectEqual(@as(usize, 1), context.c_api_handles.items.len);
+    try std.testing.expectEqual(@as(usize, 2), context.c_api_handles.items[0].count);
+    try std.testing.expectEqual(
+        @intFromPtr(privateBoxedFrom(encoded).?),
+        @intFromPtr(context.c_api_handles.items[0].ref),
+    );
+
+    JSGarbageCollect(global);
+    const marker_key = JSStringCreateWithUTF8CString("marker") orelse return error.StringInitFailed;
+    defer JSStringRelease(marker_key);
+    const survivor_ref = privateRefFromEncoded(global, encoded) orelse return error.ValueMissing;
+    const marker = JSObjectGetProperty(global, survivor_ref, marker_key, null) orelse
+        return error.PropertyMissing;
+    try std.testing.expectEqual(@as(f64, 367), JSValueToNumber(global, marker, null));
+    const protected_cells = context.gc.?.live_cells;
+
+    Bun__JSValue__unprotect(encoded);
+    try std.testing.expectEqual(@as(usize, 1), context.c_api_handles.items.len);
+    try std.testing.expectEqual(@as(usize, 1), context.c_api_handles.items[0].count);
+    JSGarbageCollect(global);
+    try std.testing.expect(privateValueFrom(global, encoded) != null);
+
+    Bun__JSValue__unprotect(encoded);
+    try std.testing.expectEqual(@as(usize, 0), context.c_api_handles.items.len);
+    JSGarbageCollect(global);
+    try std.testing.expect(context.gc.?.live_cells < protected_cells);
+    Bun__JSValue__unprotect(encoded);
+    try std.testing.expectEqual(@as(usize, 0), context.c_api_handles.items.len);
 }
 
 test "C-API: JIT-enabled compaction fails closed in native callback then moves protected handle quiescently" {

@@ -311,6 +311,7 @@ comptime {
 
 extern "c" fn JSGlobalContextCreate(?*anyopaque) JSContextRef;
 extern "c" fn JSGlobalContextCreateInGroup(?*anyopaque, ?*anyopaque) JSContextRef;
+extern "c" fn ZJSGlobalContextCreateGarbageCollected(bool) JSContextRef;
 extern "c" fn JSGlobalContextRelease(JSContextRef) void;
 extern "c" fn JSContextGetGroup(JSContextRef) ?*anyopaque;
 extern "c" fn JSContextGetGlobalObject(JSContextRef) JSObjectRef;
@@ -327,10 +328,13 @@ extern "c" fn JSObjectSetPrototype(JSContextRef, JSObjectRef, JSValueRef) void;
 extern "c" fn JSObjectGetProperty(JSContextRef, JSObjectRef, JSStringRef, [*c]JSValueRef) JSValueRef;
 extern "c" fn JSObjectSetProperty(JSContextRef, JSObjectRef, JSStringRef, JSValueRef, c_uint, [*c]JSValueRef) void;
 extern "c" fn JSEvaluateScript(JSContextRef, JSStringRef, JSObjectRef, JSStringRef, c_int, [*c]JSValueRef) JSValueRef;
+extern "c" fn JSGarbageCollect(JSContextRef) void;
 
 extern "c" fn JSC__JSValue__eqlCell(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__eqlValue(EncodedValue, EncodedValue) bool;
 extern "c" fn JSC__JSValue__callCustomInspectFunction(JSContextRef, EncodedValue, EncodedValue, u32, u32, bool) EncodedValue;
+extern "c" fn Bun__JSValue__protect(EncodedValue) void;
+extern "c" fn Bun__JSValue__unprotect(EncodedValue) void;
 extern "c" fn JSC__JSValue__toBoolean(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toInt32(EncodedValue) i32;
 extern "c" fn JSC__JSValue__fromInt64NoTruncate(JSContextRef, i64) EncodedValue;
@@ -1452,6 +1456,37 @@ pub fn main() void {
         "typeof i==='function'&&i(322,o)==='322'})");
     if (JSC__JSValue__callCustomInspectFunction(context, inspect_function, inspect_receiver, 3, 9, false) != .true)
         fail("private custom inspect invocation mismatch");
+
+    // Revision-pinned counted protection (#367): the encoded cell discovers
+    // its owning VM without a global argument and remains live until the final
+    // matching unprotect. Primitive and unmatched calls are exact no-ops.
+    const protected_context = ZJSGlobalContextCreateGarbageCollected(false) orelse
+        fail("private protected-value context creation failed");
+    defer JSGlobalContextRelease(protected_context);
+    const protected_value = evaluate(protected_context, "({ marker: 367 })");
+    Bun__JSValue__protect(.empty);
+    Bun__JSValue__protect(.undefined);
+    Bun__JSValue__protect(EncodedValue.fromInt32(367));
+    Bun__JSValue__unprotect(.null);
+    Bun__JSValue__protect(protected_value);
+    Bun__JSValue__protect(protected_value);
+    JSGarbageCollect(protected_context);
+    if (JSValueToNumber(
+        protected_context,
+        getProperty(protected_context, protected_value, "marker").cellPointer(),
+        null,
+    ) != 367)
+        fail("private protected value did not survive collection");
+    Bun__JSValue__unprotect(protected_value);
+    JSGarbageCollect(protected_context);
+    if (JSValueToNumber(
+        protected_context,
+        getProperty(protected_context, protected_value, "marker").cellPointer(),
+        null,
+    ) != 367)
+        fail("private counted protection released too early");
+    Bun__JSValue__unprotect(protected_value);
+    Bun__JSValue__unprotect(protected_value);
 
     // Revision-pinned native TextCodec fallback (#327): exact registry,
     // stable canonical-name storage, incremental state, errors, and ownership.

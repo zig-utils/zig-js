@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 403,
-      "pending": 127
+      "implemented": 405,
+      "pending": 125
     }
   },
   "declarations": [
@@ -536,10 +536,10 @@
       "line": 507,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSValue__protect(value: JSValue) void;",
       "declaration_sha256": "fae15f2e38ad35116c88bb95e959ae85ced7514ed5acf3c833905306187266da",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__JSValue__toNumber",
@@ -558,10 +558,10 @@
       "line": 508,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn Bun__JSValue__unprotect(value: JSValue) void;",
       "declaration_sha256": "86e9b5ca58b1731558c1696f4c7430ed277a69a925e5ba74cdc8fab599571195",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Bun__LifecycleAgentPreventExit",
