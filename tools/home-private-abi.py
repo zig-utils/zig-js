@@ -20,6 +20,7 @@ READABLE_STREAM_CONTRACT = ROOT / "docs/abi/readable-stream-consumption-405.json
 FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
 WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed-409.json"
+WASM_STREAMING_RESPONSE_FEED_CONTRACT = ROOT / "docs/abi/wasm-streaming-response-feed-410.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -645,6 +646,7 @@ def validate_wasm_streaming_contract(home_root: Path | None) -> None:
         or contract.get("issue") != 408
         or contract.get("parent_issues") != [140, 141, 143, 406]
         or contract.get("follow_up_issue") != 409
+        or contract.get("incremental_feed_issue") != 410
         or contract.get("revisions") != {
             "home": REVISION,
             "bun": "4982b91e3702094330f3be3883354c52b8c01323",
@@ -740,6 +742,39 @@ def validate_wasm_streaming_compiler_contract(home_root: Path | None) -> None:
         fail("Wasm StreamingCompiler semantic inventory is incomplete or duplicated")
 
 
+def validate_wasm_streaming_response_feed_contract() -> None:
+    if not WASM_STREAMING_RESPONSE_FEED_CONTRACT.is_file():
+        fail(f"missing checked-in Wasm Response feed contract {WASM_STREAMING_RESPONSE_FEED_CONTRACT}")
+    contract = json.loads(WASM_STREAMING_RESPONSE_FEED_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "wasm-streaming-response-feed"
+        or contract.get("issue") != 410
+        or contract.get("parent_issue") != 406
+        or contract.get("depends_on") != [407, 409]
+        or contract.get("related_issue") != 408
+        or contract.get("implementation") != ["src/interpreter.zig", "src/wasm/api.zig"]
+    ):
+        fail("Wasm Response feed contract schema or issue lineage drift")
+    for relative in contract["implementation"]:
+        if not (ROOT / relative).is_file():
+            fail(f"missing Wasm Response feed implementation {relative}")
+    expected_profiles = {
+        "mvp",
+        "fixed-width-simd",
+        "threads",
+        "exception-handling",
+        "memory64",
+        "gc/core-3",
+    }
+    profiles = contract.get("feature_profiles")
+    if not isinstance(profiles, list) or set(profiles) != expected_profiles or len(profiles) != len(expected_profiles):
+        fail("Wasm Response feed feature-profile inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("Wasm Response feed semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -774,6 +809,7 @@ def main() -> None:
     validate_fetch_body_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_compiler_contract(args.home_root.resolve() if args.home_root else None)
+    validate_wasm_streaming_response_feed_contract()
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

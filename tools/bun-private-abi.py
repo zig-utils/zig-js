@@ -671,6 +671,7 @@ def validate_wasm_streaming_contract(bun_root: Path | None) -> None:
         or contract.get("issue") != 408
         or contract.get("parent_issues") != [140, 141, 143, 406]
         or contract.get("follow_up_issue") != 409
+        or contract.get("incremental_feed_issue") != 410
         or contract.get("revisions") != {
             "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
             "bun": REVISION,
@@ -800,6 +801,7 @@ def main() -> None:
     validate_fetch_body_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_wasm_streaming_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_wasm_streaming_compiler_contract(args.bun_root.resolve() if args.bun_root else None)
+    scanner.validate_wasm_streaming_response_feed_contract()
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]

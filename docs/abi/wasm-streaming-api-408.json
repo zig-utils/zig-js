@@ -3,6 +3,7 @@
   "contract": "wasm-streaming-api",
   "issue": 408,
   "parent_issues": [140, 141, 143, 406],
+  "follow_up_issue": 409,
   "incremental_feed_issue": 410,
   "revisions": {
     "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
