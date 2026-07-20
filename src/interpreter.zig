@@ -33,6 +33,7 @@ const Shape = @import("shape.zig").Shape;
 const unicode_case = @import("unicode_case.zig");
 const unicode_normalize = @import("unicode_normalize.zig");
 const idna = @import("idna.zig");
+const enc_data = @import("encoding_singlebyte_data.zig");
 const cldr_numbers = @import("cldr_numbers.zig");
 const numbering_systems = @import("numbering_systems.zig");
 const cldr_locale = @import("cldr_locale.zig");
@@ -40844,16 +40845,10 @@ fn installTextEncoder(env: *Environment, rs: *Shape, object_proto: *value.Object
 /// Map an encoding label (trimmed, case-insensitive) to its canonical name, or
 /// null for an unsupported/unknown label (→ RangeError).
 fn textDecoderEncoding(label: []const u8) ?[]const u8 {
-    const t = std.mem.trim(u8, label, " \t\n\r\x0c");
-    const Alias = struct { name: []const u8, aliases: []const []const u8 };
-    const table = [_]Alias{
-        .{ .name = "utf-8", .aliases = &.{ "utf-8", "utf8", "unicode-1-1-utf-8", "unicode11utf8", "unicode20utf8", "x-unicode20utf8" } },
-        .{ .name = "utf-16le", .aliases = &.{ "utf-16le", "utf-16", "ucs-2", "unicode", "unicodefeff", "csunicode" } },
-        .{ .name = "utf-16be", .aliases = &.{ "utf-16be", "unicodefffe" } },
-        .{ .name = "windows-1252", .aliases = &.{ "windows-1252", "latin1", "iso-8859-1", "iso8859-1", "iso88591", "ascii", "us-ascii", "cp1252", "cp819", "ibm819", "l1", "x-cp1252" } },
-    };
-    for (table) |e| for (e.aliases) |al| if (std.ascii.eqlIgnoreCase(t, al)) return e.name;
-    return null;
+    // The full WHATWG label→name map (utf-8/utf-16le/utf-16be + all single-byte
+    // encodings). Multi-byte (big5/gbk/gb18030/shift_jis/euc-*) is not yet
+    // supported, so their labels are absent → RangeError.
+    return enc_data.labelToName(std.mem.trim(u8, label, " \t\n\r\x0c"));
 }
 
 /// The bytes a BufferSource (ArrayBuffer/SharedArrayBuffer/TypedArray/DataView)
@@ -40965,7 +40960,21 @@ fn textDecoderDecodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.
             i += n;
         }
     } else if (std.mem.eql(u8, enc, "windows-1252")) {
+        // node/V8 decodes windows-1252 (and its iso-8859-1/latin1/ascii aliases)
+        // as latin1 — a raw byte→code-point map, not the WHATWG index.
         for (bytes) |b| try tdEmit(self, &out, b);
+    } else if (enc_data.singleByteTable(enc)) |tbl| {
+        // WHATWG single-byte decoder: 0x00–0x7F is ASCII; a high byte indexes the
+        // table, and a 0xFFFD entry is an unmapped byte (error / U+FFFD).
+        for (bytes) |b| {
+            if (b < 0x80) {
+                try tdEmit(self, &out, b);
+            } else {
+                const cp = tbl[b - 0x80];
+                if (cp == 0xFFFD and fatal) return self.throwError("TypeError", "The encoded data was not valid.");
+                try tdEmit(self, &out, cp);
+            }
+        }
     } else { // utf-16le / utf-16be
         const le = std.mem.eql(u8, enc, "utf-16le");
         var i: usize = 0;
