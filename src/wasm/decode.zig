@@ -736,7 +736,13 @@ fn parseExportSection(r: *Reader, a: Allocator) DecodeError![]const types.Export
 }
 
 fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
-    const legacy_func_type = types.ValType.fromRef(.{ .nullable = false, .heap = .func });
+    // Core 3 refines only the flag-0 shorthand to `(ref func)`. Earlier
+    // profiles decode it as `funcref`, while the explicit elemkind carried by
+    // flag forms 1..3 remains `funcref` in every profile.
+    const implicit_active_func_type = if (r.features.typed_function_references)
+        types.ValType.fromRef(.{ .nullable = false, .heap = .func })
+    else
+        types.ValType.funcref;
     const n = try r.readCount();
     const elems = try a.alloc(types.Elem, n);
     for (elems) |*e| {
@@ -744,19 +750,17 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
         const kind = try r.readU32Leb();
         e.* = switch (kind) {
             0 => .{
-                .type = legacy_func_type,
+                .type = implicit_active_func_type,
                 .mode = .{ .active = .{ .table = 0, .offset = try r.readConstExpr(a) } },
                 .init = try readFuncElemInit(r, a),
-                .legacy_func_indices = true,
             },
             1 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 try readElemKind(r);
                 break :blk .{
-                    .type = legacy_func_type,
+                    .type = .funcref,
                     .mode = .passive,
                     .init = try readFuncElemInit(r, a),
-                    .legacy_func_indices = true,
                 };
             },
             2 => blk: {
@@ -765,20 +769,18 @@ fn parseElemSection(r: *Reader, a: Allocator) DecodeError![]const types.Elem {
                 const offset = try r.readConstExpr(a);
                 try readElemKind(r);
                 break :blk .{
-                    .type = legacy_func_type,
+                    .type = .funcref,
                     .mode = .{ .active = .{ .table = table, .offset = offset } },
                     .init = try readFuncElemInit(r, a),
-                    .legacy_func_indices = true,
                 };
             },
             3 => blk: {
                 if (!r.features.bulk_memory) return r.unsupportedFeature(kind_off, .bulk_memory);
                 try readElemKind(r);
                 break :blk .{
-                    .type = legacy_func_type,
+                    .type = .funcref,
                     .mode = .declarative,
                     .init = try readFuncElemInit(r, a),
-                    .legacy_func_indices = true,
                 };
             },
             4 => blk: {
@@ -1445,11 +1447,7 @@ test "wasm.decode kitchen sink module" {
     // Start / elem / data.
     try std.testing.expectEqual(@as(?u32, 1), mod.start);
     try std.testing.expectEqual(@as(usize, 1), mod.elems.len);
-    try std.testing.expectEqual(
-        types.ValType.fromRef(.{ .nullable = false, .heap = .func }),
-        mod.elems[0].type,
-    );
-    try std.testing.expect(mod.elems[0].legacy_func_indices);
+    try std.testing.expectEqual(types.ValType.funcref, mod.elems[0].type);
     const elem_active = mod.elems[0].mode.active;
     try std.testing.expectEqual(@as(u32, 0), elem_active.table);
     try std.testing.expectEqualDeep(types.ConstExpr{ .i32 = 0 }, elem_active.offset);
@@ -2194,12 +2192,7 @@ test "wasm.decode bulk memory segment forms DataCount order and immediates" {
 
     try std.testing.expectEqual(@as(?u32, 3), mod.data_count);
     try std.testing.expectEqual(@as(usize, 8), mod.elems.len);
-    const non_null_funcref = types.ValType.fromRef(.{ .nullable = false, .heap = .func });
-    for (mod.elems[0..4]) |elem| {
-        try std.testing.expectEqual(non_null_funcref, elem.type);
-        try std.testing.expect(elem.legacy_func_indices);
-    }
-    for (mod.elems[4..]) |elem| try std.testing.expect(!elem.legacy_func_indices);
+    for (mod.elems[0..4]) |elem| try std.testing.expectEqual(types.ValType.funcref, elem.type);
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).active, std.meta.activeTag(mod.elems[0].mode));
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).passive, std.meta.activeTag(mod.elems[1].mode));
     try std.testing.expectEqual(std.meta.Tag(types.ElemMode).declarative, std.meta.activeTag(mod.elems[3].mode));
@@ -2220,6 +2213,19 @@ test "wasm.decode bulk memory segment forms DataCount order and immediates" {
     try std.testing.expectEqualDeep(types.Instr.Indices{ .first = 3, .second = 1 }, instrs[4].imm.indices);
     try std.testing.expectEqual(types.Op.elem_drop, instrs[5].op);
     try std.testing.expectEqual(types.Op.table_copy, instrs[6].op);
+
+    var core3_diag: types.Diagnostic = .{};
+    const core3_mod = try decodeWithFeatures(std.testing.allocator, bytes, .{
+        .bulk_memory = true,
+        .reference_types = true,
+        .typed_function_references = true,
+    }, &core3_diag);
+    defer destroyModule(std.testing.allocator, core3_mod);
+    try std.testing.expectEqual(
+        types.ValType.fromRef(.{ .nullable = false, .heap = .func }),
+        core3_mod.elems[0].type,
+    );
+    for (core3_mod.elems[1..4]) |elem| try std.testing.expectEqual(types.ValType.funcref, elem.type);
 
     const code_only = comptime testCode("\x0B");
     const out_of_order = comptime hdr ++ code_only ++ testSection(12, "\x00");

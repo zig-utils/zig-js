@@ -682,8 +682,9 @@ fn validateWithAllocator(mod: *const types.Module, diag: *types.Diagnostic, allo
     // 4. Element segments.
     for (mod.elems) |e| {
         // MVP element segments use the implicit funcref type without opting
-        // into the later reference-types feature.
-        if (!e.legacy_func_indices and e.type != .funcref) try validateValType(mod, e.type, diag);
+        // into the later reference-types feature. The Core 3 flag-0 shorthand
+        // is refined during decoding only when typed references are enabled.
+        if (e.type != .funcref) try validateValType(mod, e.type, diag);
         switch (e.mode) {
             .active => |active| {
                 if (active.table >= mod.totalTables())

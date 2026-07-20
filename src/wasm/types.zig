@@ -558,10 +558,6 @@ pub const Elem = struct {
     type: ValType,
     mode: ElemMode,
     init: []const ConstExpr,
-    /// Binary element forms 0..3 encode function indices. Core 3 assigns
-    /// those segments the precise non-null `(ref func)` type without making
-    /// that implicit type subject to the typed-reference syntax gate.
-    legacy_func_indices: bool = false,
 };
 
 pub const DataMode = union(enum) {
