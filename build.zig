@@ -822,6 +822,32 @@ pub fn build(b: *std.Build) void {
     );
     wasm_core_3_step.dependOn(&wasm_core_3_cmd.step);
 
+    const wasm_core_main_shadow_cmd = b.addSystemCommand(&.{
+        "python3",
+        "tools/wasm-spec.py",
+        "--profile",
+        "core-main-shadow",
+        "--spec-root",
+        b.option([]const u8, "wasm-core-main-shadow-root", "Path to the exact pinned upstream-main WebAssembly spec checkout") orelse "wasm-spec-main",
+        "--converter",
+        b.option([]const u8, "wasm-core-main-shadow-converter", "Path to pinned wasm-tools 1.253.0") orelse "wasm-tools",
+    });
+    if (b.option(bool, "wasm-core-main-shadow-changed-only", "Run only Core files changed from the stable WG3 baseline") orelse false) {
+        wasm_core_main_shadow_cmd.addArg("--changed-only");
+    }
+    if (b.option([]const u8, "wasm-core-main-shadow-filter", "Run only upstream-main Core paths containing this substring")) |filter| {
+        wasm_core_main_shadow_cmd.addArgs(&.{ "--filter", filter });
+    }
+    if (b.option([]const u8, "wasm-core-main-shadow-inventory", "Upstream-main shadow inventory output path")) |inventory| {
+        wasm_core_main_shadow_cmd.addArgs(&.{ "--inventory", inventory });
+    }
+    wasm_core_main_shadow_cmd.step.dependOn(&wasm_spec_eval_install.step);
+    const wasm_core_main_shadow_step = b.step(
+        "wasm-core-main-shadow",
+        "Run the exact-SHA WebAssembly upstream-main shadow corpus without changing stable scores",
+    );
+    wasm_core_main_shadow_step.dependOn(&wasm_core_main_shadow_cmd.step);
+
     const wasm_feature_profiles_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/wasm-feature-profiles.py",

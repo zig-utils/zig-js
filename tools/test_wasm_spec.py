@@ -264,6 +264,9 @@ class ScriptGenerationTests(unittest.TestCase):
             wasm_spec.feature_area("core-3", "test/core/call_ref.wast"),
             "typed_function_references",
         )
+        self.assertEqual(
+            wasm_spec.feature_area("core-main-shadow", "test/core/gc/i31.wast"), "gc",
+        )
 
     def test_terminal_profiles_declare_every_dedicated_file(self) -> None:
         tail = wasm_spec.PROFILES["tail-calls"]
@@ -271,6 +274,7 @@ class ScriptGenerationTests(unittest.TestCase):
         memory64 = wasm_spec.PROFILES["memory64"]
         gc = wasm_spec.PROFILES["gc"]
         core_3 = wasm_spec.PROFILES["core-3"]
+        core_main = wasm_spec.PROFILES["core-main-shadow"]
         self.assertEqual(tail["default_files"], [
             "return_call.wast",
             "return_call_indirect.wast",
@@ -303,6 +307,11 @@ class ScriptGenerationTests(unittest.TestCase):
         self.assertIn("gc", core_3["features"])
         self.assertIn("memory64", core_3["features"])
         self.assertIn("relaxed_simd", core_3["features"])
+        self.assertEqual(core_main["ref"], "main")
+        self.assertEqual(core_main["commit"], wasm_spec.CORE_MAIN_SHADOW_COMMIT)
+        self.assertEqual(core_main["baseline_commit"], wasm_spec.CORE_3_COMMIT)
+        self.assertFalse(core_main["accepted_score"])
+        self.assertEqual(core_main["evaluator_profile"], "core-3")
         self.assertIn("item.type === 'eqref'", wasm_spec.PRELUDE)
         self.assertIn("item.type === 'refnull'", wasm_spec.PRELUDE)
         self.assertIn("item.type === 'exnref'", wasm_spec.PRELUDE)

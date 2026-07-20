@@ -18,6 +18,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 SPEC_COMMIT = "977f97014c962f7bd1291fcc6d28b41a924882bf"
 CORE_3_COMMIT = "9d36019973201a19f9c9ebb0f10828b2fe2374aa"
+CORE_MAIN_SHADOW_COMMIT = "d7b37e4170d8315f2f1283aed4e8076591a9a333"
 WABT_VERSION = "1.0.12"
 WABT_COMMIT = "cf261f2bd561297e0da7008ddde8c09ba5ea35a2"
 
@@ -55,6 +56,38 @@ PROFILES = {
         "repository": "https://github.com/WebAssembly/spec.git",
         "tag": "wg-3.0",
         "commit": CORE_3_COMMIT,
+        "converter_kind": "wasm-tools",
+        "converter_repository": "https://github.com/bytecodealliance/wasm-tools.git",
+        "converter_version": "1.253.0",
+        "converter_commit": "c799bb87b9cf9dc4fa7d11d63c5d52cbb3c4eb38",
+        "evaluator_profile": "core-3",
+        "features": [
+            "sign_extension_ops",
+            "nontrapping_float_to_int",
+            "multi_value",
+            "reference_types",
+            "bulk_memory",
+            "fixed_width_simd",
+            "relaxed_simd",
+            "tail_calls",
+            "typed_function_references",
+            "gc",
+            "exception_handling",
+            "memory64",
+            "multi_memory",
+        ],
+        "corpus_root": "test/core",
+        "corpus_glob": "test/core/**/*.wast",
+        "converter_args": [],
+    },
+    "core-main-shadow": {
+        "kind": "webassembly_core_main_shadow_inventory",
+        "repository": "https://github.com/WebAssembly/spec.git",
+        "tag": None,
+        "ref": "main",
+        "commit": CORE_MAIN_SHADOW_COMMIT,
+        "baseline_commit": CORE_3_COMMIT,
+        "accepted_score": False,
         "converter_kind": "wasm-tools",
         "converter_repository": "https://github.com/bytecodealliance/wasm-tools.git",
         "converter_version": "1.253.0",
@@ -314,6 +347,8 @@ def wasm_tools_version_matches(
 def verify_tools(spec_root: Path, converter: Path, engine: Path, profile: dict) -> None:
     corpus_root = spec_root / profile.get("corpus_root", Path(profile["corpus_glob"]).parent)
     if not corpus_root.is_dir():
+        if profile["commit"] == CORE_MAIN_SHADOW_COMMIT:
+            fail("missing upstream-main shadow corpus; pass --spec-root with the exact pinned checkout")
         submodule = "wasm-spec-wg3" if profile["commit"] == CORE_3_COMMIT else "wasm-spec-wg1"
         fail(f"missing corpus at {spec_root}; run `git submodule update --init {submodule}`")
     actual_spec = checked_output(["git", "rev-parse", "HEAD"], spec_root)
@@ -1367,7 +1402,7 @@ def feature_area(profile_name: str, path: str) -> str:
         return "memory64"
     if profile_name == "gc":
         return "gc"
-    if profile_name == "core-3":
+    if profile_name in {"core-3", "core-main-shadow"}:
         directory_areas = {
             "bulk-memory": "bulk_memory",
             "exceptions": "exception_handling",
@@ -1420,6 +1455,31 @@ def select_corpus_files(all_wast: list[Path], profile: dict, filter_text: str | 
     return declared
 
 
+def changed_shadow_files(spec_root: Path, all_wast: list[Path], profile: dict) -> list[Path]:
+    """Select every present Core file changed from the stable profile baseline."""
+
+    if profile.get("accepted_score") is not False or not profile.get("baseline_commit"):
+        fail("--changed-only is restricted to a shadow profile with an exact baseline")
+    baseline = profile["baseline_commit"]
+    changed = set(
+        checked_output(
+            [
+                "git", "diff", "--name-only", "--diff-filter=ACMRT",
+                baseline, profile["commit"], "--", "test/core",
+            ],
+            spec_root,
+        ).splitlines()
+    )
+    selected = [
+        path for path in all_wast
+        if path.relative_to(spec_root).as_posix() in changed
+    ]
+    missing = sorted(path for path in changed if not (spec_root / path).is_file())
+    if missing:
+        fail(f"changed shadow files are absent from the pinned checkout: {missing}")
+    return selected
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", choices=sorted(PROFILES), default="mvp")
@@ -1433,6 +1493,11 @@ def main() -> int:
     parser.add_argument("--engine", type=Path, default=ROOT / "zig-out/bin/wasm-spec-eval")
     parser.add_argument("--inventory", type=Path)
     parser.add_argument("--filter", help="run only corpus paths containing this text")
+    parser.add_argument(
+        "--changed-only",
+        action="store_true",
+        help="score every Core file changed from the shadow profile's exact stable baseline",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -1452,8 +1517,10 @@ def main() -> int:
 
     profile = PROFILES[args.profile]
     timeout = args.timeout if args.timeout is not None else (
-        600.0 if args.profile in {"core-2-structural", "core-3"} else 120.0
+        600.0 if args.profile in {"core-2-structural", "core-3", "core-main-shadow"} else 120.0
     )
+    if args.profile == "core-main-shadow" and args.spec_root is None:
+        fail("core-main-shadow requires --spec-root with the exact pinned upstream-main checkout")
     default_spec_root = ROOT / ("wasm-spec-wg3" if args.profile == "core-3" else "wasm-spec-wg1")
     spec_root = (args.spec_root or default_spec_root).resolve()
     converter = args.converter.resolve()
@@ -1462,6 +1529,7 @@ def main() -> int:
         "mvp": ROOT / "docs/.data/wasm-spec-inventory.json",
         "core-2-structural": ROOT / "docs/.data/wasm-core-2-structural-inventory.json",
         "core-3": ROOT / "docs/.data/wasm-core-3-inventory.json",
+        "core-main-shadow": ROOT / "docs/.data/wasm-core-main-shadow-inventory.json",
         "simd-movement": ROOT / "docs/.data/wasm-simd-movement-inventory.json",
         "simd": ROOT / "docs/.data/wasm-simd-inventory.json",
         "threads": ROOT / "docs/.data/wasm-threads-inventory.json",
@@ -1475,6 +1543,9 @@ def main() -> int:
     verify_tools(spec_root, converter, engine, profile)
     all_wast = sorted(spec_root.glob(profile["corpus_glob"]))
     selected = select_corpus_files(all_wast, profile, args.filter)
+    if args.changed_only:
+        changed = set(changed_shadow_files(spec_root, all_wast, profile))
+        selected = [path for path in selected if path in changed]
     if not selected:
         fail("no corpus files selected")
 
@@ -1549,6 +1620,14 @@ def main() -> int:
         "totals_by_feature_area": totals_by_feature_area,
         "files": files,
     }
+    if profile.get("accepted_score") is False:
+        inventory["accepted_score"] = False
+        inventory["observation"] = {
+            "ref": profile["ref"],
+            "commit": profile["commit"],
+            "baseline_commit": profile["baseline_commit"],
+            "selection": "changed_files" if args.changed_only else "complete_snapshot",
+        }
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
     print(
