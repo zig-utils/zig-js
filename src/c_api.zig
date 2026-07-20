@@ -43,6 +43,7 @@ const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
 const fetch_headers = @import("fetch_headers.zig");
+const parser_mod = @import("parser.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
 const private_jstype = @import("private_abi/jstype.zig");
 const WorkerMod = @import("worker.zig");
@@ -120,6 +121,23 @@ const PrivateSerializedScriptExternal = extern struct {
     bytes: ?[*]const u8 = null,
     size: usize = 0,
     handle: ?*anyopaque = null,
+};
+
+const private_cached_bytecode_magic: u64 = 0x5a4a_4342_4341_4348;
+const private_cached_bytecode_header_len = 60;
+const private_cached_bytecode_artifact_magic = "ZJSCBC01";
+
+const PrivateCachedBytecodeKind = enum(u8) {
+    module = 1,
+    common_js = 2,
+};
+
+/// Opaque owner returned to the pinned Home/Bun CachedBytecode allocators. The
+/// published byte slice is immutable and remains stable until the matching
+/// deref, exactly mirroring the consumer's allocator-vtable lifetime.
+const PrivateCachedBytecode = struct {
+    magic: u64 = private_cached_bytecode_magic,
+    bytes: []u8,
 };
 
 const PrivateSerializedScriptOwned = struct {
@@ -4001,6 +4019,122 @@ fn privateStringBuilderBunStringUnits(
             return units;
         },
     }
+}
+
+fn privateCachedBytecodeWriteU16(out: []u8, value_: u16) void {
+    out[0] = @truncate(value_);
+    out[1] = @truncate(value_ >> 8);
+}
+
+fn privateCachedBytecodeWriteU64(out: []u8, value_: u64) void {
+    for (0..8) |index| out[index] = @truncate(value_ >> @intCast(index * 8));
+}
+
+fn privateCachedBytecodeSyntaxValid(kind: PrivateCachedBytecodeKind, source: []const u8) bool {
+    var arena_state = std.heap.ArenaAllocator.init(private_string_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const owned = arena.dupe(u8, source) catch return false;
+    var parser = parser_mod.Parser.init(arena, owned) catch return false;
+    const program = switch (kind) {
+        .module => parser.parseModule() catch return false,
+        .common_js => parser.parseProgram() catch return false,
+    };
+    if (kind == .common_js and program.* == .program)
+        parser.scanEvalContext(program.program, true, true) catch return false;
+    return true;
+}
+
+fn privateGenerateCachedBytecode(
+    kind: PrivateCachedBytecodeKind,
+    source_provider_url: ?*const PrivateBunString,
+    input_code: ?[*]const u8,
+    input_source_code_size: usize,
+    output_bytecode: ?*?[*]u8,
+    output_bytecode_size: ?*usize,
+    cached_bytecode: ?*?*PrivateCachedBytecode,
+) bool {
+    const output = output_bytecode orelse return false;
+    const output_size = output_bytecode_size orelse return false;
+    const owner_output = cached_bytecode orelse return false;
+    output.* = null;
+    output_size.* = 0;
+    owner_output.* = null;
+
+    if (input_source_code_size > 0 and input_code == null) return false;
+    const source = if (input_source_code_size == 0) &.{} else input_code.?[0..input_source_code_size];
+    if (!privateCachedBytecodeSyntaxValid(kind, source)) return false;
+
+    const url_units = if (source_provider_url) |url|
+        privateStringBuilderBunStringUnits(private_string_allocator, url) catch return false
+    else
+        private_string_allocator.alloc(u16, 0) catch return false;
+    defer private_string_allocator.free(url_units);
+    const url_byte_len = std.math.mul(usize, url_units.len, @sizeOf(u16)) catch return false;
+    const payload_len = std.math.add(usize, url_byte_len, source.len) catch return false;
+    const artifact_len = std.math.add(usize, private_cached_bytecode_header_len, payload_len) catch return false;
+
+    const owner = private_string_allocator.create(PrivateCachedBytecode) catch return false;
+    const artifact = private_string_allocator.alloc(u8, artifact_len) catch {
+        private_string_allocator.destroy(owner);
+        return false;
+    };
+
+    @memcpy(artifact[0..8], private_cached_bytecode_artifact_magic);
+    privateCachedBytecodeWriteU16(artifact[8..10], 1);
+    artifact[10] = @intFromEnum(kind);
+    artifact[11] = 0;
+    privateCachedBytecodeWriteU64(artifact[12..20], @intCast(url_units.len));
+    privateCachedBytecodeWriteU64(artifact[20..28], @intCast(source.len));
+    var cursor: usize = private_cached_bytecode_header_len;
+    for (url_units) |unit| {
+        privateCachedBytecodeWriteU16(artifact[cursor..][0..2], unit);
+        cursor += 2;
+    }
+    @memcpy(artifact[cursor..], source);
+
+    var digest: [32]u8 = undefined;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(artifact[10..28]);
+    hash.update(artifact[private_cached_bytecode_header_len..]);
+    hash.final(&digest);
+    @memcpy(artifact[28..private_cached_bytecode_header_len], &digest);
+
+    owner.* = .{ .bytes = artifact };
+    output.* = artifact.ptr;
+    output_size.* = artifact.len;
+    owner_output.* = owner;
+    return true;
+}
+
+export fn generateCachedModuleByteCodeFromSourceCode(
+    source_provider_url: ?*const PrivateBunString,
+    input_code: ?[*]const u8,
+    input_source_code_size: usize,
+    output_bytecode: ?*?[*]u8,
+    output_bytecode_size: ?*usize,
+    cached_bytecode: ?*?*PrivateCachedBytecode,
+) callconv(.c) bool {
+    return privateGenerateCachedBytecode(.module, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
+}
+
+export fn generateCachedCommonJSProgramByteCodeFromSourceCode(
+    source_provider_url: ?*const PrivateBunString,
+    input_code: ?[*]const u8,
+    input_source_code_size: usize,
+    output_bytecode: ?*?[*]u8,
+    output_bytecode_size: ?*usize,
+    cached_bytecode: ?*?*PrivateCachedBytecode,
+) callconv(.c) bool {
+    return privateGenerateCachedBytecode(.common_js, source_provider_url, input_code, input_source_code_size, output_bytecode, output_bytecode_size, cached_bytecode);
+}
+
+export fn CachedBytecode__deref(cached_bytecode: ?*PrivateCachedBytecode) callconv(.c) void {
+    const owner = cached_bytecode orelse return;
+    if (owner.magic != private_cached_bytecode_magic) return;
+    owner.magic = 0;
+    private_string_allocator.free(owner.bytes);
+    private_string_allocator.destroy(owner);
 }
 
 /// Yarr operates on UTF-16 code units. Encoding every unit independently as
@@ -27655,4 +27789,92 @@ test "AbortSignal timeout owns observable signals and invalidates borrowed Bun h
     try std.testing.expect((try context.evaluate(
         "__natural_timeout_330.aborted && __natural_timeout_330.reason.name === 'TimeoutError'",
     )).asBool());
+}
+
+test "private cached bytecode artifacts are deterministic typed and owned" {
+    const url_bytes = "file:///fixture.js";
+    const url = PrivateBunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{
+            .tagged_ptr = @intFromPtr(url_bytes.ptr),
+            .len = url_bytes.len,
+        } },
+    };
+    const source = "const answer = 42;";
+
+    var module_bytes: ?[*]u8 = null;
+    var module_len: usize = 0;
+    var module_owner: ?*PrivateCachedBytecode = null;
+    try std.testing.expect(generateCachedModuleByteCodeFromSourceCode(
+        &url,
+        source.ptr,
+        source.len,
+        &module_bytes,
+        &module_len,
+        &module_owner,
+    ));
+    defer CachedBytecode__deref(module_owner);
+    const module_artifact = module_bytes.?[0..module_len];
+    try std.testing.expectEqualStrings(private_cached_bytecode_artifact_magic, module_artifact[0..8]);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(PrivateCachedBytecodeKind.module)), module_artifact[10]);
+    try std.testing.expectEqualSlices(u8, source, module_artifact[module_artifact.len - source.len ..]);
+
+    var repeat_bytes: ?[*]u8 = null;
+    var repeat_len: usize = 0;
+    var repeat_owner: ?*PrivateCachedBytecode = null;
+    try std.testing.expect(generateCachedModuleByteCodeFromSourceCode(
+        &url,
+        source.ptr,
+        source.len,
+        &repeat_bytes,
+        &repeat_len,
+        &repeat_owner,
+    ));
+    defer CachedBytecode__deref(repeat_owner);
+    try std.testing.expectEqualSlices(u8, module_artifact, repeat_bytes.?[0..repeat_len]);
+
+    var cjs_bytes: ?[*]u8 = null;
+    var cjs_len: usize = 0;
+    var cjs_owner: ?*PrivateCachedBytecode = null;
+    try std.testing.expect(generateCachedCommonJSProgramByteCodeFromSourceCode(
+        &url,
+        source.ptr,
+        source.len,
+        &cjs_bytes,
+        &cjs_len,
+        &cjs_owner,
+    ));
+    defer CachedBytecode__deref(cjs_owner);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(PrivateCachedBytecodeKind.common_js)), cjs_bytes.?[10]);
+    try std.testing.expect(!std.mem.eql(u8, module_artifact, cjs_bytes.?[0..cjs_len]));
+}
+
+test "private cached bytecode rejects syntax without publishing partial outputs" {
+    const invalid = "const = ;";
+    var bytes: ?[*]u8 = @ptrFromInt(1);
+    var len: usize = 99;
+    var owner: ?*PrivateCachedBytecode = @ptrFromInt(@alignOf(PrivateCachedBytecode));
+    try std.testing.expect(!generateCachedModuleByteCodeFromSourceCode(
+        null,
+        invalid.ptr,
+        invalid.len,
+        &bytes,
+        &len,
+        &owner,
+    ));
+    try std.testing.expectEqual(@as(?[*]u8, null), bytes);
+    try std.testing.expectEqual(@as(usize, 0), len);
+    try std.testing.expectEqual(@as(?*PrivateCachedBytecode, null), owner);
+
+    try std.testing.expect(!generateCachedCommonJSProgramByteCodeFromSourceCode(
+        null,
+        null,
+        1,
+        &bytes,
+        &len,
+        &owner,
+    ));
+    try std.testing.expectEqual(@as(?[*]u8, null), bytes);
+    try std.testing.expectEqual(@as(usize, 0), len);
+    try std.testing.expectEqual(@as(?*PrivateCachedBytecode, null), owner);
 }

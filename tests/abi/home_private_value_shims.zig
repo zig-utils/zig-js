@@ -173,6 +173,8 @@ const BunString = extern struct {
     value: BunStringImpl,
 };
 
+const CachedBytecode = opaque {};
+
 const SerializedScriptExternal = extern struct {
     bytes: ?[*]const u8,
     size: usize,
@@ -409,6 +411,9 @@ extern "c" fn BunString__toJS(JSContextRef, *const BunString) EncodedValue;
 extern "c" fn BunString__toJSWithLength(JSContextRef, *const BunString, usize) EncodedValue;
 extern "c" fn BunString__transferToJS(*BunString, JSContextRef) EncodedValue;
 extern "c" fn BunString__createArray(JSContextRef, [*c]const BunString, usize) EncodedValue;
+extern "c" fn generateCachedModuleByteCodeFromSourceCode(*const BunString, [*]const u8, usize, *?[*]u8, *usize, *?*CachedBytecode) bool;
+extern "c" fn generateCachedCommonJSProgramByteCodeFromSourceCode(*const BunString, [*]const u8, usize, *?[*]u8, *usize, *?*CachedBytecode) bool;
+extern "c" fn CachedBytecode__deref(*CachedBytecode) void;
 extern "c" fn JSC__JSString__iterator(?*anyopaque, JSContextRef, ?*anyopaque) void;
 extern "c" fn JSFunction__createFromZig(JSContextRef, BunString, ?*const JSHostFn, u32, ImplementationVisibility, Intrinsic, ?*const JSHostFn) EncodedValue;
 extern "c" fn Bun__CallFrame__getCallerSrcLoc(?*const PrivateCallFrame, JSContextRef, *BunString, *c_uint, *c_uint) void;
@@ -1641,6 +1646,31 @@ fn runFetchHeadersFixture(context: JSContextRef, vm: ?*anyopaque) void {
 pub fn main() void {
     const context = JSGlobalContextCreate(null) orelse fail("context creation failed");
     defer JSGlobalContextRelease(context);
+
+    const cached_url_bytes = "file:///home-cache.js";
+    const cached_url = BunString{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(cached_url_bytes.ptr), .len = cached_url_bytes.len } },
+    };
+    const cached_source = "const cached = 42;";
+    var cached_bytes: ?[*]u8 = null;
+    var cached_len: usize = 0;
+    var cached_owner: ?*CachedBytecode = null;
+    if (!generateCachedModuleByteCodeFromSourceCode(&cached_url, cached_source.ptr, cached_source.len, &cached_bytes, &cached_len, &cached_owner) or
+        cached_len <= cached_source.len or
+        !std.mem.eql(u8, cached_bytes.?[0..8], "ZJSCBC01") or
+        cached_bytes.?[10] != 1 or
+        !std.mem.eql(u8, cached_bytes.?[cached_len - cached_source.len .. cached_len], cached_source))
+        fail("private module cached-bytecode artifact mismatch");
+    CachedBytecode__deref(cached_owner.?);
+
+    cached_bytes = null;
+    cached_len = 0;
+    cached_owner = null;
+    if (!generateCachedCommonJSProgramByteCodeFromSourceCode(&cached_url, cached_source.ptr, cached_source.len, &cached_bytes, &cached_len, &cached_owner) or
+        cached_bytes.?[10] != 2)
+        fail("private CommonJS cached-bytecode artifact mismatch");
+    CachedBytecode__deref(cached_owner.?);
 
     const private_pow_negative_zero = Bun__JSC__operationMathPow(-0.0, 3);
     if (Bun__JSC__operationMathPow(2, 10) != 1024 or

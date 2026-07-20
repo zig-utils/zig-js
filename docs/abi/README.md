@@ -583,6 +583,14 @@ while storage and cross-process flags reject them rather than publishing
 non-portable tokens. Malformed input, foreign values, uncloneable values, and
 allocation failure use the shared pending-exception channel.
 
+The cached-bytecode boundary returns an immutable, versioned `ZJSCBC01`
+artifact owned by its opaque handle. The endian-stable header records the
+module/CommonJS kind, UTF-16 source URL length, source length, and SHA-256
+integrity digest; the payload retains the exact URL units and source bytes.
+Generation runs the production parser first, publishes no partial outputs on
+failure, and never claims compatibility with JavaScriptCore's private cache
+serialization. The byte view remains valid until `CachedBytecode__deref`.
+
 The VM exception slice exports the shared `JSGlobalObject`/`VM` pending-state
 boundary plus exception-cell conversion and classification. Sibling realms in
 one context group observe the same VM pointer and pending cell; taking or

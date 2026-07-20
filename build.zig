@@ -407,6 +407,24 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_abort_signal_test_step.dependOn(&run_bun_private_abort_signal_fixture.step);
 
+    const bun_private_cached_bytecode_fixture = b.addExecutable(.{
+        .name = "bun-private-cached-bytecode",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_cached_bytecode.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    bun_private_cached_bytecode_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_cached_bytecode_fixture = b.addRunArtifact(bun_private_cached_bytecode_fixture);
+    run_bun_private_cached_bytecode_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_cached_bytecode_test_step = b.step(
+        "test-bun-private-cached-bytecode",
+        "Compile, link, and run Bun's private cached-bytecode boundary",
+    );
+    bun_private_cached_bytecode_test_step.dependOn(&run_bun_private_cached_bytecode_fixture.step);
+
     const bun_private_property_iterator_fixture = b.addExecutable(.{
         .name = "bun-private-property-iterator",
         .root_module = b.createModule(.{

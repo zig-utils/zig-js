@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 460,
-      "pending": 70
+      "implemented": 463,
+      "pending": 67
     }
   },
   "declarations": [
@@ -1270,10 +1270,10 @@
       "line": 41,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern \"c\" fn CachedBytecode__deref(this: *CachedBytecode) void;",
       "declaration_sha256": "7f522fa8dec1e32b8dbf2cf7bdd2e9dc0d5ec5328066eefe24a715b58f3508af",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "DOMFormData__forEach",
@@ -5988,10 +5988,10 @@
       "line": 16,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn generateCachedCommonJSProgramByteCodeFromSourceCode(sourceProviderURL: *String, input_code: [*]const u8, inputSourceCodeSize: usize, outputByteCode: *?[*]u8, outputByteCodeSize: *usize, cached_bytecode: *?*CachedBytecode) bool;",
       "declaration_sha256": "bb94b28a8dae2666449547ecba208604b1c3877eb0d372a071d2dbd93f037576",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "generateCachedModuleByteCodeFromSourceCode",
@@ -5999,10 +5999,10 @@
       "line": 15,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn generateCachedModuleByteCodeFromSourceCode(sourceProviderURL: *String, input_code: [*]const u8, inputSourceCodeSize: usize, outputByteCode: *?[*]u8, outputByteCodeSize: *usize, cached_bytecode: *?*CachedBytecode) bool;",
       "declaration_sha256": "c022d85d252c3254c9c295d9f5474ad671a7ddecc92cbfee00177ad91d22462b",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "gnu_get_libc_version",
