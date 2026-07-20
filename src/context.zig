@@ -2856,6 +2856,11 @@ pub const Context = struct {
     gc_cooperative_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_max: std.atomic.Value(u64) = .init(0),
     gc_cooperative_tranche_bytes: usize = 1024 * 1024 * 1024,
+    /// Stop-the-mutator time spent in automatic single-mutator nursery
+    /// collections. Explicit host collections are measured by their caller;
+    /// cooperative no-GIL pauses use the counters above.
+    gc_minor_pause_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_minor_pause_ns_max: std.atomic.Value(u64) = .init(0),
     /// Internal proof that private specialized VM checkpoints reached the
     /// precise-root path. Tests compare deltas; embedders do not observe it.
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
@@ -5097,7 +5102,11 @@ pub const Context = struct {
         defer self.gc_scan_native_stack = false;
         self.gc_scan_parked_stacks = !precise_roots;
         defer self.gc_scan_parked_stacks = false;
+        const started_ns = parallelGcNowNs();
         h.collectYoung();
+        const elapsed = parallelGcNowNs() -| started_ns;
+        _ = self.gc_minor_pause_ns_total.fetchAdd(elapsed, .monotonic);
+        self.recordParallelGcMax(&self.gc_minor_pause_ns_max, elapsed);
         return true;
     }
 
@@ -15334,6 +15343,8 @@ test "enable_gc: mid-script safepoints collect nursery before old heap" {
     // entered the nursery collector at VM safepoints.
     try std.testing.expect(heap.minor_collections - minor_before > 2);
     try std.testing.expectEqual(full_before, heap.full_collections);
+    try std.testing.expect(ctx.gc_minor_pause_ns_total.load(.monotonic) > 0);
+    try std.testing.expect(ctx.gc_minor_pause_ns_max.load(.monotonic) > 0);
     try std.testing.expect(heap.live_cells < 20000);
 }
 
