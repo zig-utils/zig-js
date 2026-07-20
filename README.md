@@ -73,7 +73,7 @@ Run `zig build --help` for the full command list.
 
 - remaining JSC framework/private and Bun/Home ABI surfaces;
 - 24 dispositioned PR-249 shell/JIT/GC/Wasm cases ([inventory](docs/.data/pr249-reference-inventory.json));
-- automatic/concurrent compaction, a moving nursery, parallel minor GC, and an optimizing JIT; explicit C/Zig compaction supports quiescent realms and scheduled precise baseline-JIT checkpoints.
+- automatic/concurrent compaction, a moving nursery, and an optimizing JIT; explicit C/Zig compaction supports quiescent realms and scheduled precise baseline-JIT checkpoints, while age-three parallel minor collection is implemented.
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 

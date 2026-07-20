@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (408 implemented, 63 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (409 implemented, 62 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 408 are implemented and 63 remain pending
+Of the private entries, 409 are implemented and 62 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -476,6 +476,14 @@ one-way auto-start disable, explicit start, console logging, and the default
 inspection policy. Apple-family targets deterministically follow modern JSC's
 disabled default and non-Apple targets default enabled; explicit policy changes
 remain separate from each context's inspectability flag.
+
+The pinned hot-reload boundary broadcasts the exact `Bun.canReload` inspector
+event to every live connection in process creation order, including sessions in
+different VMs and sessions with no enabled protocol domain. Snapshot lifetime
+references allow callbacks to detach themselves or later sessions and to
+rebroadcast recursively without stale delivery or use-after-free. Both profile
+libraries compile and run the same exact consumer through
+`zig build test-private-hot-reload`.
 
 The proxy internal-field projection returns exact live target/handler cells
 without ordinary property access or userland traps. Revoked fields become
@@ -1070,7 +1078,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (400 implemented, 61 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (401 implemented, 60 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1088,9 +1096,10 @@ zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
 zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
 zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
+zig build test-private-hot-reload
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 61
+not claim complete Bun runtime compatibility; #164 remains open for the 60
 pending core entries and later wider/generated profiles.
