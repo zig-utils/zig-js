@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (401 implemented, 70 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (408 implemented, 63 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 401 are implemented and 70 remain pending
+Of the private entries, 408 are implemented and 63 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -656,6 +656,15 @@ report committed arena capacity. Sibling/foreign isolation, null boundaries,
 counter saturation, deferred job execution, and first-exception preservation
 are covered.
 
+The standalone VM boundary owns one refcounted context group for either pinned
+heap tag. `deinit` releases that owner exactly once only when its global belongs
+to the same VM, while retained realms remain usable. `deferGC` is synchronous
+and nestable: every collection attempt inside the callback is suppressed, one
+queued intent survives, and it becomes runnable after the outermost return.
+Control-flow-profiler enablement is stored per VM. Focused tests cover both heap
+tags, foreign/double teardown, retained realms, nested callbacks, collection
+epochs, and every context/group allocation failure.
+
 The VM execution-control slice adds the pinned API-lock trio and
 execution-time-limit trio. The group API lock maps `JSC::VM::apiLock()` onto a
 recursive per-group mutex: same-thread nesting increments depth without
@@ -1061,7 +1070,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (393 implemented, 68 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (400 implemented, 61 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1078,9 +1087,10 @@ zig build test-bun-private-property-iterator -Dprivate-abi-consumer=bun
 zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
 zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
+zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
 ```
 
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 93
+not claim complete Bun runtime compatibility; #164 remains open for the 61
 pending core entries and later wider/generated profiles.
