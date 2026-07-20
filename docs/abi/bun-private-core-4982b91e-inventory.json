@@ -88,8 +88,8 @@
     },
     "by_status": {
       "external": 1,
-      "implemented": 418,
-      "pending": 65
+      "implemented": 422,
+      "pending": 61
     }
   },
   "home_comparison": {
@@ -3030,10 +3030,10 @@
       "line": 7,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__create(heap_type: u8) *VM;",
       "declaration_sha256": "6e7f751d8c18cad45328141e9934c6d74262488ee01b19c241d0f8468885e522",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__deferGC",
@@ -3041,10 +3041,10 @@
       "line": 54,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__deferGC(this: *VM, ctx: ?*anyopaque, callback: *const fn (ctx: ?*anyopaque) callconv(.c) void) void;",
       "declaration_sha256": "03fdf701d044844842bc56accc7cdc2ed2c4195d96982a9b6f3d41121d1033d5",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__deinit",
@@ -3052,10 +3052,10 @@
       "line": 12,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__deinit(vm: *VM, global_object: *JSGlobalObject) void;",
       "declaration_sha256": "419049cf2d46ffaad38da95313c581ad6632c745040f93cf85d7c1b7d197ce0d",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__deleteAllCode",
@@ -3272,10 +3272,10 @@
       "line": 17,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__VM__setControlFlowProfiler(vm: *VM, enabled: bool) void;",
       "declaration_sha256": "3881b4206d2a019ea73e4ed26b8a19596d0d47d10e23eaa4825f91ef08703ad3",
-      "issue": 164
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__setExecutionForbidden",

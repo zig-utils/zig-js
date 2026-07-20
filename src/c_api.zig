@@ -587,9 +587,18 @@ const ReachabilityVisitor = struct {
 /// shared arena/JIT runtime; every exposed global context is a distinct realm on
 /// that runtime and retains this record until its own final release.
 const CContextGroup = struct {
+    record_allocator: std.mem.Allocator,
     ref_count: std.atomic.Value(usize) = .init(1),
     owner_thread: std.Thread.Id,
     primary: *Context,
+    /// `JSC__VM__create` owns exactly one group reference. Public context
+    /// groups begin with no private owner to release through `JSC__VM__deinit`.
+    private_vm_owner_released: std.atomic.Value(bool) = .init(true),
+    heap_type: u8 = 0,
+    control_flow_profiler_enabled: std.atomic.Value(bool) = .init(false),
+    /// Nesting depth for the synchronous `JSC::DeferGC` callback boundary.
+    /// Attempts made inside it remain queued in `async_gc_requested`.
+    gc_defer_depth: std.atomic.Value(usize) = .init(0),
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
     /// Private EncodedJSValue boundaries expose the engine cell address, so
     /// publishing the same object twice must return the same encoded handle.
@@ -703,7 +712,7 @@ const CContextGroup = struct {
             }
         }
         self.zig_string_views.deinit(gpa);
-        gpa.destroy(self);
+        self.record_allocator.destroy(self);
     }
 };
 
@@ -11282,6 +11291,67 @@ fn privateGroupFromVM(vm_ref: ?*anyopaque) ?*CContextGroup {
     return @ptrCast(@alignCast(vm_ref orelse return null));
 }
 
+fn privateCreateVMWithAllocator(allocator: std.mem.Allocator, heap_type: u8) ?*anyopaque {
+    if (heap_type > 1) return null;
+    const primary = Context.create(allocator) catch return null;
+    const group_ref = createContextGroupForPrimary(primary, allocator) orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    group.heap_type = heap_type;
+    group.private_vm_owner_released.store(false, .release);
+    return @ptrCast(group);
+}
+
+/// Create one standalone JSC-shaped VM. Both pinned heap tags select the same
+/// collector today; retaining the tag makes the sizing policy explicit and
+/// leaves the ownership identity independent from any realm later attached.
+export fn JSC__VM__create(heap_type: u8) callconv(.c) ?*anyopaque {
+    return privateCreateVMWithAllocator(gpa, heap_type);
+}
+
+/// Release the single owner reference published by `JSC__VM__create`.
+/// Retained realms continue to own the group, and a foreign global cannot
+/// release another VM. Repeated calls while the realm remains alive are inert.
+export fn JSC__VM__deinit(vm_ref: ?*anyopaque, global: JSContextRef) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    const context = ctxForLifecycle(global) orelse return;
+    if (context.c_api_group != vm_ref) return;
+    if (group.private_vm_owner_released.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return;
+    if (group.release()) group.destroy();
+}
+
+fn privateQueueCollection(group: *CContextGroup) void {
+    group.async_gc_requested.store(true, .release);
+    if (group.gc_defer_depth.load(.acquire) == 0)
+        group.primary.requestGarbageCollection();
+}
+
+/// Execute the callback synchronously while collection is forbidden. Nested
+/// scopes are exact: only the outermost exit makes queued work runnable.
+export fn JSC__VM__deferGC(
+    vm_ref: ?*anyopaque,
+    callback_context: ?*anyopaque,
+    callback: ?*const fn (?*anyopaque) callconv(.c) void,
+) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    const run = callback orelse return;
+    const previous = group.gc_defer_depth.fetchAdd(1, .acq_rel);
+    if (previous == std.math.maxInt(usize)) {
+        _ = group.gc_defer_depth.fetchSub(1, .acq_rel);
+        return;
+    }
+    defer {
+        const before_exit = group.gc_defer_depth.fetchSub(1, .acq_rel);
+        if (before_exit == 1 and group.async_gc_requested.load(.acquire))
+            group.primary.requestGarbageCollection();
+    }
+    run(callback_context);
+}
+
+export fn JSC__VM__setControlFlowProfiler(vm_ref: ?*anyopaque, enabled: bool) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.control_flow_profiler_enabled.store(enabled, .release);
+}
+
 fn privateMaterializeTermination(group: *CContextGroup) ?*Boxed {
     if (group.pending_exception) |pending| return pending;
     if (!group.termination_requested.load(.acquire)) return null;
@@ -12460,6 +12530,10 @@ export fn JSCommonJSExtensions__swapRemove(global: JSContextRef, index: u32) cal
 }
 
 fn privateRunFullCollection(group: *CContextGroup) usize {
+    if (group.gc_defer_depth.load(.acquire) != 0) {
+        privateQueueCollection(group);
+        return 0;
+    }
     group.async_gc_requested.store(false, .release);
     group.primary.collectGarbage();
     if (group.collection_epoch != std.math.maxInt(u64)) group.collection_epoch += 1;
@@ -12475,8 +12549,7 @@ export fn JSC__VM__blockBytesAllocated(vm_ref: ?*anyopaque) callconv(.c) usize {
 
 export fn JSC__VM__collectAsync(vm_ref: ?*anyopaque) callconv(.c) void {
     const group = privateGroupFromVM(vm_ref) orelse return;
-    group.async_gc_requested.store(true, .release);
-    group.primary.requestGarbageCollection();
+    privateQueueCollection(group);
 }
 
 export fn JSC__VM__externalMemorySize(vm_ref: ?*anyopaque) callconv(.c) usize {
@@ -12492,7 +12565,8 @@ export fn JSC__VM__heapSize(vm_ref: ?*anyopaque) callconv(.c) usize {
 export fn JSC__VM__performOpportunisticallyScheduledTasks(vm_ref: ?*anyopaque, until: f64) callconv(.c) void {
     const group = privateGroupFromVM(vm_ref) orelse return;
     if (std.math.isNan(until) or until <= 0) return;
-    if (group.async_gc_requested.load(.acquire)) _ = privateRunFullCollection(group);
+    if (group.async_gc_requested.load(.acquire) and group.gc_defer_depth.load(.acquire) == 0)
+        _ = privateRunFullCollection(group);
     privateVMDrainMicrotasks(group);
 }
 
@@ -13657,12 +13731,13 @@ fn contextGroupFrom(ref: JSContextGroupRef) ?*CContextGroup {
     return group;
 }
 
-fn createContextGroupForPrimary(primary: *Context) JSContextGroupRef {
-    const group = gpa.create(CContextGroup) catch {
+fn createContextGroupForPrimary(primary: *Context, record_allocator: std.mem.Allocator) JSContextGroupRef {
+    const group = record_allocator.create(CContextGroup) catch {
         primary.destroy();
         return null;
     };
     group.* = .{
+        .record_allocator = record_allocator,
         .owner_thread = std.Thread.getCurrentId(),
         .primary = primary,
         .atom_strings = strcell.InternTable.init(gpa),
@@ -13675,7 +13750,7 @@ fn createContextGroupForPrimary(primary: *Context) JSContextGroupRef {
 
 export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
     const primary = Context.create(gpa) catch return null;
-    return createContextGroupForPrimary(primary);
+    return createContextGroupForPrimary(primary, gpa);
 }
 
 export fn JSContextGroupRetain(group_ref: JSContextGroupRef) callconv(.c) JSContextGroupRef {
@@ -13696,6 +13771,10 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
     const c = ctxFrom(ctx) orelse return;
     if (c.c_api_group) |opaque_group| {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.gc_defer_depth.load(.acquire) != 0) {
+            privateQueueCollection(group);
+            return;
+        }
         if (group.collection_epoch != std.math.maxInt(u64))
             group.collection_epoch += 1;
     }
@@ -13798,7 +13877,7 @@ export fn ZJSGlobalContextCreateThreaded(gil: bool) callconv(.c) JSContextRef {
 /// pointer-free baseline JIT may remain enabled across quiescent movement.
 export fn ZJSGlobalContextCreateGarbageCollected(enable_jit: bool) callconv(.c) JSContextRef {
     const ctx = Context.createWith(gpa, .{ .enable_gc = true, .enable_jit = enable_jit }) catch return null;
-    _ = createContextGroupForPrimary(ctx) orelse return null;
+    _ = createContextGroupForPrimary(ctx, gpa) orelse return null;
     ctx.initCApiRef();
     return @ptrCast(ctx);
 }
@@ -27940,4 +28019,106 @@ test "private cached bytecode generation is concurrent and isolated" {
     for (&threads, &tasks) |*thread, *task| thread.* = try std.Thread.spawn(.{}, Task.run, .{task});
     for (&threads) |*thread| thread.join();
     for (tasks) |task| try std.testing.expect(!task.failed);
+}
+
+const PrivateVmGcDeferTestState = struct {
+    vm: *anyopaque,
+    global: JSContextRef,
+    initial_epoch: u64,
+    callbacks: usize = 0,
+    failed: bool = false,
+};
+
+fn privateVmGcDeferTestCallback(callback_context: ?*anyopaque) callconv(.c) void {
+    const state: *PrivateVmGcDeferTestState = @ptrCast(@alignCast(callback_context orelse return));
+    state.callbacks += 1;
+    JSGarbageCollect(state.global);
+    if (JSC__VM__runGC(state.vm, true) != 0 or
+        ZJSContextGetCollectionEpoch(state.global) != state.initial_epoch)
+    {
+        state.failed = true;
+    }
+    JSC__VM__collectAsync(state.vm);
+    if (state.callbacks == 1)
+        JSC__VM__deferGC(state.vm, state, privateVmGcDeferTestCallback);
+}
+
+test "private VM lifecycle retains realms and rejects foreign deinit" {
+    try std.testing.expectEqual(@as(?*anyopaque, null), JSC__VM__create(2));
+
+    const first_vm = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    const first = JSGlobalContextCreateInGroup(@ptrCast(first_vm), null) orelse {
+        JSContextGroupRelease(@ptrCast(first_vm));
+        return error.ContextCreateFailed;
+    };
+    defer JSGlobalContextRelease(first);
+
+    const second_vm = JSC__VM__create(1) orelse return error.VMCreateFailed;
+    const second = JSGlobalContextCreateInGroup(@ptrCast(second_vm), null) orelse {
+        JSContextGroupRelease(@ptrCast(second_vm));
+        return error.ContextCreateFailed;
+    };
+    defer JSGlobalContextRelease(second);
+
+    const first_group = privateGroupFromVM(first_vm).?;
+    const second_group = privateGroupFromVM(second_vm).?;
+    try std.testing.expectEqual(@as(u8, 0), first_group.heap_type);
+    try std.testing.expectEqual(@as(u8, 1), second_group.heap_type);
+
+    JSC__VM__deinit(first_vm, second);
+    try std.testing.expect(!first_group.private_vm_owner_released.load(.acquire));
+
+    JSC__VM__setControlFlowProfiler(first_vm, true);
+    try std.testing.expect(first_group.control_flow_profiler_enabled.load(.acquire));
+    JSC__VM__setControlFlowProfiler(first_vm, false);
+    try std.testing.expect(!first_group.control_flow_profiler_enabled.load(.acquire));
+
+    JSC__VM__deinit(first_vm, first);
+    JSC__VM__deinit(first_vm, first);
+    try std.testing.expect(first_group.private_vm_owner_released.load(.acquire));
+    try std.testing.expect(JSContextGetGlobalObject(first) != null);
+
+    JSC__VM__deinit(second_vm, second);
+    try std.testing.expect(second_group.private_vm_owner_released.load(.acquire));
+}
+
+test "private VM GC deferral is nested and preserves queued collection" {
+    const vm_ref = JSC__VM__create(0) orelse return error.VMCreateFailed;
+    const global = JSGlobalContextCreateInGroup(@ptrCast(vm_ref), null) orelse {
+        JSContextGroupRelease(@ptrCast(vm_ref));
+        return error.ContextCreateFailed;
+    };
+    defer JSGlobalContextRelease(global);
+    defer JSC__VM__deinit(vm_ref, global);
+
+    const group = privateGroupFromVM(vm_ref).?;
+    const initial_epoch = ZJSContextGetCollectionEpoch(global);
+    var state = PrivateVmGcDeferTestState{
+        .vm = vm_ref,
+        .global = global,
+        .initial_epoch = initial_epoch,
+    };
+    JSC__VM__deferGC(vm_ref, &state, privateVmGcDeferTestCallback);
+    try std.testing.expectEqual(@as(usize, 2), state.callbacks);
+    try std.testing.expect(!state.failed);
+    try std.testing.expectEqual(@as(usize, 0), group.gc_defer_depth.load(.acquire));
+    try std.testing.expect(group.async_gc_requested.load(.acquire));
+    try std.testing.expectEqual(initial_epoch, ZJSContextGetCollectionEpoch(global));
+
+    JSC__VM__performOpportunisticallyScheduledTasks(vm_ref, 1);
+    try std.testing.expect(!group.async_gc_requested.load(.acquire));
+    try std.testing.expectEqual(initial_epoch + 1, ZJSContextGetCollectionEpoch(global));
+}
+
+fn privateVmAllocationFailureProbe(allocator: std.mem.Allocator) !void {
+    const vm_ref = privateCreateVMWithAllocator(allocator, 0) orelse return error.OutOfMemory;
+    JSContextGroupRelease(@ptrCast(vm_ref));
+}
+
+test "private VM creation rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        privateVmAllocationFailureProbe,
+        .{},
+    );
 }
