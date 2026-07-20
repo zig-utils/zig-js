@@ -257,8 +257,11 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
       - uses: pantry-pm/pantry/packages/action@main
+        continue-on-error: true
         with:
           packages: zig@0.17.0-dev
+      - name: Ensure Zig is available
+        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Install pinned WebAssembly corpus tools
         if: matrix.wasm_spec == true
         working-directory: zig-js
@@ -384,8 +387,11 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
       - uses: pantry-pm/pantry/packages/action@main
+        continue-on-error: true
         with:
           packages: zig@0.17.0-dev
+      - name: Ensure Zig is available
+        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Build the TSan-instrumented threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin -Dtsan=true
@@ -451,8 +457,11 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
       - uses: pantry-pm/pantry/packages/action@main
+        continue-on-error: true
         with:
           packages: zig@0.17.0-dev
+      - name: Ensure Zig is available
+        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: ${{ matrix.name }}
         working-directory: zig-js
         env:
@@ -493,8 +502,11 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
       - uses: pantry-pm/pantry/packages/action@main
+        continue-on-error: true
         with:
           packages: zig@0.17.0-dev
+      - name: Ensure Zig is available
+        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Parallel test262 introduces no new failures
         working-directory: zig-js
         run: |
