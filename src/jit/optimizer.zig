@@ -87,7 +87,7 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_, throw_ };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return };
 
 pub const HandlerState = struct {
     catch_ip: u32,
@@ -284,7 +284,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret, .ret_undef, .throw_op => if (ip + 1 < code.len) {
+        .ret, .ret_undef, .throw_op, .abrupt_return => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -331,7 +331,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret, .ret_undef, .throw_op => {},
+            .ret, .ret_undef, .throw_op, .abrupt_return => {},
             else => if (index + 1 < blocks_list.items.len) {
                 addSuccessor(block, @intCast(index + 1));
             },
@@ -390,7 +390,7 @@ const DepthEffect = struct {
 fn depthEffect(op: bc.Op) DepthEffect {
     return switch (op) {
         .load_const, .load_undefined, .load_null, .load_true, .load_false, .load_local => .{ .required = 0, .removed = 0, .added = 1 },
-        .pop, .jump_if_false, .ret, .throw_op => .{ .required = 1, .removed = 1, .added = 0 },
+        .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
@@ -772,6 +772,13 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.appendFrameState(.throw_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
             },
+            .abrupt_return => {
+                if (depth == 0) return error.InvalidControlFlow;
+                // The bytecode VM owns completion propagation through finally;
+                // retain its input and handler stack and resume this opcode.
+                try builder.appendFrameState(.abrupt_return, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                depth -= 1;
+            },
             .push_handler => try handlers.append(allocator, .{
                 .catch_ip = inst.a,
                 .finally_ip = inst.b,
@@ -967,6 +974,7 @@ fn supports(op: bc.Op) bool {
         .push_handler,
         .pop_handler,
         .throw_op,
+        .abrupt_return,
         => true,
         else => false,
     };
@@ -1148,6 +1156,31 @@ test "optimizer models throw as a resumable terminal frame" {
     try std.testing.expectEqual(std.math.maxInt(u32), handler.catch_ip);
     try std.testing.expectEqual(@as(u32, 4), handler.finally_ip);
     try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
+}
+
+test "optimizer models abrupt return as a resumable terminal frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(RuntimeValue.num(7));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 4);
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.abrupt_return, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.push_completion, 0);
+    _ = try chunk.emit(.end_finally, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var abrupt_state: ?FrameState = null;
+    for (plan.graph.frame_states) |state| {
+        if (state.kind == .abrupt_return) abrupt_state = state;
+    }
+    const state = abrupt_state orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 2), state.origin);
+    try std.testing.expectEqual(@as(u32, 1), state.stack_count);
+    try std.testing.expectEqual(@as(u32, 1), state.handler_count);
+    try std.testing.expectEqual(@as(u32, 4), plan.graph.handler_states[state.first_handler].finally_ip);
 }
 
 test "optimizer canonicalizes pure values and removes dead SSA" {

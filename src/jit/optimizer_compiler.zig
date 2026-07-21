@@ -280,7 +280,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             bytecode_steps = graph.returns[0].origin + 1;
         } else if (graph.returns.len == 0) {
             var throw_index: ?u16 = null;
-            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_) {
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return) {
                 if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
                 throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
                 bytecode_steps = state.origin;
@@ -352,6 +352,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .branch => .branch,
                 .return_ => .return_,
                 .throw_ => .throw_,
+                .abrupt_return => .abrupt_return,
             },
             .exit_ip = state.origin,
             .first_value = first_value,
@@ -1299,6 +1300,32 @@ test "optimizer lowering publishes an exact throw side exit" {
         try std.testing.expectEqual(@as(u64, 2), steps);
         try std.testing.expectEqual(jit.DeoptPointKind.throw_, compiled.deopt.?.points[frame.deopt_index].kind);
     }
+}
+
+test "optimizer lowering publishes an exact abrupt return side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(Value.num(7));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 4);
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.abrupt_return, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.push_completion, 0);
+    _ = try chunk.emit(.end_finally, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.abrupt_return, point.kind);
+    try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 1), point.stack_count);
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u32, 4), program.deopt_handlers[point.first_handler].finally_ip);
 }
 
 test "optimizer compiler executes guarded parameter SSA" {
