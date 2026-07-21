@@ -181,12 +181,20 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
     var required_numeric_slots: u64 = 0;
+    var numeric_inputs: [jit.numeric_scratch_capacity]bool = @splat(false);
+    for (graph.nodes) |node| switch (node.kind) {
+        .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            numeric_inputs[try resolveAlias(node.lhs, aliases)] = true;
+            numeric_inputs[try resolveAlias(node.rhs, aliases)] = true;
+        },
+        else => {},
+    };
     for (graph.nodes) |node| switch (node.kind) {
         .block_argument => {},
         .argument => {
             if (node.immediate >= chunk.param_count or node.immediate >= 64) return error.UnsupportedChunk;
-            required_numeric_slots |= @as(u64, 1) << @intCast(node.immediate);
-            types[node.id] = .number;
+            if (numeric_inputs[node.id]) required_numeric_slots |= @as(u64, 1) << @intCast(node.immediate);
+            types[node.id] = if (numeric_inputs[node.id]) .number else .other;
             try operations.append(allocator, .{
                 .kind = .argument,
                 .destination = @intCast(node.id),
@@ -280,7 +288,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             bytecode_steps = graph.returns[0].origin + 1;
         } else if (graph.returns.len == 0) {
             var throw_index: ?u16 = null;
-            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return) {
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .call) {
                 if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
                 throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
                 bytecode_steps = state.origin;
@@ -353,6 +361,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .return_ => .return_,
                 .throw_ => .throw_,
                 .abrupt_return => .abrupt_return,
+                .call => .call,
             },
             .exit_ip = state.origin,
             .first_value = first_value,
@@ -1326,6 +1335,30 @@ test "optimizer lowering publishes an exact abrupt return side exit" {
     try std.testing.expectEqual(@as(u16, 1), point.stack_count);
     try std.testing.expectEqual(@as(u16, 1), point.handler_count);
     try std.testing.expectEqual(@as(u32, 4), program.deopt_handlers[point.first_handler].finally_ip);
+}
+
+test "optimizer lowering publishes an exact pre-call side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.call, 1);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
+    try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 2), point.stack_count);
 }
 
 test "optimizer compiler executes guarded parameter SSA" {
