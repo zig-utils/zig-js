@@ -49,7 +49,9 @@ zig build home-private-abi-audit \
 
 This verifies the live revision, every source hash, signature, classification,
 and calling convention. It replaces a vague source-level estimate: the 471
-private imports are now 446 implemented / 25 pending under #163. The generated
+private imports are now 446 implemented / 1 pending under #163. Another 25
+declarations are consumer-provided (24 pinned Bun/Home host definitions plus
+the generated `JSFunctionCall`) and are deliberately not zig-js exports. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
 so zig-js must not provide a duplicate symbol. The implemented
 slices cover JSC64 value identity, cell equality, truthiness, int32 extraction,

@@ -27,7 +27,8 @@ Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
 or extension totals. The pinned Home inventory currently reports 446
-implemented and 25 pending private symbols; `zig build test-home-private-abi`,
+implemented and 1 pending private symbol; 25 consumer-provided declarations
+are tracked separately and rejected as duplicate zig-js exports. `zig build test-home-private-abi`,
 `zig build test-private-jstype`, and the feature-specific private ABI fixtures
 are their focused compile-link-runtime gates.
 
@@ -400,13 +401,15 @@ return/then forwarding segment for at most 32 hops, and stop at combinators or
 settled/invalid links. It preserves existing/materialized stacks and pending
 exceptions while honoring the selected realm's `Error.stackTraceLimit`.
 
-Bun's separately pinned core `src/jsc` inventory reports 461 private symbols,
-of which 424 shims are implemented and 37 remain pending. Its
-source/signature audit is `zig build bun-private-abi-audit`; broader Bun runtime
-and generated bindings are outside that first core profile. The inventoried
-`JSFunctionCall` declaration is consumer-provided because each runtime-compiled
-FFI module emits and resolves its own definition. Bun JSType numbering
-is selected with `-Dprivate-abi-consumer=bun` and verified by
+Bun's separately pinned core `src/jsc` inventory reports 437 private symbols,
+all implemented by zig-js. Its source/signature audit is
+`zig build bun-private-abi-audit`; broader Bun runtime and generated bindings
+remain outside that core profile. Twenty-four additional declarations are
+defined by pinned Bun/Home C++ provider sources, while `JSFunctionCall` is
+emitted by each runtime-compiled FFI module. The provider contract rejects
+duplicate zig-js definitions and is final-link tested with
+`zig build test-private-consumer-providers`. Bun JSType numbering is selected
+with `-Dprivate-abi-consumer=bun` and verified by
 `zig build test-private-jstype -Dprivate-abi-consumer=bun`.
 
 `ZJSContextGetCollectionEpoch` returns the monotonic count of explicit

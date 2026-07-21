@@ -44,10 +44,10 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (446 implemented, 25 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 447 (446 implemented, 1 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
-| Consumer-generated definition (`JSFunctionCall`) | 1 |
+| Consumer-provided definitions | 25 |
 | **Total** | **538** |
 
 The 538 symbols come from 66 pinned source files; 15 repeated imports retain
@@ -61,11 +61,12 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 446 are implemented and 25 remain pending
+Of the private entries, 446 are implemented and 1 remains pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
-`JSFunctionCall` remains revision-pinned in the declaration inventory but is
-not part of that denominator: each runtime-generated FFI module defines the
-function and resolves it locally after relocation.
+The [consumer-provider contract](consumer-provided-private-exports-422.json)
+pins 24 Bun/Home host definitions and rejects duplicate zig-js exports.
+`JSFunctionCall` is the 25th external entry: each runtime-generated FFI module
+defines it and resolves it locally after relocation.
 
 Home revisions `5e829ad483bb9e5ccb19766997df6462edd8e167`,
 `38702f9e43b3aecbee7d5b7aa48cc66d41cabde7`, and
@@ -1173,9 +1174,9 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (437 implemented, 24 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 437 (437 implemented, 0 pending) |
 | Public-C overlap | 22 |
-| Consumer-generated definition (`JSFunctionCall`) | 1 |
+| Consumer-provided definitions | 25 |
 | **Total** | **484** |
 
 The checked-in comparison proves that Home cannot stand in for Bun: 481 symbol
@@ -1214,7 +1215,7 @@ The [process initialization contract](process-initialization-shell-timeout-417.j
 pins first-call option publication and the distinct shell-timeout trap across
 the tree walker, bytecode VM, quickened regions, and native checkpoints.
 
-The audit rejects revision, file hash, declaration digest, classification,
-calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 24
-pending core entries and later wider/generated profiles.
+The audit rejects revision, provider hash, declaration digest, classification,
+calling-convention, implementation-status, duplicate exports, and
+Home-comparison drift. The pinned Bun core profile has zero missing imports;
+wider/generated runtime profiles remain separate work under #140/#134.
