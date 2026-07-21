@@ -168,6 +168,12 @@ python3 tools/object-churn-gc-profile.py zig-out/bin/bench-comparison-zig-js \
   --markdown-out /tmp/object-churn-gc.md
 ```
 
+The July 21 [raw samples](.data/object-churn-gc-phases-2026-07-21.tsv) and
+[summary](.data/object-churn-gc-phases-2026-07-21.md) attribute the eight-lane
+collector pause primarily to nursery sweep and motivate the bounded #427
+whole-run reclamation experiment. This focused profile does not replace the
+complete comparison matrix or its README scores.
+
 ## What is compared
 
 Both runners evaluate the exact source in [`bench/comparison.js`](../bench/comparison.js). Each workload returns an exactly representable integer checksum, and the driver rejects a run if a checksum changes between samples or differs across engines at the same lane count.

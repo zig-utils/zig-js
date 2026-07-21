@@ -54,6 +54,14 @@ class ProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incoherent"):
             profile.validate([row], 1, [2])
 
+    def test_render_identifies_measured_sweep_followup(self) -> None:
+        rows = [profile.parse_output(output(lane), 0) for lane in (1, 2, 4, 8)]
+        report = profile.render(rows, [1, 2, 4, 8], 1, "zig-js-rev", "zig-gc-rev")
+        self.assertIn("## Finding", report)
+        self.assertIn("Nursery sweep", report)
+        self.assertIn("zig-js/issues/427", report)
+        self.assertIn("zig-gc/issues/42", report)
+
 
 if __name__ == "__main__":
     unittest.main()

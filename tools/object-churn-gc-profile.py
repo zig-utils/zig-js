@@ -119,6 +119,29 @@ def render(rows: list[dict[str, int | str]], lanes: list[int], samples: int, rev
             f"{pause / 1e6:,.3f} ms ({pause / elapsed * 100:.1f}%) | {sweep / 1e6:,.3f} ms | "
             f"{batch / 1e6:,.3f} ms | {worker / 1e6:,.3f} ms |"
         )
+    if 8 in groups:
+        eight = groups[8]
+        elapsed = median(eight, "elapsed_ns")
+        pause = median(eight, "pause_ns_total")
+        sweep = median(eight, "minor_sweep_ns")
+        rendezvous = median(eight, "rendezvous_ns_total")
+        trace = median(eight, "minor_trace_ns")
+        reclaimed = median(eight, "last_minor_reclaimed_bytes")
+        survived = median(eight, "last_minor_survived_cells")
+        lines.extend([
+            "",
+            "## Finding",
+            "",
+            f"At eight lanes, cooperative GC accounts for {pause / elapsed * 100:.1f}% of wall time. "
+            f"Nursery sweep is {sweep / pause * 100:.1f}% of that pause "
+            f"({sweep / 1e6:,.3f} ms), versus {rendezvous / 1e6:,.3f} ms of rendezvous and "
+            f"{trace / 1e6:,.3f} ms of trace. The median cycle reclaims "
+            f"{reclaimed / 1e9:,.3f} GB while retaining only {survived:,.0f} young cells. "
+            "The next measured candidate is whole-run dead nursery backing reclamation "
+            "([zig-js #427](https://github.com/zig-utils/zig-js/issues/427), "
+            "[zig-gc #42](https://github.com/zig-utils/zig-gc/issues/42)), not another "
+            "rendezvous or tracing optimization.",
+        ])
     lines.extend([
         "",
         "`object-batch CPU` sums allocation/publication time across workers and may exceed wall time. Cooperative pause and phase columns are collector wall time while peers are stopped.",
