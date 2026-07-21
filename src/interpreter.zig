@@ -9144,9 +9144,9 @@ pub const Interpreter = struct {
         return try Value.strOwned(self.arena, try out.toOwnedSlice(self.arena));
     }
 
-    fn appendSplitSegment(self: *Interpreter, out: *std.ArrayListUnmanaged(Value), s: []const u8, start: usize, end: usize) EvalError!void {
+    fn appendSplitSegment(self: *Interpreter, out: *std.ArrayListUnmanaged(Value), s: []const u8, cursor: *RxCursor, start: usize, end: usize) EvalError!void {
         var buf: std.ArrayListUnmanaged(u8) = .empty;
-        try appendUtf16Slice(&buf, self.arena, s, start, end);
+        try appendUtf16SliceFrom(&buf, self.arena, s, cursor, start, end);
         try out.append(self.arena, try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena)));
     }
 
@@ -9171,11 +9171,23 @@ pub const Interpreter = struct {
             return result;
         }
 
+        // Fast path for a plain built-in splitter: precompute once, share cursors
+        // (one for exec conversions, one for the output segment slices) → O(n).
+        const fast = self.regexpHasBuiltinExec(splitter);
+        const search_input = if (fast) try self.regexpSearchInput(s, full_unicode) else "";
+        const input_u16 = if (fast) size else 0;
+        const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
+        var exec_cursor: RxCursor = .{};
+        var seg_cursor: RxCursor = .{};
+
         var p: usize = 0;
         var q: usize = 0;
         while (q < size) {
             try self.setRegExpLikeLastIndex(splitter, @floatFromInt(q));
-            const z = try self.regexpExecGeneric(splitter, s);
+            const z = if (fast)
+                try self.regexBuiltinExecWith(splitter.asObj(), s, input_value, search_input, splitter_flags, input_u16, &exec_cursor)
+            else
+                try self.regexpExecGeneric(splitter, s);
             if (z.isNull()) {
                 q = advanceStringIndex(s, q, full_unicode);
                 continue;
@@ -9187,7 +9199,7 @@ pub const Interpreter = struct {
                 continue;
             }
 
-            try self.appendSplitSegment(out, s, p, q);
+            try self.appendSplitSegment(out, s, &seg_cursor, p, q);
             if (out.items.len >= lim) return result;
 
             const length = toLen(try self.toNumberV(try self.getProperty(z, "length")));
@@ -9201,7 +9213,7 @@ pub const Interpreter = struct {
             p = e;
             q = p;
         }
-        try self.appendSplitSegment(out, s, p, size);
+        try self.appendSplitSegment(out, s, &seg_cursor, p, size);
         return result;
     }
 
