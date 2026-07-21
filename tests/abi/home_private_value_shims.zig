@@ -173,6 +173,14 @@ const BunString = extern struct {
     value: BunStringImpl,
 };
 
+const ExternColumnIdentifier = extern struct {
+    tag: u8,
+    value: extern union {
+        index: u32,
+        name: BunString,
+    },
+};
+
 const CachedBytecode = opaque {};
 
 const SerializedScriptExternal = extern struct {
@@ -318,6 +326,9 @@ comptime {
     if (@sizeOf(BunString) != 24 or @alignOf(BunString) != 8 or
         @offsetOf(BunString, "value") != 8)
         @compileError("BunString fixture layout drifted");
+    if (@sizeOf(ExternColumnIdentifier) != 32 or @alignOf(ExternColumnIdentifier) != 8 or
+        @offsetOf(ExternColumnIdentifier, "value") != 8)
+        @compileError("ExternColumnIdentifier fixture layout drifted");
     if (@offsetOf(WTFStringImpl, "bytes") != 8 or
         @offsetOf(WTFStringImpl, "hash_and_flags") != 16)
         @compileError("WTFStringImpl fixture prefix drifted");
@@ -583,6 +594,10 @@ extern "c" fn JSC__JSCell__toObject(?*anyopaque, JSContextRef) JSObjectRef;
 extern "c" fn JSC__JSValue__createEmptyObject(JSContextRef, usize) EncodedValue;
 extern "c" fn JSC__JSValue__createEmptyObjectWithNullPrototype(JSContextRef) EncodedValue;
 extern "c" fn JSC__JSObject__create(JSContextRef, usize, ?*anyopaque, ?*const fn (?*anyopaque, ?*anyopaque, ?*anyopaque) callconv(.c) void) EncodedValue;
+extern "c" const JSC__JSObject__maxInlineCapacity: c_uint;
+extern "c" fn JSC__createStructure(JSContextRef, ?*anyopaque, u32, [*c]const ExternColumnIdentifier) EncodedValue;
+extern "c" fn JSC__createEmptyObjectWithStructure(JSContextRef, EncodedValue) EncodedValue;
+extern "c" fn JSC__putDirectOffset(?*anyopaque, EncodedValue, u32, EncodedValue) void;
 extern "c" fn URLSearchParams__create(JSContextRef, *const ZigString) EncodedValue;
 extern "c" fn URLSearchParams__fromJS(EncodedValue) ?*anyopaque;
 extern "c" fn URLSearchParams__toString(?*anyopaque, ?*anyopaque, ?*const fn (?*anyopaque, *const ZigString) callconv(.c) void) void;
@@ -4296,7 +4311,103 @@ pub fn main() void {
     defer JSGlobalContextRelease(sibling_context);
     const vm = JSC__JSGlobalObject__vm(context) orelse fail("private VM lookup failed");
     const sibling_vm = JSC__JSGlobalObject__vm(sibling_context) orelse fail("sibling VM lookup failed");
+    const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
     runFetchHeadersFixture(context, vm);
+
+    // `JSC__createStructure` (#411): the exact SQL row shape pipeline. The
+    // structure is an opaque cell (never an ordinary JSObject); duplicate and
+    // indexed identifiers do not create named slots, repeated malformed named
+    // entries de-duplicate by first occurrence, and UTF-16 BunStrings survive
+    // the borrowed call boundary.
+    const id_bytes = "id";
+    const label_bytes = "label";
+    const unicode_units = [_]u16{0x03bb}; // U+03BB GREEK SMALL LETTER LAMDA
+    const id_name = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(id_bytes.ptr), .len = id_bytes.len } } };
+    const label_name = BunString{ .tag = .static_zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(label_bytes.ptr), .len = label_bytes.len } } };
+    const unicode_name = BunString{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(&unicode_units) | (@as(usize, 1) << 63), .len = unicode_units.len } } };
+    var column_names = [_]ExternColumnIdentifier{
+        .{ .tag = 2, .value = .{ .name = id_name } },
+        .{ .tag = 1, .value = .{ .index = 17 } },
+        .{ .tag = 0, .value = .{ .index = 0 } },
+        .{ .tag = 2, .value = .{ .name = label_name } },
+        .{ .tag = 2, .value = .{ .name = unicode_name } },
+        .{ .tag = 2, .value = .{ .name = id_name } },
+    };
+    if (JSC__JSObject__maxInlineCapacity != 62) fail("private SQL structure inline-capacity ABI mismatch");
+    const sql_structure = JSC__createStructure(
+        context,
+        empty_object.cellPointer(),
+        column_names.len,
+        &column_names,
+    );
+    if (sql_structure == .empty or !sql_structure.isCell() or
+        JSC__JSCell__getObject(sql_structure.cellPointer()) != null)
+        fail("private SQL structure opacity mismatch");
+    const sql_row = JSC__createEmptyObjectWithStructure(context, sql_structure);
+    if (sql_row == .empty) fail("private SQL structure object construction failed");
+    exposeCell(context, "__private_sql_row", sql_row);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "Object.keys(__private_sql_row).join(',') === 'id,label,λ' && __private_sql_row.id === undefined && Object.getPrototypeOf(__private_sql_row) === Object.prototype")))
+        fail("private SQL structure named-slot/prototype mismatch");
+    const sql_payload = evaluate(context, "({ marker: 411 })");
+    JSC__putDirectOffset(vm, sql_row, 0, EncodedValue.fromInt32(411));
+    JSC__putDirectOffset(vm, sql_row, 1, evaluate(context, "'ready'"));
+    JSC__putDirectOffset(vm, sql_row, 2, sql_payload);
+    JSC__putDirectOffset(vm, sql_row, 99, EncodedValue.fromInt32(-1));
+    JSC__putDirectOffset(foreign_vm, sql_row, 0, EncodedValue.fromInt32(-2));
+    JSC__putDirectOffset(vm, sql_row, 0, evaluate(foreign_context, "({ foreign: true })"));
+    if (!JSC__JSValue__toBoolean(evaluate(context, "__private_sql_row.id === 411 && __private_sql_row.label === 'ready' && __private_sql_row['λ'].marker === 411 && Object.keys(__private_sql_row).length === 3")))
+        fail("private SQL direct-offset writes mismatch");
+
+    // A Structure retains its creation realm's prototype but is consumable by
+    // sibling globals of the same VM. Foreign VMs and foreign owners fail
+    // closed, and a null owner follows JSC's VM-barrier branch.
+    const sibling_sql_row = JSC__createEmptyObjectWithStructure(sibling_context, sql_structure);
+    if (sibling_sql_row == .empty or sibling_vm != vm) fail("private SQL sibling structure construction failed");
+    exposeCell(sibling_context, "__private_sql_sibling_row", sibling_sql_row);
+    exposeCell(sibling_context, "__private_sql_origin_proto", object_prototype);
+    if (!JSC__JSValue__toBoolean(evaluate(sibling_context, "Object.getPrototypeOf(__private_sql_sibling_row) === __private_sql_origin_proto && Object.getPrototypeOf(__private_sql_sibling_row) !== Object.prototype")))
+        fail("private SQL cross-realm prototype mismatch");
+    if (JSC__createEmptyObjectWithStructure(foreign_context, sql_structure) != .empty or
+        JSC__createStructure(context, foreign_object, column_names.len, &column_names) != .empty)
+        fail("private SQL foreign VM rejection mismatch");
+    const unowned_structure = JSC__createStructure(context, null, column_names.len, &column_names);
+    if (unowned_structure == .empty or JSC__createEmptyObjectWithStructure(context, unowned_structure) == .empty)
+        fail("private SQL null-owner structure mismatch");
+
+    // The pinned JSC loop stops as soon as 62 non-duplicate identifiers have
+    // been observed; later names must never enter the structure.
+    var cutoff_names: [64]ExternColumnIdentifier = undefined;
+    for (&cutoff_names, 0..) |*entry, index| entry.* = .{ .tag = 1, .value = .{ .index = @intCast(index) } };
+    const first_bytes = "first";
+    const late_bytes = "late";
+    cutoff_names[0] = .{ .tag = 2, .value = .{ .name = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(first_bytes.ptr), .len = first_bytes.len } } } } };
+    cutoff_names[62] = .{ .tag = 2, .value = .{ .name = .{ .tag = .zig_string, .value = .{ .zig_string = .{ .tagged_ptr = @intFromPtr(late_bytes.ptr), .len = late_bytes.len } } } } };
+    const cutoff_structure = JSC__createStructure(context, null, cutoff_names.len, &cutoff_names);
+    const cutoff_row = JSC__createEmptyObjectWithStructure(context, cutoff_structure);
+    exposeCell(context, "__private_sql_cutoff_row", cutoff_row);
+    if (!JSC__JSValue__toBoolean(evaluate(context, "Object.hasOwn(__private_sql_cutoff_row, 'first') && !Object.hasOwn(__private_sql_cutoff_row, 'late')")))
+        fail("private SQL structure cutoff mismatch");
+    exposeCell(context, "__private_sql_gc_row", sql_row);
+    _ = JSC__VM__runGC(vm, true);
+    if (JSC__createEmptyObjectWithStructure(context, sql_structure) == .empty)
+        fail("private SQL structure did not survive precise GC");
+
+    const precise_structure = JSC__createStructure(protected_context, null, column_names.len, &column_names);
+    const precise_row = JSC__createEmptyObjectWithStructure(protected_context, precise_structure);
+    exposeCell(protected_context, "__private_sql_precise_row", precise_row);
+    JSGarbageCollect(protected_context);
+    const precise_row_after_gc = JSC__createEmptyObjectWithStructure(protected_context, precise_structure);
+    JSC__putDirectOffset(JSC__JSGlobalObject__vm(protected_context), precise_row_after_gc, 0, EncodedValue.fromInt32(411));
+    exposeCell(protected_context, "__private_sql_precise_row_after_gc", precise_row_after_gc);
+    if (!JSC__JSValue__toBoolean(evaluate(protected_context, "__private_sql_precise_row_after_gc.id === 411")))
+        fail("private SQL structure precise-GC relocation mismatch");
+
+    const retired_structure_context = JSGlobalContextCreateInGroup(JSContextGetGroup(context), null) orelse
+        fail("private SQL retired realm creation failed");
+    const retired_structure = JSC__createStructure(retired_structure_context, null, column_names.len, &column_names);
+    JSGlobalContextRelease(retired_structure_context);
+    if (JSC__createEmptyObjectWithStructure(context, retired_structure) != .empty)
+        fail("private SQL retired-realm structure remained usable");
 
     const common_string_kinds = [_]CommonStringsForZig{
         .IPv4,       .IPv6,         .IN4Loopback, .IN6Any,                .ipv4Lower,            .ipv6Lower,            .fetchDefault,
@@ -4322,7 +4433,6 @@ pub fn main() void {
         Bun__CommonStringsForZig__toJS(@enumFromInt(13), context) != .empty or
         Bun__CommonStringsForZig__toJS(.IPv4, null) != .empty)
         fail("private CommonStrings invalid/pending-exception mismatch");
-    const foreign_vm = JSC__JSGlobalObject__vm(foreign_context) orelse fail("foreign VM lookup failed");
     if (JSC__VM__isEntered(null) or JSC__VM__isEntered(vm) or JSC__VM__isEntered(sibling_vm) or JSC__VM__isEntered(foreign_vm))
         fail("private idle VM entry state mismatch");
 
@@ -6887,5 +6997,5 @@ pub fn main() void {
     Bun__SerializedScriptSlice__free(serialized.handle);
     Bun__SerializedScriptSlice__free(serialized.handle);
 
-    std.debug.print("Home private value shims: 388/388 symbols linked; runtime matrix passed\n", .{});
+    std.debug.print("Home private value shims: 392/392 symbols linked; runtime matrix passed\n", .{});
 }

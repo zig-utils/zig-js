@@ -392,6 +392,25 @@ pub fn build(b: *std.Build) void {
     );
     home_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
 
+    const bun_private_sql_structure_fixture = b.addExecutable(.{
+        .name = "bun-private-sql-structure",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_sql_structure.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    bun_private_sql_structure_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_sql_structure_fixture = b.addRunArtifact(bun_private_sql_structure_fixture);
+    run_bun_private_sql_structure_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const bun_private_sql_structure_test_step = b.step(
+        "test-bun-private-sql-structure",
+        "Compile, link, and run Bun's private SQL Structure boundary",
+    );
+    bun_private_sql_structure_test_step.dependOn(&run_bun_private_sql_structure_fixture.step);
+
     const bun_private_abort_signal_fixture = b.addExecutable(.{
         .name = "bun-private-abort-signal",
         .root_module = b.createModule(.{

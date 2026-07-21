@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (440 implemented, 31 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (441 implemented, 30 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 440 are implemented and 31 remain pending
+Of the private entries, 441 are implemented and 30 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -1172,7 +1172,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (431 implemented, 30 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (432 implemented, 29 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1190,12 +1190,18 @@ zig build test-bun-private-c-api-extensions -Dprivate-abi-consumer=bun
 zig build test-bun-private-array-buffer -Dprivate-abi-consumer=bun
 zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
 zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
+zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun
 zig build test-private-hot-reload
 zig build test-private-error-code
 zig build test-private-inspector-agents
 ```
 
+The [SQL structure contract](sql-object-structure-411.json) implements the
+opaque `JSC__createStructure` descriptor and its object/offset consumers with
+exact 32-byte column identifiers, the 62-entry cutoff, realm/VM validation,
+shared engine shapes, GC barriers, and a compiled runtime fixture.
+
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 45
+not claim complete Bun runtime compatibility; #164 remains open for the 29
 pending core entries and later wider/generated profiles.

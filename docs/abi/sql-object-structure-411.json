@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "contract": "sql-object-structure",
+  "issue": 411,
+  "parent_issues": [140, 163, 164],
+  "roadmap_issue": 134,
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+    "bun_webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0"
+  },
+  "sources": {
+    "home_js_object": {
+      "path": "packages/runtime/src/jsc/JSObject.zig",
+      "sha256": "0ff0b3a1ba9e61cb14416751d0fcd2f4a9a9f669b5a2a91ec9e9ded61b0ba48e"
+    },
+    "bun_js_object": {
+      "path": "src/jsc/JSObject.zig",
+      "sha256": "a2359c78380363862e985a4ec28730a89020402b14bae7d9281cdfec72d2cb9e"
+    },
+    "bun_sql_client": {
+      "path": "src/jsc/bindings/SQLClient.cpp",
+      "sha256": "4305ff144994f2cd292ccc60dc164c10d57bd7c19531dda6dad8063a0ab203b5"
+    },
+    "bun_webkit_js_object": {
+      "path": "Source/JavaScriptCore/runtime/JSObject.h",
+      "sha256": "f8ef524cbb0fae78657f8b72398960580fbc57292704bfb67f64e5b4e9c6e5d2"
+    }
+  },
+  "implementation": [
+    "src/c_api.zig",
+    "src/value.zig"
+  ],
+  "fixtures": [
+    "tests/abi/home_private_value_shims.zig",
+    "tests/abi/bun_private_sql_structure.zig"
+  ],
+  "symbols": [
+    "JSC__JSObject__maxInlineCapacity",
+    "JSC__createStructure",
+    "JSC__createEmptyObjectWithStructure",
+    "JSC__putDirectOffset"
+  ],
+  "semantics": [
+    "ExternColumnIdentifier is exactly 32 bytes with alignment 8 and its tag byte is followed at offset 8 by the u32-index/24-byte-BunString union.",
+    "Named identifiers are decoded without retaining caller storage, de-duplicated by first occurrence, and transitioned in insertion order; duplicate tag 0 and indexed tag 1 add no named property.",
+    "Every non-zero tag consumes the inline-capacity counter and scanning stops exactly at the pinned JSC64 JSFinalObject maximum of 62, so later identifiers cannot affect the structure.",
+    "The returned cell is an opaque realm-affine structure descriptor backed by zig-js's immutable shared Shape chain, never an ordinary JavaScript object.",
+    "A null owner uses VM lifetime; a non-null owner must be a live cell from the same VM. Same-VM sibling realms accept the descriptor while foreign VMs and retired creation realms fail closed.",
+    "Object construction uses the structure creation realm's Object.prototype, initializes every named slot to undefined, and converges on the descriptor's exact engine Shape.",
+    "Direct offset writes validate the VM, object, replacement cell, and slot bound before applying the object-owner GC barrier and replacing exactly one existing slot.",
+    "The independently compiled fixture covers mixed tags, repeated names, UTF-16 BunString input, null owners, sibling and foreign realms, cutoff behavior, invalid writes, precise collection, and retired-realm rejection."
+  ]
+}

@@ -4141,6 +4141,19 @@ pub const Object = struct {
         if (self.keyOrder() != null) try self.recordKeyOrderUnlocked(arena, name);
     }
 
+    /// JSC's `putDirectOffset`: replace an existing shape slot without a
+    /// property lookup or transition. The caller supplies a proven offset; an
+    /// invalid offset is rejected instead of indexing uninitialized storage.
+    pub fn putDirectOffset(self: *Object, offset: u32, v: Value) bool {
+        self.lockProperties();
+        defer self.unlockProperties();
+        const slots = self.slotsItems();
+        if (offset >= slots.len) return false;
+        gcBarrier(self, v);
+        @constCast(slots)[offset] = v;
+        return true;
+    }
+
     pub const AccessorDeleteResult = enum {
         absent,
         blocked,

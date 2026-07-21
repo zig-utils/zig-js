@@ -50,6 +50,7 @@ const private_jstype = @import("private_abi/jstype.zig");
 const private_abi_options = @import("private_abi_options");
 const WorkerMod = @import("worker.zig");
 const JsString = @import("jsstring.zig").JsString;
+const Shape = @import("shape.zig").Shape;
 
 const Context = ContextMod.Context;
 const Value = value.Value;
@@ -116,6 +117,26 @@ const PrivateBunString = extern struct {
         return .{ .tag = .empty, .value = .{ .zig_string = .{} } };
     }
 };
+
+/// Pinned `Bun::ExternColumnIdentifier` layout from SQLClient.cpp. Tags are
+/// deliberately not an enum: the C++ boundary treats every non-zero unknown
+/// tag as a non-duplicate capacity entry, while only 2 contributes a name.
+const PrivateExternColumnIdentifier = extern struct {
+    tag: u8,
+    value: extern union {
+        index: u32,
+        name: PrivateBunString,
+    },
+};
+
+const private_js_final_object_max_inline_capacity: u32 = 62;
+
+comptime {
+    if (@sizeOf(PrivateExternColumnIdentifier) != 32 or
+        @alignOf(PrivateExternColumnIdentifier) != 8 or
+        @offsetOf(PrivateExternColumnIdentifier, "value") != 8)
+        @compileError("ExternColumnIdentifier ABI drifted from pinned Bun/Home");
+}
 
 /// Pinned Home/Bun `SerializedScriptValue.External` return layout. The byte
 /// view borrows the opaque handle and remains valid until its matching free.
@@ -493,8 +514,21 @@ const Boxed = struct {
     /// a `*Value` when tracing C-API handles.
     value: Value,
     owner: *Context,
-    private_kind: enum(u8) { value, exception } = .value,
+    private_kind: enum(u8) { value, exception, structure } = .value,
     exception_encoded: EncodedValue = .empty,
+    structure: ?*PrivateStructure = null,
+};
+
+/// VM/realm-affine analogue of JSC::Structure for Bun's SQL row fast path.
+/// The immutable Shape is the engine-native hidden class; `names` is retained
+/// so the paired constructor can initialize every slot without exposing this
+/// descriptor as an ordinary JavaScript object.
+const PrivateStructure = struct {
+    realm: *Context,
+    root_shape: *Shape,
+    final_shape: *Shape,
+    names: []const []const u8,
+    inline_capacity_hint: u32,
 };
 
 const PrivateContiguousVector = struct {
@@ -2705,6 +2739,18 @@ fn privateValueFrom(global: JSContextRef, encoded: EncodedValue) ?Value {
                 const group = context.c_api_group orelse return null;
                 if (boxed.owner.c_api_group != group) return null;
             }
+            return boxed.value;
+        },
+        else => null,
+    };
+}
+
+fn privateValueFromGroup(group: *CContextGroup, encoded: EncodedValue) ?Value {
+    return encoded.toInternalPrimitive(Value) catch |err| switch (err) {
+        error.CellRequiresHandle => {
+            const boxed = privateBoxedFrom(encoded) orelse return null;
+            if (boxed.private_kind != .value or
+                boxed.owner.c_api_group != @as(?*anyopaque, @ptrCast(group))) return null;
             return boxed.value;
         },
         else => null,
@@ -10760,6 +10806,161 @@ export fn JSC__JSValue__createEmptyObjectWithNullPrototype(global: JSContextRef)
     const null_value = JSValueMakeNull(global) orelse return .empty;
     JSObjectSetPrototype(global, object, null_value);
     return privateEncodedFromRef(object);
+}
+
+/// Exact pinned `JSFinalObject::maxInlineCapacity` for Bun's WebKit JSC64
+/// build: `(512 - sizeof(JSObjectWithButterfly)) / 8 == 62`.
+export const JSC__JSObject__maxInlineCapacity: c_uint = private_js_final_object_max_inline_capacity;
+
+/// `SQLClient.cpp:JSC__createStructure`: build the immutable named-property
+/// transition chain used by Bun's SQL row materializer. Indexed entries and
+/// unknown non-zero tags consume inline-capacity budget but do not add named
+/// slots; duplicate tag 0 consumes neither. Named entries are de-duplicated by
+/// first occurrence, matching JSC's PropertyNameArrayBuilder.
+export fn JSC__createStructure(
+    global: JSContextRef,
+    owner: ?*anyopaque,
+    capacity: u32,
+    names_ptr: [*c]const PrivateExternColumnIdentifier,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null or (capacity > 0 and names_ptr == null)) return .empty;
+
+    const owner_box = if (owner) |cell| privateBoxFromCell(cell) orelse return .empty else null;
+    if (owner_box) |boxed|
+        if (boxed.owner.c_api_group != opaque_group) return .empty;
+
+    var collected: std.ArrayListUnmanaged([]const u8) = .empty;
+    var non_duplicate_count: u32 = 0;
+    var shape = context.root_shape;
+    const entries: []const PrivateExternColumnIdentifier = if (capacity == 0)
+        &.{}
+    else
+        names_ptr[0..capacity];
+    for (entries) |*entry| {
+        if (entry.tag == 2) {
+            const name_value = privateBunStringValue(context, &entry.value.name, null) catch |err| {
+                privatePublishBunStringError(context, err);
+                return .empty;
+            };
+            if (!name_value.isString()) return .empty;
+            const name = name_value.asStr();
+            var duplicate = false;
+            for (collected.items) |existing| {
+                if (std.mem.eql(u8, existing, name)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                const owned = context.arena().dupe(u8, name) catch {
+                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    return .empty;
+                };
+                collected.append(context.arena(), owned) catch {
+                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    return .empty;
+                };
+                shape = shape.transition(owned) catch {
+                    privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+                    return .empty;
+                };
+            }
+        }
+        non_duplicate_count += @intFromBool(entry.tag != 0);
+        if (non_duplicate_count == private_js_final_object_max_inline_capacity) break;
+    }
+
+    const descriptor = context.arena().create(PrivateStructure) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    descriptor.* = .{
+        .realm = context,
+        .root_shape = context.root_shape,
+        .final_shape = shape,
+        .names = collected.items,
+        .inline_capacity_hint = non_duplicate_count,
+    };
+    const boxed = context.arena().create(Boxed) catch {
+        privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
+        return .empty;
+    };
+    boxed.* = .{
+        // Structure descriptors are arena-owned rather than GC cells. Keep the
+        // Boxed root slot primitive: retaining an owner Value here would create
+        // a false strong edge and could leave an untraced relocated pointer.
+        .value = Value.undef(),
+        .owner = context,
+        .private_kind = .structure,
+        .structure = descriptor,
+    };
+    return privateEncodedFromRef(@ptrCast(boxed));
+}
+
+/// Paired pinned SQL consumer: instantiate a genuine ordinary object using the
+/// descriptor's original realm prototype and shared hidden-class chain. Every
+/// declared named slot starts as `undefined`, ready for direct offset writes.
+export fn JSC__createEmptyObjectWithStructure(
+    global: JSContextRef,
+    encoded_structure: EncodedValue,
+) callconv(.c) EncodedValue {
+    const context = ctxForEvaluation(global) orelse return .empty;
+    const opaque_group = context.c_api_group orelse return .empty;
+    const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+    if (group.pending_exception != null) return .empty;
+    const structure_box = privateBoxedFrom(encoded_structure) orelse return .empty;
+    if (structure_box.private_kind != .structure or structure_box.owner.c_api_group != opaque_group)
+        return .empty;
+    const descriptor = structure_box.structure orelse return .empty;
+
+    const gc_saved = gc_mod.setActiveHeap(context.gc);
+    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const sa_saved = strcell.setActiveArena(context.arena());
+    defer _ = strcell.setActiveArena(sa_saved);
+    var machine = context.interpreter();
+    context.pushActiveInterpreter(&machine) catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    defer context.popActiveInterpreter(&machine);
+
+    const created = machine.newObject() catch |err| {
+        privateSetPendingAbrupt(context, &machine, err);
+        return .empty;
+    };
+    const object = created.asObj();
+    var realm_machine = descriptor.realm.interpreter();
+    object.proto = realm_machine.objectProto();
+    for (descriptor.names) |name| {
+        object.setOwn(context.arena(), descriptor.root_shape, name, Value.undef()) catch |err| {
+            privateSetPendingAbrupt(context, &machine, err);
+            return .empty;
+        };
+    }
+    if ((object.shape orelse descriptor.root_shape) != descriptor.final_shape) return .empty;
+    return privateEncodedFromValue(context, created);
+}
+
+/// Paired pinned SQL consumer: write one existing object slot by Structure
+/// offset. The VM identity replaces a global argument, so both object and value
+/// cells are validated against that group before the owner-aware GC barrier.
+export fn JSC__putDirectOffset(
+    vm_ref: ?*anyopaque,
+    encoded_object: EncodedValue,
+    offset: u32,
+    encoded_value: EncodedValue,
+) callconv(.c) void {
+    const pointer = vm_ref orelse return;
+    if (@intFromPtr(pointer) % @alignOf(CContextGroup) != 0) return;
+    const group: *CContextGroup = @ptrCast(@alignCast(pointer));
+    if (group.primary.c_api_group != pointer) return;
+    const boxed = privateBoxedFrom(encoded_object) orelse return;
+    if (boxed.private_kind != .value or boxed.owner.c_api_group != pointer or !boxed.value.isObject()) return;
+    const replacement = privateValueFromGroup(group, encoded_value) orelse return;
+    _ = boxed.value.asObj().putDirectOffset(offset, replacement);
 }
 
 /// `JSC::constructEmptyObject(globalObject, objectPrototype, min(capacity,

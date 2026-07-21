@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 499,
-      "pending": 31
+      "implemented": 500,
+      "pending": 30
     }
   },
   "declarations": [
@@ -3360,10 +3360,11 @@
       "line": 135,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__createStructure(global: *home_rt.jsc.JSGlobalObject, owner: *home_rt.jsc.JSCell, length: u32, names: [*]ExternColumnIdentifier) home_rt.jsc.JSValue;",
       "declaration_sha256": "0d362c0518bb88e3f77e352a2dd5bd1d04b18e47374b5403bb324ae80e9ed1a4",
-      "issue": 163
+      "implementation": "src/c_api.zig",
+      "issue": 411
     },
     {
       "name": "JSC__createTypeError",
