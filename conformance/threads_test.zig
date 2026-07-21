@@ -27,6 +27,7 @@ const allowlist = [_][]const u8{
     "dw1-sort-comparator-callsite-shapes.js",
     "dw1-sort-comparator-iterator-host.js",
     "dw1-sort-comparator-osr.js",
+    "dw2-marklistset-storm.js",
     "api/condition-basic.js",
     "api/condition-async-wait.js",
     "api/condition-wait-termination.js",
@@ -65,6 +66,11 @@ const allowlist = [_][]const u8{
     "bench/megamorphic-access.js",
     "bench/transition-heavy-constructor.js",
     "congc-t1-window-split.js",
+    "congc-t3-barrier-storm.js",
+    "congc-t4-alloc-steal-storm.js",
+    "congc-t5-celllock-audit.js",
+    "congc-t9-attach-exit-churn.js",
+    "congc-t11-diagnostics.js",
     "cve/mc-aint-terminate-notify-park-race.js",
     "cve/mc-code-deferred-fire-stale-window.js",
     "cve/mc-code-sleep-through-jettison-isb.js",
@@ -77,6 +83,8 @@ const allowlist = [_][]const u8{
     "cve/mc-gc-blocked-native-roots.js",
     "cve/mc-gc-finreg-cross-thread-gc.js",
     "cve/mc-gc-thread-shell-finalizer-storm.js",
+    "cve/mc-gc-weakgcmap-registry-vs-prune.js",
+    "cve/mc-grow-buffer-storm.js",
     "cve/mc-grow-s4-detach-nullvec-repro.js",
     "cve/mc-grow-wasm-relocating-grow.js",
     "cve/mc-hand-dead-registrant-settle.js",
@@ -282,6 +290,29 @@ fn usesBenchHarness(name: []const u8) bool {
         std.mem.eql(u8, name, "heap-bench-allocation.js") or
         std.mem.eql(u8, name, "jit/construction-shared-constructor.js") or
         std.mem.eql(u8, name, "jit/fires-per-sec.js");
+}
+
+fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (builtin.sanitize_thread and std.mem.eql(u8, name, "dw2-marklistset-storm.js")) {
+        // Preserve two worker sort/apply lanes plus the main mutator and an
+        // explicit GC requester,
+        // and the explicit r=16 GC request while bounding TSan's >100x cost.
+        // Normal builds execute the untouched 16 x 120 shape; the sanitizer
+        // gate executes 2 x 18 plus main/reference passes. Fail closed if the
+        // pinned fixture changes instead of silently running another shape.
+        const workers_needle = "const W = HAVE_THREADS ? 16 : 1;";
+        const rounds_needle = "const ROUNDS = 120;";
+        const workers_at = std.mem.indexOf(u8, source, workers_needle) orelse return error.CorpusFixtureDrift;
+        const rounds_at = std.mem.indexOf(u8, source, rounds_needle) orelse return error.CorpusFixtureDrift;
+        if (rounds_at <= workers_at) return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, source[0..workers_at]);
+        try buf.appendSlice(gpa, "const W = HAVE_THREADS ? 2 : 1;");
+        try buf.appendSlice(gpa, source[workers_at + workers_needle.len .. rounds_at]);
+        try buf.appendSlice(gpa, "const ROUNDS = 18;");
+        try buf.appendSlice(gpa, source[rounds_at + rounds_needle.len ..]);
+        return;
+    }
+    try buf.appendSlice(gpa, source);
 }
 
 fn parallelJsBudgetSkip(name: []const u8) bool {
@@ -717,7 +748,7 @@ pub fn main(init: std.process.Init) !void {
                 try buf.appendSlice(gpa, vmstate_workload_src);
                 try buf.appendSlice(gpa, "\n");
             }
-            try buf.appendSlice(gpa, test_src);
+            try appendCaseSource(gpa, &buf, name, test_src);
 
             // Per-file configs, mirroring their run-tests.sh / //@ runDefault
             // lines: blocking-gate runs can-block-is-false; thread-id-bounds runs

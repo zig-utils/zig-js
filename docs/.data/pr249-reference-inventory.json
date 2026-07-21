@@ -1,88 +1,47 @@
 {
   "dependency_catalog": {
-    "buffer-lifetime": {
-      "description": "Resizable, transferred, and creator-owned buffer lifetime under concurrent access",
-      "owner_issues": [
-        143
-      ]
-    },
-    "cross-realm-weak-gc": {
-      "description": "Cross-realm weak registries during concurrent pruning",
-      "owner_issues": [
-        145
-      ]
-    },
     "jit-artifact-lifetime": {
       "description": "Optimized code, call-link records, retirement epochs, and jettison",
       "owner_issues": [
-        146
+        146,
+        429
       ]
     },
     "jit-trap-polling": {
       "description": "Optimized-tier trap polling, invalidation, and resume",
       "owner_issues": [
-        146
+        146,
+        429
       ]
     },
     "jsc-butterfly-verifier": {
       "description": "JSC-private butterfly verification and indexing-mode invariants",
       "owner_issues": [
         143,
-        146
-      ]
-    },
-    "jsc-heap-snapshot": {
-      "description": "JSC-private heap snapshot and preventCollection controls",
-      "owner_issues": [
-        143,
-        144
-      ],
-      "resolution": "partial: portable snapshot serialization promoted by #403; JSC shared-collector gate remains reference-only"
-    },
-    "jsc-mark-list": {
-      "description": "JSC-private shared-GC mark-list storage and shell controls",
-      "owner_issues": [
-        143,
-        144
+        146,
+        429
       ]
     },
     "jsc-shared-heap-shell": {
       "description": "JSC $vm sharedHeapTest and shared-heap diagnostic controls",
       "owner_issues": [
         143,
-        145
+        145,
+        429
       ]
-    },
-    "jsc-spawned-thread-wasm-refusal": {
-      "description": "JSC-specific refusal of WebAssembly on spawned shared-realm threads",
-      "owner_issues": [
-        143
-      ],
-      "resolution": "explicitly-incompatible: zig-js supports WebAssembly in shared-realm threads"
     },
     "optimizing-jit": {
       "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
       "owner_issues": [
-        146
+        146,
+        429
       ]
     },
     "shared-concurrent-gc": {
       "description": "Concurrent shared-heap collection, stop coordination, and diagnostics",
       "owner_issues": [
-        145
-      ]
-    },
-    "typed-array-race-semantics": {
-      "description": "TypedArray copy and detached-view race semantics",
-      "owner_issues": [
-        143
-      ]
-    },
-    "wasm-shared-memory-lifetime": {
-      "description": "WebAssembly memory growth and backing-store lifetime during concurrent access",
-      "owner_issues": [
-        265,
-        287
+        145,
+        429
       ]
     }
   },
@@ -686,20 +645,32 @@
     {
       "bytes": 2470,
       "case": "api/wasm-refused-sd7.js",
-      "dependencies": [
-        "jsc-spawned-thread-wasm-refusal"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143
-      ],
       "path": "threads-tests/api/wasm-refused-sd7.js",
       "required_shell_hooks": [
         "global:load",
         "option:--useJSThreads=1"
       ],
-      "sha256": "4bec416e0ec046172f7a892b8529baedfd1ac1248580474b2a79e2974422a29f"
+      "sha256": "4bec416e0ec046172f7a892b8529baedfd1ac1248580474b2a79e2974422a29f",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "Every WebAssembly entry point must throw TypeError on a spawned shared-realm thread.",
+        "verification": {
+          "default": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "WebAssembly is intentionally available from shared-realm Thread workers."
+      }
     },
     {
       "bytes": 4399,
@@ -1065,10 +1036,11 @@
         "jit-trap-polling",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
-        146
+        146,
+        429
       ],
       "path": "threads-tests/checktraps-invalidation.js",
       "required_shell_hooks": [
@@ -1097,16 +1069,8 @@
     {
       "bytes": 5584,
       "case": "congc-t11-diagnostics.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t11-diagnostics.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -1119,21 +1083,20 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "6234b562490d2e0a5eeed226aecc6c0a0ac1a2b50558cb889463b0ba18425f8f"
+      "sha256": "6234b562490d2e0a5eeed226aecc6c0a0ac1a2b50558cb889463b0ba18425f8f",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
     },
     {
       "bytes": 2265,
       "case": "congc-t2-lockorder-lint.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t2-lockorder-lint.js",
       "required_shell_hooks": [
         "$vm.sharedHeapTest",
@@ -1142,21 +1105,31 @@
         "option:--useDollarVM=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "1d5d503c686a3952e761c06c1f777de8095cf4564b7ca50db9d1b4b8de7d4cb6"
+      "sha256": "1d5d503c686a3952e761c06c1f777de8095cf4564b7ca50db9d1b4b8de7d4cb6",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The meaningful arms call JSC's $vm.sharedHeapTest lock-order diagnostics.",
+        "verification": {
+          "default": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js tests its collector lock order through native stress/fault gates and does not emulate JSC internal lock classes."
+      }
     },
     {
       "bytes": 6206,
       "case": "congc-t3-barrier-storm.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t3-barrier-storm.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -1169,21 +1142,20 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "b14d8b60f509bc220e318ed7562b354f1a0df2a6d0657f07f4c0a45d11fc6ecc"
+      "sha256": "b14d8b60f509bc220e318ed7562b354f1a0df2a6d0657f07f4c0a45d11fc6ecc",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
     },
     {
       "bytes": 5360,
       "case": "congc-t4-alloc-steal-storm.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t4-alloc-steal-storm.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -1196,21 +1168,20 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "4c28cc552f1eec32c19dcca983efca77535e41dbab8bfa00a1ffed640de13cb3"
+      "sha256": "4c28cc552f1eec32c19dcca983efca77535e41dbab8bfa00a1ffed640de13cb3",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
     },
     {
       "bytes": 8259,
       "case": "congc-t5-celllock-audit.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t5-celllock-audit.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -1222,21 +1193,20 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "27cf95d04ad4a26a3a52f7d97c01c4e4bb453dfc043e94827321dfa0fcdd0056"
+      "sha256": "27cf95d04ad4a26a3a52f7d97c01c4e4bb453dfc043e94827321dfa0fcdd0056",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
     },
     {
       "bytes": 12775,
       "case": "congc-t8-stop-interleaving.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t8-stop-interleaving.js",
       "required_shell_hooks": [
         "$vm.createGlobalObject",
@@ -1252,21 +1222,31 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "1210134831117551e17212e5ce49584e575b83d9eac4fbd74c7a3d07c85c2e6f"
+      "sha256": "1210134831117551e17212e5ce49584e575b83d9eac4fbd74c7a3d07c85c2e6f",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "All collector-stop arms require JSC's $vm.sharedHeapTest dispatcher and its internal stop counters.",
+        "verification": {
+          "default": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js verifies stop/GC interleavings through maintained collector and debugger stress gates, not JSC's private dispatcher."
+      }
     },
     {
       "bytes": 7896,
       "case": "congc-t9-attach-exit-churn.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145
-      ],
       "path": "threads-tests/congc-t9-attach-exit-churn.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -1278,7 +1258,14 @@
         "option:--useJSThreads=1",
         "option:--useSharedGCHeap=1"
       ],
-      "sha256": "e16c28ef49bcdc49623f0eddf6dd49fb1137df51c8c19c33012e4de9550ddd91"
+      "sha256": "e16c28ef49bcdc49623f0eddf6dd49fb1137df51c8c19c33012e4de9550ddd91",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
     },
     {
       "bytes": 10704,
@@ -1288,12 +1275,13 @@
         "jsc-shared-heap-shell",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         143,
         145,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
       "required_shell_hooks": [
@@ -1333,12 +1321,13 @@
         "jsc-shared-heap-shell",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         143,
         145,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-code-calllink-writer-writer.js",
       "required_shell_hooks": [
@@ -1381,23 +1370,33 @@
     {
       "bytes": 4444,
       "case": "cve/mc-df-arraycopy-relabel.js",
-      "dependencies": [
-        "jsc-butterfly-verifier",
-        "typed-array-race-semantics"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        146
-      ],
       "path": "threads-tests/cve/mc-df-arraycopy-relabel.js",
       "required_shell_hooks": [
         "global:load",
         "option:--useJSThreads=1",
         "option:--verifyConcurrentButterfly=1"
       ],
-      "sha256": "c567020ed0e1a2e01ba16418229b085344186b82112f5082a84ae8c594d5f8d5"
+      "sha256": "c567020ed0e1a2e01ba16418229b085344186b82112f5082a84ae8c594d5f8d5",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A racing Array growth must not be observed by TypedArray.prototype.set and JSC's butterfly verifier must be present.",
+        "verification": {
+          "default": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "The source length is snapshotted at the specified set operation point; growth before that snapshot may correctly make the copy reject with RangeError."
+      }
     },
     {
       "bytes": 3292,
@@ -1471,10 +1470,11 @@
         "jit-artifact-lifetime",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-dos-retired-artifact-churn.js",
       "required_shell_hooks": [
@@ -1562,15 +1562,8 @@
     {
       "bytes": 6506,
       "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
-      "dependencies": [
-        "cross-realm-weak-gc",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        145
-      ],
       "path": "threads-tests/cve/mc-gc-weakgcmap-registry-vs-prune.js",
       "required_shell_hooks": [
         "$vm.createGlobalObject",
@@ -1587,17 +1580,8 @@
     {
       "bytes": 9309,
       "case": "cve/mc-grow-buffer-storm.js",
-      "dependencies": [
-        "buffer-lifetime",
-        "wasm-shared-memory-lifetime"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        265,
-        287
-      ],
       "path": "threads-tests/cve/mc-grow-buffer-storm.js",
       "required_shell_hooks": [
         "global:gc",
@@ -1778,11 +1762,12 @@
         "jsc-butterfly-verifier",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         143,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-jit-stale-base-grow-oob.js",
       "required_shell_hooks": [
@@ -1810,21 +1795,33 @@
     {
       "bytes": 6166,
       "case": "cve/mc-life-creator-thread-dies.js",
-      "dependencies": [
-        "buffer-lifetime"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143
-      ],
       "path": "threads-tests/cve/mc-life-creator-thread-dies.js",
       "required_shell_hooks": [
         "global:gc",
         "global:load",
         "option:--useJSThreads=1"
       ],
-      "sha256": "07c0e9996c5fd2a666a76d99324aa10c7be62bc1915a290c1c5b8daaf3deba38"
+      "sha256": "07c0e9996c5fd2a666a76d99324aa10c7be62bc1915a290c1c5b8daaf3deba38",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A reader repeatedly constructs a new TypedArray from a buffer after a concurrent transfer has detached it.",
+        "verification": {
+          "default": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "Constructing any TypedArray over an already detached ArrayBuffer throws TypeError; creator-owned backing lifetime is tested separately."
+      }
     },
     {
       "bytes": 6199,
@@ -2023,11 +2020,12 @@
         "optimizing-jit",
         "shared-concurrent-gc"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         145,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
       "required_shell_hooks": [
@@ -2051,11 +2049,12 @@
         "optimizing-jit",
         "shared-concurrent-gc"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         145,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop.js",
       "required_shell_hooks": [
@@ -2237,10 +2236,11 @@
       "dependencies": [
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
-        146
+        146,
+        429
       ],
       "path": "threads-tests/cve/mc-val-fire-vs-link.js",
       "required_shell_hooks": [
@@ -2351,15 +2351,8 @@
     {
       "bytes": 4834,
       "case": "dw2-marklistset-storm.js",
-      "dependencies": [
-        "jsc-mark-list"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        144
-      ],
       "path": "threads-tests/dw2-marklistset-storm.js",
       "required_shell_hooks": [
         "global:gc",
@@ -2367,7 +2360,14 @@
         "global:print",
         "option:--useJSThreads=1"
       ],
-      "sha256": "6d7566588bbe0e9d2c51b0b6108c373602c513a51158e34b969c6986463dd46a"
+      "sha256": "6d7566588bbe0e9d2c51b0b6108c373602c513a51158e34b969c6986463dd46a",
+      "terminal_premises": [
+        {
+          "category": "implementation-private-premise",
+          "hook": "JSC MarkedVector/MarkListSet internals",
+          "reason": "The portable sort/apply/GC root-pressure witness is maintained; zig-js does not claim JSC's private marker-container implementation."
+        }
+      ]
     },
     {
       "bytes": 7739,
@@ -2716,10 +2716,11 @@
       "dependencies": [
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
-        146
+        146,
+        429
       ],
       "path": "threads-tests/jit/foreign-reify-getbyid-converges.js",
       "required_shell_hooks": [
@@ -2793,12 +2794,13 @@
         "jsc-shared-heap-shell",
         "optimizing-jit"
       ],
-      "execution_state": "reference-only",
+      "execution_state": "blocked",
       "kind": "javascript",
       "owner_issues": [
         143,
         145,
-        146
+        146,
+        429
       ],
       "path": "threads-tests/jit/ic-publish-reset-loops.js",
       "required_shell_hooks": [
@@ -4258,15 +4260,8 @@
     {
       "bytes": 6296,
       "case": "w16-c1-prevent-collection.js",
-      "dependencies": [
-        "jsc-heap-snapshot"
-      ],
-      "execution_state": "reference-only",
+      "execution_state": "terminal-disposition",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        144
-      ],
       "path": "threads-tests/w16-c1-prevent-collection.js",
       "required_shell_hooks": [
         "global:gc",
@@ -4276,10 +4271,28 @@
         "global:print",
         "option:--useJSThreads=1"
       ],
-      "sha256": "27644c1cd6a0141cd37d9e195ecfae073c0a33ae98778a799b27e6ea5e8b3fa7"
+      "sha256": "27644c1cd6a0141cd37d9e195ecfae073c0a33ae98778a799b27e6ea5e8b3fa7",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The verdict requires JSC's concurrent Heap::preventCollection election through shell snapshot functions.",
+        "verification": {
+          "default": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "VM-wide heap snapshots are real and separately gated, but zig-js has no JSC preventCollection election or fake shell equivalent."
+      }
     }
   ],
-  "schema_version": 1,
+  "schema_version": 2,
   "source": {
     "head": "3a14f2a821ac56fcb01d1c765200be7e9dfdb458",
     "pull_request": 249,
@@ -4292,11 +4305,13 @@
       "manifest": 1,
       "shell": 4
     },
+    "blocked": 10,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 235,
-    "reference_only": 24
+    "promoted": 243,
+    "promoted_with_terminal_premises": 6,
+    "terminal_disposition": 6
   }
 }

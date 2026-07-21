@@ -17190,6 +17190,20 @@ fn vmEnsureArrayStorageFn(ctx: *anyopaque, this: Value, args: []const Value) val
     return v;
 }
 
+/// JSC-shell-compatible fresh-global hook backed by zig-js's real child-realm
+/// implementation. Realm construction is serialized only in `parallel_js`:
+/// the collector takes the same lock while tracing realm-owned environments,
+/// and sibling mutators must never observe a half-installed intrinsic graph.
+fn vmCreateGlobalObjectFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = this;
+    _ = args;
+    const self: *Interpreter = @ptrCast(@alignCast(ctx));
+    self.lockRealm();
+    defer self.unlockRealm();
+    const child = try makeChildRealm(self);
+    return child.get("globalThis") orelse self.throwError("TypeError", "$vm.createGlobalObject failed");
+}
+
 fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) EvalError!void {
     const a = env.arena;
     const vm_obj = try gc_mod.allocObj(a);
@@ -17200,6 +17214,7 @@ fn installDollarVM(env: *Environment, rs: *Shape, object_proto: *value.Object) E
     try setNative(a, rs, vm_obj, "indexingMode", 1, vmIndexingModeFn);
     try setNative(a, rs, vm_obj, "noInline", 1, noInlineFn);
     try setNative(a, rs, vm_obj, "useThreadGIL", 0, vmUseThreadGILFn);
+    try setNative(a, rs, vm_obj, "createGlobalObject", 0, vmCreateGlobalObjectFn);
     try env.put("$vm", Value.obj(vm_obj));
 }
 

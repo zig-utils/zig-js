@@ -19339,6 +19339,7 @@ test "$vm exposes only supported shell hooks" {
         \\if (typeof $vm.indexingMode !== "function") throw new Error("missing $vm.indexingMode");
         \\if (typeof $vm.noInline !== "function") throw new Error("missing $vm.noInline");
         \\if (typeof $vm.useThreadGIL !== "function") throw new Error("missing $vm.useThreadGIL");
+        \\if (typeof $vm.createGlobalObject !== "function") throw new Error("missing $vm.createGlobalObject");
         \\if ($vm.useThreadGIL() !== true) throw new Error("thread GIL state");
         \\let storageProbe = [1, 2, 3];
         \\if (!$vm.indexingMode(storageProbe).includes("CopyOnWrite")) throw new Error("array indexing mode");
@@ -19367,6 +19368,38 @@ test "$vm exposes only supported shell hooks" {
     );
     try std.testing.expect(!gc_ctx.gc_requested.load(.monotonic));
     try std.testing.expect(gc_ctx.gc.?.collections > before);
+}
+
+test "$vm createGlobalObject publishes complete child realms under parallel_js" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = try ctx.evaluate(
+        \\const registrySymbol = Symbol.for("zig-js-vm-fresh-global");
+        \\const workers = [];
+        \\for (let t = 0; t < 4; ++t) workers.push(new Thread(() => {
+        \\  let completed = 0;
+        \\  for (let i = 0; i < 16; ++i) {
+        \\    const other = $vm.createGlobalObject();
+        \\    if (other === globalThis || other.Object === Object || other.Function === Function) return -1;
+        \\    if (other.Symbol.for("zig-js-vm-fresh-global") !== registrySymbol) return -2;
+        \\    const descriptor = other.Object.getOwnPropertyDescriptor(other.Function.prototype, "name");
+        \\    if (typeof descriptor !== "object") return -3;
+        \\    ++completed;
+        \\  }
+        \\  return completed;
+        \\}));
+        \\let completed = 0;
+        \\for (const worker of workers) completed += worker.join();
+        \\completed;
+    );
+    try std.testing.expect(result.isNumber());
+    try std.testing.expectEqual(@as(f64, 64), result.asNum());
 }
 
 test "enable_gc: requested GC runs between microtasks after joined threads" {

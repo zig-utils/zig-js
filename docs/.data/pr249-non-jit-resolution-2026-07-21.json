@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "issue": 428,
+  "date": "2026-07-21",
+  "source_head": "3a14f2a821ac56fcb01d1c765200be7e9dfdb458",
+  "runner": {
+    "build": "zig build threads-test-bin -Doptimize=ReleaseFast",
+    "default": "zig-out/bin/threads-test one <case>",
+    "parallel_js": "zig-out/bin/threads-test parallel-js one <case>",
+    "tsan_parallel_js": "zig build threads-test-bin -Dtsan=true -Doptimize=ReleaseSafe; zig-out/bin/threads-test parallel-js one <promoted-case>",
+    "tsan_ci_debug": "zig build threads-test-bin -Dtsan=true; zig-out/bin/threads-test parallel-js one dw2-marklistset-storm.js",
+    "tsan_dw2_profile": "2 workers x 18 rounds plus main; worker seed 0 requests GC at r=16 while worker seed 1 and main mutate (normal build remains 16 x 120)"
+  },
+  "summary": {
+    "cases": 14,
+    "mode_runs": 28,
+    "promoted": 8,
+    "terminal_dispositions": 6,
+    "tsan_mode_runs": 8,
+    "tsan_pass": 8,
+    "tsan_ci_debug_runs": 1,
+    "tsan_ci_debug_pass": 1
+  },
+  "cases": [
+    {
+      "case": "api/wasm-refused-sd7.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "fail", "elapsed_ms": 2 },
+      "parallel_js": { "status": "fail", "elapsed_ms": 2 },
+      "evidence": "expected TypeError but got no-throw"
+    },
+    {
+      "case": "congc-t2-lockorder-lint.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "pass", "elapsed_ms": 1 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 2 },
+      "evidence": "only the trailing arithmetic sanity branch executes"
+    },
+    {
+      "case": "congc-t3-barrier-storm.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 1112 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 1785 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 244001 }
+    },
+    {
+      "case": "congc-t4-alloc-steal-storm.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 717 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 1309 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 150481 }
+    },
+    {
+      "case": "congc-t5-celllock-audit.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 500 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 720 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 42376 }
+    },
+    {
+      "case": "congc-t8-stop-interleaving.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "pass", "elapsed_ms": 3 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 2 },
+      "evidence": "the sharedHeapTest-gated body is not entered"
+    },
+    {
+      "case": "congc-t9-attach-exit-churn.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 190 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 329 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 21689 }
+    },
+    {
+      "case": "congc-t11-diagnostics.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 131 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 395 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 27777 }
+    },
+    {
+      "case": "cve/mc-df-arraycopy-relabel.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "fail", "elapsed_ms": 2 },
+      "parallel_js": { "status": "fail", "elapsed_ms": 2 },
+      "evidence": "RangeError: offset is out of bounds"
+    },
+    {
+      "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 247 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 321 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 10293 }
+    },
+    {
+      "case": "cve/mc-grow-buffer-storm.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 1215 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 1434 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 61561 }
+    },
+    {
+      "case": "cve/mc-life-creator-thread-dies.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "fail", "elapsed_ms": 4 },
+      "parallel_js": { "status": "fail", "elapsed_ms": 5 },
+      "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer"
+    },
+    {
+      "case": "dw2-marklistset-storm.js",
+      "resolution": "promoted",
+      "default": { "status": "pass", "elapsed_ms": 4512 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 5909 },
+      "tsan_parallel_js": { "status": "pass", "elapsed_ms": 26726 },
+      "tsan_ci_debug": { "status": "pass", "elapsed_ms": 326285 }
+    },
+    {
+      "case": "w16-c1-prevent-collection.js",
+      "resolution": "terminal-disposition",
+      "default": { "status": "pass", "elapsed_ms": 3823 },
+      "parallel_js": { "status": "pass", "elapsed_ms": 7890 },
+      "evidence": "snapshot/preventCollection branches are unavailable"
+    }
+  ]
+}

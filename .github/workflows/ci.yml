@@ -71,12 +71,10 @@ jobs:
             cmd: zig build threads-test -Dthreads-shard-index=3 -Dthreads-shard-count=4
           - name: threads-nogil-witness
             cmd: zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
-          # Reference-only corpus hygiene: fail if a non-promoted PR-249 file
-          # loses its blocker classification or if one of the nearest
-          # promotion probes starts passing or changes failure shape without the
-          # allowlist/docs being updated in the same change.
+          # PR-249 corpus hygiene: reject inventory/disposition drift and verify
+          # the bounded terminal-premise probes against the installed runner.
           - name: threads-reference-audit
-            cmd: zig build threads-reference-audit && python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
+            cmd: zig build threads-reference-audit threads-reference-probes
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
           - name: wasm-feature-profiles

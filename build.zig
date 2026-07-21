@@ -1384,20 +1384,21 @@ pub fn build(b: *std.Build) void {
         "--check-inventory",
         "--self-test-inventory",
     });
-    const threads_reference_audit_step = b.step("threads-reference-audit", "Audit remaining reference-only PR-249 files");
+    const threads_reference_audit_step = b.step("threads-reference-audit", "Audit promoted, blocked, and terminal PR-249 files");
     threads_reference_audit_step.dependOn(&threads_reference_audit_cmd.step);
 
     const threads_reference_probes_cmd = b.addSystemCommand(&.{
         "python3",
         "tools/threads-reference-audit.py",
         "--fail-on-uncategorized",
-        "--run-probes",
-        "--expect-current-blockers",
+        "--run-disposition-probes",
+        "--expect-terminal-dispositions",
         "--skip-timeout-probes",
         "--probe-timeout",
         "20",
     });
-    const threads_reference_probes_step = b.step("threads-reference-probes", "Verify quick PR-249 reference-only promotion blockers");
+    threads_reference_probes_cmd.step.dependOn(&threads_test_install.step);
+    const threads_reference_probes_step = b.step("threads-reference-probes", "Verify quick PR-249 terminal dispositions");
     threads_reference_probes_step.dependOn(&threads_reference_probes_cmd.step);
 
     // Concurrent-JS fuzzer: `zig build threadfuzz [-Dtsan] [-Dfuzz-iters=N] [-Dfuzz-seed=S]`.
