@@ -576,13 +576,20 @@ pub const Owner = struct {
     /// across every native entry it performs. Nested VM calls inherit the same
     /// lease through `Interpreter.jit_execution_depth`.
     pub fn enterExecution(self: *Owner) ?Execution {
-        if (self.invalidating.load(.acquire)) return null;
+        if (!self.executionPermitted()) return null;
         _ = self.active_leases.fetchAdd(1, .acquire);
-        if (self.invalidating.load(.acquire)) {
+        if (!self.executionPermitted()) {
             _ = self.active_leases.fetchSub(1, .release);
             return null;
         }
         return .{ .owner = self };
+    }
+
+    /// Native entry and OSR polls use this even while an outer execution lease
+    /// remains active. Once invalidation starts, the lease keeps mappings alive
+    /// but no later poll may enter code compiled from the retired generation.
+    pub fn executionPermitted(self: *const Owner) bool {
+        return !self.invalidating.load(.acquire);
     }
 
     /// Claim compilation as an owner operation so invalidation cannot finish
@@ -992,8 +999,10 @@ test "Owner invalidates tiers only after active native leases retire" {
     var shared = Shared{ .owner = &owner };
     var thread = try std.Thread.spawn(.{}, Shared.clear, .{&shared});
     while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
+    while (owner.executionPermitted()) std.atomic.spinLoopHint();
     for (0..32) |_| std.Thread.yield() catch {};
     try std.testing.expect(!shared.finished.load(.acquire));
+    try std.testing.expect(owner.enterExecution() == null);
     execution.release();
     thread.join();
 

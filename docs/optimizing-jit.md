@@ -31,6 +31,8 @@ Every CFG edge also retains its exact locals-plus-stack state separately from th
 
 The first AArch64 loop OSR region handles a guarded numeric header with one Boolean branch. After a hot backedge, native code imports the exact header frame, executes and accounts for the comparison block, then side-exits to the selected body or exit edge without replay. A budget or 1,024-step checkpoint crossing remains in bytecode. Native loop bodies/backedges, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
 
+Executable-code invalidation now closes native entry immediately while existing owner leases keep published mappings alive. Function entry, direct calls, and every loop OSR backedge poll the owner before entering native code; a rejected poll performs no step accounting or state mutation and continues in bytecode. Long-running native regions still need resumable internal invalidation polls before #432's invalidation acceptance item can close.
+
 Focused verification:
 
 ```sh

@@ -3859,6 +3859,8 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*
 
 fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!NativeRunOutcome {
     if (gen != null or !vm.jit_execution_allowed) return .miss;
+    const owner = vm.jit_owner orelse return .miss;
+    if (!owner.executionPermitted()) return .miss;
     const native = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return .miss;
     if (native.osr == null) return .miss;
     if (native.frame_slots > 0) {
@@ -3878,7 +3880,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
     const owner = vm.jit_owner orelse return null;
 
-    if (!vm.jit_execution_allowed) return null;
+    if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
     if (loadOrCompileOptimizer(owner, chunk)) |artifact| {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
@@ -3927,7 +3929,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
 /// operand stack; only formal parameters are copied, matching buildActivation.
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
     const owner = vm.jit_owner orelse return null;
-    if (!vm.jit_execution_allowed) return null;
+    if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
     const slot_count: usize = @intCast(chunk.local_count);
@@ -7413,6 +7415,23 @@ test "vm: optimizer enters a loop header after a hot backedge" {
     try std.testing.expect(artifact.has_side_exits);
     try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+
+    var refused_slots = [_]Value{ Value.num(6), Value.num(1) };
+    var refused_frame = Frame{ .slots = &refused_slots, .parent = null };
+    var refused_exec = Exec{ .ip = artifact.osr.?.entries[0].entry_ip };
+    const steps_before_refusal = machine.steps;
+    machine.jit_execution_allowed = true;
+    owner.invalidating.store(true, .release);
+    try std.testing.expectEqual(NativeRunOutcome.miss, try tryRunLoopOsr(
+        &machine,
+        &refused_exec,
+        function_chunk,
+        &refused_frame,
+        null,
+    ));
+    try std.testing.expectEqual(steps_before_refusal, machine.steps);
+    owner.invalidating.store(false, .release);
+    machine.jit_execution_allowed = false;
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 6), (try run(&machine, root, null)).asNum());
