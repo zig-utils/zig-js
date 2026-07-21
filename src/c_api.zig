@@ -907,6 +907,11 @@ const CContextGroup = struct {
     /// Attempts made inside it remain queued in `async_gc_requested`.
     gc_defer_depth: std.atomic.Value(usize) = .init(0),
     contexts: std.ArrayListUnmanaged(*Context) = .empty,
+    /// Precise siblings whose public Context reference reached zero but whose
+    /// cells are still retained by VM-wide roots (for example a protected
+    /// private EncodedJSValue). They are no longer callable or root-producing;
+    /// later collection boundaries retry their physical teardown.
+    retiring_precise_contexts: std.ArrayListUnmanaged(*Context) = .empty,
     /// Private EncodedJSValue boundaries expose the engine cell address, so
     /// publishing the same object twice must return the same encoded handle.
     /// Keep one canonical Boxed cell per VM-owned object across sibling realms.
@@ -995,6 +1000,109 @@ const CContextGroup = struct {
         }
     }
 
+    fn usesPreciseHeap(self: *const CContextGroup) bool {
+        return self.primary.gc != null;
+    }
+
+    fn removeContext(self: *CContextGroup, context: *Context) bool {
+        for (self.contexts.items, 0..) |candidate, index| {
+            if (candidate != context) continue;
+            _ = self.contexts.swapRemove(index);
+            return true;
+        }
+        return false;
+    }
+
+    /// The canonical private handle map is weak: only explicit handle tables
+    /// root its Boxed values. Rebuild it after a precise collection so dead
+    /// cells disappear and moved protected cells are keyed by their rewritten
+    /// address rather than the pre-compaction pointer.
+    fn reconcilePrivateObjectBoxes(self: *CContextGroup) void {
+        const backing = self.primary.gc_cell_backing orelse return;
+        while (true) {
+            var stale_key: ?*Object = null;
+            var replacement_key: ?*Object = null;
+            var replacement_box: ?*Boxed = null;
+            var iterator = self.private_object_boxes.iterator();
+            while (iterator.next()) |entry| {
+                const boxed = entry.value_ptr.*;
+                if (!boxed.value.isObject()) {
+                    stale_key = entry.key_ptr.*;
+                    break;
+                }
+                const current = boxed.value.asObj();
+                const realm_id = backing.realmIdForCellAddress(@intFromPtr(current));
+                if (realm_id == ContextMod.GcCellBacking.no_realm or current != entry.key_ptr.*) {
+                    stale_key = entry.key_ptr.*;
+                    if (realm_id != ContextMod.GcCellBacking.no_realm) {
+                        replacement_key = current;
+                        replacement_box = boxed;
+                    }
+                    break;
+                }
+            }
+            const old = stale_key orelse return;
+            _ = self.private_object_boxes.remove(old);
+            if (replacement_key) |current| {
+                if (!self.private_object_boxes.contains(current))
+                    self.private_object_boxes.putAssumeCapacity(current, replacement_box.?);
+            }
+        }
+    }
+
+    /// Retry physically releasing precise realms that have already lost every
+    /// callable Context reference. Returns true if the final realm reference
+    /// destroyed the group; callers must not touch `self` afterwards.
+    fn drainRetiringPreciseContexts(self: *CContextGroup) bool {
+        var index: usize = 0;
+        while (index < self.retiring_precise_contexts.items.len) {
+            const context = self.retiring_precise_contexts.items[index];
+            context.destroySharedPreciseRealm() catch |err| switch (err) {
+                error.RealmCellsRemain, error.RealmNotQuiescent => {
+                    self.reconcilePrivateObjectBoxes();
+                    index += 1;
+                    continue;
+                },
+                else => {
+                    self.reconcilePrivateObjectBoxes();
+                    index += 1;
+                    continue;
+                },
+            };
+            self.reconcilePrivateObjectBoxes();
+            _ = self.retiring_precise_contexts.swapRemove(index);
+            if (self.release()) {
+                self.destroy();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Consume one precise realm's group ownership when its last public
+    /// Context retain is released. A VM-wide protected value may keep the
+    /// realm's cells alive; in that case the inert Context remains only as a
+    /// finalizer-routing record until a later collection boundary can retry.
+    fn retirePreciseContext(self: *CContextGroup, context: *Context) void {
+        std.debug.assert(self.usesPreciseHeap());
+        if (!self.removeContext(context)) return;
+        std.debug.assert(self.retiring_precise_contexts.items.len < self.retiring_precise_contexts.capacity);
+        context.destroySharedPreciseRealm() catch |err| switch (err) {
+            error.RealmCellsRemain, error.RealmNotQuiescent => {
+                self.reconcilePrivateObjectBoxes();
+                self.retiring_precise_contexts.appendAssumeCapacity(context);
+                return;
+            },
+            else => {
+                self.reconcilePrivateObjectBoxes();
+                self.retiring_precise_contexts.appendAssumeCapacity(context);
+                return;
+            },
+        };
+        self.reconcilePrivateObjectBoxes();
+        if (self.release()) self.destroy();
+    }
+
     fn destroy(self: *CContextGroup) void {
         // Stop and join the host watchdog before any realm state it can touch
         // (`primary.requestTermination`) is torn down; its nap bound keeps the
@@ -1004,12 +1112,21 @@ const CContextGroup = struct {
             thread.join();
             self.watchdog_thread = null;
         }
-        var index = self.contexts.items.len;
-        while (index > 0) {
-            index -= 1;
-            self.contexts.items[index].destroySharedArenaRealm();
+        if (self.usesPreciseHeap()) {
+            // Every precise child carries a group reference until its physical
+            // retirement completes, so reaching group refcount zero proves
+            // both registries are empty before the owner heap is destroyed.
+            std.debug.assert(self.contexts.items.len == 0);
+            std.debug.assert(self.retiring_precise_contexts.items.len == 0);
+        } else {
+            var index = self.contexts.items.len;
+            while (index > 0) {
+                index -= 1;
+                self.contexts.items[index].destroySharedArenaRealm();
+            }
         }
         self.contexts.deinit(gpa);
+        self.retiring_precise_contexts.deinit(gpa);
         self.private_object_boxes.deinit(gpa);
         var vectors = self.private_contiguous_vectors.valueIterator();
         while (vectors.next()) |record| {
@@ -2752,10 +2869,14 @@ fn box(ctx: *Context, v: Value) JSValueRef {
 }
 
 fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Boxed {
-    const boxed = ctx.arena().create(Boxed) catch return null;
+    const owner = if (ctx.c_api_group) |opaque_group| blk: {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        break :blk group.primary;
+    } else ctx;
+    const boxed = owner.arena().create(Boxed) catch return null;
     boxed.* = .{
         .value = thrown,
-        .owner = ctx,
+        .owner = owner,
         .private_kind = .exception,
         .exception_encoded = encoded,
     };
@@ -2802,7 +2923,13 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
             }
             break :number EncodedValue.fromDouble(value_);
         },
-        .string => privateEncodedFromRef(box(context, internal)),
+        .string => string: {
+            const owner = if (context.c_api_group) |opaque_group| blk: {
+                const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+                break :blk group.primary;
+            } else context;
+            break :string privateEncodedFromRef(box(owner, internal));
+        },
         .object => object: {
             const opaque_group = context.c_api_group orelse
                 break :object privateEncodedFromRef(box(context, internal));
@@ -2810,7 +2937,11 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
             const object_ptr = internal.asObj();
             if (group.private_object_boxes.get(object_ptr)) |existing|
                 break :object privateEncodedFromRef(@ptrCast(existing));
-            const created: *Boxed = @ptrCast(@alignCast(box(context, internal) orelse break :object .empty));
+            // Private EncodedJSValues are VM cells, not realm handles. Store
+            // their stable wrapper in the hidden owner arena so an explicit
+            // protect can outlive test-isolation replacement while its Value
+            // remains traced from the owner's C-handle table.
+            const created: *Boxed = @ptrCast(@alignCast(box(group.primary, internal) orelse break :object .empty));
             group.private_object_boxes.put(gpa, object_ptr, created) catch break :object .empty;
             break :object privateEncodedFromRef(@ptrCast(created));
         },
@@ -9367,7 +9498,8 @@ fn privateNoSideEffectStaticString(
         .undefined_value => Value.str("undefined"),
         .object => Value.str("[object Object]"),
     };
-    const created: *Boxed = @ptrCast(@alignCast(box(context, projected) orelse return .empty));
+    _ = context;
+    const created: *Boxed = @ptrCast(@alignCast(box(group.primary, projected) orelse return .empty));
     slot.* = created;
     return privateEncodedFromRef(@ptrCast(created));
 }
@@ -13605,7 +13737,10 @@ export fn JSCInitialize(
 fn privateCreateVMWithAllocator(allocator: std.mem.Allocator, heap_type: u8) ?*anyopaque {
     if (heap_type > 1) return null;
     const options = privateCurrentJSCProcessOptions();
-    const primary = Context.createWith(allocator, .{ .enable_jit = options.use_jit }) catch return null;
+    const primary = Context.createWith(allocator, .{
+        .enable_jit = options.use_jit,
+        .enable_gc = true,
+    }) catch return null;
     const group_ref = createContextGroupForPrimary(primary, allocator) orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
     group.heap_type = heap_type;
@@ -16334,6 +16469,13 @@ export fn JSGarbageCollect(ctx: JSContextRef) callconv(.c) void {
             group.collection_epoch += 1;
     }
     c.collectGarbage();
+    if (c.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.usesPreciseHeap()) {
+            group.reconcilePrivateObjectBoxes();
+            _ = group.drainRetiringPreciseContexts();
+        }
+    }
 }
 
 /// zig-js extension: monotonically counts explicit collection points for the
@@ -16397,11 +16539,39 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     }
-    const ctx = Context.createSharedArenaRealm(group.primary) catch {
+    group.contexts.ensureUnusedCapacity(gpa, 1) catch {
         if (group.release()) group.destroy();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     };
+    if (group.usesPreciseHeap()) group.retiring_precise_contexts.ensureTotalCapacity(
+        gpa,
+        group.retiring_precise_contexts.items.len + group.contexts.items.len + 1,
+    ) catch {
+        if (group.release()) group.destroy();
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    };
+    const ctx = if (group.usesPreciseHeap())
+        Context.createSharedPreciseRealm(group.primary) catch {
+            if (group.release()) group.destroy();
+            if (created_group) JSContextGroupRelease(effective_ref);
+            return null;
+        }
+    else
+        Context.createSharedArenaRealm(group.primary) catch {
+            if (group.release()) group.destroy();
+            if (created_group) JSContextGroupRelease(effective_ref);
+            return null;
+        };
+    const destroy_created = struct {
+        fn run(context: *Context, precise: bool) void {
+            if (precise) {
+                context.destroySharedPreciseRealm() catch @panic("failed to roll back unpublished precise realm");
+            } else context.destroySharedArenaRealm();
+        }
+    }.run;
+    const precise = group.usesPreciseHeap();
     ctx.c_api_group = @ptrCast(group);
     if (group.cpu_profiler.running.load(.acquire)) {
         ctx.profile_statement_ctx = group;
@@ -16412,8 +16582,8 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
     ctx.shell_timeout_check_flag = &group.need_shell_timeout_check;
     ctx.termination_request_flag = &group.termination_requested;
     if (!privateApplyProcessGlobals(ctx, group.process_options)) {
-        ctx.destroySharedArenaRealm();
-        _ = group.release();
+        destroy_created(ctx, precise);
+        if (group.release()) group.destroy();
         if (created_group) JSContextGroupRelease(effective_ref);
         return null;
     }
@@ -16421,24 +16591,19 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
     const ctx_ref: JSContextRef = @ptrCast(ctx);
     if (global_class != null) {
         const class = classFrom(global_class) orelse {
-            ctx.destroySharedArenaRealm();
+            destroy_created(ctx, precise);
             _ = group.release();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         };
         if (!attachClassToExistingObject(ctx_ref, ctx, ctx.global_object, class, null)) {
-            ctx.destroySharedArenaRealm();
+            destroy_created(ctx, precise);
             _ = group.release();
             if (created_group) JSContextGroupRelease(effective_ref);
             return null;
         }
     }
-    group.contexts.append(gpa, ctx) catch {
-        ctx.destroySharedArenaRealm();
-        _ = group.release();
-        if (created_group) JSContextGroupRelease(effective_ref);
-        return null;
-    };
+    group.contexts.appendAssumeCapacity(ctx);
     if (created_group) JSContextGroupRelease(effective_ref);
     return ctx_ref;
 }
@@ -16499,6 +16664,11 @@ export fn ZJSContextCompactGarbage(
     if (moved_bytes) |out| out.* = 0;
     const context = ctxFrom(ctx) orelse return .unsupported;
     const result = context.compactGarbage();
+    if (context.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.usesPreciseHeap() and result.status != .unsupported)
+            group.reconcilePrivateObjectBoxes();
+    }
     if (moved_cells) |out| out.* = result.moved_cells;
     if (moved_bytes) |out| out.* = result.moved_bytes;
     return cCompactionStatus(result.status);
@@ -16511,7 +16681,9 @@ export fn JSGlobalContextRelease(ctx: JSContextRef) callconv(.c) void {
     if (!c.releaseCApiRef()) return;
     if (c.c_api_group) |opaque_group| {
         const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-        if (group.release()) group.destroy();
+        if (group.usesPreciseHeap() and c != group.primary) {
+            group.retirePreciseContext(c);
+        } else if (group.release()) group.destroy();
     } else c.destroy();
 }
 
@@ -19456,50 +19628,64 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
     return boxResult(c, exception, Value.obj(obj));
 }
 
-fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
-    const c = ctxFrom(ctx) orelse return false;
-    const boxed = boxedFrom(v) orelse return false;
-    if (valueFromContext(c, v) == null) return false;
-    const raw = v.?;
+fn valueProtectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
+    if (valueFromContext(c, @ptrCast(raw)) == null) return false;
     // Shared JSC realms use one VM-lifetime arena, so a handle created by a
     // sibling context is already stable for the entire group lifetime. Precise
-    // GC contexts are currently single-realm and retain per-context root tables.
+    // Precise groups route VM-owned private boxes through the hidden owner;
+    // ordinary realm-local JSValueRefs remain in their creating realm table.
     if (c.gc == null) return true; // arena contexts keep values for the context lifetime.
-    if (boxed.owner != c) return false;
+    const root_context = boxed.owner;
+    if (root_context.gc != c.gc) return false;
     // `c_api_handles` is read by the mid-script parallel collector; guard it
     // under `realm_lock` (a no-op outside parallel_js).
-    c.realmLock();
-    defer c.realmUnlock();
-    for (c.c_api_handles.items) |*h| {
+    root_context.realmLock();
+    defer root_context.realmUnlock();
+    for (root_context.c_api_handles.items) |*h| {
         if (h.ref == raw) {
             h.count = std.math.add(usize, h.count, 1) catch return false;
             return true;
         }
     }
-    c.reserveCApiHandlesLocked(1) catch return false;
-    c.c_api_handles.appendAssumeCapacity(.{ .ref = raw, .count = 1 });
+    root_context.reserveCApiHandlesLocked(1) catch return false;
+    root_context.c_api_handles.appendAssumeCapacity(.{ .ref = raw, .count = 1 });
     return true;
+}
+
+fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
+    const c = ctxFrom(ctx) orelse return false;
+    const boxed = boxedFrom(v) orelse return false;
+    return valueProtectInContext(c, boxed, v.?);
+}
+
+fn valueUnprotectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
+    if (valueFromContext(c, @ptrCast(raw)) == null) return false;
+    if (c.gc == null) return true;
+    const root_context = boxed.owner;
+    if (root_context.gc != c.gc) return false;
+    root_context.realmLock();
+    defer root_context.realmUnlock();
+    for (root_context.c_api_handles.items, 0..) |*h, i| {
+        if (h.ref != raw) continue;
+        if (h.count > 1) {
+            h.count -= 1;
+        } else {
+            _ = root_context.c_api_handles.swapRemove(i);
+        }
+        return true;
+    }
+    return false;
 }
 
 fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
     const c = ctxFrom(ctx) orelse return false;
     const boxed = boxedFrom(v) orelse return false;
-    if (valueFromContext(c, v) == null) return false;
-    const raw = v.?;
-    if (c.gc == null) return true;
-    if (boxed.owner != c) return false;
-    c.realmLock();
-    defer c.realmUnlock();
-    for (c.c_api_handles.items, 0..) |*h, i| {
-        if (h.ref != raw) continue;
-        if (h.count > 1) {
-            h.count -= 1;
-        } else {
-            _ = c.c_api_handles.swapRemove(i);
-        }
-        return true;
-    }
-    return false;
+    const removed = valueUnprotectInContext(c, boxed, v.?);
+    if (removed) if (c.c_api_group) |opaque_group| {
+        const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+        if (group.usesPreciseHeap()) _ = group.drainRetiringPreciseContexts();
+    };
+    return removed;
 }
 
 /// Private Home/Bun ABI: encoded cell handles carry their owning context, so
@@ -19509,12 +19695,14 @@ fn valueUnprotect(ctx: JSContextRef, v: JSValueRef) bool {
 fn privateSetValueProtected(encoded: EncodedValue, protected: bool) void {
     const boxed = privateBoxedFrom(encoded) orelse return;
     if (boxed.private_kind != .value) return;
-    const context: JSContextRef = @ptrCast(boxed.owner);
-    const value_ref: JSValueRef = @ptrCast(boxed);
     if (protected) {
-        _ = valueProtect(context, value_ref);
+        _ = valueProtectInContext(boxed.owner, boxed, @ptrCast(boxed));
     } else {
-        _ = valueUnprotect(context, value_ref);
+        const removed = valueUnprotectInContext(boxed.owner, boxed, @ptrCast(boxed));
+        if (removed) if (boxed.owner.c_api_group) |opaque_group| {
+            const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
+            if (group.usesPreciseHeap()) _ = group.drainRetiringPreciseContexts();
+        };
     }
 }
 
@@ -22226,6 +22414,25 @@ test "private script execution context identifiers are stable and process unique
 }
 
 test "private global lifecycle creates isolates and consumes exact ownership" {
+    const BufferCallback = struct {
+        fn run(_: ?*anyopaque, raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    const StringCallback = struct {
+        fn run(raw: ?*anyopaque, _: ?*anyopaque, _: usize) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    const ClassCallback = struct {
+        var calls: usize = 0;
+        fn run(_: JSObjectRef) callconv(.c) void {
+            calls += 1;
+        }
+    };
+    ClassCallback.calls = 0;
     var first_console: usize = 1;
     var second_console: usize = 2;
     var worker: usize = 3;
@@ -22234,6 +22441,24 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     const first_context = ctxForLifecycle(first) orelse return error.ContextCreateFailed;
     const first_group: *CContextGroup = @ptrCast(@alignCast(first_context.c_api_group.?));
     try std.testing.expectEqual(@as(u8, 0), first_group.heap_type);
+    try std.testing.expect(first_group.usesPreciseHeap());
+    try std.testing.expectEqual(first_group.primary.gc, first_context.gc);
+    try std.testing.expect(first_group.primary.arena_state != first_context.arena_state);
+    const first_realm_id = first_context.gc_realm_id;
+    try std.testing.expect(first_realm_id > ContextMod.GcCellBacking.owner_realm);
+    var old_finalizers: Context.GcFinalizerStats = .{};
+    first_context.gc_finalizer_stats_out = &old_finalizers;
+    var external_buffer_calls: usize = 0;
+    const external_owner = try first_context.createExternalBufferOwner(null, BufferCallback.run, &external_buffer_calls);
+    first_context.queueExternalOwnerRelease(external_owner);
+    var external_string_calls: usize = 0;
+    const external_string_owner = try first_context.createExternalStringOwner(
+        null,
+        0,
+        &external_string_calls,
+        StringCallback.run,
+    );
+    first_context.queueExternalStringRelease(external_string_owner);
     const first_record = privateGlobalLifecycle(first) orelse return error.MissingLifecycle;
     try std.testing.expectEqual(@as(?*anyopaque, &first_console), first_record.console);
     try std.testing.expectEqual(@as(i32, 4242), first_record.execution_context_id);
@@ -22243,6 +22468,29 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     try std.testing.expectEqual(first, ScriptExecutionContextIdentifier__getGlobalObject(4242));
     const marker = try first_context.evaluate("globalThis.__privateIsolationMarker = 42");
     try std.testing.expect(marker.isNumber() and marker.asNum() == 42);
+    const first_symbol = try first_context.evaluate("Symbol.for('private-lifecycle-vm-state')");
+    const old_value = try first_context.evaluate("globalThis.__privateOldGraph = { value: 73 }; __privateOldGraph");
+    const old_encoded = privateEncodedFromValue(first_context, old_value);
+    try std.testing.expect(old_encoded != .empty);
+    Bun__JSValue__protect(old_encoded);
+    var class_definition: JSClassDefinition = .{ .finalize = ClassCallback.run };
+    const old_class = JSClassCreate(&class_definition) orelse return error.ClassCreateFailed;
+    const old_class_object = JSObjectMake(first, old_class, null) orelse return error.ObjectCreateFailed;
+    JSValueProtect(first, old_class_object);
+    JSClassRelease(old_class);
+    var no_copy_buffer_calls: usize = 0;
+    var no_copy_bytes = [_]u8{ 4, 1, 6 };
+    var no_copy_exception: JSValueRef = null;
+    const no_copy_buffer = JSObjectMakeArrayBufferWithBytesNoCopy(
+        first,
+        &no_copy_bytes,
+        no_copy_bytes.len,
+        BufferCallback.run,
+        &no_copy_buffer_calls,
+        &no_copy_exception,
+    ) orelse return error.ArrayBufferCreateFailed;
+    try std.testing.expect(no_copy_exception == null);
+    JSValueProtect(first, no_copy_buffer);
 
     const retained = JSGlobalContextRetain(first) orelse return error.RetainFailed;
     const isolated = Zig__GlobalObject__createForTestIsolation(first, &second_console) orelse
@@ -22261,7 +22509,30 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     try std.testing.expect(isolated_marker.isString());
     try std.testing.expectEqualStrings("undefined", isolated_marker.asStr());
     try std.testing.expect(privateGlobalLifecycle(first) == null);
+    const isolated_symbol = try isolated_context.evaluate("Symbol.for('private-lifecycle-vm-state')");
+    try std.testing.expectEqual(first_symbol.asObj(), isolated_symbol.asObj());
+    const compaction = first_group.primary.compactGarbage();
+    try std.testing.expect(compaction.status == .compacted or compaction.status == .no_candidates);
+    first_group.reconcilePrivateObjectBoxes();
+    try std.testing.expectEqual(
+        old_encoded,
+        privateEncodedFromValue(isolated_context, privateValueFrom(isolated, old_encoded).?),
+    );
     JSGlobalContextRelease(retained);
+    try std.testing.expectEqual(@as(usize, 1), first_group.retiring_precise_contexts.items.len);
+    try std.testing.expectEqual(first_context, first_group.primary.gc_state.?.realms.realmForId(first_realm_id).?);
+    const retained_old_value = privateValueFrom(isolated, old_encoded) orelse return error.MissingRetainedValue;
+    try std.testing.expectEqual(@as(f64, 73), retained_old_value.asObj().getOwn("value").?.asNum());
+    try std.testing.expectEqual(@as(u32, 4242), ScriptExecutionContextIdentifier__forGlobalObject(isolated));
+    try std.testing.expect(ScriptExecutionContextIdentifier__forGlobalObject(first) != 4242);
+    Bun__JSValue__unprotect(old_encoded);
+    try std.testing.expectEqual(@as(usize, 0), first_group.retiring_precise_contexts.items.len);
+    try std.testing.expectEqual(@as(?*Context, null), first_group.primary.gc_state.?.realms.realmForId(first_realm_id));
+    try std.testing.expect(old_finalizers.cells > 0);
+    try std.testing.expectEqual(@as(usize, 1), external_buffer_calls);
+    try std.testing.expectEqual(@as(usize, 1), external_string_calls);
+    try std.testing.expectEqual(@as(usize, 1), no_copy_buffer_calls);
+    try std.testing.expectEqual(@as(usize, 1), ClassCallback.calls);
 
     Zig__GlobalObject__destructOnExit(isolated);
     Zig__GlobalObject__destructOnExit(isolated);
@@ -32465,12 +32736,42 @@ fn privateVmAllocationFailureProbe(allocator: std.mem.Allocator) !void {
     JSContextGroupRelease(@ptrCast(vm_ref));
 }
 
-test "private VM creation rolls back every allocation failure" {
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        privateVmAllocationFailureProbe,
-        .{},
-    );
+test "private VM creation rolls back bootstrap allocation failures" {
+    // A precise VM installs thousands of intrinsic cells. Recreating the full
+    // VM once per allocation index turns this unit test into hours of duplicate
+    // work, so exhaust the structurally distinct bootstrap prefix and sample
+    // deterministic depths across the remaining construction transaction.
+    var successful = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try privateVmAllocationFailureProbe(successful.allocator());
+    const needed = successful.alloc_index;
+    try std.testing.expect(needed > 64);
+
+    var sampled: [72]usize = undefined;
+    var sampled_len: usize = 0;
+    for (0..64) |index| {
+        sampled[sampled_len] = index;
+        sampled_len += 1;
+    }
+    for ([_]usize{
+        needed / 8,
+        needed / 4,
+        needed / 2,
+        (needed * 3) / 4,
+        (needed * 7) / 8,
+        needed - 3,
+        needed - 2,
+        needed - 1,
+    }) |index| {
+        sampled[sampled_len] = index;
+        sampled_len += 1;
+    }
+
+    for (sampled[0..sampled_len]) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, privateVmAllocationFailureProbe(failing.allocator()));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 test "private heap snapshot serializers return no partial output on allocation failure" {
