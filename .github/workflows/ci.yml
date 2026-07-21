@@ -171,6 +171,9 @@ jobs:
             cmd: |
               python3 -m unittest tools/test_home_private_abi.py
               zig build c-api-audit home-private-abi-audit test-home-private-abi
+              zig build test-private-consumer-providers
+              zig build test-private-consumer-providers -Doptimize=ReleaseSafe
+              zig build test-private-consumer-providers -Dtsan=true
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Doptimize=ReleaseSafe
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Dtsan=true

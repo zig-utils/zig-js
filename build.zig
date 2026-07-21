@@ -392,6 +392,49 @@ pub fn build(b: *std.Build) void {
     );
     home_private_abi_test_step.dependOn(&run_home_private_value_fixture.step);
 
+    const home_private_consumer_providers_fixture = b.addExecutable(.{
+        .name = "home-private-consumer-providers",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    home_private_consumer_providers_fixture.root_module.addCSourceFile(.{
+        .file = b.path("tests/abi/private_consumer_providers.cpp"),
+    });
+    home_private_consumer_providers_fixture.root_module.addIncludePath(b.path("include"));
+    home_private_consumer_providers_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_consumer_providers_fixture = b.addRunArtifact(home_private_consumer_providers_fixture);
+    run_home_private_consumer_providers_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_consumer_providers_fixture = b.addExecutable(.{
+        .name = "bun-private-consumer-providers",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .link_libcpp = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    bun_private_consumer_providers_fixture.root_module.addCSourceFile(.{
+        .file = b.path("tests/abi/private_consumer_providers.cpp"),
+    });
+    bun_private_consumer_providers_fixture.root_module.addIncludePath(b.path("include"));
+    bun_private_consumer_providers_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_consumer_providers_fixture = b.addRunArtifact(bun_private_consumer_providers_fixture);
+    run_bun_private_consumer_providers_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+
+    const private_consumer_providers_test_step = b.step(
+        "test-private-consumer-providers",
+        "Compile, final-link, and run both pinned consumer-provider witnesses",
+    );
+    private_consumer_providers_test_step.dependOn(&run_home_private_consumer_providers_fixture.step);
+    private_consumer_providers_test_step.dependOn(&run_bun_private_consumer_providers_fixture.step);
+
     const bun_private_sql_structure_fixture = b.addExecutable(.{
         .name = "bun-private-sql-structure",
         .root_module = b.createModule(.{
