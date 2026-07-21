@@ -25,6 +25,7 @@ SQL_OBJECT_STRUCTURE_CONTRACT = ROOT / "docs/abi/sql-object-structure-411.json"
 GLOBAL_OBJECT_LIFECYCLE_CONTRACT = ROOT / "docs/abi/global-object-lifecycle-412.json"
 PROCESS_INITIALIZATION_CONTRACT = ROOT / "docs/abi/process-initialization-shell-timeout-417.json"
 CONSUMER_PROVIDER_CONTRACT = ROOT / "docs/abi/consumer-provided-private-exports-422.json"
+SOURCE_PROVIDER_LIFECYCLE_CONTRACT = ROOT / "docs/abi/source-provider-lifecycle-424.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -1168,6 +1169,65 @@ def validate_consumer_provider_contract(
         fail("consumer-provider semantic inventory is incomplete or duplicated")
 
 
+def validate_source_provider_lifecycle_contract(home_root: Path | None = None) -> None:
+    if not SOURCE_PROVIDER_LIFECYCLE_CONTRACT.is_file():
+        fail(f"missing checked-in source-provider contract {SOURCE_PROVIDER_LIFECYCLE_CONTRACT}")
+    contract = json.loads(SOURCE_PROVIDER_LIFECYCLE_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "retained-exception-source-provider"
+        or contract.get("issue") != 424
+        or contract.get("parent_issues") != [140, 163]
+        or contract.get("related_issue") != 250
+        or contract.get("roadmap_issue") != 134
+        or contract.get("revision") != REVISION
+        or contract.get("implementation") != ["src/c_api.zig"]
+        or contract.get("fixtures") != ["tests/abi/home_private_value_shims.zig"]
+        or contract.get("symbols") != ["JSC__SourceProvider__deref"]
+        or contract.get("declaration")
+        != "extern fn JSC__SourceProvider__deref(provider: *SourceProvider) void;"
+    ):
+        fail("source-provider contract schema, lineage, or boundary drift")
+
+    sources = contract.get("sources")
+    if not isinstance(sources, list) or len(sources) != 4:
+        fail("source-provider source inventory drift")
+    paths: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict) or set(source) != {"path", "sha256"}:
+            fail("malformed source-provider source entry")
+        path = source["path"]
+        digest = source["sha256"]
+        if (
+            not isinstance(path, str)
+            or path in paths
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            fail("invalid source-provider source path or digest")
+        paths.add(path)
+        if home_root is not None:
+            live = home_root / path
+            if not live.is_file() or sha256(live) != digest:
+                fail(f"source-provider source drift for {path}")
+    if paths != {
+        "packages/runtime/upstream/src/jsc/SourceProvider.zig",
+        "packages/runtime/upstream/src/jsc/ZigException.zig",
+        "packages/runtime/upstream/src/jsc/bindings/ZigException.cpp",
+        "packages/runtime/upstream/src/jsc/bindings/bindings.cpp",
+    }:
+        fail("source-provider source paths drift")
+
+    exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    if "JSC__SourceProvider__deref" not in exports:
+        fail("source-provider implementation export missing")
+    if not (ROOT / contract["fixtures"][0]).is_file():
+        fail("source-provider consumer fixture missing")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) != 10 or len(semantics) != len(set(semantics)):
+        fail("source-provider semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -1207,6 +1267,7 @@ def main() -> None:
     validate_global_object_lifecycle_contract(args.home_root.resolve() if args.home_root else None)
     validate_process_initialization_contract(args.home_root.resolve() if args.home_root else None)
     validate_consumer_provider_contract(home_root=args.home_root.resolve() if args.home_root else None)
+    validate_source_provider_lifecycle_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

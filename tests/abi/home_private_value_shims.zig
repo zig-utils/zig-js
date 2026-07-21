@@ -697,6 +697,7 @@ extern "c" fn JSC__Exception__getStackTrace(?*anyopaque, JSContextRef, *ZigStack
 extern "c" fn JSC__JSValue__toZigException(EncodedValue, JSContextRef, *ZigException) void;
 extern "c" fn ZigException__collectSourceLines(EncodedValue, JSContextRef, *ZigException) void;
 extern "c" fn ZigException__fromException(?*anyopaque) ZigException;
+extern "c" fn JSC__SourceProvider__deref(?*anyopaque) void;
 extern "c" fn JSC__JSValue__isException(EncodedValue, ?*anyopaque) bool;
 extern "c" fn JSC__JSValue__isTerminationException(EncodedValue) bool;
 extern "c" fn JSC__JSValue__toError_(EncodedValue) EncodedValue;
@@ -1361,6 +1362,18 @@ fn derefBunString(string: BunString) void {
     if (string.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
 }
 
+fn derefSourceProviderOnThread(provider: *anyopaque) void {
+    JSC__SourceProvider__deref(provider);
+}
+
+fn borrowedBunStringBytes(string: *const BunString) ?[]const u8 {
+    if (string.tag != .static_zig_string or string.value.zig_string.len == 0) return null;
+    const address = string.value.zig_string.tagged_ptr & ((@as(usize, 1) << 53) - 1);
+    if (address == 0) return null;
+    const bytes: [*]const u8 = @ptrFromInt(address);
+    return bytes[0..string.value.zig_string.len];
+}
+
 fn releaseZigException(exception: *ZigException) void {
     derefBunString(exception.syscall);
     derefBunString(exception.system_code);
@@ -1376,6 +1389,10 @@ fn releaseZigException(exception: *ZigException) void {
             derefBunString(frame.function_name);
             derefBunString(frame.source_url);
         }
+    }
+    if (exception.stack.referenced_source_provider) |provider| {
+        JSC__SourceProvider__deref(provider);
+        exception.stack.referenced_source_provider = null;
     }
 }
 
@@ -5649,8 +5666,13 @@ pub fn main() void {
         fail("complete ZigException projection mismatch");
     ZigException__collectSourceLines(traced_exception, context, &projected);
     if (projected.stack.source_lines_len != 1 or projected_source_numbers[0] != 40 or
+        projected.stack.referenced_source_provider == null or projected_source_lines[0].tag != .static_zig_string or
         !JSC__JSValue__isStrictEqual(BunString__toJS(context, &projected_source_lines[0]), evaluate(context, "\"(function outer249(){ return (function inner249(){ return new Error('stack-249'); })(); })()\""), context))
         fail("ZigException source-line projection mismatch");
+    ZigException__collectSourceLines(traced_exception, sibling_context, &projected);
+    if (projected.stack.source_lines_len != 1 or projected.stack.referenced_source_provider == null or
+        projected_source_lines[0].tag != .static_zig_string)
+        fail("ZigException repeated source-provider replacement mismatch");
 
     var by_value = ZigException__fromException(traced_exception.cellPointer());
     if (by_value.type != .Error or by_value.exception != traced_exception.cellPointer() or by_value.stack.frames_len != 0 or
@@ -5714,14 +5736,59 @@ pub fn main() void {
     };
     JSC__JSValue__toZigException(line_error, context, &line_projection);
     ZigException__collectSourceLines(line_error, sibling_context, &line_projection);
-    if (line_projection.stack.source_lines_len != 2) fail("multi-line ZigException source count mismatch");
+    if (line_projection.stack.source_lines_len != 2 or line_projection.stack.referenced_source_provider == null or
+        line_strings[0].tag != .static_zig_string or line_strings[1].tag != .static_zig_string)
+        fail("multi-line ZigException source count/provider mismatch");
     if (line_numbers[0] != 71 or line_numbers[1] != 70 or line_numbers[2] != -1)
         fail("multi-line ZigException source numbers mismatch");
     if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[0]), evaluate(context, "\"new Error('lines-250');\""), context))
         fail("multi-line ZigException current source mismatch");
     if (!JSC__JSValue__isStrictEqual(BunString__toJS(context, &line_strings[1]), evaluate(context, "\"const mid250 = '💩';\""), context))
         fail("multi-line ZigException previous source mismatch");
+    JSGarbageCollect(context);
+    if (!JSC__JSValue__isStrictEqual(BunString__toJS(sibling_context, &line_strings[0]), evaluate(context, "\"new Error('lines-250');\""), context))
+        fail("ZigException source provider did not survive collection");
+    ZigException__collectSourceLines(line_error, context, &line_projection);
+    if (line_projection.stack.source_lines_len != 2 or line_projection.stack.referenced_source_provider == null)
+        fail("multi-line source-provider replacement lost capacity");
+    const line_provider = line_projection.stack.referenced_source_provider orelse fail("missing retained source provider");
+    line_projection.stack.referenced_source_provider = null;
+    const source_release_thread = std.Thread.spawn(.{}, derefSourceProviderOnThread, .{line_provider}) catch fail("source-provider release thread failed");
+    source_release_thread.join();
+    JSC__SourceProvider__deref(null);
     releaseZigException(&line_projection);
+
+    const terminal_context = JSGlobalContextCreate(null) orelse fail("terminal source-provider context creation failed");
+    const terminal_script = JSStringCreateWithUTF8CString("new Error('terminal-provider')") orelse fail("terminal source-provider script creation failed");
+    defer JSStringRelease(terminal_script);
+    const terminal_url = JSStringCreateWithUTF8CString("terminal-provider.js") orelse fail("terminal source-provider URL creation failed");
+    defer JSStringRelease(terminal_url);
+    var terminal_exception_ref: JSValueRef = null;
+    const terminal_error_ref = JSEvaluateScript(terminal_context, terminal_script, null, terminal_url, 1, &terminal_exception_ref) orelse fail("terminal source-provider evaluation failed");
+    if (terminal_exception_ref != null) fail("terminal source-provider evaluation threw");
+    const terminal_error = EncodedValue.fromRef(terminal_error_ref);
+    var terminal_frames: [1]ZigStackFrame = undefined;
+    var terminal_lines: [1]BunString = @splat(emptyBunString());
+    var terminal_numbers: [1]i32 = @splat(-1);
+    var terminal_projection = ZigException__fromException(null);
+    terminal_projection.stack = .{
+        .source_lines_ptr = &terminal_lines,
+        .source_lines_numbers = &terminal_numbers,
+        .source_lines_len = 1,
+        .source_lines_to_collect = 1,
+        .frames_ptr = &terminal_frames,
+        .frames_len = 0,
+        .frames_cap = 1,
+    };
+    JSC__JSValue__toZigException(terminal_error, terminal_context, &terminal_projection);
+    ZigException__collectSourceLines(terminal_error, terminal_context, &terminal_projection);
+    if (terminal_projection.stack.referenced_source_provider == null or
+        !std.mem.eql(u8, borrowedBunStringBytes(&terminal_lines[0]) orelse fail("terminal source line is not borrowed"), "new Error('terminal-provider')"))
+        fail("terminal source-provider projection mismatch");
+    JSGlobalContextRelease(terminal_context);
+    if (!std.mem.eql(u8, borrowedBunStringBytes(&terminal_lines[0]) orelse fail("terminal source line expired"), "new Error('terminal-provider')"))
+        fail("source provider did not survive terminal VM teardown");
+    releaseZigException(&terminal_projection);
 
     var rejected_projection = projected;
     rejected_projection.type = .AggregateError;

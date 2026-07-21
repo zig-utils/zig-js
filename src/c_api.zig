@@ -308,6 +308,18 @@ const PrivateZigException = extern struct {
     browser_url: PrivateBunString = .empty(),
 };
 
+const private_source_provider_magic: u64 = 0x5a4a_5350_524f_5631;
+
+/// Intrusively retained backing for borrowed exception source-line views.
+/// Like JSC::SourceProvider, this allocation is independent of the VM heap so
+/// a projected exception may outlive its originating realm or VM.
+const PrivateSourceProvider = struct {
+    magic: u64 = private_source_provider_magic,
+    ref_count: u32 = 1,
+    source: []u8,
+    script_id: u64,
+};
+
 const PrivateImplementationVisibility = enum(u8) {
     public = 0,
     private = 1,
@@ -15339,6 +15351,55 @@ fn privateDerefBunString(string: PrivateBunString) void {
     if (string.tag == .wtf_string_impl) Bun__WTFStringImpl__deref(string.value.wtf_string_impl);
 }
 
+fn privateCreateSourceProvider(script: Context.DebugScript) ?*PrivateSourceProvider {
+    const source = private_string_allocator.dupe(u8, script.source) catch return null;
+    errdefer private_string_allocator.free(source);
+    const provider = private_string_allocator.create(PrivateSourceProvider) catch return null;
+    provider.* = .{ .source = source, .script_id = script.id };
+    return provider;
+}
+
+fn privateDerefSourceProvider(provider: *PrivateSourceProvider) void {
+    if (provider.magic != private_source_provider_magic) return;
+    const previous = @atomicRmw(u32, &provider.ref_count, .Sub, 1, .acq_rel);
+    if (previous != 1) return;
+    provider.magic = 0;
+    private_string_allocator.free(provider.source);
+    private_string_allocator.destroy(provider);
+}
+
+fn privateReleaseSourceProvider(slot: *?*anyopaque) void {
+    const raw = slot.* orelse return;
+    slot.* = null;
+    const provider: *PrivateSourceProvider = @ptrCast(@alignCast(raw));
+    privateDerefSourceProvider(provider);
+}
+
+fn privateReleaseProjectedSourceLines(trace: *PrivateZigStackTrace, restore_capacity: bool) void {
+    if (trace.referenced_source_provider == null) return;
+    if (trace.source_lines_ptr != null) {
+        for (trace.source_lines_ptr[0..trace.source_lines_len]) |line| privateDerefBunString(line);
+    }
+    privateReleaseSourceProvider(&trace.referenced_source_provider);
+    trace.source_lines_len = if (restore_capacity) trace.source_lines_to_collect else 0;
+}
+
+export fn JSC__SourceProvider__deref(provider: ?*anyopaque) callconv(.c) void {
+    const raw = provider orelse return;
+    const typed: *PrivateSourceProvider = @ptrCast(@alignCast(raw));
+    privateDerefSourceProvider(typed);
+}
+
+fn privateBorrowedSourceLine(bytes: []const u8) PrivateBunString {
+    if (bytes.len == 0) return .empty();
+    var tagged_ptr = @intFromPtr(bytes.ptr);
+    if (!interp.Interpreter.jsStringIs8Bit(bytes)) tagged_ptr |= @as(usize, 1) << 61;
+    return .{
+        .tag = .static_zig_string,
+        .value = .{ .zig_string = .{ .tagged_ptr = tagged_ptr, .len = bytes.len } },
+    };
+}
+
 fn privateRuntimeTypeForValue(input: Value) PrivateJSRuntimeType {
     return switch (input.kind()) {
         .undefined => .undefined,
@@ -15458,7 +15519,6 @@ fn privateExceptionInput(global: JSContextRef, encoded: EncodedValue) ?struct { 
 
 fn privatePopulateRetainedStack(input: Value, output: *PrivateZigStackTrace) void {
     output.frames_len = 0;
-    output.referenced_source_provider = null;
     if (output.frames_cap == 0 or output.frames_ptr == null or !input.isObject() or !input.asObj().behavior.is_error) return;
 
     const retained = input.asObj().errorStackFrames();
@@ -15495,9 +15555,9 @@ export fn JSC__Exception__getStackTrace(
     trace: ?*PrivateZigStackTrace,
 ) callconv(.c) void {
     const output = trace orelse return;
+    privateReleaseProjectedSourceLines(output, false);
     output.frames_len = 0;
     output.source_lines_len = 0;
-    output.referenced_source_provider = null;
 
     const context = ctxForHandleInspection(global) orelse return;
     const boxed = privateBoxFromCell(exception) orelse return;
@@ -15514,6 +15574,7 @@ export fn JSC__JSValue__toZigException(
 ) callconv(.c) void {
     const destination = output orelse return;
     const input = privateExceptionInput(global, encoded) orelse return;
+    privateReleaseProjectedSourceLines(&destination.stack, true);
     if (!privateProjectExceptionValue(input.context, input.value, input.cell, destination)) return;
     privatePopulateRetainedStack(input.value, &destination.stack);
 }
@@ -15543,17 +15604,17 @@ fn privateLineBounds(source: []const u8, offset: usize) struct { start: usize, e
 }
 
 /// Second-phase source collection corresponding to upstream
-/// `PopulateStackTraceFlags::OnlySourceLines`. Source lines are owned BunStrings,
-/// so no SourceProvider reference is needed and consumer deinit remains exact.
+/// `PopulateStackTraceFlags::OnlySourceLines`. The returned static BunString
+/// views borrow one intrusive SourceProvider copy, released by consumer deinit.
 export fn ZigException__collectSourceLines(
     encoded: EncodedValue,
     global: JSContextRef,
     output: ?*PrivateZigException,
 ) callconv(.c) void {
     const destination = output orelse return;
+    privateReleaseProjectedSourceLines(&destination.stack, true);
     const storage_cap = @min(destination.stack.source_lines_len, destination.stack.source_lines_to_collect);
     destination.stack.source_lines_len = 0;
-    destination.stack.referenced_source_provider = null;
     if (storage_cap == 0 or destination.stack.source_lines_ptr == null or destination.stack.source_lines_numbers == null or destination.stack.frames_len == 0) return;
 
     const input = privateExceptionInput(global, encoded) orelse return;
@@ -15565,18 +15626,20 @@ export fn ZigException__collectSourceLines(
     const script = privateDebugScriptForFrame(input.context, frame) orelse return;
     if (frame.line_start_byte < 0) return;
 
-    var bounds = privateLineBounds(script.source, @intCast(frame.line_start_byte));
+    const provider = privateCreateSourceProvider(script) orelse return;
+    destination.stack.referenced_source_provider = provider;
+
+    var bounds = privateLineBounds(provider.source, @intCast(frame.line_start_byte));
     var line = frame.line_zero_based;
     var written: u8 = 0;
     while (written < storage_cap) : (written += 1) {
-        const owned = privateOwnedWTF8String(script.source[bounds.start..bounds.end]) catch break;
-        destination.stack.source_lines_ptr[written] = owned;
+        destination.stack.source_lines_ptr[written] = privateBorrowedSourceLine(provider.source[bounds.start..bounds.end]);
         destination.stack.source_lines_numbers[written] = line;
         destination.stack.source_lines_len += 1;
         if (bounds.start == 0) break;
         var previous_end = bounds.start - 1;
-        if (previous_end > 0 and script.source[previous_end - 1] == '\r') previous_end -= 1;
-        bounds = privateLineBounds(script.source, previous_end -| 1);
+        if (previous_end > 0 and provider.source[previous_end - 1] == '\r') previous_end -= 1;
+        bounds = privateLineBounds(provider.source, previous_end -| 1);
         line -= 1;
     }
 }

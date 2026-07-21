@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "contract": "retained-exception-source-provider",
+  "issue": 424,
+  "parent_issues": [140, 163],
+  "related_issue": 250,
+  "roadmap_issue": 134,
+  "revision": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+  "sources": [
+    {
+      "path": "packages/runtime/upstream/src/jsc/SourceProvider.zig",
+      "sha256": "5a0411a1d0b32e8dd290697efc49b4767e76cd0f18bc4a1f7ee2806d8de9d327"
+    },
+    {
+      "path": "packages/runtime/upstream/src/jsc/ZigException.zig",
+      "sha256": "3a5bdb8ccf6b3651997f6c47b9a08eac85a9a62ecc093e75806226b70fd62d26"
+    },
+    {
+      "path": "packages/runtime/upstream/src/jsc/bindings/ZigException.cpp",
+      "sha256": "b7ab83678bdc4f64e56a196927bcca7cf6b3a13f3e8b24f288c3a2d2745b6ae3"
+    },
+    {
+      "path": "packages/runtime/upstream/src/jsc/bindings/bindings.cpp",
+      "sha256": "dc257db901ecb6b4e01509b5c05db77d039de9305b23fd4c7863187bab10d634"
+    }
+  ],
+  "implementation": ["src/c_api.zig"],
+  "fixtures": ["tests/abi/home_private_value_shims.zig"],
+  "symbols": ["JSC__SourceProvider__deref"],
+  "declaration": "extern fn JSC__SourceProvider__deref(provider: *SourceProvider) void;",
+  "semantics": [
+    "A projected source provider is an opaque intrusive reference whose backing allocation is independent of the originating VM heap.",
+    "Exception source-line BunStrings are non-owning static views into the retained provider rather than independent string allocations.",
+    "The provider copies the exact registered debug-script source so views survive realm retirement, precise-GC relocation, and terminal VM teardown.",
+    "Collecting source lines replaces and releases any provider already stored in the output trace before publishing a new reference.",
+    "Every successfully published provider is released exactly once by ZigException consumer deinitialization or by a later replacement.",
+    "The atomic intrusive count permits final release from a consumer thread different from the projection thread.",
+    "Null dereference is inert; foreign, stale, and repeated non-null pointers retain the pinned upstream raw-pointer precondition and are caller undefined behavior.",
+    "Source offsets and line numbers remain byte-accurate for ASCII, Latin-1, and WTF-8 source while borrowed views carry the matching ZigString encoding tag.",
+    "Same-VM sibling realms may collect an exception's source lines, while a foreign VM cannot project or retain the provider.",
+    "The symbol belongs only to the Home profile at the pinned revisions and does not change Bun or public C-API accounting."
+  ]
+}

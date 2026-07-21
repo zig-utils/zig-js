@@ -96,8 +96,7 @@
     },
     "by_status": {
       "external": 32,
-      "implemented": 505,
-      "pending": 1
+      "implemented": 506
     }
   },
   "declarations": [
@@ -3026,10 +3025,10 @@
       "line": 14,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn JSC__SourceProvider__deref(provider: *SourceProvider) void;",
       "declaration_sha256": "a590a232f63f6faabe51ac0b109cc5e572bd79f3cf4295dccff6cb9df6d248e7",
-      "issue": 163
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__VM__blockBytesAllocated",
