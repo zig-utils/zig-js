@@ -3893,7 +3893,7 @@ fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*String
     const realm = active_realm_context orelse heap.ctx.context;
     errdefer realm.gpa.free(bytes);
     const cell = try heap.create(StringCell, .string);
-    cell.* = .{ .bytes = bytes, .hash = strcell.hashBytes(bytes) };
+    cell.* = .{ .bytes = bytes, .hash = strcell.contentHash(bytes) };
     cell.setGcManaged(true);
     _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, bytes.len, .monotonic);
     return cell;

@@ -30,6 +30,33 @@ pub fn hashBytes(bytes: []const u8) u64 {
     return h;
 }
 
+/// The top bit of a StringCell's cached `hash` word flags a pure-ASCII string
+/// (every byte < 0x80). For ASCII, the WTF-8 storage is already a flat
+/// 1-byte-per-code-unit image, so `byte offset == UTF-16 index`: charAt/indexOf/
+/// slice and regexp offset math become O(1) instead of walking the string. The
+/// low 63 bits remain the FNV-1a content hash. Interning and `eql` stay exact
+/// because ASCII-ness is a deterministic function of content — two equal strings
+/// classify identically and so carry an identical `hash` word — and the intern
+/// shard pick uses only low bits. This is the first brick of the flat-string
+/// model (Phase 1); later phases widen to true latin1/UTF-16 flat storage.
+pub const ascii_flag: u64 = @as(u64, 1) << 63;
+
+/// FNV-1a content hash with the ASCII flag folded into the top bit, computed in
+/// a single pass (`high` accumulates the OR of every byte; no byte ≥ 0x80 ⇒
+/// ASCII). Every StringCell construction path uses this so `isAscii()` is O(1).
+pub fn contentHash(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    var high: u8 = 0;
+    for (bytes) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+        high |= b;
+    }
+    h &= ~ascii_flag;
+    if (high & 0x80 == 0) h |= ascii_flag;
+    return h;
+}
+
 pub const ExternalStringDeallocator = *const fn (
     context: ?*anyopaque,
     pointer: ?*anyopaque,
@@ -106,6 +133,14 @@ pub const StringCell = struct {
     pub fn eqlBytes(self: *const StringCell, bytes: []const u8) bool {
         return std.mem.eql(u8, self.bytes, bytes);
     }
+
+    /// True when every code unit is ASCII (< 0x80), so the WTF-8 bytes are
+    /// already a flat 1-byte-per-unit image (`byte offset == UTF-16 index`),
+    /// making indexOf/charAt/slice/regexp offset conversions O(1). Cached in
+    /// `hash`'s top bit at construction — see `contentHash`.
+    pub fn isAscii(self: *const StringCell) bool {
+        return self.hash & ascii_flag != 0;
+    }
 };
 
 /// A compile-time-interned cell for a string *literal* — **no allocator
@@ -119,7 +154,7 @@ pub const StringCell = struct {
 /// etc.) use `createCell` / `InternTable.intern` with their in-scope allocator.
 pub fn staticCell(comptime s: []const u8) *const StringCell {
     return &struct {
-        const cell = StringCell{ .bytes = s, .hash = hashBytes(s) };
+        const cell = StringCell{ .bytes = s, .hash = contentHash(s) };
     }.cell;
 }
 
@@ -175,7 +210,7 @@ pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Alloc
     const owned = try canonicalizeSurrogates(allocator, bytes);
     errdefer allocator.free(owned);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = owned, .hash = hashBytes(owned) };
+    cell.* = .{ .bytes = owned, .hash = contentHash(owned) };
     return cell;
 }
 
@@ -197,7 +232,7 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
     owns_original = false;
     errdefer allocator.free(bytes);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = bytes, .hash = hashBytes(bytes) };
+    cell.* = .{ .bytes = bytes, .hash = contentHash(bytes) };
     return cell;
 }
 
@@ -267,7 +302,7 @@ pub const InternTable = struct {
     /// sight. Repeated calls with equal bytes return the *same* pointer, from
     /// any thread. The returned cell is owned by the table (freed at `deinit`).
     pub fn intern(self: *InternTable, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
-        const h = hashBytes(bytes);
+        const h = contentHash(bytes);
         const shard = &self.shards[h & (shard_count - 1)];
         shard.acquire();
         defer shard.releaseLock();
@@ -365,7 +400,7 @@ test "strcell: makeCell allocates from the active arena (no per-site allocator)"
     const c = makeCell(&buf); // no allocator argument
     buf[0] = 'Z'; // cell kept its own copy
     try std.testing.expectEqualStrings("abc", c.bytes);
-    try std.testing.expectEqual(hashBytes("abc"), c.hash);
+    try std.testing.expectEqual(contentHash("abc"), c.hash);
     // Non-interned: two calls with equal bytes yield distinct cells (equality is
     // by bytes, so this is still correct for the NaN-box value).
     const d = makeCell("abc");
@@ -408,7 +443,7 @@ test "strcell: createCell owns its bytes and caches the hash" {
     }
     src[0] = 'X'; // mutate the source: the cell kept its own copy
     try std.testing.expectEqualStrings("hi", cell.bytes);
-    try std.testing.expectEqual(hashBytes("hi"), cell.hash);
+    try std.testing.expectEqual(contentHash("hi"), cell.hash);
     try std.testing.expect(cell.eqlBytes("hi"));
     try std.testing.expect(!cell.eqlBytes("hX"));
 }
@@ -423,11 +458,32 @@ test "strcell: staticCell needs no allocator and comptime-interns literals" {
     try std.testing.expectEqual(a, b);
     try std.testing.expect(a != c);
     try std.testing.expectEqualStrings("undefined", a.bytes);
-    try std.testing.expectEqual(hashBytes("undefined"), a.hash);
+    try std.testing.expectEqual(contentHash("undefined"), a.hash);
     // Its hash matches what the runtime intern path would compute for the same
     // bytes, so a literal cell and an interned cell of equal content agree on
     // hash (equality stays by-bytes; only identity differs across the boundary).
-    try std.testing.expectEqual(hashBytes("null"), c.hash);
+    try std.testing.expectEqual(contentHash("null"), c.hash);
+}
+
+test "strcell: isAscii is cached and reflects content, hash low bits unchanged" {
+    const a = std.testing.allocator;
+    const ascii = try createCell(a, "hello world");
+    defer {
+        a.free(ascii.bytes);
+        a.destroy(ascii);
+    }
+    // "café" has a non-ASCII 'é' (U+00E9) → not ASCII.
+    const latin1 = try createCell(a, "caf\xc3\xa9");
+    defer {
+        a.free(latin1.bytes);
+        a.destroy(latin1);
+    }
+    try std.testing.expect(ascii.isAscii());
+    try std.testing.expect(!latin1.isAscii());
+    // The ASCII flag lives in the top bit; the low 63 bits still match the pure
+    // FNV content hash, so the shard pick (low bits) and hash agreement hold.
+    try std.testing.expectEqual(hashBytes("hello world") & ~ascii_flag, ascii.hash & ~ascii_flag);
+    try std.testing.expectEqual(hashBytes("caf\xc3\xa9") & ~ascii_flag, latin1.hash & ~ascii_flag);
 }
 
 test "strcell: intern dedups equal bytes to one cell, separates distinct" {

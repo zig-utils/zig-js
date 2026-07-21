@@ -4448,6 +4448,13 @@ pub const Value = struct {
     pub inline fn asStringCell(self: Value) *const StringCell {
         return @ptrFromInt(self.bits & payload_mask);
     }
+    /// O(1) ASCII classification (every code unit < 0x80), cached on the cell.
+    /// For ASCII the WTF-8 bytes are a flat 1-byte-per-unit image, so byte
+    /// offsets and UTF-16 indices coincide and offset conversions are O(1).
+    /// Caller has checked `isString()`.
+    pub inline fn strIsAscii(self: Value) bool {
+        return self.asStringCell().isAscii();
+    }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);
     }

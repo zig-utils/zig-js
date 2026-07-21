@@ -8402,7 +8402,13 @@ pub const Interpreter = struct {
             return Value.obj(o);
         }
         if (eq(name, "exec")) {
-            const input = try self.toStringV(arg0(args));
+            const src = arg0(args);
+            const input = try self.toStringV(src);
+            // ASCII input ⇒ byte offset == UTF-16 index, so the conversions below
+            // are O(1) and this exec-in-a-loop stays O(n) overall (see isAscii).
+            // The flag is cached on the source string's cell; a coerced non-string
+            // has no cell, so fall back to the O(n) walk (false).
+            const ascii = src.isString() and src.strIsAscii();
             // RegExpBuiltinExec always reads/coerces `lastIndex`; it only uses it
             // as the search start for global/sticky regexps.
             const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
@@ -8410,13 +8416,15 @@ pub const Interpreter = struct {
             const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
             const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
             const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
-            const search_input = try self.regexpSearchInput(input, unicode);
+            // ASCII has no astral chars, so regexpSearchInput would rescan O(n)
+            // only to return `input` unchanged — skip it so exec-in-a-loop is O(n).
+            const search_input = if (ascii) input else try self.regexpSearchInput(input, unicode);
             const start_units = if (global or sticky) li else 0;
-            if (start_units > utf16LenOfString(input)) {
+            if (start_units > utf16LenOfStringA(input, ascii)) {
                 if (global or sticky) try self.setRegExpLastIndex(o, 0);
                 return Value.nul();
             }
-            const start = byteOffsetForUtf16Index(search_input, start_units);
+            const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
             const re = try self.compileRegex(o);
             const found = re.findFrom(search_input, start) catch null;
             if (found) |m| {
@@ -8427,13 +8435,16 @@ pub const Interpreter = struct {
                 }
                 const mstart = m.start;
                 const mend = m.end;
-                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, mend)));
-                recordRegexpLegacy(self, search_input, mstart, mend, m.captures);
+                if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffsetA(search_input, mend, ascii)));
+                // Borrowed legacy slices + reuse of the source string cell avoid an
+                // O(n) input/context copy per call, so exec-in-a-loop stays O(n)
+                // (search_input is arena/cell lifetime — same as the fast path).
+                recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
                 try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
                 for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
-                try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffset(search_input, mstart))));
-                try self.setProp(arr.asObj(), "input", try Value.strAlloc(self.arena, input));
+                try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffsetA(search_input, mstart, ascii))));
+                try self.setProp(arr.asObj(), "input", if (src.isString()) src else try Value.strAlloc(self.arena, input));
                 const groups = try self.regexGroups(re, m);
                 try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
@@ -8452,18 +8463,21 @@ pub const Interpreter = struct {
 
     pub fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
         const input = try self.toStringV(input_arg);
+        const ascii = input_arg.isString() and input_arg.strIsAscii();
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
         const flags = o.regexFlags();
         const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
         const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
-        const search_input = try self.regexpSearchInput(input, unicode);
+        // ASCII has no astral chars, so regexpSearchInput would rescan O(n) only to
+        // return `input` unchanged — skip it so test-in-a-loop is O(n).
+        const search_input = if (ascii) input else try self.regexpSearchInput(input, unicode);
         const start_units = if (global or sticky) li else 0;
-        if (start_units > utf16LenOfString(input)) {
+        if (start_units > utf16LenOfStringA(input, ascii)) {
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
             return false;
         }
-        const start = byteOffsetForUtf16Index(search_input, start_units);
+        const start = byteOffsetForUtf16IndexA(search_input, start_units, ascii);
         const re = try self.compileRegex(o);
         const found = re.findFrom(search_input, start) catch null;
         if (found) |m| {
@@ -8471,8 +8485,10 @@ pub const Interpreter = struct {
                 try self.setRegExpLastIndex(o, 0);
                 return false;
             }
-            if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffset(search_input, m.end)));
-            recordRegexpLegacy(self, search_input, m.start, m.end, m.captures);
+            if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(utf16IndexForByteOffsetA(search_input, m.end, ascii)));
+            // Borrowed legacy slices avoid an O(n) copy per call → test-in-a-loop
+            // is O(n) (search_input is arena/cell lifetime, same as the fast path).
+            recordRegexpLegacyBorrowed(self, search_input, m.start, m.end, m.captures);
             return true;
         }
         if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -8704,18 +8720,18 @@ pub const Interpreter = struct {
         return buf.toOwnedSlice(self.arena);
     }
 
-    fn stringPosition(self: *Interpreter, s: []const u8, v: Value) EvalError!?usize {
+    fn stringPosition(self: *Interpreter, s: []const u8, v: Value, ascii: bool) EvalError!?usize {
         const n = try self.toNumberV(v);
         const pos = if (std.math.isNan(n)) @as(f64, 0) else @trunc(n);
-        if (pos < 0 or pos >= @as(f64, @floatFromInt(utf16LenOfString(s)))) return null;
+        if (pos < 0 or pos >= @as(f64, @floatFromInt(utf16LenOfStringA(s, ascii)))) return null;
         return @intFromFloat(pos);
     }
 
-    fn stringClampPosition(self: *Interpreter, s: []const u8, v: Value, default_pos: usize) EvalError!usize {
+    fn stringClampPosition(self: *Interpreter, s: []const u8, v: Value, default_pos: usize, ascii: bool) EvalError!usize {
         if (v.isUndefined()) return default_pos;
         const n = try self.toNumberV(v);
         if (std.math.isNan(n) or n <= 0) return 0;
-        const len = utf16LenOfString(s);
+        const len = utf16LenOfStringA(s, ascii);
         if (n >= @as(f64, @floatFromInt(len))) return len;
         return @intFromFloat(@trunc(n));
     }
@@ -8745,6 +8761,29 @@ pub const Interpreter = struct {
         return units;
     }
 
+    // ---- ASCII fast paths (flat-string model, phase 1) --------------------
+    // When a string is known ASCII (cached `StringCell.isAscii()`), its WTF-8
+    // bytes are already a flat 1-byte-per-unit image, so byte offset == UTF-16
+    // index and these conversions are O(1) instead of walking the string. The
+    // `ascii` flag is threaded from the source cell at the hot call sites
+    // (regexp exec/match/replace/split, indexOf/lastIndexOf); everything else
+    // keeps the exact O(n) WTF-8 walk.
+
+    fn byteOffsetForUtf16IndexA(s: []const u8, index: usize, ascii: bool) usize {
+        if (ascii) return @min(index, s.len);
+        return byteOffsetForUtf16Index(s, index);
+    }
+
+    fn utf16IndexForByteOffsetA(s: []const u8, byte_offset: usize, ascii: bool) usize {
+        if (ascii) return @min(byte_offset, s.len);
+        return utf16IndexForByteOffset(s, byte_offset);
+    }
+
+    fn utf16LenOfStringA(s: []const u8, ascii: bool) usize {
+        if (ascii) return s.len;
+        return utf16LenOfString(s);
+    }
+
     fn appendWtf8CodeUnit(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, cu: u16) !void {
         try buf.append(a, @intCast(0xE0 | (cu >> 12)));
         try buf.append(a, @intCast(0x80 | ((cu >> 6) & 0x3F)));
@@ -8758,7 +8797,11 @@ pub const Interpreter = struct {
     const RxCursor = struct {
         byte: usize = 0,
         units: usize = 0,
+        /// True when the scanned string is ASCII: byte offset == UTF-16 index,
+        /// so both conversions are identity and never walk (see `RxCursor` doc).
+        ascii: bool = false,
         fn byteForUtf16(self: *RxCursor, s: []const u8, index: usize) usize {
+            if (self.ascii) return @min(index, s.len);
             if (index < self.units) {
                 self.byte = 0;
                 self.units = 0;
@@ -8781,6 +8824,7 @@ pub const Interpreter = struct {
             return i;
         }
         fn utf16ForByte(self: *RxCursor, s: []const u8, byte: usize) usize {
+            if (self.ascii) return @min(byte, s.len);
             const target = @min(byte, s.len);
             if (target < self.byte) {
                 self.byte = 0;
@@ -9018,9 +9062,10 @@ pub const Interpreter = struct {
         // instead of O(n^2) (each RegExpExec otherwise re-scans/re-allocates).
         const fast = self.regexpHasBuiltinExec(rx);
         const search_input = if (fast) try self.regexpSearchInput(s, full_unicode) else "";
-        const input_u16 = if (fast) utf16LenOfString(s) else 0;
         const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
-        var cursor: RxCursor = .{};
+        const input_ascii = fast and input_value.strIsAscii();
+        const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
+        var cursor: RxCursor = .{ .ascii = input_ascii };
 
         try self.setRegExpLikeLastIndex(rx, 0);
         const arr = try self.newArray();
@@ -9069,9 +9114,10 @@ pub const Interpreter = struct {
         const fast = self.regexpHasBuiltinExec(rx);
         const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
         const search_input = if (fast) try self.regexpSearchInput(s, unicode) else "";
-        const input_u16 = if (fast) utf16LenOfString(s) else 0;
         const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
-        var cursor: RxCursor = .{};
+        const input_ascii = fast and input_value.strIsAscii();
+        const input_u16 = if (fast) utf16LenOfStringA(s, input_ascii) else 0;
+        var cursor: RxCursor = .{ .ascii = input_ascii };
 
         var results: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
@@ -9090,12 +9136,12 @@ pub const Interpreter = struct {
             }
         }
 
-        const string_len = utf16LenOfString(s);
+        const string_len = utf16LenOfStringA(s, input_ascii);
         var accumulated: usize = 0;
         var out: std.ArrayListUnmanaged(u8) = .empty;
         // Matches are in increasing position order, so one cursor keeps the
         // per-match output slices O(n) overall.
-        var out_cursor: RxCursor = .{};
+        var out_cursor: RxCursor = .{ .ascii = input_ascii };
         for (results.items) |result| {
             const length = toLen(try self.toNumberV(try self.getProperty(result, "length")));
             const captures_len = if (length == 0) 0 else length - 1;
@@ -9175,10 +9221,11 @@ pub const Interpreter = struct {
         // (one for exec conversions, one for the output segment slices) → O(n).
         const fast = self.regexpHasBuiltinExec(splitter);
         const search_input = if (fast) try self.regexpSearchInput(s, full_unicode) else "";
-        const input_u16 = if (fast) size else 0;
         const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
-        var exec_cursor: RxCursor = .{};
-        var seg_cursor: RxCursor = .{};
+        const input_ascii = fast and input_value.strIsAscii();
+        const input_u16 = if (fast) size else 0;
+        var exec_cursor: RxCursor = .{ .ascii = input_ascii };
+        var seg_cursor: RxCursor = .{ .ascii = input_ascii };
 
         var p: usize = 0;
         var q: usize = 0;
@@ -13102,7 +13149,8 @@ pub const Interpreter = struct {
                 // methods take precedence over the generic Array-like coercion for
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
-                    if (try self.stringMethod(o.boxedPrimitive().?.asStr(), name, args, true)) |r| return r;
+                    const bp = o.boxedPrimitive().?;
+                    if (try self.stringMethod(bp.asStr(), name, args, true, bp.strIsAscii())) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -13113,7 +13161,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try self.toStringV(recv), name, args, true);
+                    return try self.stringMethod(try self.toStringV(recv), name, args, true, false);
                 }
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
@@ -13129,14 +13177,14 @@ pub const Interpreter = struct {
                     }
                 }
             },
-            .string => return try self.stringMethod(recv.asStr(), name, args, true),
+            .string => return try self.stringMethod(recv.asStr(), name, args, true, recv.strIsAscii()),
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
             },
             .boolean => {
                 if (try self.booleanMethod(recv.asBool(), name, args)) |r| return r;
-                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true);
+                if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
             },
             else => {},
         }
@@ -14476,7 +14524,11 @@ pub const Interpreter = struct {
         return @intFromFloat(@trunc(n));
     }
 
-    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool) EvalError!?Value {
+    // `s_ascii` is the receiver string's cached `StringCell.isAscii()` flag (or
+    // false when the caller only has coerced bytes with no cell). When true, the
+    // WTF-8 bytes are a flat 1-byte-per-unit image so UTF-16↔byte offset
+    // conversions are O(1) — used by indexOf/lastIndexOf to stay O(n) in a loop.
+    fn stringMethod(self: *Interpreter, s: []const u8, name: []const u8, args: []const Value, check_protocol: bool, s_ascii: bool) EvalError!?Value {
         if (eq(name, "valueOf") or eq(name, "toString")) return try Value.strAlloc(self.arena, s);
         if (check_protocol and eq(name, "replaceAll"))
             if (try self.replaceAllProtocolDispatch(try Value.strAlloc(self.arena, s), args)) |r| return r;
@@ -14487,12 +14539,12 @@ pub const Interpreter = struct {
         // use the protocol for methods whose spec algorithms are implemented.
         if (check_protocol) if (try self.stringProtocolDispatch(name, try Value.strAlloc(self.arena, s), args)) |r| return r;
         if (eq(name, "charAt")) {
-            const pos = try self.stringPosition(s, arg0(args)) orelse return Value.str("");
+            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.str("");
             const cu = stringCodeUnitAt(s, pos) orelse return Value.str("");
             return try Value.strAlloc(self.arena, try self.stringFromCodeUnit(cu.unit));
         }
         if (eq(name, "charCodeAt")) {
-            const pos = try self.stringPosition(s, arg0(args)) orelse return Value.num(std.math.nan(f64));
+            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.num(std.math.nan(f64));
             const cu = stringCodeUnitAt(s, pos) orelse return Value.num(std.math.nan(f64));
             return Value.num(@floatFromInt(cu.unit));
         }
@@ -14505,9 +14557,9 @@ pub const Interpreter = struct {
             // byte offsets: clamp the position in code units, convert to a byte
             // offset for the (self-synchronizing WTF-8) byte search, then map the
             // match byte offset back to a code-unit index.
-            const start_cu = try self.stringClampPosition(s, arg(args, 1), 0);
-            const start_byte = byteOffsetForUtf16Index(s, start_cu);
-            return Value.num(if (std.mem.indexOfPos(u8, s, start_byte, sub)) |idx| @floatFromInt(utf16IndexForByteOffset(s, idx)) else -1);
+            const start_cu = try self.stringClampPosition(s, arg(args, 1), 0, s_ascii);
+            const start_byte = byteOffsetForUtf16IndexA(s, start_cu, s_ascii);
+            return Value.num(if (std.mem.indexOfPos(u8, s, start_byte, sub)) |idx| @floatFromInt(utf16IndexForByteOffsetA(s, idx, s_ascii)) else -1);
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
@@ -14529,16 +14581,16 @@ pub const Interpreter = struct {
             return Value.boolVal(std.mem.endsWith(u8, s[0..end_pos], sub));
         }
         if (eq(name, "slice")) {
-            const len = utf16LenOfString(s);
+            const len = utf16LenOfStringA(s, s_ascii);
             const start = try relIndex(self, arg0(args), len, 0);
             const end = try relIndex(self, arg(args, 1), len, @floatFromInt(len));
             if (start < end) return try Value.strAlloc(self.arena, try self.stringSliceUtf16(s, start, end));
             return Value.str("");
         }
         if (eq(name, "substring")) {
-            const len = utf16LenOfString(s);
-            var a0 = try self.stringClampPosition(s, arg0(args), 0);
-            var b0 = try self.stringClampPosition(s, arg(args, 1), len);
+            const len = utf16LenOfStringA(s, s_ascii);
+            var a0 = try self.stringClampPosition(s, arg0(args), 0, s_ascii);
+            var b0 = try self.stringClampPosition(s, arg(args, 1), len, s_ascii);
             if (a0 > b0) {
                 const t = a0;
                 a0 = b0;
@@ -14630,7 +14682,7 @@ pub const Interpreter = struct {
             if (sep.len == 0) {
                 // Empty separator splits into individual UTF-16 code units (an
                 // astral character becomes its two surrogate halves), not bytes.
-                const cu_len = utf16LenOfString(s);
+                const cu_len = utf16LenOfStringA(s, s_ascii);
                 var i: usize = 0;
                 while (i < cu_len) : (i += 1) {
                     if (out.items.len >= lim) return result;
@@ -14649,7 +14701,7 @@ pub const Interpreter = struct {
             const n = try self.toNumberV(arg0(args));
             const fl = if (std.math.isNan(n)) 0 else @trunc(n);
             if (std.math.isInf(fl)) return Value.undef();
-            const slen = utf16LenOfString(s);
+            const slen = utf16LenOfStringA(s, s_ascii);
             const slen_f = @as(f64, @floatFromInt(slen));
             if (fl < -slen_f or fl >= slen_f) return Value.undef();
             const idx: i64 = if (fl < 0) @as(i64, @intCast(slen)) + @as(i64, @intFromFloat(fl)) else @intFromFloat(fl);
@@ -14703,7 +14755,7 @@ pub const Interpreter = struct {
         }
         if (eq(name, "padStart") or eq(name, "padEnd")) {
             const target = toLen(try self.toNumberV(arg0(args)));
-            const len = utf16LenOfString(s);
+            const len = utf16LenOfStringA(s, s_ascii);
             if (len >= target) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
             const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
@@ -14789,7 +14841,7 @@ pub const Interpreter = struct {
         if (eq(name, "codePointAt")) {
             // ToIntegerOrInfinity(pos): a position outside [0, len) yields undefined
             // (so a negative position is undefined, not clamped to index 0).
-            const pos = try self.stringPosition(s, arg0(args)) orelse return Value.undef();
+            const pos = try self.stringPosition(s, arg0(args), s_ascii) orelse return Value.undef();
             const cu = stringCodeUnitAt(s, pos) orelse return Value.undef();
             if (cu.astral) |cp| return Value.num(@floatFromInt(cp));
             if (isHighSurrogate(cu.unit)) {
@@ -14806,7 +14858,7 @@ pub const Interpreter = struct {
             // the match must start at or before the clamped position.
             const sub = try self.toStringV(arg0(args));
             // `position` and the returned index are UTF-16 code-unit offsets.
-            const cu_len = utf16LenOfString(s);
+            const cu_len = utf16LenOfStringA(s, s_ascii);
             const np = try self.toNumberV(arg(args, 1));
             const limit_cu: usize = if (std.math.isNan(np)) cu_len else if (np <= 0)
                 0
@@ -14814,13 +14866,13 @@ pub const Interpreter = struct {
             if (sub.len == 0) return Value.num(@floatFromInt(limit_cu));
             // A match starting at code-unit ≤ limit occupies s[kb .. kb+sub.len) in
             // bytes; the largest such start lies within s[0 .. limit_byte+sub.len].
-            const limit_byte = byteOffsetForUtf16Index(s, limit_cu);
+            const limit_byte = byteOffsetForUtf16IndexA(s, limit_cu, s_ascii);
             const hi = @min(limit_byte + sub.len, s.len);
-            return Value.num(if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(utf16IndexForByteOffset(s, idx)) else -1);
+            return Value.num(if (std.mem.lastIndexOf(u8, s[0..hi], sub)) |idx| @floatFromInt(utf16IndexForByteOffsetA(s, idx, s_ascii)) else -1);
         }
         if (eq(name, "substr")) {
             // `substr(start, length)`: start may count from the end.
-            const size = utf16LenOfString(s);
+            const size = utf16LenOfStringA(s, s_ascii);
             const start = try relIndex(self, arg0(args), size, 0);
             const remaining = size - start;
             const len: usize = if (args.len > 1 and !arg(args, 1).isUndefined()) blk: {
@@ -31082,7 +31134,7 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
             const s = try self.toStringV(this);
-            return (try self.stringMethod(s, name, args, false)) orelse Value.undef();
+            return (try self.stringMethod(s, name, args, false, this.isString() and this.strIsAscii())) orelse Value.undef();
         }
     }.call;
 }
@@ -31511,8 +31563,14 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 return try self.regexpToString(this);
             }
             if (comptime std.mem.eql(u8, name, "test")) {
-                const str = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-                const r = try self.regexpExecGeneric(this, str);
+                const str_src = if (args.len > 0) args[0] else Value.undef();
+                // Fast path when `exec` is the built-in (not subclass-overridden):
+                // regexpTestBuiltin avoids regexpExecGeneric's per-call O(n) input
+                // copy, so test-in-a-loop is O(n) (matches the match/replace/split
+                // fast-path guard). Otherwise honor the overridden exec via generic.
+                if (self.regexpHasBuiltinExec(this))
+                    return Value.boolVal(try self.regexpTestBuiltin(this.asObj(), str_src));
+                const r = try self.regexpExecGeneric(this, try self.toStringV(str_src));
                 return Value.boolVal(!r.isNull());
             }
             if (!this.isObject() or !this.asObj().behavior.is_regex) {
@@ -31534,7 +31592,8 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
         fn call(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
-            const str = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+            const str_src = if (args.len > 0) args[0] else Value.undef();
+            const str = try self.toStringV(str_src);
             if (comptime std.mem.eql(u8, op, "match")) {
                 return try self.regexpMatch(this, str);
             }
@@ -31552,38 +31611,19 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, op, "matchAll")) {
                 return try self.regexpMatchAll(this, str);
             }
-            return (try self.stringMethod(str, op, &.{this}, false)) orelse Value.undef();
+            return (try self.stringMethod(str, op, &.{this}, false, str_src.isString() and str_src.strIsAscii())) orelse Value.undef();
         }
     }.call;
 }
 
-/// Record a successful match into the legacy static RegExp state. `captures` are
-/// the 1-based capture-group substrings (group i at index i-1); an absent group
-/// is the empty string. All values are duped into the arena.
-pub fn recordRegexpLegacy(self: *Interpreter, input: []const u8, start: usize, end: usize, captures: []const []const u8) void {
-    const a = self.arena;
-    const dup = struct {
-        fn f(arena: std.mem.Allocator, s: []const u8) []const u8 {
-            return arena.dupe(u8, s) catch "";
-        }
-    }.f;
-    self.re_legacy.input = dup(a, input);
-    self.re_legacy.last_match = dup(a, input[@min(start, input.len)..@min(end, input.len)]);
-    self.re_legacy.left_context = dup(a, input[0..@min(start, input.len)]);
-    self.re_legacy.right_context = dup(a, input[@min(end, input.len)..]);
-    var last_paren: []const u8 = "";
-    for (self.re_legacy.groups[0..], 0..) |*g, i| {
-        const cap: []const u8 = if (i < captures.len) captures[i] else "";
-        g.* = dup(a, cap);
-        if (i < captures.len and captures[i].len > 0) last_paren = cap;
-    }
-    self.re_legacy.last_paren = dup(a, last_paren);
-}
-
-/// Like `recordRegexpLegacy` but stores borrowed slices into `input` instead of
-/// copying — O(1) instead of O(n). Safe only when `input` and `captures` are
-/// arena-lifetime (they outlive the legacy statics), which the built-in global
-/// loops guarantee. Avoids the O(n^2) of re-copying the whole input per match.
+/// Record a successful match into the legacy static RegExp state (`RegExp.input`,
+/// `$&`, `` $` ``, `$'`, `$1`..`$9`). `captures` are the 1-based capture-group
+/// substrings (group i at index i-1); an absent group is the empty string. The
+/// whole-input parts are stored as borrowed slices into `input` (O(1), no copy)
+/// instead of duping the entire string per match — so exec/test/replace in a loop
+/// stay O(n) rather than O(n^2). Safe only when `input` is arena/cell-lifetime
+/// (it outlives the legacy statics), which every caller guarantees; `captures`
+/// may come from a reused match buffer, so those small values are still copied.
 pub fn recordRegexpLegacyBorrowed(self: *Interpreter, input: []const u8, start: usize, end: usize, captures: []const []const u8) void {
     const s = @min(start, input.len);
     const e = @min(end, input.len);
