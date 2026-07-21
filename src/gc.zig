@@ -3624,6 +3624,60 @@ test "precise heap realm registry serializes concurrent add and retire" {
     for (siblings) |sibling| try state.realms.releaseRetired(sibling);
 }
 
+test "precise sibling realm shares one heap and retires only after cross-realm handles drop" {
+    const owner = try ContextMod.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer owner.destroy();
+    const sibling = try ContextMod.Context.createSharedPreciseRealm(owner);
+    var sibling_destroyed = false;
+    defer if (!sibling_destroyed) sibling.destroySharedPreciseRealm() catch unreachable;
+    var finalizers = ContextMod.Context.GcFinalizerStats{};
+    sibling.gc_finalizer_stats_out = &finalizers;
+
+    try std.testing.expectEqual(@as(usize, 1), owner.gc_state.?.realms.siblingCount());
+    try std.testing.expectEqual(owner.gc, sibling.gc);
+    try std.testing.expect(owner.arena_state != sibling.arena_state);
+    const owner_symbol = try owner.evaluate("Symbol.for('shared-precise-symbol')");
+    const sibling_symbol = try sibling.evaluate("Symbol.for('shared-precise-symbol')");
+    try std.testing.expectEqual(owner_symbol.asObj(), sibling_symbol.asObj());
+
+    const moving_value = try sibling.evaluate("globalThis.movingWitness = { value: 73 }; movingWitness");
+    const moving_handle = try sibling.protectValue(moving_value);
+    const saved_cleanup_jobs = sibling.finalization_cleanup_jobs;
+    var pending_cleanup = [_]*Object{moving_handle.get().asObj()};
+    sibling.finalization_cleanup_jobs = .{ .items = &pending_cleanup, .capacity = pending_cleanup.len };
+    try std.testing.expectEqual(.unsupported, owner.compactGarbage().status);
+    sibling.finalization_cleanup_jobs = saved_cleanup_jobs;
+    const compaction = owner.compactGarbage();
+    try std.testing.expect(compaction.status == .compacted or compaction.status == .no_candidates);
+    const moved = moving_handle.get();
+    try std.testing.expectEqual(@as(f64, 73), moved.asObj().getOwn("value").?.asNum());
+    try std.testing.expect(sibling.unprotectValue(moving_handle));
+
+    const retained = try sibling.evaluate("globalThis.retainedByOwner = { realm: 'sibling' }; retainedByOwner");
+    const handle = try owner.protectValue(retained);
+    try std.testing.expect(!owner.gc_state.?.realms.ownerCanDestroy());
+    try std.testing.expectError(error.RealmCellsRemain, sibling.destroySharedPreciseRealm());
+    try std.testing.expectEqual(sibling, owner.gc_state.?.realms.realmForId(sibling.gc_realm_id).?);
+    try std.testing.expect(owner.unprotectValue(handle));
+
+    const ExternalCallback = struct {
+        fn run(_: ?*anyopaque, raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    var external_calls: usize = 0;
+    const external_owner = try sibling.createExternalBufferOwner(null, ExternalCallback.run, &external_calls);
+    sibling.queueExternalOwnerRelease(external_owner);
+
+    try sibling.destroySharedPreciseRealm();
+    sibling_destroyed = true;
+    try std.testing.expect(finalizers.cells > 0);
+    try std.testing.expectEqual(@as(usize, 1), external_calls);
+    try std.testing.expectEqual(@as(usize, 0), owner.gc_state.?.realms.siblingCount());
+    try std.testing.expect(owner.gc_state.?.realms.ownerCanDestroy());
+}
+
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
 

@@ -3511,6 +3511,21 @@ pub const Context = struct {
             return self.siblings.items.len;
         }
 
+        pub fn ownerCanDestroy(self: *GcRealmRegistry) bool {
+            self.acquire();
+            defer self.release();
+            return self.siblings.items.len == 0 and self.retiring.items.len == 0 and
+                self.bootstrapping.items.len == 0;
+        }
+
+        pub fn liveSiblingsAreQuiescent(self: *GcRealmRegistry) bool {
+            self.acquire();
+            defer self.release();
+            for (self.siblings.items) |realm|
+                if (!realm.preciseRealmIsQuiescent()) return false;
+            return true;
+        }
+
         fn deinit(self: *GcRealmRegistry, allocator: std.mem.Allocator) void {
             std.debug.assert(self.siblings.items.len == 0);
             std.debug.assert(self.retiring.items.len == 0);
@@ -3682,6 +3697,28 @@ pub const Context = struct {
     }
 
     pub fn createWithTestingOptions(gpa: std.mem.Allocator, options: TestingOptions) !*Context {
+        return createWithTestingOptionsForSharedOwner(gpa, options, null);
+    }
+
+    /// Engine-core constructor used by #419 tests and, later, #416's private
+    /// lifecycle. Arena C context groups deliberately keep their existing path.
+    pub fn createSharedPreciseRealm(primary: *Context) !*Context {
+        if (primary.gc == null or primary.gc_state == null or primary.shared_jit_owner != null or
+            primary.gil != null or primary.parallel_js)
+            return error.UnsupportedSharedRuntime;
+        primary.assertOwnerThread();
+        return createWithTestingOptionsForSharedOwner(primary.host_gpa, .{
+            .enable_jit = primary.enable_jit,
+            .enable_gc = true,
+            .wasm_features = primary.wasm_features,
+        }, primary);
+    }
+
+    fn createWithTestingOptionsForSharedOwner(
+        gpa: std.mem.Allocator,
+        options: TestingOptions,
+        shared_owner: ?*Context,
+    ) !*Context {
         // Validate option dependencies before allocating anything, so the error
         // path leaks nothing.
         if (options.parallel_js and !(options.enable_threads and options.enable_gc and options.parallel_gc))
@@ -3744,6 +3781,7 @@ pub const Context = struct {
             .arena_state = arena_state,
             .locked_arena = locked_arena,
             .jit_owner = jit.Owner.init(context_gpa),
+            .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
@@ -3758,7 +3796,19 @@ pub const Context = struct {
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
         self.gc_cooperative_enabled = options.enable_gc and options.parallel_js and !options.parallel_midscript_gc;
-        if (options.enable_gc) {
+        if (shared_owner) |owner| {
+            self.gc = owner.gc;
+            self.gc_binding = owner.gc_binding;
+            self.gc_cell_backing = owner.gc_cell_backing;
+            self.gc_state = owner.gc_state;
+            try owner.gc_state.?.realms.beginBootstrap(owner.gpa, self);
+            errdefer {
+                const saved = gc_mod.setActiveContext(owner);
+                defer gc_mod.restoreActiveContext(saved);
+                owner.collectGarbage();
+                owner.gc_state.?.realms.releaseFailedBootstrap(self) catch {};
+            }
+        } else if (options.enable_gc) {
             // GC cells are gpa-backed (the collector frees them individually).
             // Keep the heap, binding, and cell backing in one stable allocation
             // to reduce GC-enabled context lifecycle churn.
@@ -3828,6 +3878,7 @@ pub const Context = struct {
         self.tdz_marker = tdz;
 
         try interp.installGlobals(&self.env, self.root_shape);
+        if (shared_owner) |owner| try self.shareSymbolRegistry(owner);
         if (options.wasm_spec_bit_exact)
             try wasm_api.installSpecHarness(&self.env, self.root_shape);
         inline for (.{ "Date", "Error", "RegExp", "Function" }, 0..) |name, index| {
@@ -3891,7 +3942,27 @@ pub const Context = struct {
         }
         if (!options.enable_threads and (options.concurrent_gc or options.parallel_gc)) enableParallelSync();
         if (self.budget_allocator) |ba| ba.setRecovery(self, recoverAllocationFailure);
+        if (shared_owner) |owner| try owner.gc_state.?.realms.registerBootstrapped(owner.gpa, self);
         return self;
+    }
+
+    fn shareSymbolRegistry(self: *Context, owner: *Context) !void {
+        const source_symbol = if (owner.env.get("Symbol")) |symbol|
+            if (symbol.isObject()) symbol.asObj() else return
+        else
+            return;
+        const registry = source_symbol.getOwn("\x00registry") orelse create: {
+            const saved = gc_mod.setActiveContext(owner);
+            defer gc_mod.restoreActiveContext(saved);
+            const object = try gc_mod.allocObj(owner.arena());
+            object.* = .{};
+            const registry_value = Value.obj(object);
+            try source_symbol.setOwn(owner.arena(), owner.root_shape, "\x00registry", registry_value);
+            break :create registry_value;
+        };
+        if (self.env.get("Symbol")) |symbol|
+            if (symbol.isObject())
+                try symbol.asObj().setOwn(self.arena(), self.root_shape, "\x00registry", registry);
     }
 
     fn createReservedThreadOomError(self: *Context) !Value {
@@ -4151,6 +4222,10 @@ pub const Context = struct {
     }
 
     pub fn destroy(self: *Context) void {
+        if (self.gc_state) |state| {
+            if (state.realms.owner == self and !state.realms.ownerCanDestroy())
+                @panic("precise heap owner destroyed before every sibling realm");
+        }
         std.debug.assert(self.c_api_inspector_state == null);
         if (self.c_api_script_execution_context_unregister) |unregister| {
             self.c_api_script_execution_context_unregister = null;
@@ -4282,14 +4357,7 @@ pub const Context = struct {
         if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
 
-    /// Tear down one secondary shared-arena realm without releasing the primary
-    /// VM heap. The group calls this only after its last external/context retain
-    /// is gone, so callbacks and embedder deallocators run while every realm and
-    /// every cross-realm value is still allocated.
-    pub fn destroySharedArenaRealm(self: *Context) void {
-        self.assertOwnerThread();
-        std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
-        std.debug.assert(self.shared_jit_owner != null);
+    fn deinitSharedRealmState(self: *Context) void {
         std.debug.assert(self.c_api_inspector_state == null);
         if (self.c_api_script_execution_context_unregister) |unregister| {
             self.c_api_script_execution_context_unregister = null;
@@ -4340,7 +4408,79 @@ pub const Context = struct {
         self.wasm_registry.deinit(self.gpa);
         self.sab_retains.deinit();
         self.jit_owner.deinit();
+    }
+
+    /// Tear down one secondary shared-arena realm without releasing the primary
+    /// VM heap. The group calls this only after its last external/context retain
+    /// is gone, so callbacks and embedder deallocators run while every realm and
+    /// every cross-realm value is still allocated.
+    pub fn destroySharedArenaRealm(self: *Context) void {
+        self.assertOwnerThread();
+        std.debug.assert(self.gc == null and self.locked_arena == null and self.gil == null);
+        std.debug.assert(self.shared_jit_owner != null);
+        self.deinitSharedRealmState();
         self.gpa.destroy(self);
+    }
+
+    /// Terminal engine-core lifecycle for a sibling with its own non-cell
+    /// arena and the owner's precise cell heap. A retained cross-realm edge
+    /// makes the operation fail with `RealmCellsRemain`; the Context stays
+    /// intact and callback-addressable so the caller can drop that edge and
+    /// retry without use-after-free.
+    pub fn destroySharedPreciseRealm(self: *Context) !void {
+        self.assertOwnerThread();
+        std.debug.assert(self.gc != null and self.gc_state != null and self.gil == null);
+        std.debug.assert(self.shared_jit_owner != null);
+        const state = self.gc_state.?;
+        const owner = state.realms.owner;
+        self.lockActiveInterpreters();
+        const has_active_interpreters = self.active_interpreters.items.len != 0;
+        self.unlockActiveInterpreters();
+        if (has_active_interpreters) return error.RealmNotQuiescent;
+        for (self.js_threads.items) |record| if (!record.exited) return error.RealmNotQuiescent;
+        self.teardown_stop.store(true, .release);
+        agent.interruptWaiters();
+        self.cancelAllTimers();
+        self.microtasks.clearRetainingCapacity();
+        self.next_ticks.clearRetainingCapacity();
+        self.unhandled_rejections.clearRetainingCapacity();
+        self.handled_rejections.clearRetainingCapacity();
+        self.finalization_cleanup_jobs.clearRetainingCapacity();
+        self.async_waiters.clearRetainingCapacity();
+        for (self.protected_values.items) |handle| self.gpa.destroy(handle);
+        self.protected_values.clearRetainingCapacity();
+        self.private_strong_roots.clearRetainingCapacity();
+        self.c_api_handles.clearRetainingCapacity();
+        state.realms.retireQuiescent(self) catch |err| switch (err) {
+            error.RealmNotRegistered => {
+                if (state.realms.realmForId(self.gc_realm_id) != self) return err;
+            },
+            else => return err,
+        };
+        const saved = gc_mod.setActiveContext(owner);
+        owner.collectGarbage();
+        gc_mod.restoreActiveContext(saved);
+        try state.realms.releaseRetired(self);
+
+        self.gc = null;
+        self.gc_binding = null;
+        self.gc_cell_backing = null;
+        self.gc_state = null;
+        const host_gpa = self.host_gpa;
+        const context_gpa = self.gpa;
+        const budget_allocator = self.budget_allocator;
+        const host_allocator_lock = self.host_allocator_lock;
+        self.deinitSharedRealmState();
+        if (self.locked_arena) |la| {
+            la.resetLocalFor();
+            context_gpa.destroy(la);
+            self.locked_arena = null;
+        }
+        self.arena_state.deinit();
+        context_gpa.destroy(self.arena_state);
+        context_gpa.destroy(self);
+        if (budget_allocator) |ba| host_gpa.destroy(ba);
+        if (host_allocator_lock) |lock| host_gpa.destroy(lock);
     }
 
     pub fn initCApiRef(self: *Context) void {
@@ -5383,6 +5523,10 @@ pub const Context = struct {
 
     fn compactGarbageChecked(self: *Context, allowed_active_interpreter: ?*interp.Interpreter) GcHeap.CompactionResult {
         const h = self.gc orelse return .{ .status = .unsupported };
+        if (self.gc_state) |state| {
+            if (state.realms.owner != self or !state.realms.liveSiblingsAreQuiescent())
+                return .{ .status = .unsupported };
+        }
         if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
             return .{ .status = .unsupported };
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
