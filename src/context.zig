@@ -2671,6 +2671,10 @@ pub const Context = struct {
     /// Stable identity within `gc_state.realms`. Zero is reserved for contexts
     /// that do not own cells in a precise heap.
     gc_realm_id: GcCellBacking.RealmId = GcCellBacking.no_realm,
+    /// Root fields are not traceable until global/bootstrap construction has
+    /// completed. Allocation failure during this window must propagate as OOM
+    /// rather than attempting a collection over partially initialized roots.
+    gc_bootstrapping: bool = true,
     /// Non-threaded Contexts are creator-thread-affine. Threaded contexts admit
     /// registered shared-realm `Thread`s and use either dedicated no-GIL
     /// synchronization or the explicit `.gil = true` fallback. Debug builds
@@ -3796,6 +3800,19 @@ pub const Context = struct {
         };
         self.gc_par_enabled = options.parallel_midscript_gc;
         self.gc_cooperative_enabled = options.enable_gc and options.parallel_js and !options.parallel_midscript_gc;
+        var owned_gc_state: ?*GcState = null;
+        errdefer if (owned_gc_state) |state| {
+            state.backing.beginBulkTeardown();
+            state.heap.deinitRetainingCellStorage();
+            self.runDeferredPostSweepCallbacks();
+            state.backing.deinit();
+            state.realms.deinit(context_gpa);
+            context_gpa.destroy(state);
+            self.gc = null;
+            self.gc_binding = null;
+            self.gc_cell_backing = null;
+            self.gc_state = null;
+        };
         if (shared_owner) |owner| {
             self.gc = owner.gc;
             self.gc_binding = owner.gc_binding;
@@ -3850,6 +3867,7 @@ pub const Context = struct {
             self.gc_binding = &gc_state.binding;
             self.gc_cell_backing = &gc_state.backing;
             self.gc_state = gc_state;
+            owned_gc_state = gc_state;
             // Single-mutator only for now: concurrent marking + no peer mutators.
             self.gc_concurrent = options.concurrent_gc and !options.enable_threads;
             // A dedicated marker thread can still read the heap's payload index
@@ -3943,6 +3961,7 @@ pub const Context = struct {
         if (!options.enable_threads and (options.concurrent_gc or options.parallel_gc)) enableParallelSync();
         if (self.budget_allocator) |ba| ba.setRecovery(self, recoverAllocationFailure);
         if (shared_owner) |owner| try owner.gc_state.?.realms.registerBootstrapped(owner.gpa, self);
+        self.gc_bootstrapping = false;
         return self;
     }
 
@@ -5594,6 +5613,7 @@ pub const Context = struct {
     /// active interpreter that can safely elect the abort/no-sweep parallel
     /// collector; otherwise it fails closed to ordinary OOM.
     pub fn collectForAllocationFailure(self: *Context, machine: ?*interp.Interpreter) bool {
+        if (self.gc_bootstrapping) return false;
         const h = self.gc orelse return false;
         if (!stack_scan.supported) return false;
         if (self.gc_par_collector.load(.acquire) != null) return false;
