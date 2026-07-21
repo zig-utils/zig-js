@@ -17,15 +17,17 @@ The optimizing tier is under construction in [#146](https://github.com/zig-utils
 
 ## Executable subset
 
-On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by `+`, `-`, `*`, `/`, relational comparisons, and numeric equality. It also accepts one Boolean branch into two terminal returns when both paths execute exactly the same number of bytecode instructions; unequal paths fail closed. Branch-local numeric expressions are safe to evaluate eagerly because every live input is guarded and the accepted operations have no observable coercion effects.
+On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by `+`, `-`, `*`, `/`, relational comparisons, and numeric equality. It also accepts one Boolean branch into two terminal returns. Equal-cost paths complete natively; unequal-cost paths execute the common prefix and resume the selected successor in bytecode. Equal-cost branch-local numeric expressions are safe to evaluate eagerly because every live input is guarded and the accepted operations have no observable coercion effects.
 
-Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges/loops, unequal-path control, remainder, coercions, OSR/deoptimization, precise stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
+Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges/loops, remainder, coercions, precise stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
 
 ## Deoptimization foundation
 
 Optimizer SSA retains deterministic locals-plus-operand-stack frame states at every reachable block entry, branch, and return. Lowering resolves those states to immutable recovery records owned by the published artifact, including the exact resume IP, accumulator value, handler depth, and source scratch slot for every value. The VM distinguishes a deoptimized outcome from an entry miss, reconstructs `Exec` and frame slots from the selected record, and prevents partial-exit artifacts from using the restart-only direct-call path.
 
-The first generated side exit handles a guarded numeric branch whose two paths have unequal bytecode costs. Native code executes and accounts for the common prefix, publishes the selected successor state, and resumes that path in bytecode without restarting the function. Entry declines before doing work when the prefix would cross a budget or 1,024-step checkpoint. General merges/loops, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
+The first generated side exit handles a guarded numeric branch whose two paths have unequal bytecode costs. Native code executes and accounts for the common prefix, publishes the selected successor state, and resumes that path in bytecode without restarting the function. Entry declines before doing work when the prefix would cross a budget or 1,024-step checkpoint.
+
+Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Executable loop OSR, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
 
 Focused verification:
 

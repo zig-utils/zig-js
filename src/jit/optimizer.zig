@@ -102,6 +102,17 @@ pub const FrameState = struct {
     stack_count: u32,
 };
 
+/// Exact state supplied by one predecessor edge. Unlike a block-entry state,
+/// these values remain unambiguous at loop headers and other SSA merges.
+pub const EdgeState = struct {
+    from: u32,
+    to: u32,
+    origin: u32,
+    first_value: u32,
+    local_count: u32,
+    stack_count: u32,
+};
+
 pub const ValueGraph = struct {
     allocator: std.mem.Allocator,
     nodes: []ValueNode,
@@ -111,6 +122,7 @@ pub const ValueGraph = struct {
     branches: []BranchValue,
     frame_states: []FrameState,
     frame_state_values: []ValueId,
+    edge_states: []EdgeState,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
@@ -120,6 +132,7 @@ pub const ValueGraph = struct {
         self.allocator.free(self.branches);
         self.allocator.free(self.frame_states);
         self.allocator.free(self.frame_state_values);
+        self.allocator.free(self.edge_states);
         self.* = undefined;
     }
 };
@@ -220,6 +233,20 @@ pub const Plan = struct {
             const first: usize = state.first_value;
             const count: usize = state.local_count + state.stack_count;
             for (self.graph.frame_state_values[first .. first + count], 0..) |value, index| {
+                if (index != 0) try out.append(allocator, ',');
+                try out.print(allocator, "%{d}", .{value});
+            }
+            try out.appendSlice(allocator, ")\n");
+        }
+        for (self.graph.edge_states) |state| {
+            if (state.from == Block.none) {
+                try out.print(allocator, "state edge entry -> b{d} @{d} (", .{ state.to, state.origin });
+            } else {
+                try out.print(allocator, "state edge b{d} -> b{d} @{d} (", .{ state.from, state.to, state.origin });
+            }
+            const first: usize = state.first_value;
+            const count: usize = state.local_count + state.stack_count;
+            for (self.graph.edge_arguments[first .. first + count], 0..) |value, index| {
                 if (index != 0) try out.append(allocator, ',');
                 try out.print(allocator, "%{d}", .{value});
             }
@@ -742,6 +769,25 @@ fn compactValueGraph(
     const frame_state_values = try allocator.alloc(ValueId, builder.frame_state_values.items.len);
     errdefer allocator.free(frame_state_values);
     for (builder.frame_state_values.items, frame_state_values) |old, *value| value.* = remap[old];
+    const edge_states = try allocator.alloc(EdgeState, owned_edges.len);
+    errdefer allocator.free(edge_states);
+    for (owned_edges, edge_states) |edge, *state| {
+        var entry_state: ?FrameState = null;
+        for (frame_states) |candidate| if (candidate.kind == .block_entry and candidate.block == edge.to) {
+            std.debug.assert(entry_state == null);
+            entry_state = candidate;
+        };
+        const target = entry_state.?;
+        std.debug.assert(target.local_count + target.stack_count == edge.argument_count);
+        state.* = .{
+            .from = edge.from,
+            .to = edge.to,
+            .origin = target.origin,
+            .first_value = edge.first_argument,
+            .local_count = target.local_count,
+            .stack_count = target.stack_count,
+        };
+    }
     return .{
         .allocator = allocator,
         .nodes = nodes,
@@ -751,6 +797,7 @@ fn compactValueGraph(
         .branches = branches,
         .frame_states = frame_states,
         .frame_state_values = frame_state_values,
+        .edge_states = edge_states,
     };
 }
 
@@ -831,7 +878,9 @@ test "optimizer control-flow plans are deterministic" {
     try std.testing.expectEqual(@as(usize, 1), first.graph.branches.len);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "branch b0 @3") != null);
     try std.testing.expectEqual(@as(usize, 6), first.graph.frame_states.len);
+    try std.testing.expectEqual(first.graph.edges.len, first.graph.edge_states.len);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "state branch b0 @3 locals=1 stack=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first_dump, "state edge entry -> b0 @0") != null);
     for (first.graph.frame_state_values) |value| try std.testing.expect(value < first.graph.nodes.len);
 }
 
@@ -868,8 +917,27 @@ test "optimizer SSA block arguments close loop backedges" {
 
     try std.testing.expectEqual(@as(usize, 4), plan.blocks.len);
     try std.testing.expectEqual(@as(usize, 5), plan.graph.edges.len);
+    try std.testing.expectEqual(plan.graph.edges.len, plan.graph.edge_states.len);
     try std.testing.expect(std.mem.indexOf(u8, dump, "edge b2 -> b1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "state edge b0 -> b1 @4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "state edge b2 -> b1 @4") != null);
     try std.testing.expect(std.mem.indexOf(u8, dump, "block_argument") != null);
+
+    var preheader: ?EdgeState = null;
+    var backedge: ?EdgeState = null;
+    for (plan.graph.edge_states) |state| {
+        if (state.from == 0 and state.to == 1) preheader = state;
+        if (state.from == 2 and state.to == 1) backedge = state;
+    }
+    const preheader_state = preheader.?;
+    const backedge_state = backedge.?;
+    try std.testing.expectEqual(preheader_state.local_count, backedge_state.local_count);
+    try std.testing.expectEqual(preheader_state.stack_count, backedge_state.stack_count);
+    const count: usize = preheader_state.local_count + preheader_state.stack_count;
+    const preheader_values = plan.graph.edge_arguments[preheader_state.first_value .. preheader_state.first_value + count];
+    const backedge_values = plan.graph.edge_arguments[backedge_state.first_value .. backedge_state.first_value + count];
+    try std.testing.expect(!std.mem.eql(ValueId, preheader_values, backedge_values));
+    try std.testing.expect(preheader_values[1] != backedge_values[1]);
 }
 
 test "optimizer canonicalizes pure values and removes dead SSA" {
