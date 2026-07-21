@@ -90,6 +90,11 @@ pub const MemoryInst = struct {
     /// back failure-atomically. Null on the pure-wasm path.
     on_grow: ?*const fn (ctx: *anyopaque, mem: *MemoryInst) bool = null,
     on_grow_ctx: ?*anyopaque = null,
+    /// Host-observed ordinary memory may have live TypedArray aliases. These
+    /// callbacks stop accesses to that one old backing only while relocation
+    /// copies its bytes; the token is passed back to the unlock hook.
+    on_relocate_lock: ?*const fn (ctx: *anyopaque, mem: *MemoryInst) ?*anyopaque = null,
+    on_relocate_unlock: ?*const fn (ctx: *anyopaque, mem: *MemoryInst, token: *anyopaque) void = null,
 
     pub fn pages(self: *const MemoryInst) u32 {
         return @intCast(self.bytes().len / types.PAGE_SIZE);
@@ -865,7 +870,18 @@ pub fn memoryGrowAddressed(mem: *MemoryInst, delta: u64) ?u64 {
         // hook could observe the grown buffer, so allocate fresh, publish the
         // new bytes, run the hook, and only then free the old slab.
         const fresh = mem.gpa.alloc(u8, new_len) catch return null;
+        const relocation_token = if (mem.on_relocate_lock) |lock|
+            lock(mem.on_grow_ctx orelse @ptrCast(mem), mem) orelse {
+                mem.gpa.free(fresh);
+                return null;
+            }
+        else
+            null;
         @memcpy(fresh[0..mem.local_bytes.len], mem.local_bytes);
+        if (relocation_token) |token| {
+            const unlock = mem.on_relocate_unlock orelse unreachable;
+            unlock(mem.on_grow_ctx orelse @ptrCast(mem), mem, token);
+        }
         @memset(fresh[mem.local_bytes.len..], 0);
         const old = mem.local_bytes;
         mem.local_bytes = fresh;
@@ -5388,6 +5404,73 @@ test "wasm.exec shared memory64 grows concurrently without moving its backing" {
     try std.testing.expectEqual(@as(usize, 9 * types.PAGE_SIZE), storage.len());
     try std.testing.expectEqual(@as(?u64, 9), memoryGrowAddressed(mem, 0));
     try std.testing.expectEqual(@as(?u64, null), memoryGrowAddressed(mem, 1));
+}
+
+test "wasm.exec host relocation callbacks serialize the copied backing" {
+    const mem = try createMemory(talloc, 1, 2);
+    defer destroyMemory(talloc, mem);
+
+    const Host = struct {
+        mutex: std.atomic.Mutex = .unlocked,
+        current: []u8,
+        ready: std.atomic.Value(bool) = .init(false),
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn acquire(mutex: *std.atomic.Mutex) void {
+            while (!mutex.tryLock()) std.atomic.spinLoopHint();
+        }
+
+        fn relocationLock(raw: *anyopaque, _: *MemoryInst) ?*anyopaque {
+            const host: *@This() = @ptrCast(@alignCast(raw));
+            acquire(&host.mutex);
+            return raw;
+        }
+
+        fn relocationUnlock(_: *anyopaque, _: *MemoryInst, token: *anyopaque) void {
+            const host: *@This() = @ptrCast(@alignCast(token));
+            host.mutex.unlock();
+        }
+
+        fn didGrow(raw: *anyopaque, memory: *MemoryInst) bool {
+            const host: *@This() = @ptrCast(@alignCast(raw));
+            acquire(&host.mutex);
+            host.current = memory.local_bytes;
+            host.mutex.unlock();
+            return true;
+        }
+
+        fn write(raw: *@This()) void {
+            var byte: u8 = 0x5a;
+            while (!raw.stop.load(.acquire)) {
+                acquire(&raw.mutex);
+                raw.current[0] = byte;
+                raw.mutex.unlock();
+                raw.ready.store(true, .release);
+                byte ^= 0xff;
+            }
+        }
+    };
+
+    var host = Host{ .current = mem.local_bytes };
+    mem.on_grow = Host.didGrow;
+    mem.on_grow_ctx = &host;
+    mem.on_relocate_lock = Host.relocationLock;
+    mem.on_relocate_unlock = Host.relocationUnlock;
+    const writer = try std.Thread.spawn(.{}, Host.write, .{&host});
+    var writer_joined = false;
+    defer if (!writer_joined) {
+        host.stop.store(true, .release);
+        writer.join();
+    };
+    while (!host.ready.load(.acquire)) std.atomic.spinLoopHint();
+
+    try std.testing.expectEqual(@as(?u64, 1), memoryGrowAddressed(mem, 1));
+    host.stop.store(true, .release);
+    writer.join();
+    writer_joined = true;
+    try std.testing.expect(host.current.ptr == mem.local_bytes.ptr);
+    try std.testing.expect(mem.local_bytes[0] == 0x5a or mem.local_bytes[0] == 0xa5);
+    for (mem.local_bytes[types.PAGE_SIZE..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
 }
 
 fn instantiateMemory64WithFailingAllocator(gpa: Allocator) !void {

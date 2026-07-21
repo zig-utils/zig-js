@@ -268,6 +268,8 @@ const MemoryOwner = struct {
     fn deinit(self: *MemoryOwner) void {
         if (self.mem.on_grow_ctx == @as(?*anyopaque, @ptrCast(self))) {
             self.mem.on_grow = null;
+            self.mem.on_relocate_lock = null;
+            self.mem.on_relocate_unlock = null;
             self.mem.on_grow_ctx = null;
         }
         if (self.owns_native) exec.destroyMemory(self.store.gpa, self.mem);
@@ -802,6 +804,26 @@ fn memoryDidGrow(raw: *anyopaque, mem: *exec.MemoryInst) bool {
     return true;
 }
 
+fn memoryRelocationLock(raw: *anyopaque, mem: *exec.MemoryInst) ?*anyopaque {
+    const owner: *MemoryOwner = @ptrCast(@alignCast(raw));
+    if (owner.mem != mem or mem.isShared()) return null;
+    const state = owner.wrapper.wasmMemorySnapshot() orelse return null;
+    const buffer = (state.buffer_obj orelse return null).arrayBuffer() orelse return null;
+    buffer.lockBuffer();
+    if (buffer.isDetached() or buffer.local_data.ptr != mem.local_bytes.ptr) {
+        buffer.unlockBuffer();
+        return null;
+    }
+    return @ptrCast(buffer);
+}
+
+fn memoryRelocationUnlock(raw: *anyopaque, mem: *exec.MemoryInst, token: *anyopaque) void {
+    const owner: *MemoryOwner = @ptrCast(@alignCast(raw));
+    std.debug.assert(owner.mem == mem and !mem.isShared());
+    const buffer: *value.ArrayBufferData = @ptrCast(@alignCast(token));
+    buffer.unlockBuffer();
+}
+
 fn memoryFromThis(self: *Interpreter, this: Value, operation: []const u8) value.HostError!*MemoryOwner {
     const object = languageObject(this) orelse return self.throwError("TypeError", operation);
     const state = object.wasmMemorySnapshot() orelse return self.throwError("TypeError", operation);
@@ -837,6 +859,8 @@ fn memoryConstructor(ctx: *anyopaque, _: Value, args: []const Value) value.HostE
     state.mem = @ptrCast(owner);
     state.buffer_obj = buffer;
     mem.on_grow = memoryDidGrow;
+    mem.on_relocate_lock = memoryRelocationLock;
+    mem.on_relocate_unlock = memoryRelocationUnlock;
     mem.on_grow_ctx = @ptrCast(owner);
     try store.appendWasmOwned(.{ .memory = @ptrCast(owner) });
     return Value.obj(object);
@@ -1978,6 +2002,8 @@ fn wrapDefinedMemory(self: *Interpreter, descriptor: *InstanceDescriptor, store:
     state.owner_obj = instance_object;
     try store.appendWasmOwned(.{ .memory = @ptrCast(owner) });
     mem.on_grow = memoryDidGrow;
+    mem.on_relocate_lock = memoryRelocationLock;
+    mem.on_relocate_unlock = memoryRelocationUnlock;
     mem.on_grow_ctx = @ptrCast(owner);
     return Value.obj(object);
 }
