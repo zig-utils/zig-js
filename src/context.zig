@@ -3185,10 +3185,56 @@ pub const Context = struct {
             while (!self.lock.tryLock()) : (spins += 1) {
                 if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
             }
+            // Binding.traceRoots/relocateRoots take this lock. Registry growth
+            // must therefore fail closed instead of recovering allocation by
+            // collecting back into the same lock.
+            gc_runtime.enterTraceSensitiveLock();
         }
 
         pub fn release(self: *GcRealmRegistry) void {
+            gc_runtime.leaveTraceSensitiveLock();
             self.lock.unlock();
+        }
+
+        /// Publish a completely initialized sibling as a root source. The
+        /// caller owns bootstrap failure cleanup and must not expose or execute
+        /// the realm before this succeeds.
+        pub fn registerBootstrapped(
+            self: *GcRealmRegistry,
+            allocator: std.mem.Allocator,
+            realm: *Context,
+        ) !void {
+            if (realm == self.owner) return error.OwnerCannotBeSibling;
+            if (realm.gc != self.owner.gc or realm.gc_state != self.owner.gc_state)
+                return error.ForeignPreciseHeap;
+            self.acquire();
+            defer self.release();
+            for (self.siblings.items) |registered|
+                if (registered == realm) return error.RealmAlreadyRegistered;
+            try self.siblings.append(allocator, realm);
+        }
+
+        /// Remove one stopped sibling from the root set. Dropping realm-owned
+        /// cell/storage state is a later phase: callers must first make every
+        /// execution and host-job source quiescent, and keep the Context alive
+        /// until collection/finalization has consumed its cells.
+        pub fn retireQuiescent(self: *GcRealmRegistry, realm: *Context) !void {
+            if (realm == self.owner) return error.OwnerCannotRetire;
+            if (!realm.preciseRealmIsQuiescent()) return error.RealmNotQuiescent;
+            self.acquire();
+            defer self.release();
+            for (self.siblings.items, 0..) |registered, index| {
+                if (registered != realm) continue;
+                _ = self.siblings.orderedRemove(index);
+                return;
+            }
+            return error.RealmNotRegistered;
+        }
+
+        pub fn siblingCount(self: *GcRealmRegistry) usize {
+            self.acquire();
+            defer self.release();
+            return self.siblings.items.len;
         }
 
         fn deinit(self: *GcRealmRegistry, allocator: std.mem.Allocator) void {
@@ -3782,6 +3828,41 @@ pub const Context = struct {
     pub fn terminationRequested(self: *const Context) bool {
         if (self.stop_flag) |flag| if (flag.load(.acquire)) return true;
         return @constCast(&self.teardown_stop).load(.acquire);
+    }
+
+    fn preciseRealmIsQuiescent(self: *Context) bool {
+        self.lockActiveInterpreters();
+        const has_active_interpreters = self.active_interpreters.items.len != 0;
+        self.unlockActiveInterpreters();
+        if (has_active_interpreters) return false;
+        if (self.gil) |g| {
+            g.lockApi();
+            const has_live_thread_or_task = g.tasks_queued.load(.acquire) != 0 or threads: {
+                const io = agent.engineIo();
+                for (self.js_threads.items) |record| {
+                    record.join_mutex.lockUncancelable(io);
+                    const exited = record.exited;
+                    record.join_mutex.unlock(io);
+                    if (!exited) break :threads true;
+                }
+                break :threads false;
+            };
+            g.unlockApi();
+            if (has_live_thread_or_task) return false;
+            g.lockPropWaiters();
+            const has_property_waiter = g.prop_waiters.items.len != 0 or g.prop_async.items.len != 0;
+            g.unlockPropWaiters();
+            if (has_property_waiter) return false;
+        } else {
+            for (self.js_threads.items) |record| if (!record.exited) return false;
+        }
+        return self.microtasks.isEmpty() and
+            self.next_ticks.isEmpty() and
+            self.unhandled_rejections.items.len == 0 and
+            self.handled_rejections.items.len == 0 and
+            self.timers.items.len == 0 and
+            self.finalization_cleanup_jobs.items.len == 0 and
+            self.async_waiters.items.len == 0;
     }
 
     fn deinitProtectedValues(self: *Context) void {

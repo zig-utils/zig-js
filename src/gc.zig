@@ -3268,6 +3268,213 @@ pub const Binding = struct {
     }
 };
 
+test "precise heap realm registry traces relocates and retires one sibling exactly once" {
+    const owner = try ContextMod.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer owner.destroy();
+    const sibling = try ContextMod.Context.create(std.testing.allocator);
+    defer sibling.destroy();
+
+    const state = owner.gc_state.?;
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    state.realms.acquire();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    state.realms.release();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    try std.testing.expectError(
+        error.OwnerCannotBeSibling,
+        state.realms.registerBootstrapped(owner.gpa, owner),
+    );
+    try std.testing.expectError(
+        error.ForeignPreciseHeap,
+        state.realms.registerBootstrapped(owner.gpa, sibling),
+    );
+    const saved_gc = sibling.gc;
+    const saved_binding = sibling.gc_binding;
+    const saved_backing = sibling.gc_cell_backing;
+    const saved_state = sibling.gc_state;
+    defer {
+        sibling.gc = saved_gc;
+        sibling.gc_binding = saved_binding;
+        sibling.gc_cell_backing = saved_backing;
+        sibling.gc_state = saved_state;
+    }
+    // Model the state installed by the future shared-precise bootstrap without
+    // changing arena-backed Context creation in this engine-core registry test.
+    sibling.gc = owner.gc;
+    sibling.gc_binding = owner.gc_binding;
+    sibling.gc_cell_backing = owner.gc_cell_backing;
+    sibling.gc_state = owner.gc_state;
+
+    var owner_root = Object{};
+    var sibling_root = Object{};
+    var relocated_sibling_root = Object{};
+    const saved_owner_constructor = owner.c_api_builtin_constructors[0];
+    const saved_sibling_constructor = sibling.c_api_builtin_constructors[0];
+    defer {
+        owner.c_api_builtin_constructors[0] = saved_owner_constructor;
+        sibling.c_api_builtin_constructors[0] = saved_sibling_constructor;
+    }
+    owner.c_api_builtin_constructors[0] = Value.obj(&owner_root);
+    sibling.c_api_builtin_constructors[0] = Value.obj(&sibling_root);
+
+    try state.realms.registerBootstrapped(owner.gpa, sibling);
+    try std.testing.expectEqual(@as(usize, 1), state.realms.siblingCount());
+    try std.testing.expectError(
+        error.RealmAlreadyRegistered,
+        state.realms.registerBootstrapped(owner.gpa, sibling),
+    );
+
+    const Visitor = struct {
+        owner_root: *Object,
+        sibling_root: *Object,
+        owner_marks: usize = 0,
+        sibling_marks: usize = 0,
+
+        pub fn mark(self: *@This(), cell: ?*anyopaque) void {
+            const pointer = cell orelse return;
+            if (pointer == @as(*anyopaque, @ptrCast(self.owner_root))) self.owner_marks += 1;
+            if (pointer == @as(*anyopaque, @ptrCast(self.sibling_root))) self.sibling_marks += 1;
+        }
+        pub fn markWeak(_: *@This(), _: *?*anyopaque) void {}
+        pub fn markWeakAtomic(_: *@This(), _: *std.atomic.Value(?*anyopaque)) void {}
+        pub fn markConservativeWord(_: *@This(), _: usize) void {}
+        pub fn markConservativeWords(_: *@This(), _: [*]const usize, _: usize) void {}
+        pub fn deferToFinish(_: *@This(), _: *anyopaque) void {}
+        pub fn concurrent(_: *@This()) bool {
+            return false;
+        }
+        pub fn isManaged(_: *@This(), cell: ?*anyopaque) bool {
+            return cell != null;
+        }
+        pub fn isMarked(_: *@This(), _: ?*anyopaque) bool {
+            return false;
+        }
+    };
+    var visitor = Visitor{ .owner_root = &owner_root, .sibling_root = &sibling_root };
+    state.binding.traceRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 1), visitor.owner_marks);
+    try std.testing.expectEqual(@as(usize, 1), visitor.sibling_marks);
+
+    const Plan = struct {
+        old: *Object,
+        new: *Object,
+
+        pub fn resolve(self: *const @This(), pointer: *anyopaque) *anyopaque {
+            if (pointer == @as(*anyopaque, @ptrCast(self.old))) return @ptrCast(self.new);
+            return pointer;
+        }
+    };
+    const plan = Plan{ .old = &sibling_root, .new = &relocated_sibling_root };
+    state.binding.relocateRoots(&plan);
+    try std.testing.expectEqual(&relocated_sibling_root, sibling.c_api_builtin_constructors[0].asObj());
+
+    const saved_cleanup_jobs = sibling.finalization_cleanup_jobs;
+    defer sibling.finalization_cleanup_jobs = saved_cleanup_jobs;
+    var pending_cleanup = [_]*Object{&relocated_sibling_root};
+    sibling.finalization_cleanup_jobs = .{ .items = &pending_cleanup, .capacity = pending_cleanup.len };
+    try std.testing.expectError(error.RealmNotQuiescent, state.realms.retireQuiescent(sibling));
+    sibling.finalization_cleanup_jobs = .empty;
+    try std.testing.expectError(error.OwnerCannotRetire, state.realms.retireQuiescent(owner));
+    try state.realms.retireQuiescent(sibling);
+    try std.testing.expectEqual(@as(usize, 0), state.realms.siblingCount());
+    try std.testing.expectError(error.RealmNotRegistered, state.realms.retireQuiescent(sibling));
+
+    visitor.owner_marks = 0;
+    visitor.sibling_marks = 0;
+    visitor.sibling_root = &relocated_sibling_root;
+    state.binding.traceRoots(&visitor);
+    try std.testing.expectEqual(@as(usize, 1), visitor.owner_marks);
+    try std.testing.expectEqual(@as(usize, 0), visitor.sibling_marks);
+}
+
+test "precise heap realm registry serializes concurrent add and retire" {
+    const sibling_count = 4;
+    const owner = try ContextMod.Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .parallel_gc = true,
+    });
+    defer owner.destroy();
+    const state = owner.gc_state.?;
+
+    const SavedHeap = struct {
+        gc: ?*ContextMod.Context.GcHeap,
+        binding: ?*ContextMod.Context.GcBinding,
+        backing: ?*ContextMod.GcCellBacking,
+        state: ?*ContextMod.Context.GcState,
+    };
+    var siblings: [sibling_count]*ContextMod.Context = undefined;
+    var saved: [sibling_count]SavedHeap = undefined;
+    var initialized: usize = 0;
+    defer {
+        for (siblings[0..initialized], saved[0..initialized]) |sibling, snapshot| {
+            sibling.gc = snapshot.gc;
+            sibling.gc_binding = snapshot.binding;
+            sibling.gc_cell_backing = snapshot.backing;
+            sibling.gc_state = snapshot.state;
+            sibling.destroy();
+        }
+    }
+    for (&siblings, &saved) |*sibling_slot, *saved_slot| {
+        const sibling = try ContextMod.Context.create(std.testing.allocator);
+        sibling_slot.* = sibling;
+        saved_slot.* = .{
+            .gc = sibling.gc,
+            .binding = sibling.gc_binding,
+            .backing = sibling.gc_cell_backing,
+            .state = sibling.gc_state,
+        };
+        initialized += 1;
+        sibling.gc = owner.gc;
+        sibling.gc_binding = owner.gc_binding;
+        sibling.gc_cell_backing = owner.gc_cell_backing;
+        sibling.gc_state = owner.gc_state;
+    }
+
+    const Operation = enum { register, retire };
+    const Worker = struct {
+        registry: *ContextMod.Context.GcRealmRegistry,
+        allocator: std.mem.Allocator,
+        realm: *ContextMod.Context,
+        operation: Operation,
+        result: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            switch (self.operation) {
+                .register => self.registry.registerBootstrapped(self.allocator, self.realm) catch |err| {
+                    self.result = err;
+                },
+                .retire => self.registry.retireQuiescent(self.realm) catch |err| {
+                    self.result = err;
+                },
+            }
+        }
+    };
+
+    var workers: [sibling_count]Worker = undefined;
+    var threads: [sibling_count]std.Thread = undefined;
+    for (&workers, &threads, siblings) |*worker, *thread, sibling| {
+        worker.* = .{
+            .registry = &state.realms,
+            .allocator = owner.gpa,
+            .realm = sibling,
+            .operation = .register,
+        };
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+    for (&threads) |*thread| thread.join();
+    for (&workers) |*worker| try std.testing.expectEqual(@as(?anyerror, null), worker.result);
+    try std.testing.expectEqual(@as(usize, sibling_count), state.realms.siblingCount());
+
+    for (&workers, &threads) |*worker, *thread| {
+        worker.operation = .retire;
+        worker.result = null;
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+    for (&threads) |*thread| thread.join();
+    for (&workers) |*worker| try std.testing.expectEqual(@as(?anyerror, null), worker.result);
+    try std.testing.expectEqual(@as(usize, 0), state.realms.siblingCount());
+}
+
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
 pub const Heap = gc.Heap(Binding);
 
