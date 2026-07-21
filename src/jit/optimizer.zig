@@ -288,6 +288,16 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
         .ret, .ret_undef => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
+        .push_handler => {
+            if (inst.a != std.math.maxInt(u32)) {
+                if (inst.a >= code.len) return error.InvalidControlFlow;
+                starts[inst.a] = true;
+            }
+            if (inst.b != std.math.maxInt(u32)) {
+                if (inst.b >= code.len) return error.InvalidControlFlow;
+                starts[inst.b] = true;
+            }
+        },
         else => {},
     };
 
@@ -363,7 +373,7 @@ fn depthEffect(op: bc.Op) DepthEffect {
         .pop, .jump_if_false, .ret => .{ .required = 1, .removed = 1, .added = 0 },
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
-        .jump, .ret_undef => .{ .required = 0, .removed = 0, .added = 0 },
+        .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
         else => unreachable,
     };
 }
@@ -490,6 +500,15 @@ fn valueKindForBinary(op: bc.Op) ValueKind {
     };
 }
 
+fn handlerStatesEqual(lhs: []const HandlerState, rhs: []const HandlerState) bool {
+    if (lhs.len != rhs.len) return false;
+    for (lhs, rhs) |a, b| {
+        if (a.catch_ip != b.catch_ip or a.finally_ip != b.finally_ip or a.stack_depth != b.stack_depth)
+            return false;
+    }
+    return true;
+}
+
 fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std.mem.Allocator) BuildError!ValueGraph {
     const local_count: usize = chunk.local_count;
     if (chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
@@ -517,6 +536,53 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             } else {
                 entry_depths[successor] = depth;
                 try queue.append(allocator, successor);
+            }
+        }
+    }
+
+    const entry_handlers = try allocator.alloc(?[]HandlerState, blocks.len);
+    @memset(entry_handlers, null);
+    defer {
+        for (entry_handlers) |maybe_handlers| if (maybe_handlers) |handlers| allocator.free(handlers);
+        allocator.free(entry_handlers);
+    }
+    entry_handlers[0] = try allocator.alloc(HandlerState, 0);
+    var handler_queue: std.ArrayListUnmanaged(u32) = .empty;
+    defer handler_queue.deinit(allocator);
+    try handler_queue.append(allocator, 0);
+    var handler_queue_index: usize = 0;
+    var active_handlers: std.ArrayListUnmanaged(HandlerState) = .empty;
+    defer active_handlers.deinit(allocator);
+    while (handler_queue_index < handler_queue.items.len) : (handler_queue_index += 1) {
+        const block_id = handler_queue.items[handler_queue_index];
+        const block = blocks[block_id];
+        active_handlers.clearRetainingCapacity();
+        try active_handlers.appendSlice(allocator, entry_handlers[block_id].?);
+        var depth = entry_depths[block_id] orelse return error.InvalidControlFlow;
+        for (chunk.code.items[block.start..block.end]) |inst| {
+            switch (inst.op) {
+                .push_handler => {
+                    if (inst.a == std.math.maxInt(u32) and inst.b == std.math.maxInt(u32))
+                        return error.InvalidControlFlow;
+                    try active_handlers.append(allocator, .{
+                        .catch_ip = inst.a,
+                        .finally_ip = inst.b,
+                        .stack_depth = depth,
+                    });
+                },
+                .pop_handler => if (active_handlers.pop() == null) return error.InvalidControlFlow,
+                else => {},
+            }
+            const effect = depthEffect(inst.op);
+            if (depth < effect.required) return error.InvalidControlFlow;
+            depth = depth - effect.removed + effect.added;
+        }
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (entry_handlers[successor]) |known| {
+                if (!handlerStatesEqual(known, active_handlers.items)) return error.InvalidControlFlow;
+            } else {
+                entry_handlers[successor] = try allocator.dupe(HandlerState, active_handlers.items);
+                try handler_queue.append(allocator, successor);
             }
         }
     }
@@ -585,6 +651,8 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
     defer allocator.free(locals);
     const stack = try allocator.alloc(ValueId, chunk.code.items.len + 1);
     defer allocator.free(stack);
+    var handlers: std.ArrayListUnmanaged(HandlerState) = .empty;
+    defer handlers.deinit(allocator);
 
     for (blocks, 0..) |block, block_id| {
         const entry_depth = entry_depths[block_id] orelse continue;
@@ -592,7 +660,9 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         @memcpy(locals, entry[0..local_count]);
         @memcpy(stack[0..entry_depth], entry[local_count..]);
         var depth: usize = entry_depth;
-        try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth], &.{});
+        handlers.clearRetainingCapacity();
+        try handlers.appendSlice(allocator, entry_handlers[block_id].?);
+        try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth], handlers.items);
 
         for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (inst.op) {
             .load_const => {
@@ -641,7 +711,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .jump => {},
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
-                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
+                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 if (block.successor_count != 2) return error.InvalidControlFlow;
@@ -655,7 +725,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .ret => {
                 if (depth == 0) return error.InvalidControlFlow;
-                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 try builder.returns.append(allocator, .{
@@ -665,7 +735,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 });
             },
             .ret_undef => {
-                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 const result = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
                 try builder.roots.append(allocator, result);
                 try builder.returns.append(allocator, .{
@@ -674,6 +744,12 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .value = result,
                 });
             },
+            .push_handler => try handlers.append(allocator, .{
+                .catch_ip = inst.a,
+                .finally_ip = inst.b,
+                .stack_depth = @intCast(depth),
+            }),
+            .pop_handler => if (handlers.pop() == null) return error.InvalidControlFlow,
             else => unreachable,
         };
 
@@ -860,6 +936,8 @@ fn supports(op: bc.Op) bool {
         .jump_if_false,
         .ret,
         .ret_undef,
+        .push_handler,
+        .pop_handler,
         => true,
         else => false,
     };
@@ -965,6 +1043,54 @@ test "optimizer SSA block arguments close loop backedges" {
     try std.testing.expect(preheader_values[1] != backedge_values[1]);
 }
 
+test "optimizer frame states preserve active normal-flow handlers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const zero = try chunk.addConst(RuntimeValue.num(0));
+    const eleven = try chunk.addConst(RuntimeValue.num(11));
+    const dummy = try chunk.addConst(RuntimeValue.num(1));
+    const twenty_two = try chunk.addConst(RuntimeValue.num(22));
+    const ninety_nine = try chunk.addConst(RuntimeValue.num(99));
+    _ = try chunk.emitAB(.push_handler, 13, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 8);
+    _ = try chunk.emit(.pop_handler, 0);
+    _ = try chunk.emit(.load_const, eleven);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.pop_handler, 0);
+    _ = try chunk.emit(.load_const, dummy);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, twenty_two);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.load_const, ninety_nine);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var active_entries: usize = 0;
+    for (plan.graph.frame_states) |state| {
+        if (state.kind == .branch or (state.kind == .block_entry and state.block != 0)) {
+            try std.testing.expectEqual(@as(u32, 1), state.handler_count);
+            const handler = plan.graph.handler_states[state.first_handler];
+            try std.testing.expectEqual(@as(u32, 13), handler.catch_ip);
+            try std.testing.expectEqual(std.math.maxInt(u32), handler.finally_ip);
+            try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
+            active_entries += 1;
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), state.handler_count);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), active_entries);
+    for (plan.graph.edge_states) |state| {
+        if (state.to != 0) try std.testing.expectEqual(@as(u32, 1), state.handler_count);
+    }
+}
+
 test "optimizer canonicalizes pure values and removes dead SSA" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1005,6 +1131,11 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
 
+    var throwing = bc.Chunk.init(arena.allocator());
+    _ = try throwing.emit(.load_undefined, 0);
+    _ = try throwing.emit(.throw_op, 0);
+    try std.testing.expectError(error.UnsupportedChunk, build(&throwing, std.testing.allocator));
+
     var invalid = bc.Chunk.init(arena.allocator());
     _ = try invalid.emit(.jump, 1);
     try std.testing.expectError(error.InvalidControlFlow, build(&invalid, std.testing.allocator));
@@ -1017,4 +1148,18 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try mismatched_merge.emit(.jump, 4);
     _ = try mismatched_merge.emit(.ret_undef, 0);
     try std.testing.expectError(error.InvalidControlFlow, build(&mismatched_merge, std.testing.allocator));
+
+    var mismatched_handlers = bc.Chunk.init(arena.allocator());
+    _ = try mismatched_handlers.emit(.load_true, 0);
+    _ = try mismatched_handlers.emit(.jump_if_false, 4);
+    _ = try mismatched_handlers.emitAB(.push_handler, 5, std.math.maxInt(u32));
+    _ = try mismatched_handlers.emit(.jump, 4);
+    _ = try mismatched_handlers.emit(.ret_undef, 0);
+    _ = try mismatched_handlers.emit(.ret_undef, 0);
+    try std.testing.expectError(error.InvalidControlFlow, build(&mismatched_handlers, std.testing.allocator));
+
+    var unbalanced_handler = bc.Chunk.init(arena.allocator());
+    _ = try unbalanced_handler.emit(.pop_handler, 0);
+    _ = try unbalanced_handler.emit(.ret_undef, 0);
+    try std.testing.expectError(error.InvalidControlFlow, build(&unbalanced_handler, std.testing.allocator));
 }

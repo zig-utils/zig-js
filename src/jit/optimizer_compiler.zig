@@ -1393,6 +1393,61 @@ test "optimizer compiler side exits asymmetric control exactly" {
     try std.testing.expectEqual(@as(u64, 4), steps);
 }
 
+test "optimizer compiler side exits with an active catch handler" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const zero = try chunk.addConst(Value.num(0));
+    const eleven = try chunk.addConst(Value.num(11));
+    const dummy = try chunk.addConst(Value.num(1));
+    const twenty_two = try chunk.addConst(Value.num(22));
+    const ninety_nine = try chunk.addConst(Value.num(99));
+    _ = try chunk.emitAB(.push_handler, 13, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 8);
+    _ = try chunk.emit(.pop_handler, 0);
+    _ = try chunk.emit(.load_const, eleven);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.pop_handler, 0);
+    _ = try chunk.emit(.load_const, dummy);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, twenty_two);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.load_const, ninety_nine);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    var slots = [_]Value{Value.num(-1)};
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = @ptrCast(slots[0..].ptr),
+        .scratch = &scratch,
+        .steps = &steps,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 5), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 5), steps);
+    var point = compiled.deopt.?.points[frame.deopt_index];
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u32, 13), compiled.deopt.?.handlers[point.first_handler].catch_ip);
+
+    slots[0] = Value.num(1);
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 5), steps);
+    point = compiled.deopt.?.points[frame.deopt_index];
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u32, 13), compiled.deopt.?.handlers[point.first_handler].catch_ip);
+}
+
 test "optimizer loop OSR metadata imports an exact VM frame" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

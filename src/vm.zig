@@ -7488,6 +7488,47 @@ test "vm: optimizer asymmetric branch resumes without restarting" {
     try std.testing.expectEqual(ordinary_delta, machine.steps - 1022);
 }
 
+test "vm: optimizer side exit restores an active catch handler" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function choose(x) { try { if (x < 0) return x + 10; 1 + 2; return x + 20; } catch { return 99; } }
+        \\choose(-1); choose(1); choose(-2); choose(2); choose(-3);
+        \\choose(3); choose(-4); choose(4); choose(-5); choose(9)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(artifact.has_side_exits);
+    try std.testing.expect(artifact.deopt.?.handlers.len != 0);
+    var saw_active_handler = false;
+    for (artifact.deopt.?.points) |point| if (point.handler_count != 0) {
+        const handler = artifact.deopt.?.handlers[point.first_handler];
+        try std.testing.expect(handler.catch_ip != jit.RecoveryHandler.none);
+        saw_active_handler = true;
+    };
+    try std.testing.expect(saw_active_handler);
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
 test "vm: optimizer executes multiple iterations after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
