@@ -3674,6 +3674,10 @@ fn reconstructNativeSideExit(
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return .miss;
+    if (native.has_side_exits) {
+        const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
+        if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
+    }
     const frame_slots: usize = @intCast(native.frame_slots);
     const live_slots = slots[0..frame_slots];
 
@@ -3871,6 +3875,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const optimizer_artifact = loadOrCompileOptimizer(owner, chunk);
     const baseline_artifact = chunk.tier.loadCode();
     if (optimizer_artifact == null and baseline_artifact == null) return null;
+    if (optimizer_artifact) |artifact| if (artifact.has_side_exits) return null;
 
     try vm.stackGuard();
     vm.depth += 1;
@@ -7249,6 +7254,51 @@ test "vm: optimizer exact branch converges across both paths" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer asymmetric branch resumes without restarting" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function choose(x) { if (x < 0) { 1 + 2; return x + 10; } return x + 20; }
+        \\choose(-1); choose(1); choose(-2); choose(2); choose(-3);
+        \\choose(3); choose(-4); choose(4); choose(-5); choose(9)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(artifact.has_side_exits);
+    try std.testing.expect(artifact.manages_steps);
+    try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 29), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+
+    var slots = [_]Value{Value.num(-2)};
+    var frame = Frame{ .slots = &slots, .parent = null };
+    const ordinary_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 8), (try run(&machine, function_chunk, &frame)).asNum());
+    const ordinary_delta = machine.steps - ordinary_start;
+    slots[0] = Value.num(-2);
+    machine.steps = 1022;
+    try std.testing.expectEqual(@as(f64, 8), (try run(&machine, function_chunk, &frame)).asNum());
+    try std.testing.expectEqual(ordinary_delta, machine.steps - 1022);
 }
 
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {

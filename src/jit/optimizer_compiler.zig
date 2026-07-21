@@ -31,6 +31,7 @@ pub const OperationKind = enum {
 pub const Operation = struct {
     kind: OperationKind,
     destination: u8,
+    block: u32,
     lhs: u8 = 0,
     rhs: u8 = 0,
     immediate: u64 = 0,
@@ -42,11 +43,19 @@ pub const BranchSelection = struct {
     true_result: u8,
 };
 
+pub const SideExitBranch = struct {
+    condition: u8,
+    false_deopt_index: u16,
+    true_deopt_index: u16,
+    common_steps: u12,
+};
+
 pub const Program = struct {
     allocator: std.mem.Allocator,
     operations: []Operation,
     result: u8,
     branch: ?BranchSelection,
+    side_exit_branch: ?SideExitBranch,
     scratch_slots: u8,
     frame_slots: u32,
     required_numeric_slots: u64,
@@ -99,6 +108,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = .argument,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .immediate = node.immediate,
             });
         },
@@ -108,6 +118,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = .constant,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .immediate = node.immediate,
             });
         },
@@ -116,6 +127,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = .constant,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .immediate = Value.undef().rawBits(),
             });
         },
@@ -124,6 +136,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = .constant,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .immediate = Value.nul().rawBits(),
             });
         },
@@ -132,6 +145,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = .constant,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .immediate = Value.boolVal(node.kind == .true).rawBits(),
             });
         },
@@ -163,6 +177,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             try operations.append(allocator, .{
                 .kind = kind,
                 .destination = @intCast(node.id),
+                .block = node.block,
                 .lhs = @intCast(lhs),
                 .rhs = @intCast(rhs),
             });
@@ -172,6 +187,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
 
     var result: optimizer.ValueId = 0;
     var branch_selection: ?BranchSelection = null;
+    var side_exit_branch: ?SideExitBranch = null;
     var bytecode_steps: u32 = 0;
     if (graph.branches.len == 0) {
         if (graph.returns.len != 1 or graph.returns[0].block != 0 or graph.edges.len != 1 or
@@ -201,13 +217,22 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         const true_result = try resolveAlias(true_return.value, aliases);
         const false_steps = plan.blocks[0].instruction_count + plan.blocks[branch.false_block].instruction_count;
         const true_steps = plan.blocks[0].instruction_count + plan.blocks[branch.true_block].instruction_count;
-        if (false_steps != true_steps) return error.UnsupportedChunk;
-        bytecode_steps = false_steps;
-        branch_selection = .{
-            .condition = @intCast(condition),
-            .false_result = @intCast(false_result),
-            .true_result = @intCast(true_result),
-        };
+        if (false_steps == true_steps) {
+            bytecode_steps = false_steps;
+            branch_selection = .{
+                .condition = @intCast(condition),
+                .false_result = @intCast(false_result),
+                .true_result = @intCast(true_result),
+            };
+        } else {
+            bytecode_steps = plan.blocks[0].instruction_count;
+            side_exit_branch = .{
+                .condition = @intCast(condition),
+                .false_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.false_block),
+                .true_deopt_index = try blockEntryStateIndex(graph.frame_states, branch.true_block),
+                .common_steps = @intCast(plan.blocks[0].instruction_count),
+            };
+        }
     }
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
     errdefer deopt_points.deinit(allocator);
@@ -245,6 +270,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .operations = owned_operations,
         .result = @intCast(result),
         .branch = branch_selection,
+        .side_exit_branch = side_exit_branch,
         .scratch_slots = @intCast(graph.nodes.len),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = required_numeric_slots,
@@ -252,6 +278,12 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
     };
+}
+
+fn blockEntryStateIndex(states: []const optimizer.FrameState, block: u32) error{UnsupportedChunk}!u16 {
+    for (states, 0..) |state, index| if (state.kind == .block_entry and state.block == block)
+        return std.math.cast(u16, index) orelse error.UnsupportedChunk;
+    return error.UnsupportedChunk;
 }
 
 fn returnForBlock(returns: []const optimizer.ReturnValue, block: u32) ?optimizer.ReturnValue {
@@ -290,37 +322,52 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try assembler.load64(13, 12, frameOffset("slots"));
     try assembler.load64(14, 12, frameOffset("scratch"));
 
-    for (program.operations) |operation| switch (operation.kind) {
-        .argument => {
-            try assembler.load64(9, 13, try slotOffset(operation.immediate));
-            try assembler.store64(9, 14, try slotOffset(operation.destination));
-        },
-        .constant => {
-            try assembler.movImmediate64(9, operation.immediate);
-            try assembler.store64(9, 14, try slotOffset(operation.destination));
-        },
-        .add, .sub, .mul, .div => {
-            try loadNumericOperands(&assembler, operation);
-            try assembler.floatBinary64(switch (operation.kind) {
-                .add => .add,
-                .sub => .sub,
-                .mul => .mul,
-                .div => .div,
-                else => unreachable,
-            }, 0, 0, 1);
-            try emitCanonicalNumber(&assembler, 9, 0);
-            try assembler.store64(9, 14, try slotOffset(operation.destination));
-        },
-        .lt, .le, .gt, .ge, .eq, .neq => {
-            try loadNumericOperands(&assembler, operation);
-            try assembler.compareFloat64(0, 1);
-            try assembler.conditionalSet32(9, comparisonCondition(operation.kind));
-            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-            try assembler.addRegister64(9, 10, 9);
-            try assembler.store64(9, 14, try slotOffset(operation.destination));
-        },
-    };
-    if (program.branch) |branch| {
+    for (program.operations) |operation| {
+        if (program.side_exit_branch != null and operation.block != optimizer.Block.none and operation.block != 0) continue;
+        switch (operation.kind) {
+            .argument => {
+                try assembler.load64(9, 13, try slotOffset(operation.immediate));
+                try assembler.store64(9, 14, try slotOffset(operation.destination));
+            },
+            .constant => {
+                try assembler.movImmediate64(9, operation.immediate);
+                try assembler.store64(9, 14, try slotOffset(operation.destination));
+            },
+            .add, .sub, .mul, .div => {
+                try loadNumericOperands(&assembler, operation);
+                try assembler.floatBinary64(switch (operation.kind) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    else => unreachable,
+                }, 0, 0, 1);
+                try emitCanonicalNumber(&assembler, 9, 0);
+                try assembler.store64(9, 14, try slotOffset(operation.destination));
+            },
+            .lt, .le, .gt, .ge, .eq, .neq => {
+                try loadNumericOperands(&assembler, operation);
+                try assembler.compareFloat64(0, 1);
+                try assembler.conditionalSet32(9, comparisonCondition(operation.kind));
+                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                try assembler.addRegister64(9, 10, 9);
+                try assembler.store64(9, 14, try slotOffset(operation.destination));
+            },
+        }
+    }
+    if (program.side_exit_branch) |branch| {
+        try assembler.load64(9, 12, frameOffset("steps"));
+        try assembler.load64(10, 9, 0);
+        try assembler.addImmediate64(10, 10, branch.common_steps);
+        try assembler.store64(10, 9, 0);
+        try assembler.load64(9, 14, try slotOffset(branch.condition));
+        try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+        try assembler.compareRegister64(9, 10);
+        const false_jump = try assembler.branchConditionPlaceholder(.eq);
+        try emitSideExit(&assembler, branch.true_deopt_index, program.deopt_points[branch.true_deopt_index].exit_ip);
+        try assembler.patchConditionBranch(false_jump, assembler.position());
+        try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
+    } else if (program.branch) |branch| {
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
@@ -333,9 +380,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     } else {
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
-    try assembler.store64(9, 12, frameOffset("result_bits"));
-    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
-    try assembler.ret();
+    if (program.side_exit_branch == null) {
+        try assembler.store64(9, 12, frameOffset("result_bits"));
+        try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
+        try assembler.ret();
+    }
     try memory.publish(assembler.bytes().len);
     const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values);
     errdefer deopt.destroy();
@@ -349,7 +398,18 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .required_numeric_slots = program.required_numeric_slots,
         .max_stack_depth = program.scratch_slots,
         .deopt = deopt,
+        .manages_steps = program.side_exit_branch != null,
+        .has_side_exits = program.side_exit_branch != null,
     };
+}
+
+fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
+    try assembler.movImmediate64(9, exit_ip);
+    try assembler.store64(9, 12, frameOffset("exit_ip"));
+    try assembler.movImmediate64(9, deopt_index);
+    try assembler.store64(9, 12, frameOffset("deopt_index"));
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
+    try assembler.ret();
 }
 
 fn loadNumericOperands(assembler: *aarch64.Assembler, operation: Operation) !void {
@@ -532,7 +592,7 @@ test "optimizer compiler executes exact two-way SSA control" {
     try std.testing.expectEqual(@as(f64, 22), Value.fromRawBits(frame.result_bits).asNum());
 }
 
-test "optimizer compiler rejects remainder and asymmetric control before publication" {
+test "optimizer compiler rejects remainder before publication" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -544,7 +604,12 @@ test "optimizer compiler rejects remainder and asymmetric control before publica
     _ = try chunk.emit(.mod, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
+}
 
+test "optimizer compiler side exits asymmetric control exactly" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     var asymmetric = bc.Chunk.init(arena.allocator());
     asymmetric.param_count = 1;
     asymmetric.local_count = 1;
@@ -561,5 +626,28 @@ test "optimizer compiler rejects remainder and asymmetric control before publica
     _ = try asymmetric.emit(.ret, 0);
     _ = try asymmetric.emit(.load_const, two_value);
     _ = try asymmetric.emit(.ret, 0);
-    try std.testing.expectError(error.UnsupportedChunk, compile(&asymmetric));
+
+    var compiled = try compile(&asymmetric);
+    defer compiled.deinit();
+    try std.testing.expect(compiled.manages_steps);
+    try std.testing.expect(compiled.has_side_exits);
+    try std.testing.expectEqual(@as(u32, 4), compiled.bytecode_steps);
+    var slots = [_]Value{Value.num(-1)};
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = @ptrCast(slots[0..].ptr),
+        .scratch = scratch[0..].ptr,
+        .steps = &steps,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 4), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 4), steps);
+    try std.testing.expectEqual(jit.DeoptPointKind.block_entry, compiled.deopt.?.points[frame.deopt_index].kind);
+
+    slots[0] = Value.num(1);
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 4), steps);
 }
