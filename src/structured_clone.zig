@@ -26,6 +26,7 @@ const interpreter = @import("interpreter.zig");
 const builtins = @import("builtins.zig");
 const shared_buffer = @import("shared_buffer.zig");
 const agent = @import("agent.zig");
+const gc_mod = @import("gc.zig");
 
 const Value = value.Value;
 const Interpreter = interpreter.Interpreter;
@@ -603,6 +604,8 @@ pub fn serializeWithLimit(
     v: Value,
     max_frame_bytes: usize,
 ) SerializeLimitError![]u8 {
+    const gc_saved = gc_mod.setActiveMachineContext(self);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const payload_limit = if (max_frame_bytes >= wire_header_len)
         max_frame_bytes - wire_header_len
     else
@@ -1210,6 +1213,8 @@ const Deserializer = struct {
 /// wrappers they create. A successful root must consume the entire stream;
 /// valid trailing token payloads are released before malformed input fails.
 pub fn deserialize(self: *Interpreter, bytes: []const u8) HostError!Value {
+    const gc_saved = gc_mod.setActiveMachineContext(self);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const frame = readFrame(bytes) catch return self.throwError("TypeError", "structured clone: malformed payload");
     if (frame.frame_len != bytes.len) {
         releaseSerialized(bytes);
