@@ -892,6 +892,7 @@ var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_attempts: std.atomic.Value(u64) = .init(0);
 var optimizer_native_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
     std.debug.assert(builtin.is_test);
@@ -3707,6 +3708,53 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
     };
 }
 
+fn tryRunOsrNative(
+    vm: *Interpreter,
+    native: *const jit.CompiledCode,
+    slots: []Value,
+    exec: *Exec,
+) EvalError!NativeRunOutcome {
+    const metadata = native.osr orelse return .miss;
+    if (!native.manages_steps or !native.has_side_exits or
+        native.max_stack_depth > jit.numeric_scratch_capacity or !nativeSlotGuardsPass(native, slots))
+        return .miss;
+    const entry_index = metadata.findEntry(
+        exec.ip,
+        slots.len,
+        exec.stack.items.len,
+        exec.handlers.items.len,
+        exec.acc.rawBits(),
+    ) orelse return .miss;
+    const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
+    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
+
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    const frame_words: []const u64 = @ptrCast(slots);
+    const stack_words: []const u64 = @ptrCast(exec.stack.items);
+    if (!metadata.prepareScratch(entry_index, frame_words, stack_words, &scratch)) return .miss;
+    var native_frame = jit.NativeFrame{
+        .slots = if (slots.len == 0) null else @ptrCast(slots.ptr),
+        .scratch = &scratch,
+        .steps = &vm.steps,
+        .runtime_context = vm,
+        .checkpoint = nativeCheckpoint,
+        .remainder = nativeRemainder,
+        .steps_until_checkpoint = 1024 - (vm.steps & 1023),
+        .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+    };
+    return switch (native.run(&native_frame)) {
+        .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
+        .throw => error.Throw,
+        .stop => error.OutOfMemory,
+        .side_exit => side_exit: {
+            const deopt = native.deopt orelse return error.OutOfMemory;
+            if (!try reconstructNativeSideExit(deopt, &native_frame, slots, &scratch, exec, vm.arena))
+                return error.OutOfMemory;
+            break :side_exit .deoptimized;
+        },
+    };
+}
+
 /// Run a leaf artifact whose bytecode interval is short enough to account for
 /// atomically. Guards run before step accounting, so a speculative mismatch
 /// falls through to baseline/interpreter with no observable partial entry.
@@ -3788,6 +3836,7 @@ fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk) ?*const jit.Compiled
 }
 
 fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*Frame, exec: *Exec) EvalError!NativeRunOutcome {
+    if (!native.entry_enabled) return .miss;
     const current_frame = frame;
     if (native.frame_slots > 0) {
         const cf = current_frame orelse return .miss;
@@ -3806,6 +3855,23 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*
     if (builtin.is_test and native.kind == .optimizer and result != null)
         _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     return if (result) |value_word| .{ .complete = value_word } else .miss;
+}
+
+fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!NativeRunOutcome {
+    if (gen != null or !vm.jit_execution_allowed) return .miss;
+    const native = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return .miss;
+    if (native.osr == null) return .miss;
+    if (native.frame_slots > 0) {
+        const live_frame = frame orelse return .miss;
+        if (live_frame.slots.len != native.frame_slots or live_frame.escaped.load(.monotonic)) return .miss;
+    }
+    var empty_slots: [0]Value = .{};
+    const slots: []Value = if (frame) |live_frame| live_frame.slots else empty_slots[0..];
+    if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
+    const outcome = try tryRunOsrNative(vm, native, slots, exec);
+    if (builtin.is_test and outcome == .complete) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
+    if (builtin.is_test and outcome == .deoptimized) _ = optimizer_osr_entries.fetchAdd(1, .monotonic);
+    return outcome;
 }
 
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
@@ -4430,8 +4496,24 @@ fn runChunk(
             },
 
             .jump => {
-                if (inst.a <= ip - 1) optimizer_delta.observeBackedge();
+                const is_backedge = inst.a <= ip - 1;
+                if (is_backedge) optimizer_delta.observeBackedge();
                 ip = inst.a;
+                if (is_backedge) {
+                    exec.acc = acc;
+                    exec.ip = ip;
+                    switch (try tryRunLoopOsr(vm, exec, chunk, frame, gen)) {
+                        .miss => {},
+                        .deoptimized => {
+                            acc = exec.acc;
+                            ip = exec.ip;
+                        },
+                        .complete => |result| {
+                            optimizer_delta.observeValue(optimizerProfileKind(result));
+                            return result;
+                        },
+                    }
+                }
             },
             .jump_if_false => {
                 const taken = !stack.pop().?.toBoolean();
@@ -7299,6 +7381,47 @@ test "vm: optimizer asymmetric branch resumes without restarting" {
     machine.steps = 1022;
     try std.testing.expectEqual(@as(f64, 8), (try run(&machine, function_chunk, &frame)).asNum());
     try std.testing.expectEqual(ordinary_delta, machine.steps - 1022);
+}
+
+test "vm: optimizer enters a loop header after a hot backedge" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function count(n) { var i = 0; while (i < n) i = i + 1; return i; }
+        \\count(6); count(6); count(6); count(6); count(6);
+        \\count(6); count(6); count(6); count(6); count(6)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 6), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled);
+    try std.testing.expect(artifact.osr != null);
+    try std.testing.expect(artifact.has_side_exits);
+    try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 6), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+
+    machine.steps = 1022;
+    var slots = [_]Value{ Value.num(2), Value.num(0) };
+    var frame = Frame{ .slots = &slots, .parent = null };
+    try std.testing.expectEqual(@as(f64, 2), (try run(&machine, function_chunk, &frame)).asNum());
 }
 
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {

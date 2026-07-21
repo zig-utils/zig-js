@@ -27,7 +27,9 @@ Optimizer SSA retains deterministic locals-plus-operand-stack frame states at ev
 
 The first generated side exit handles a guarded numeric branch whose two paths have unequal bytecode costs. Native code executes and accounts for the common prefix, publishes the selected successor state, and resumes that path in bytecode without restarting the function. Entry declines before doing work when the prefix would cross a budget or 1,024-step checkpoint.
 
-Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Loop headers now produce an immutable OSR-entry contract with exact IP, locals, operand-stack depth, handler depth, accumulator, and VM-to-SSA scratch imports. Entry is ineligible on any shape mismatch, and backends do not publish this metadata until they can execute the corresponding loop. Executable loop OSR, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
+Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Loop headers produce an immutable OSR-entry contract with exact IP, locals, operand-stack depth, handler depth, accumulator, and VM-to-SSA scratch imports. Entry is ineligible on any shape mismatch.
+
+The first AArch64 loop OSR region handles a guarded numeric header with one Boolean branch. After a hot backedge, native code imports the exact header frame, executes and accounts for the comparison block, then side-exits to the selected body or exit edge without replay. A budget or 1,024-step checkpoint crossing remains in bytecode. Native loop bodies/backedges, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
 
 Focused verification:
 
@@ -36,5 +38,6 @@ zig build test-jit
 zig build test -Dtest-filter='constant SSA return converges'
 zig build test -Dtest-filter='guarded parameter SSA'
 zig build test -Dtest-filter='optimizer exact branch'
+zig build test -Dtest-filter='optimizer enters a loop header'
 zig build test -Dtest-filter='unsupported optimizer input caches rejection'
 ```

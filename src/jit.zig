@@ -308,7 +308,7 @@ pub const RecoveryValue = struct {
     }
 };
 
-pub const DeoptPointKind = enum(u8) { block_entry, branch, return_ };
+pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, edge };
 
 pub const DeoptPoint = struct {
     kind: DeoptPointKind,
@@ -462,6 +462,9 @@ pub const CompiledCode = struct {
     required_u32_slots: u64 = 0,
     max_stack_depth: u8 = 0,
     deopt: ?*DeoptMetadata = null,
+    osr: ?*OsrMetadata = null,
+    /// False for an artifact that may only be entered through an exact OSR row.
+    entry_enabled: bool = true,
     /// A side exit may have executed observable bytecode and must resume from
     /// `deopt`; direct/restart-only entry paths reject such artifacts.
     has_side_exits: bool = false,
@@ -469,6 +472,7 @@ pub const CompiledCode = struct {
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();
         if (self.deopt) |metadata| metadata.destroy();
+        if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
 

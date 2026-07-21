@@ -62,11 +62,15 @@ pub const Program = struct {
     bytecode_steps: u32,
     deopt_points: []jit.DeoptPoint,
     deopt_values: []jit.RecoveryValue,
+    osr: ?*jit.OsrMetadata = null,
+    execution_block: u32 = 0,
+    entry_enabled: bool = true,
 
     pub fn deinit(self: *Program) void {
         self.allocator.free(self.operations);
         self.allocator.free(self.deopt_points);
         self.allocator.free(self.deopt_values);
+        if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
 };
@@ -329,6 +333,168 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     };
 }
 
+fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
+    const graph = &plan.graph;
+    if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
+        graph.branches.len != 1)
+        return error.UnsupportedChunk;
+
+    const osr = try buildOsrMetadata(plan, allocator);
+    errdefer osr.destroy();
+    if (osr.entries.len != 1) return error.UnsupportedChunk;
+    const entry = osr.entries[0];
+    if (entry.stack_count != 0) return error.UnsupportedChunk;
+    var header_block: ?u32 = null;
+    for (plan.blocks) |block| if (block.start == entry.entry_ip) {
+        if (header_block != null) return error.UnsupportedChunk;
+        header_block = block.id;
+    };
+    const header = header_block orelse return error.UnsupportedChunk;
+    const branch = graph.branches[0];
+    if (branch.block != header or branch.false_block == branch.true_block) return error.UnsupportedChunk;
+
+    var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
+    var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
+    var operations: std.ArrayListUnmanaged(Operation) = .empty;
+    errdefer operations.deinit(allocator);
+    for (graph.nodes) |node| {
+        if (node.block != header) continue;
+        switch (node.kind) {
+            .block_argument => {
+                types[node.id] = .number;
+                initialized[node.id] = true;
+            },
+            .constant => {
+                const constant = Value.fromRawBits(node.immediate);
+                types[node.id] = if (constant.isNumber()) .number else if (constant.isBoolean()) .boolean else .other;
+                try operations.append(allocator, .{
+                    .kind = .constant,
+                    .destination = @intCast(node.id),
+                    .block = header,
+                    .immediate = node.immediate,
+                });
+                initialized[node.id] = true;
+            },
+            .true, .false => {
+                types[node.id] = .boolean;
+                try operations.append(allocator, .{
+                    .kind = .constant,
+                    .destination = @intCast(node.id),
+                    .block = header,
+                    .immediate = Value.boolVal(node.kind == .true).rawBits(),
+                });
+                initialized[node.id] = true;
+            },
+            .add, .sub, .mul, .div, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+                if (node.lhs >= graph.nodes.len or node.rhs >= graph.nodes.len or
+                    types[node.lhs] != .number or types[node.rhs] != .number)
+                    return error.UnsupportedChunk;
+                const kind: OperationKind = switch (node.kind) {
+                    .add => .add,
+                    .sub => .sub,
+                    .mul => .mul,
+                    .div => .div,
+                    .lt => .lt,
+                    .le => .le,
+                    .gt => .gt,
+                    .ge => .ge,
+                    .eq, .eq_strict => .eq,
+                    .neq, .neq_strict => .neq,
+                    else => unreachable,
+                };
+                types[node.id] = switch (kind) {
+                    .lt, .le, .gt, .ge, .eq, .neq => .boolean,
+                    else => .number,
+                };
+                try operations.append(allocator, .{
+                    .kind = kind,
+                    .destination = @intCast(node.id),
+                    .block = header,
+                    .lhs = @intCast(node.lhs),
+                    .rhs = @intCast(node.rhs),
+                });
+                initialized[node.id] = true;
+            },
+            else => return error.UnsupportedChunk,
+        }
+    }
+    if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
+
+    var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
+    errdefer deopt_points.deinit(allocator);
+    var deopt_values: std.ArrayListUnmanaged(jit.RecoveryValue) = .empty;
+    errdefer deopt_values.deinit(allocator);
+    const false_index = try appendEdgeDeopt(graph, &initialized, header, branch.false_block, allocator, &deopt_points, &deopt_values);
+    const true_index = try appendEdgeDeopt(graph, &initialized, header, branch.true_block, allocator, &deopt_points, &deopt_values);
+
+    const owned_operations = try operations.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_operations);
+    const owned_deopt_points = try deopt_points.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_points);
+    const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_values);
+    const local_mask: u64 = if (chunk.local_count == 64)
+        std.math.maxInt(u64)
+    else
+        (@as(u64, 1) << @intCast(chunk.local_count)) - 1;
+    return .{
+        .allocator = allocator,
+        .operations = owned_operations,
+        .result = 0,
+        .branch = null,
+        .side_exit_branch = .{
+            .condition = @intCast(branch.condition),
+            .false_deopt_index = false_index,
+            .true_deopt_index = true_index,
+            .common_steps = @intCast(plan.blocks[header].instruction_count),
+        },
+        .scratch_slots = @intCast(graph.nodes.len),
+        .frame_slots = chunk.local_count,
+        .required_numeric_slots = local_mask,
+        .bytecode_steps = plan.blocks[header].instruction_count,
+        .deopt_points = owned_deopt_points,
+        .deopt_values = owned_deopt_values,
+        .osr = osr,
+        .execution_block = header,
+        .entry_enabled = false,
+    };
+}
+
+fn appendEdgeDeopt(
+    graph: *const optimizer.ValueGraph,
+    initialized: []const bool,
+    from: u32,
+    to: u32,
+    allocator: std.mem.Allocator,
+    points: *std.ArrayListUnmanaged(jit.DeoptPoint),
+    values: *std.ArrayListUnmanaged(jit.RecoveryValue),
+) !u16 {
+    var found: ?optimizer.EdgeState = null;
+    for (graph.edge_states) |state| if (state.from == from and state.to == to) {
+        if (found != null) return error.UnsupportedChunk;
+        found = state;
+    };
+    const state = found orelse return error.UnsupportedChunk;
+    const index = std.math.cast(u16, points.items.len) orelse return error.UnsupportedChunk;
+    const first_value: u32 = @intCast(values.items.len);
+    const first: usize = state.first_value;
+    const count: usize = state.local_count + state.stack_count;
+    if (first > graph.edge_arguments.len or count > graph.edge_arguments.len - first) return error.UnsupportedChunk;
+    for (graph.edge_arguments[first .. first + count]) |value| {
+        if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
+        try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
+    }
+    try points.append(allocator, .{
+        .kind = .edge,
+        .exit_ip = state.origin,
+        .first_value = first_value,
+        .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+        .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
+    });
+    return index;
+}
+
 fn blockEntryStateIndex(states: []const optimizer.FrameState, block: u32) error{UnsupportedChunk}!u16 {
     for (states, 0..) |state, index| if (state.kind == .block_entry and state.block == block)
         return std.math.cast(u16, index) orelse error.UnsupportedChunk;
@@ -362,7 +528,10 @@ fn resolveAlias(initial: optimizer.ValueId, aliases: [jit.numeric_scratch_capaci
 pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
     var plan = try optimizer.build(chunk, std.heap.page_allocator);
     defer plan.deinit();
-    var program = try lower(chunk, &plan, std.heap.page_allocator);
+    var program = lower(chunk, &plan, std.heap.page_allocator) catch |err| switch (err) {
+        error.UnsupportedChunk => try lowerLoopOsr(chunk, &plan, std.heap.page_allocator),
+        else => return err,
+    };
     defer program.deinit();
     return compileAarch64(&program);
 }
@@ -377,7 +546,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try assembler.load64(14, 12, frameOffset("scratch"));
 
     for (program.operations) |operation| {
-        if (program.side_exit_branch != null and operation.block != optimizer.Block.none and operation.block != 0) continue;
+        if (program.side_exit_branch != null and operation.block != optimizer.Block.none and operation.block != program.execution_block) continue;
         switch (operation.kind) {
             .argument => {
                 try assembler.load64(9, 13, try slotOffset(operation.immediate));
@@ -442,6 +611,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try memory.publish(assembler.bytes().len);
     const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values);
     errdefer deopt.destroy();
+    const osr = if (program.osr) |metadata|
+        try jit.OsrMetadata.create(std.heap.page_allocator, metadata.entries, metadata.imports)
+    else
+        null;
+    errdefer if (osr) |metadata| metadata.destroy();
 
     return .{
         .memory = memory,
@@ -452,6 +626,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .required_numeric_slots = program.required_numeric_slots,
         .max_stack_depth = program.scratch_slots,
         .deopt = deopt,
+        .osr = osr,
+        .entry_enabled = program.entry_enabled,
         .manages_steps = program.side_exit_branch != null,
         .has_side_exits = program.side_exit_branch != null,
     };
@@ -761,4 +937,55 @@ test "optimizer loop OSR metadata imports an exact VM frame" {
     try std.testing.expect(!metadata.prepareScratch(entry_index, &slots, &.{}, scratch[0..2]));
     try std.testing.expectEqualSlices(u64, &.{ 0xfeed_face, 0xfeed_face }, scratch[0..2]);
     metadata.imports[last_import].destination = saved_destination;
+}
+
+test "optimizer compiler executes one loop-header OSR region" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 2;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 14);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expect(!compiled.entry_enabled);
+    try std.testing.expect(compiled.has_side_exits);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(4, 2, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    var slots = [_]u64{ Value.num(9).rawBits(), Value.num(3).rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{ .slots = slots[0..].ptr, .scratch = &scratch, .steps = &steps };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 4), steps);
+    try std.testing.expectEqual(jit.DeoptPointKind.edge, compiled.deopt.?.points[frame.deopt_index].kind);
+
+    slots[1] = Value.num(9).rawBits();
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 14), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 4), steps);
 }
