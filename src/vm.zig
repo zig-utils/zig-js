@@ -3633,9 +3633,47 @@ fn nativeSlotGuardsPass(native: *const jit.CompiledCode, slots: []const Value) b
     return true;
 }
 
-fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value) EvalError!?Value {
+const NativeRunOutcome = union(enum) {
+    miss,
+    complete: Value,
+    deoptimized,
+};
+
+fn reconstructNativeSideExit(
+    metadata: *const jit.DeoptMetadata,
+    native_frame: *const jit.NativeFrame,
+    slots: []Value,
+    scratch: []const u64,
+    exec: *Exec,
+    allocator: std.mem.Allocator,
+) EvalError!bool {
+    if (native_frame.deopt_index >= metadata.points.len) return false;
+    const point = metadata.points[native_frame.deopt_index];
+    if (point.exit_ip != native_frame.exit_ip or point.handler_count != 0 or exec.handlers.items.len != 0 or
+        point.local_count > slots.len or point.local_count > 64 or point.stack_count > 64)
+        return false;
+    const first: usize = point.first_value;
+    const count: usize = point.local_count + point.stack_count;
+    if (first > metadata.values.len or count > metadata.values.len - first) return false;
+
+    var recovered: [128]Value = undefined;
+    for (metadata.values[first .. first + count], 0..) |recovery, index| {
+        const bits = recovery.materialize(@ptrCast(slots), scratch) orelse return false;
+        recovered[index] = Value.fromRawBits(bits);
+    }
+    const accumulator_bits = point.accumulator.materialize(@ptrCast(slots), scratch) orelse return false;
+    exec.stack.clearRetainingCapacity();
+    for (recovered[point.local_count .. point.local_count + point.stack_count]) |value_word|
+        try exec.stack.append(allocator, value_word);
+    @memcpy(slots[0..point.local_count], recovered[0..point.local_count]);
+    exec.acc = Value.fromRawBits(accumulator_bits);
+    exec.ip = point.exit_ip;
+    return true;
+}
+
+fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
-        !nativeSlotGuardsPass(native, slots)) return null;
+        !nativeSlotGuardsPass(native, slots)) return .miss;
     const frame_slots: usize = @intCast(native.frame_slots);
     const live_slots = slots[0..frame_slots];
 
@@ -3651,10 +3689,17 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
     };
     return switch (native.run(&native_frame)) {
-        .complete => Value.fromRawBits(native_frame.result_bits),
+        .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
-        .side_exit => null,
+        .side_exit => side_exit: {
+            std.debug.assert(native.has_side_exits);
+            const target = exec orelse break :side_exit .miss;
+            const metadata = native.deopt orelse return error.OutOfMemory;
+            if (!try reconstructNativeSideExit(metadata, &native_frame, live_slots, &scratch, target, vm.arena))
+                return error.OutOfMemory;
+            break :side_exit .deoptimized;
+        },
     };
 }
 
@@ -3662,7 +3707,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
 /// atomically. Guards run before step accounting, so a speculative mismatch
 /// falls through to baseline/interpreter with no observable partial entry.
 fn tryRunUnmanagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value) ?Value {
-    if (native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
+    if (native.manages_steps or native.has_side_exits or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return null;
 
     const instruction_count: u64 = native.bytecode_steps;
@@ -3738,25 +3783,25 @@ fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk) ?*const jit.Compiled
     return artifact;
 }
 
-fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*Frame) EvalError!?Value {
+fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*Frame, exec: *Exec) EvalError!NativeRunOutcome {
     const current_frame = frame;
     if (native.frame_slots > 0) {
-        const cf = current_frame orelse return null;
-        if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return null;
+        const cf = current_frame orelse return .miss;
+        if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return .miss;
     }
     var empty_slots: [0]Value = .{};
     const slots: []Value = if (current_frame) |cf| cf.slots else empty_slots[0..];
     if (native.manages_steps) {
-        const result = try tryRunManagedNative(vm, native, slots);
-        if (builtin.is_test and native.kind == .optimizer and result != null)
+        const outcome = try tryRunManagedNative(vm, native, slots, exec);
+        if (builtin.is_test and native.kind == .optimizer and outcome == .complete)
             _ = optimizer_native_hits.fetchAdd(1, .monotonic);
-        return result;
+        return outcome;
     }
 
     const result = tryRunUnmanagedNative(vm, native, slots);
     if (builtin.is_test and native.kind == .optimizer and result != null)
         _ = optimizer_native_hits.fetchAdd(1, .monotonic);
-    return result;
+    return if (result) |value_word| .{ .complete = value_word } else .miss;
 }
 
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
@@ -3766,7 +3811,11 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     if (!vm.jit_execution_allowed) return null;
     if (loadOrCompileOptimizer(owner, chunk)) |artifact| {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
-        if (try tryExecuteNative(vm, artifact, frame)) |result| return result;
+        switch (try tryExecuteNative(vm, artifact, frame, exec)) {
+            .complete => |result| return result,
+            .deoptimized => return null,
+            .miss => {},
+        }
     }
 
     var code = chunk.tier.loadCode();
@@ -3795,7 +3844,10 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         code = chunk.tier.loadCode();
     };
     const native = code orelse return null;
-    return tryExecuteNative(vm, native, frame);
+    return switch (try tryExecuteNative(vm, native, frame, exec)) {
+        .complete => |result| result,
+        .miss, .deoptimized => null,
+    };
 }
 
 /// A ready numeric leaf has no object/upvalue/`this`/eval opcode and its native
@@ -3824,11 +3876,15 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     vm.depth += 1;
     defer vm.depth -= 1;
 
-    if (optimizer_artifact) |artifact| if (artifact.frame_slots == slot_count) {
+    if (optimizer_artifact) |artifact| if (artifact.frame_slots == slot_count and !artifact.has_side_exits) {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
-        const optimized = if (artifact.manages_steps)
-            try tryRunManagedNative(vm, artifact, slots[0..slot_count])
-        else
+        const optimized = if (artifact.manages_steps) optimized: {
+            const outcome = try tryRunManagedNative(vm, artifact, slots[0..slot_count], null);
+            break :optimized switch (outcome) {
+                .complete => |value_word| value_word,
+                .miss, .deoptimized => null,
+            };
+        } else
             tryRunUnmanagedNative(vm, artifact, slots[0..slot_count]);
         if (optimized) |native_value| {
             chunk.optimizer_tier.beginProfiling();
@@ -3844,9 +3900,14 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 
     const native = baseline_artifact orelse return null;
     if (native.frame_slots != slot_count) return null;
-    const result = if (native.manages_steps)
-        try tryRunManagedNative(vm, native, slots[0..slot_count])
-    else
+    if (native.has_side_exits) return null;
+    const result = if (native.manages_steps) managed: {
+        const outcome = try tryRunManagedNative(vm, native, slots[0..slot_count], null);
+        break :managed switch (outcome) {
+            .complete => |value_word| value_word,
+            .miss, .deoptimized => null,
+        };
+    } else
         tryRunUnmanagedNative(vm, native, slots[0..slot_count]);
     if (result) |native_value| {
         chunk.optimizer_tier.beginProfiling();
@@ -7105,6 +7166,44 @@ test "vm: guarded parameter SSA executes and side exits before accounting" {
     try std.testing.expect(second.isString());
     try std.testing.expectEqualStrings("x1", second.asStr());
     try std.testing.expectEqual(first_steps, machine.steps - steps_before_guard);
+}
+
+test "vm: optimizer deoptimization frame reconstruction is exact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var points = [_]jit.DeoptPoint{.{
+        .kind = .branch,
+        .exit_ip = 7,
+        .first_value = 0,
+        .local_count = 2,
+        .stack_count = 1,
+        .accumulator = .{ .source = .constant, .bits = Value.num(9).rawBits() },
+    }};
+    var recoveries = [_]jit.RecoveryValue{
+        .{ .source = .frame_slot, .index = 1 },
+        .{ .source = .scratch_slot, .index = 0 },
+        .{ .source = .constant, .bits = Value.num(42).rawBits() },
+    };
+    const metadata = jit.DeoptMetadata{
+        .allocator = arena.allocator(),
+        .points = &points,
+        .values = &recoveries,
+    };
+    var slots = [_]Value{ Value.num(1), Value.num(2) };
+    const scratch = [_]u64{Value.num(3).rawBits()};
+    var exec = Exec{};
+    var native_frame = jit.NativeFrame{ .exit_ip = 7, .deopt_index = 0 };
+
+    try std.testing.expect(try reconstructNativeSideExit(&metadata, &native_frame, &slots, &scratch, &exec, arena.allocator()));
+    try std.testing.expectEqual(@as(f64, 2), slots[0].asNum());
+    try std.testing.expectEqual(@as(f64, 3), slots[1].asNum());
+    try std.testing.expectEqual(@as(usize, 1), exec.stack.items.len);
+    try std.testing.expectEqual(@as(f64, 42), exec.stack.items[0].asNum());
+    try std.testing.expectEqual(@as(f64, 9), exec.acc.asNum());
+    try std.testing.expectEqual(@as(usize, 7), exec.ip);
+
+    native_frame.exit_ip = 8;
+    try std.testing.expect(!try reconstructNativeSideExit(&metadata, &native_frame, &slots, &scratch, &exec, arena.allocator()));
 }
 
 test "vm: optimizer exact branch converges across both paths" {

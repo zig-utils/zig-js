@@ -283,6 +283,9 @@ pub const NativeFrame = extern struct {
     remainder: ?*const fn (f64, f64) callconv(.c) f64 = null,
     steps_until_checkpoint: u64 = 0,
     steps_until_budget: u64 = 0,
+    /// Index into the published artifact's immutable deoptimization table.
+    /// Generated code sets this together with `exit_ip` before `side_exit`.
+    deopt_index: usize = std.math.maxInt(usize),
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -295,6 +298,14 @@ pub const RecoveryValue = struct {
     source: RecoverySource,
     index: u8 = 0,
     bits: u64 = 0,
+
+    pub fn materialize(self: RecoveryValue, frame_slots: []const u64, scratch_slots: []const u64) ?u64 {
+        return switch (self.source) {
+            .frame_slot => if (self.index < frame_slots.len) frame_slots[self.index] else null,
+            .scratch_slot => if (self.index < scratch_slots.len) scratch_slots[self.index] else null,
+            .constant => self.bits,
+        };
+    }
 };
 
 pub const DeoptPointKind = enum(u8) { block_entry, branch, return_ };
@@ -356,6 +367,9 @@ pub const CompiledCode = struct {
     required_u32_slots: u64 = 0,
     max_stack_depth: u8 = 0,
     deopt: ?*DeoptMetadata = null,
+    /// A side exit may have executed observable bytecode and must resume from
+    /// `deopt`; direct/restart-only entry paths reject such artifacts.
+    has_side_exits: bool = false,
 
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();

@@ -23,7 +23,7 @@ Every representation guard runs before step accounting; a mismatch immediately r
 
 ## Deoptimization foundation
 
-Optimizer SSA now retains deterministic locals-plus-operand-stack frame states at every reachable block entry, branch, and return. Lowering resolves those states to immutable recovery records owned by the published artifact, including the exact resume IP, accumulator value, handler depth, and source scratch slot for every value. No partially executed side exit is enabled yet: #432 must first connect these records to `Exec` reconstruction and dynamic step/checkpoint accounting.
+Optimizer SSA now retains deterministic locals-plus-operand-stack frame states at every reachable block entry, branch, and return. Lowering resolves those states to immutable recovery records owned by the published artifact, including the exact resume IP, accumulator value, handler depth, and source scratch slot for every value. The VM distinguishes a deoptimized outcome from an entry miss, reconstructs `Exec` and frame slots from the selected record, and prevents partial-exit artifacts from using the restart-only direct-call path. Generated optimizer code does not emit a partial side exit yet; dynamic step/checkpoint accounting must land before that path is enabled.
 
 Focused verification:
 
