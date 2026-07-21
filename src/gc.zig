@@ -2924,7 +2924,14 @@ pub const Binding = struct {
     }
 
     pub fn relocateRoots(self: *Binding, v: anytype) void {
-        relocateContextRoots(self.context, v);
+        const state = self.context.gc_state orelse {
+            relocateContextRoots(self.context, v);
+            return;
+        };
+        state.realms.acquire();
+        defer state.realms.release();
+        relocateContextRoots(state.realms.owner, v);
+        for (state.realms.siblings.items) |realm| relocateContextRoots(realm, v);
     }
 
     pub fn relocateCell(_: *Binding, cell: *anyopaque, kind: Kind, v: anytype) void {
@@ -2962,7 +2969,17 @@ pub const Binding = struct {
     /// Persistent roots reachable from the realm plus registered active
     /// Interpreter execution roots at quiescent checkpoints.
     pub fn traceRoots(self: *Binding, v: anytype) void {
-        const ctx = self.context;
+        const state = self.context.gc_state orelse {
+            traceRealmRoots(self.context, v);
+            return;
+        };
+        state.realms.acquire();
+        defer state.realms.release();
+        traceRealmRoots(state.realms.owner, v);
+        for (state.realms.siblings.items) |realm| traceRealmRoots(realm, v);
+    }
+
+    fn traceRealmRoots(ctx: *ContextMod.Context, v: anytype) void {
         // Mid-script collection: conservatively root the collecting thread's
         // live native stack + spilled callee-saved registers, which hold the
         // tree-walker's `Value` locals and the VM's transient accumulator. Only

@@ -3170,13 +3170,41 @@ pub const Context = struct {
         finalize_fn: ?PrivateWeakFinalizeFn = null,
         finalize_context: ?*anyopaque = null,
     };
-    /// Heap, root binding, and cell backing are allocated together so
+    /// One precise heap has one immutable owner plus zero or more registered
+    /// sibling realms. The registry is embedded beside the heap so root walks
+    /// never depend on a realm that may already be retiring. #420 adds the
+    /// sibling creation/retirement operations; the owner-only state here keeps
+    /// standalone precise contexts behaviorally unchanged.
+    pub const GcRealmRegistry = struct {
+        owner: *Context,
+        lock: std.atomic.Mutex = .unlocked,
+        siblings: std.ArrayListUnmanaged(*Context) = .empty,
+
+        pub fn acquire(self: *GcRealmRegistry) void {
+            var spins: usize = 0;
+            while (!self.lock.tryLock()) : (spins += 1) {
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            }
+        }
+
+        pub fn release(self: *GcRealmRegistry) void {
+            self.lock.unlock();
+        }
+
+        fn deinit(self: *GcRealmRegistry, allocator: std.mem.Allocator) void {
+            std.debug.assert(self.siblings.items.len == 0);
+            self.siblings.deinit(allocator);
+        }
+    };
+
+    /// Heap, root binding, realm registry, and cell backing are allocated together so
     /// GC-enabled context creation/destruction pays one GPA allocation instead
     /// of three while keeping each subobject's address stable.
     pub const GcState = struct {
         binding: GcBinding,
         heap: GcHeap,
         backing: GcCellBacking,
+        realms: GcRealmRegistry,
     };
     pub const GcFinalizerStats = struct {
         cells: usize = 0,
@@ -3412,6 +3440,7 @@ pub const Context = struct {
             // to reduce GC-enabled context lifecycle churn.
             const gc_state = try context_gpa.create(GcState);
             gc_state.binding = .{ .context = self };
+            gc_state.realms = .{ .owner = self };
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
             // size-class backing for every GC mode. Keep the heap/backing in
@@ -3838,6 +3867,7 @@ pub const Context = struct {
         }
         self.gc_binding = null;
         if (self.gc_state) |state| {
+            state.realms.deinit(self.gpa);
             self.gpa.destroy(state);
             self.gc_state = null;
         }
@@ -19068,6 +19098,10 @@ test "enable_gc: heap binding and cell backing share one lifecycle allocation" {
     try std.testing.expectEqual(@intFromPtr(&state.binding), @intFromPtr(ctx.gc_binding.?));
     try std.testing.expectEqual(@intFromPtr(&state.backing), @intFromPtr(ctx.gc_cell_backing.?));
     try std.testing.expectEqual(@intFromPtr(ctx), @intFromPtr(state.binding.context));
+    state.realms.acquire();
+    defer state.realms.release();
+    try std.testing.expectEqual(@intFromPtr(ctx), @intFromPtr(state.realms.owner));
+    try std.testing.expectEqual(@as(usize, 0), state.realms.siblings.items.len);
 }
 
 test "enable_threads: Object backing allocator stays synchronized under parallel_js" {
