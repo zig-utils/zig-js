@@ -7396,6 +7396,7 @@ test "vm: optimizer deoptimization frame reconstruction is exact" {
         .allocator = arena.allocator(),
         .points = &points,
         .values = &recoveries,
+        .handlers = &.{},
     };
     var slots = [_]Value{ Value.num(1), Value.num(2) };
     const scratch = [_]u64{Value.num(3).rawBits()};
