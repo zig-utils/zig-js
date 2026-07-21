@@ -84,6 +84,7 @@ pub const Program = struct {
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
+    observe_loop_backedges: bool = false,
 
     pub fn deinit(self: *Program) void {
         self.allocator.free(self.operations);
@@ -876,6 +877,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try emitStepIncrement(&assembler, branch.true_steps);
         try assembler.subtractImmediate64(15, 15, branch.true_steps);
         try assembler.subtractImmediate64(16, 16, branch.true_steps);
+        if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
         const backedge = try assembler.branchPlaceholder();
         try assembler.patchBranch(backedge, loop_top);
 
@@ -1025,6 +1027,15 @@ fn emitInvalidationSideExitPoll(assembler: *aarch64.Assembler) !usize {
     const invalidated = try assembler.branchConditionPlaceholder(.ne);
     try assembler.patchConditionBranch(no_owner, assembler.position());
     return invalidated;
+}
+
+fn emitBackedgeObserver(assembler: *aarch64.Assembler) !void {
+    try assembler.load64(17, 12, frameOffset("loop_backedge_observer"));
+    try assembler.compareImmediate64(17, 0);
+    const absent = try assembler.branchConditionPlaceholder(.eq);
+    try assembler.movImmediate32(9, 1);
+    try assembler.storeRelease64(9, 17);
+    try assembler.patchConditionBranch(absent, assembler.position());
 }
 
 fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
@@ -1459,6 +1470,66 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, 14), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
+
+    if (!builtin.single_threaded) {
+        var race_plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer race_plan.deinit();
+        var race_program = try lowerLoopOsr(&chunk, &race_plan, std.testing.allocator);
+        defer race_program.deinit();
+        race_program.observe_loop_backedges = true;
+        var race_compiled = try compileAarch64(&race_program);
+        defer race_compiled.deinit();
+        const race_osr = race_compiled.osr orelse return error.TestUnexpectedResult;
+        const race_entry = race_osr.findEntry(4, 2, 0, 0, Value.undef().rawBits()) orelse
+            return error.TestUnexpectedResult;
+        var race_slots = [_]u64{ Value.num(1_000_000_000).rawBits(), Value.num(0).rawBits() };
+        var race_scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+        try std.testing.expect(race_osr.prepareScratch(race_entry, &race_slots, &.{}, &race_scratch));
+        var race_steps: u64 = 0;
+        var generation: std.atomic.Value(u64) = .init(0);
+        var backedge_observer: std.atomic.Value(u64) = .init(0);
+        const Invalidation = struct {
+            observer: *std.atomic.Value(u64),
+            generation: *std.atomic.Value(u64),
+
+            fn run(shared: *@This()) void {
+                while (shared.observer.load(.acquire) == 0) std.atomic.spinLoopHint();
+                shared.generation.store(1, .release);
+            }
+        };
+        var invalidation = Invalidation{
+            .observer = &backedge_observer,
+            .generation = &generation,
+        };
+        var invalidator = try std.Thread.spawn(.{}, Invalidation.run, .{&invalidation});
+        var race_frame = jit.NativeFrame{
+            .slots = &race_slots,
+            .scratch = &race_scratch,
+            .steps = &race_steps,
+            .steps_until_checkpoint = std.math.maxInt(u64),
+            .steps_until_budget = std.math.maxInt(u64),
+            .invalidation_generation = &generation,
+            .expected_invalidation_generation = 0,
+            .loop_backedge_observer = &backedge_observer,
+        };
+        const race_status = race_compiled.run(&race_frame);
+        invalidator.join();
+
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, race_status);
+        try std.testing.expectEqual(@as(u64, 1), backedge_observer.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 4), race_frame.exit_ip);
+        try std.testing.expect(race_steps >= race_compiled.bytecode_steps);
+        try std.testing.expect(race_steps < 1_000_000_000 * @as(u64, race_compiled.bytecode_steps));
+        try std.testing.expectEqual(@as(u64, 0), race_steps % race_compiled.bytecode_steps);
+        const race_point = race_compiled.deopt.?.points[race_frame.deopt_index];
+        try std.testing.expectEqual(jit.DeoptPointKind.block_entry, race_point.kind);
+        const race_i = race_compiled.deopt.?.values[race_point.first_value + 1].materialize(&race_slots, &race_scratch) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            @as(f64, @floatFromInt(race_steps / race_compiled.bytecode_steps)),
+            Value.fromRawBits(race_i).asNum(),
+        );
+    }
 }
 
 test "optimizer loop OSR preserves parallel multi-local backedges" {

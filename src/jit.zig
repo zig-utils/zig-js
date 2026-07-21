@@ -289,6 +289,9 @@ pub const NativeFrame = extern struct {
     /// Owner generation checked by optimizer code before observable work.
     invalidation_generation: ?*const std.atomic.Value(u64) = null,
     expected_invalidation_generation: u64 = 0,
+    /// Optional release marker emitted only by instrumented optimizer tests
+    /// after a complete native loop iteration reaches its backedge.
+    loop_backedge_observer: ?*std.atomic.Value(u64) = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
