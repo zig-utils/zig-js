@@ -8891,9 +8891,30 @@ pub const Interpreter = struct {
     }
 
     fn appendUtf16Slice(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, start: usize, end: usize) !void {
+        try appendUtf16SliceImpl(buf, a, s, 0, 0, start, end);
+    }
+
+    /// `appendUtf16Slice` resuming from `cursor` (a whole-sequence boundary). One
+    /// cursor threaded through the increasing slices of `regexpReplace`'s output
+    /// makes that loop O(n) instead of O(n^2).
+    fn appendUtf16SliceFrom(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, cursor: *RxCursor, start: usize, end: usize) !void {
+        if (start < cursor.units) {
+            cursor.byte = 0;
+            cursor.units = 0;
+        }
+        while (cursor.byte < s.len) {
+            const su = utf16LenOfSeq(s, cursor.byte);
+            if (cursor.units + su > start) break;
+            cursor.units += su;
+            cursor.byte += jsStringSeqLen(s, cursor.byte);
+        }
+        try appendUtf16SliceImpl(buf, a, s, cursor.byte, cursor.units, start, end);
+    }
+
+    fn appendUtf16SliceImpl(buf: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, s: []const u8, from_byte: usize, from_units: usize, start: usize, end: usize) !void {
         if (start >= end) return;
-        var units: usize = 0;
-        var i: usize = 0;
+        var units: usize = from_units;
+        var i: usize = from_byte;
         while (i < s.len and units < end) {
             const seq_len = jsStringSeqLen(s, i);
             const seq_units = utf16LenOfSeq(s, i);
@@ -9043,9 +9064,21 @@ pub const Interpreter = struct {
 
         if (global) try self.setRegExpLikeLastIndex(rx, 0);
 
+        // Fast path for a plain built-in RegExp: hoist the per-exec O(n) setup out
+        // of the match-collection loop (see regexBuiltinExecWith), so it is O(n).
+        const fast = self.regexpHasBuiltinExec(rx);
+        const unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const search_input = if (fast) try self.regexpSearchInput(s, unicode) else "";
+        const input_u16 = if (fast) utf16LenOfString(s) else 0;
+        const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
+        var cursor: RxCursor = .{};
+
         var results: std.ArrayListUnmanaged(Value) = .empty;
         while (true) {
-            const result = try self.regexpExecGeneric(rx, s);
+            const result = if (fast)
+                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
+            else
+                try self.regexpExecGeneric(rx, s);
             if (result.isNull()) break;
             try results.append(self.arena, result);
             if (!global) break;
@@ -9060,6 +9093,9 @@ pub const Interpreter = struct {
         const string_len = utf16LenOfString(s);
         var accumulated: usize = 0;
         var out: std.ArrayListUnmanaged(u8) = .empty;
+        // Matches are in increasing position order, so one cursor keeps the
+        // per-match output slices O(n) overall.
+        var out_cursor: RxCursor = .{};
         for (results.items) |result| {
             const length = toLen(try self.toNumberV(try self.getProperty(result, "length")));
             const captures_len = if (length == 0) 0 else length - 1;
@@ -9099,12 +9135,12 @@ pub const Interpreter = struct {
             }
 
             if (position >= accumulated) {
-                try appendUtf16Slice(&out, self.arena, s, accumulated, position);
+                try appendUtf16SliceFrom(&out, self.arena, s, &out_cursor, accumulated, position);
                 try self.appendStringSlice(&out, replacement);
                 accumulated = @min(position + utf16LenOfString(matched), string_len);
             }
         }
-        try appendUtf16Slice(&out, self.arena, s, accumulated, string_len);
+        try appendUtf16SliceFrom(&out, self.arena, s, &out_cursor, accumulated, string_len);
         return try Value.strOwned(self.arena, try out.toOwnedSlice(self.arena));
     }
 
