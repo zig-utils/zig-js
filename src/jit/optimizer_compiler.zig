@@ -288,7 +288,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             bytecode_steps = graph.returns[0].origin + 1;
         } else if (graph.returns.len == 0) {
             var throw_index: ?u16 = null;
-            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .call or state.kind == .effect) {
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .abrupt_jump or state.kind == .call or state.kind == .effect) {
                 if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
                 throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
                 bytecode_steps = state.origin;
@@ -365,6 +365,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .return_ => .return_,
                 .throw_ => .throw_,
                 .abrupt_return => .abrupt_return,
+                .abrupt_jump => .abrupt_jump,
                 .call => .call,
                 .effect => .effect,
             },
@@ -1363,6 +1364,34 @@ test "optimizer lowering publishes an exact abrupt return side exit" {
     try std.testing.expectEqual(@as(u16, 1), point.stack_count);
     try std.testing.expectEqual(@as(u16, 1), point.handler_count);
     try std.testing.expectEqual(@as(u32, 4), program.deopt_handlers[point.first_handler].finally_ip);
+}
+
+test "optimizer lowering publishes exact abrupt loop-jump side exits" {
+    for ([_]bc.Op{ .abrupt_break, .abrupt_continue }) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 2);
+        _ = try chunk.emit(op, 4);
+        _ = try chunk.emit(.push_completion, 0);
+        _ = try chunk.emit(.end_finally, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u12, 1), side_exit.steps);
+        const point = program.deopt_points[side_exit.deopt_index];
+        try std.testing.expectEqual(jit.DeoptPointKind.abrupt_jump, point.kind);
+        try std.testing.expectEqual(@as(u32, 1), point.exit_ip);
+        try std.testing.expectEqual(@as(u16, 0), point.stack_count);
+        try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+        try std.testing.expectEqual(@as(u32, 2), program.deopt_handlers[point.first_handler].finally_ip);
+    }
 }
 
 test "optimizer lowering publishes an exact pre-call side exit" {

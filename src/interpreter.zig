@@ -1305,6 +1305,10 @@ pub const Interpreter = struct {
     /// during a mid-script collection. Populated only when the GC is on; the
     /// list itself is gpa-backed and freed on interpreter teardown.
     gc_execs: std.ArrayListUnmanaged(*vm.Exec) = .empty,
+    /// Scoped descriptor for the currently executing JIT invocation. Precise
+    /// collectors consult it only at a published native safepoint; the map is
+    /// selected by the frame's current deopt index and validated before use.
+    gc_native_roots: ?jit.ActiveNativeRoots = null,
     /// Active WebAssembly invocation roots. Descriptors live in the native
     /// invocation frames; registration is scoped to the call and the same
     /// safepoint/park rules that protect `gc_execs` protect these slices.

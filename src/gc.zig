@@ -22,6 +22,7 @@ const ast = @import("ast.zig");
 const interp = @import("interpreter.zig");
 const promise = @import("promise.zig");
 const vm = @import("vm.zig");
+const jit = @import("jit.zig");
 const bytecode = @import("bytecode.zig");
 const ContextMod = @import("context.zig");
 const jsthread = @import("jsthread.zig");
@@ -2134,6 +2135,50 @@ test "realm root relocation rewrites microtask variants and module graph" {
     try std.testing.expectEqual(&new_objects[15], module.dynamic_waiters.items[0].namespace);
 }
 
+fn traceActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
+    const active = machine.gc_native_roots orelse return;
+    const map = active.currentMap() orelse return;
+    if (active.frame.slots) |slots| {
+        var candidates = map.frame_pointer_slots;
+        while (candidates != 0) {
+            const slot: u6 = @intCast(@ctz(candidates));
+            markValue(v, Value.fromRawBits(slots[slot]));
+            candidates &= candidates - 1;
+        }
+    }
+    if (active.frame.scratch) |scratch| {
+        var candidates = map.scratch_pointer_slots;
+        while (candidates != 0) {
+            const slot: u6 = @intCast(@ctz(candidates));
+            markValue(v, Value.fromRawBits(scratch[slot]));
+            candidates &= candidates - 1;
+        }
+    }
+}
+
+fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
+    const active = machine.gc_native_roots orelse return;
+    const map = active.currentMap() orelse return;
+    if (active.frame.slots) |slots| {
+        var candidates = map.frame_pointer_slots;
+        while (candidates != 0) {
+            const slot: u6 = @intCast(@ctz(candidates));
+            const value_slot: *Value = @ptrCast(@alignCast(&slots[slot]));
+            gc_relocation.rewriteValueSlot(v, value_slot);
+            candidates &= candidates - 1;
+        }
+    }
+    if (active.frame.scratch) |scratch| {
+        var candidates = map.scratch_pointer_slots;
+        while (candidates != 0) {
+            const slot: u6 = @intCast(@ctz(candidates));
+            const value_slot: *Value = @ptrCast(@alignCast(&scratch[slot]));
+            gc_relocation.rewriteValueSlot(v, value_slot);
+            candidates &= candidates - 1;
+        }
+    }
+}
+
 pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     markManaged(v, machine.env);
     traceEnv(machine.env, v);
@@ -2167,6 +2212,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
             f.unlockSlots(held);
         }
     }
+    traceActiveNativeRoots(machine, v);
     for (machine.gc_wasm_roots.items) |roots| traceWasmExecutionRoots(roots, v);
     if (machine.microtasks) |q| {
         machine.lockMicrotasks();
@@ -2254,6 +2300,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         while (frame) |current| : (frame = current.parent)
             for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     }
+    relocateActiveNativeRoots(machine, v);
     for (machine.gc_wasm_roots.items) |roots| relocateWasmExecutionRoots(roots, v);
     if (machine.microtasks) |queue|
         for (@constCast(queue.pendingItems())) |*task| relocateMicrotask(task, v);
@@ -2314,8 +2361,8 @@ test "realm root relocation rewrites active interpreter containers" {
     const context = try ContextMod.Context.create(std.testing.allocator);
     defer context.destroy();
     var machine = context.interpreter();
-    var old_objects: [21]Object = undefined;
-    var new_objects: [21]Object = undefined;
+    var old_objects: [25]Object = undefined;
+    var new_objects: [25]Object = undefined;
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
 
@@ -2357,9 +2404,32 @@ test "realm root relocation rewrites active interpreter containers" {
     machine.debug_call_frame = &debug_frame;
     machine.debug_top_level_environment = &old_environment;
 
+    var native_frame_slots = [_]Value{ Value.obj(&old_objects[21]), Value.obj(&old_objects[22]) };
+    var native_scratch = [_]u64{
+        Value.obj(&old_objects[23]).rawBits(),
+        Value.obj(&old_objects[24]).rawBits(),
+    };
+    var native_frame = jit.NativeFrame{
+        .slots = @ptrCast(native_frame_slots[0..].ptr),
+        .scratch = native_scratch[0..].ptr,
+        .deopt_index = 0,
+    };
+    const native_maps = try jit.StackMapMetadata.create(std.testing.allocator, &.{.{
+        .deopt_index = 0,
+        .frame_pointer_slots = 0b01,
+        .scratch_pointer_slots = 0b10,
+    }});
+    defer native_maps.destroy();
+    machine.gc_native_roots = .{
+        .frame = &native_frame,
+        .stack_maps = native_maps,
+        .frame_slot_count = native_frame_slots.len,
+        .scratch_slot_count = native_scratch.len,
+    };
+
     const Plan = struct {
-        old_objects: *[21]Object,
-        new_objects: *[21]Object,
+        old_objects: *[25]Object,
+        new_objects: *[25]Object,
         old_environment: *Environment,
         new_environment: *Environment,
 
@@ -2404,6 +2474,10 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_environment, debug_frame.environment);
     try std.testing.expectEqual(&new_objects[20], debug_frame.this_value.asObj());
     try std.testing.expectEqual(&new_environment, machine.debug_top_level_environment.?);
+    try std.testing.expectEqual(&new_objects[21], native_frame_slots[0].asObj());
+    try std.testing.expectEqual(&old_objects[22], native_frame_slots[1].asObj());
+    try std.testing.expectEqual(&old_objects[23], Value.fromRawBits(native_scratch[0]).asObj());
+    try std.testing.expectEqual(&new_objects[24], Value.fromRawBits(native_scratch[1]).asObj());
 }
 
 test "realm root relocation rewrites Context registries and embedder handles" {

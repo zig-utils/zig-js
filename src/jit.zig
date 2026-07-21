@@ -267,9 +267,9 @@ pub const NativeFrame = extern struct {
     /// for the entire native call; generated code may only access indexes that
     /// the chunk's immutable frame metadata proves in bounds.
     slots: ?[*]u64 = null,
-    /// Caller-owned spill storage for the native operand stack. The first
-    /// numeric tier permits no GC pointer here, so precise tracing needs no
-    /// backend-specific stack map.
+    /// Caller-owned spill storage for the native operand stack. Baseline
+    /// safepoints publish primitive spills; optimizer safepoints classify any
+    /// movable candidates through the artifact's precise stack map.
     scratch: ?[*]u64 = null,
     /// Exact interpreter step counter, updated before every native safepoint
     /// and on every exit.
@@ -314,7 +314,7 @@ pub const RecoveryValue = struct {
     }
 };
 
-pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, throw_, abrupt_return, call, effect, edge };
+pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, throw_, abrupt_return, abrupt_jump, call, effect, edge };
 
 pub const DeoptPoint = struct {
     kind: DeoptPointKind,
@@ -406,6 +406,33 @@ pub const StackMapMetadata = struct {
     pub fn forDeopt(self: *const StackMapMetadata, deopt_index: usize) ?StackMap {
         for (self.maps) |map| if (map.deopt_index == deopt_index) return map;
         return null;
+    }
+};
+
+/// One running native invocation exposed to the precise collector. Generated
+/// code must publish a valid deopt/safepoint index before a callback can make
+/// this descriptor visible to root tracing; an unset or malformed map is not
+/// safe to inspect and therefore fails closed.
+pub const ActiveNativeRoots = struct {
+    frame: *NativeFrame,
+    stack_maps: *const StackMapMetadata,
+    frame_slot_count: u8,
+    scratch_slot_count: u8,
+
+    pub fn currentMap(self: ActiveNativeRoots) ?StackMap {
+        if (self.frame_slot_count > 64 or self.scratch_slot_count > 64) return null;
+        const map = self.stack_maps.forDeopt(self.frame.deopt_index) orelse return null;
+        if (map.frame_pointer_slots & ~slotMask(self.frame_slot_count) != 0 or
+            map.scratch_pointer_slots & ~slotMask(self.scratch_slot_count) != 0)
+            return null;
+        if ((map.frame_pointer_slots != 0 and self.frame.slots == null) or
+            (map.scratch_pointer_slots != 0 and self.frame.scratch == null))
+            return null;
+        return map;
+    }
+
+    fn slotMask(count: u8) u64 {
+        return if (count == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(count)) - 1;
     }
 };
 

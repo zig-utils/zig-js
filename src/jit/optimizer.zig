@@ -87,7 +87,7 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, call, effect };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, abrupt_jump, call, effect };
 
 pub const HandlerState = struct {
     catch_ip: u32,
@@ -284,6 +284,11 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
+        .abrupt_break, .abrupt_continue => {
+            if (inst.a >= code.len) return error.InvalidControlFlow;
+            starts[inst.a] = true;
+            if (ip + 1 < code.len) starts[ip + 1] = true;
+        },
         .ret,
         .ret_undef,
         .throw_op,
@@ -357,6 +362,8 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             .ret_undef,
             .throw_op,
             .abrupt_return,
+            .abrupt_break,
+            .abrupt_continue,
             .call,
             .call_eval,
             .call_method,
@@ -437,7 +444,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
-        .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
+        .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue => .{ .required = 0, .removed = 0, .added = 0 },
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
@@ -831,6 +838,11 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.appendFrameState(.abrupt_return, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
             },
+            .abrupt_break, .abrupt_continue => {
+                // The target is encoded in the bytecode. Preserve locals and
+                // active finally records before canonical completion unwinding.
+                try builder.appendFrameState(.abrupt_jump, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+            },
             .call,
             .call_eval,
             .call_method,
@@ -1057,6 +1069,8 @@ fn supports(op: bc.Op) bool {
         .pop_handler,
         .throw_op,
         .abrupt_return,
+        .abrupt_break,
+        .abrupt_continue,
         .call,
         .call_eval,
         .call_method,

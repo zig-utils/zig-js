@@ -3656,6 +3656,23 @@ const NativeRunOutcome = union(enum) {
     deoptimized,
 };
 
+fn runNativeWithPublishedRoots(
+    vm: *Interpreter,
+    native: *const jit.CompiledCode,
+    frame: *jit.NativeFrame,
+) jit.ExitStatus {
+    const saved = vm.gc_native_roots;
+    vm.gc_native_roots = null;
+    if (native.stack_maps) |stack_maps| vm.gc_native_roots = .{
+        .frame = frame,
+        .stack_maps = stack_maps,
+        .frame_slot_count = std.math.cast(u8, native.frame_slots) orelse 0,
+        .scratch_slot_count = std.math.cast(u8, native.max_stack_depth) orelse 0,
+    };
+    defer vm.gc_native_roots = saved;
+    return native.run(frame);
+}
+
 fn reconstructNativeSideExit(
     metadata: *const jit.DeoptMetadata,
     native_frame: *const jit.NativeFrame,
@@ -3803,7 +3820,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
-    return switch (native.run(&native_frame)) {
+    return switch (runNativeWithPublishedRoots(vm, native, &native_frame)) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
@@ -3855,7 +3872,7 @@ fn tryRunOsrNative(
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
-    return switch (native.run(&native_frame)) {
+    return switch (runNativeWithPublishedRoots(vm, native, &native_frame)) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
@@ -7705,6 +7722,46 @@ test "vm: optimizer abrupt return side exit preserves finally completion" {
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 10), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer abrupt break side exit preserves finally completion" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function finish(x) { outer: { try { break outer; } finally { x = x + 2; } } return x; }
+        \\finish(0); finish(1); finish(2); finish(3); finish(4);
+        \\finish(5); finish(6); finish(7); finish(8); finish(9)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const finish_chunk = root.fns.items[0].chunk.?;
+    const artifact = finish_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    var abrupt_point: ?jit.DeoptPoint = null;
+    for (artifact.deopt.?.points) |point| {
+        if (point.kind == .abrupt_jump) abrupt_point = point;
+    }
+    const point = abrupt_point orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 0), point.stack_count);
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    const handler = artifact.deopt.?.handlers[point.first_handler];
+    try std.testing.expectEqual(jit.RecoveryHandler.none, handler.catch_ip);
+    try std.testing.expect(handler.finally_ip != jit.RecoveryHandler.none);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
