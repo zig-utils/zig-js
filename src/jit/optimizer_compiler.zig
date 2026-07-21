@@ -46,6 +46,7 @@ pub const BranchSelection = struct {
 
 pub const SideExitBranch = struct {
     condition: u8,
+    entry_deopt_index: ?u16 = null,
     false_deopt_index: u16,
     true_deopt_index: u16,
     false_steps: u12,
@@ -373,13 +374,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    try appendEdgeCopies(graph, header, body, allocator, &operations, &types, &initialized);
+    try appendEdgeCopies(graph, header, body, body, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, body, false, allocator, &operations, &types, &initialized);
+    try appendEdgeCopies(graph, body, header, body, allocator, &operations, &types, &initialized);
 
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
     errdefer deopt_points.deinit(allocator);
     var deopt_values: std.ArrayListUnmanaged(jit.RecoveryValue) = .empty;
     errdefer deopt_values.deinit(allocator);
+    const entry_index = try appendBlockEntryDeopt(graph, &initialized, header, allocator, &deopt_points, &deopt_values);
     const false_index = try appendEdgeDeopt(graph, &initialized, header, branch.false_block, allocator, &deopt_points, &deopt_values);
     const true_index = try appendEdgeDeopt(graph, &initialized, body, header, allocator, &deopt_points, &deopt_values);
 
@@ -402,6 +405,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .branch = null,
         .side_exit_branch = .{
             .condition = @intCast(branch.condition),
+            .entry_deopt_index = entry_index,
             .false_deopt_index = false_index,
             .true_deopt_index = true_index,
             .false_steps = @intCast(plan.blocks[header].instruction_count),
@@ -469,6 +473,7 @@ fn appendEdgeCopies(
     graph: *const optimizer.ValueGraph,
     from: u32,
     to: u32,
+    operation_block: u32,
     allocator: std.mem.Allocator,
     operations: *std.ArrayListUnmanaged(Operation),
     types: *[jit.numeric_scratch_capacity]ValueType,
@@ -489,7 +494,7 @@ fn appendEdgeCopies(
         try operations.append(allocator, .{
             .kind = .copy,
             .destination = @intCast(node.id),
-            .block = to,
+            .block = operation_block,
             .lhs = @intCast(source),
         });
         types[node.id] = .number;
@@ -587,6 +592,36 @@ fn appendEdgeDeopt(
     return index;
 }
 
+fn appendBlockEntryDeopt(
+    graph: *const optimizer.ValueGraph,
+    initialized: []const bool,
+    block: u32,
+    allocator: std.mem.Allocator,
+    points: *std.ArrayListUnmanaged(jit.DeoptPoint),
+    values: *std.ArrayListUnmanaged(jit.RecoveryValue),
+) !u16 {
+    const state = blockEntryState(graph.frame_states, block) orelse return error.UnsupportedChunk;
+    const index = std.math.cast(u16, points.items.len) orelse return error.UnsupportedChunk;
+    const first_value: u32 = @intCast(values.items.len);
+    const first: usize = state.first_value;
+    const count: usize = state.local_count + state.stack_count;
+    if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
+        return error.UnsupportedChunk;
+    for (graph.frame_state_values[first .. first + count]) |value| {
+        if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
+        try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
+    }
+    try points.append(allocator, .{
+        .kind = .block_entry,
+        .exit_ip = state.origin,
+        .first_value = first_value,
+        .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+        .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
+    });
+    return index;
+}
+
 fn blockEntryStateIndex(states: []const optimizer.FrameState, block: u32) error{UnsupportedChunk}!u16 {
     for (states, 0..) |state, index| if (state.kind == .block_entry and state.block == block)
         return std.math.cast(u16, index) orelse error.UnsupportedChunk;
@@ -630,7 +665,7 @@ pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
 
 fn compileAarch64(program: *const Program) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
-    var memory = try jit.CodeMemory.init(@as(usize, program.operations.len) * 64 + 128);
+    var memory = try jit.CodeMemory.init(@as(usize, program.operations.len) * 64 + 512);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     try assembler.moveRegister64(12, 0); // stable NativeFrame
@@ -638,10 +673,44 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try assembler.load64(14, 12, frameOffset("scratch"));
     try emitInvalidationPoll(&assembler);
 
-    for (program.operations) |operation|
-        if (operation.block == optimizer.Block.none or operation.block == program.execution_block)
+    for (program.operations) |operation| if (operation.block == optimizer.Block.none)
+        try emitOperation(&assembler, operation);
+    if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
+        try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
+        try assembler.load64(16, 12, frameOffset("steps_until_budget"));
+        const loop_top = assembler.position();
+        const invalidated = try emitInvalidationSideExitPoll(&assembler);
+        try assembler.compareImmediate64(15, branch.true_steps);
+        const checkpoint_exit = try assembler.branchConditionPlaceholder(.ls);
+        try assembler.compareImmediate64(16, branch.true_steps);
+        const budget_exit = try assembler.branchConditionPlaceholder(.lo);
+        for (program.operations) |operation| if (operation.block == program.execution_block)
             try emitOperation(&assembler, operation);
-    if (program.side_exit_branch) |branch| {
+        try assembler.load64(9, 14, try slotOffset(branch.condition));
+        try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+        try assembler.compareRegister64(9, 10);
+        const false_jump = try assembler.branchConditionPlaceholder(.eq);
+        const body = branch.true_block.?;
+        for (program.operations) |operation| if (operation.block == body)
+            try emitOperation(&assembler, operation);
+        try emitStepIncrement(&assembler, branch.true_steps);
+        try assembler.subtractImmediate64(15, 15, branch.true_steps);
+        try assembler.subtractImmediate64(16, 16, branch.true_steps);
+        const backedge = try assembler.branchPlaceholder();
+        try assembler.patchBranch(backedge, loop_top);
+
+        try assembler.patchConditionBranch(false_jump, assembler.position());
+        try emitStepIncrement(&assembler, branch.false_steps);
+        try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
+
+        const poll_exit = assembler.position();
+        try assembler.patchConditionBranch(invalidated, poll_exit);
+        try assembler.patchConditionBranch(checkpoint_exit, poll_exit);
+        try assembler.patchConditionBranch(budget_exit, poll_exit);
+        try emitSideExit(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+    } else {
+        for (program.operations) |operation| if (operation.block == program.execution_block)
+            try emitOperation(&assembler, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
@@ -654,6 +723,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try emitStepIncrement(&assembler, branch.false_steps);
         try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
     } else if (program.branch) |branch| {
+        for (program.operations) |operation| if (operation.block == program.execution_block)
+            try emitOperation(&assembler, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
@@ -664,6 +735,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.load64(9, 14, try slotOffset(branch.false_result));
         try assembler.patchBranch(done, assembler.position());
     } else {
+        for (program.operations) |operation| if (operation.block == program.execution_block)
+            try emitOperation(&assembler, operation);
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
     if (program.side_exit_branch == null) {
@@ -755,6 +828,18 @@ fn emitInvalidationPoll(assembler: *aarch64.Assembler) !void {
     try assembler.ret();
     try assembler.patchConditionBranch(no_owner, assembler.position());
     try assembler.patchConditionBranch(current, assembler.position());
+}
+
+fn emitInvalidationSideExitPoll(assembler: *aarch64.Assembler) !usize {
+    try assembler.load64(9, 12, frameOffset("invalidation_generation"));
+    try assembler.compareImmediate64(9, 0);
+    const no_owner = try assembler.branchConditionPlaceholder(.eq);
+    try assembler.load64(10, 9, 0);
+    try assembler.load64(11, 12, frameOffset("expected_invalidation_generation"));
+    try assembler.compareRegister64(10, 11);
+    const invalidated = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.patchConditionBranch(no_owner, assembler.position());
+    return invalidated;
 }
 
 fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
@@ -1069,7 +1154,7 @@ test "optimizer loop OSR metadata imports an exact VM frame" {
     metadata.imports[last_import].destination = saved_destination;
 }
 
-test "optimizer compiler executes one full loop iteration through OSR" {
+test "optimizer compiler executes multiple loop iterations through OSR" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1106,15 +1191,21 @@ test "optimizer compiler executes one full loop iteration through OSR" {
     var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
     try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
     var steps: u64 = 0;
-    var frame = jit.NativeFrame{ .slots = slots[0..].ptr, .scratch = &scratch, .steps = &steps };
+    var frame = jit.NativeFrame{
+        .slots = slots[0..].ptr,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
-    try std.testing.expectEqual(@as(usize, 4), frame.exit_ip);
-    try std.testing.expectEqual(@as(u64, 10), steps);
+    try std.testing.expectEqual(@as(usize, 14), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 64), steps);
     const point = compiled.deopt.?.points[frame.deopt_index];
     try std.testing.expectEqual(jit.DeoptPointKind.edge, point.kind);
     const recovered_i = compiled.deopt.?.values[point.first_value + 1].materialize(&slots, &scratch) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(f64, 4), Value.fromRawBits(recovered_i).asNum());
+    try std.testing.expectEqual(@as(f64, 9), Value.fromRawBits(recovered_i).asNum());
     const stack_map = compiled.stack_maps.?.forDeopt(frame.deopt_index) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), stack_map.frame_pointer_slots);
     try std.testing.expectEqual(@as(u64, 0), stack_map.scratch_pointer_slots);
@@ -1127,6 +1218,29 @@ test "optimizer compiler executes one full loop iteration through OSR" {
     try std.testing.expectEqual(@as(u64, 0), steps);
 
     invalidation_generation.store(0, .release);
+    slots[0] = Value.num(4).rawBits();
+    slots[1] = Value.num(3).rawBits();
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 14), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 14), steps);
+    const one_iteration_point = compiled.deopt.?.points[frame.deopt_index];
+    const one_iteration_i = compiled.deopt.?.values[one_iteration_point.first_value + 1].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 4), Value.fromRawBits(one_iteration_i).asNum());
+
+    slots[0] = Value.num(9).rawBits();
+    slots[1] = Value.num(3).rawBits();
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    frame.steps_until_checkpoint = compiled.bytecode_steps;
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 4), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 0), steps);
+    try std.testing.expectEqual(jit.DeoptPointKind.block_entry, compiled.deopt.?.points[frame.deopt_index].kind);
+
+    frame.steps_until_checkpoint = 1024;
     slots[1] = Value.num(9).rawBits();
     try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
     steps = 0;

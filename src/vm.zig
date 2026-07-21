@@ -7396,7 +7396,7 @@ test "vm: optimizer asymmetric branch resumes without restarting" {
     try std.testing.expectEqual(ordinary_delta, machine.steps - 1022);
 }
 
-test "vm: optimizer executes a full iteration after a hot backedge" {
+test "vm: optimizer executes multiple iterations after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7449,9 +7449,9 @@ test "vm: optimizer executes a full iteration after a hot backedge" {
         &refused_frame,
         null,
     ));
-    try std.testing.expectEqual(@as(f64, 2), refused_slots[1].asNum());
-    try std.testing.expectEqual(@as(usize, artifact.osr.?.entries[0].entry_ip), refused_exec.ip);
-    try std.testing.expectEqual(steps_before_refusal + artifact.bytecode_steps, machine.steps);
+    try std.testing.expectEqual(@as(f64, 6), refused_slots[1].asNum());
+    try std.testing.expectEqual(@as(usize, 13), refused_exec.ip);
+    try std.testing.expectEqual(steps_before_refusal + 54, machine.steps);
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
     machine.steps = steps_before_refusal;
     machine.jit_execution_allowed = false;

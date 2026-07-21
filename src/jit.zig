@@ -482,8 +482,8 @@ pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
     kind: CodeKind = .baseline,
-    /// Number of bytecode dispatches represented by a successful native entry.
-    /// Used to preserve the interpreter's step-budget/checkpoint accounting.
+    /// Fixed dispatch count for leaf entries, or the maximum managed quantum
+    /// required before a side-exit/OSR region may begin native work.
     bytecode_steps: u32 = 0,
     /// Numeric/control entries update the interpreter counter themselves and
     /// call the runtime exactly at bytecode checkpoint boundaries.
