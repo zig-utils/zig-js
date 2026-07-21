@@ -606,7 +606,15 @@ const Boxed = struct {
     /// Keep `value` first: the GC root scanner treats a protected `*Boxed` as
     /// a `*Value` when tracing C-API handles.
     value: Value,
+    /// Realm whose intrinsics, globals, callbacks, and side storage give this
+    /// value its observable semantics. Private VM cells can outlive this realm
+    /// while explicitly protected, so its Context remains in the precise
+    /// registry's retiring set until the last root disappears.
     owner: *Context,
+    /// Context whose arena owns this stable boundary box and whose C handle
+    /// table roots it. For private EncodedJSValues this is the hidden precise
+    /// heap owner, deliberately distinct from `owner`.
+    storage_owner: *Context,
     private_kind: enum(u8) { value, exception, structure } = .value,
     exception_encoded: EncodedValue = .empty,
     structure: ?*PrivateStructure = null,
@@ -2257,8 +2265,8 @@ fn initializeClassObject(ctx: JSContextRef, object_ref: JSObjectRef, class: *CCl
 }
 
 fn attachClassToExistingObject(ctx: JSContextRef, c: *Context, obj: *Object, class: *CClass, data: ?*anyopaque) bool {
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -2864,7 +2872,13 @@ fn ctxForLifecycle(ref: JSContextRef) ?*Context {
 
 fn box(ctx: *Context, v: Value) JSValueRef {
     const b = ctx.arena().create(Boxed) catch return null;
-    b.* = .{ .value = v, .owner = ctx };
+    b.* = .{ .value = v, .owner = ctx, .storage_owner = ctx };
+    return @ptrCast(b);
+}
+
+fn privateBoxInOwner(storage_owner: *Context, realm: *Context, v: Value) JSValueRef {
+    const b = storage_owner.arena().create(Boxed) catch return null;
+    b.* = .{ .value = v, .owner = realm, .storage_owner = storage_owner };
     return @ptrCast(b);
 }
 
@@ -2876,7 +2890,8 @@ fn privateExceptionBox(ctx: *Context, thrown: Value, encoded: EncodedValue) ?*Bo
     const boxed = owner.arena().create(Boxed) catch return null;
     boxed.* = .{
         .value = thrown,
-        .owner = owner,
+        .owner = ctx,
+        .storage_owner = owner,
         .private_kind = .exception,
         .exception_encoded = encoded,
     };
@@ -2890,10 +2905,10 @@ fn boxedFrom(ref: JSValueRef) ?*Boxed {
 fn privateBoxedFrom(encoded: EncodedValue) ?*Boxed {
     const address = encoded.asCellAddress() catch return null;
     const boxed: *Boxed = @ptrFromInt(address);
-    const opaque_group = boxed.owner.c_api_group orelse return null;
+    const opaque_group = boxed.storage_owner.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    if (boxed.owner != group.primary and boxed.owner.c_api_ref_count.load(.acquire) == 0) return null;
-    boxed.owner.assertOwnerThread();
+    if (boxed.storage_owner != group.primary and boxed.storage_owner.c_api_ref_count.load(.acquire) == 0) return null;
+    boxed.storage_owner.assertOwnerThread();
     return boxed;
 }
 
@@ -2928,7 +2943,7 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
                 const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
                 break :blk group.primary;
             } else context;
-            break :string privateEncodedFromRef(box(owner, internal));
+            break :string privateEncodedFromRef(privateBoxInOwner(owner, context, internal));
         },
         .object => object: {
             const opaque_group = context.c_api_group orelse
@@ -2941,7 +2956,7 @@ fn privateEncodedFromValue(context: *Context, internal: Value) EncodedValue {
             // their stable wrapper in the hidden owner arena so an explicit
             // protect can outlive test-isolation replacement while its Value
             // remains traced from the owner's C-handle table.
-            const created: *Boxed = @ptrCast(@alignCast(box(group.primary, internal) orelse break :object .empty));
+            const created: *Boxed = @ptrCast(@alignCast(privateBoxInOwner(group.primary, context, internal) orelse break :object .empty));
             group.private_object_boxes.put(gpa, object_ptr, created) catch break :object .empty;
             break :object privateEncodedFromRef(@ptrCast(created));
         },
@@ -3028,8 +3043,8 @@ export fn AsyncContextFrame__withAsyncContextIfNeeded(
     if (callback.isObject() and callback.asObj().asyncContextFrame() != null) return callback_encoded;
     if (!callback.isObject() or !callback.asObj().isCallableObject()) return .empty;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3092,8 +3107,8 @@ export fn Bun__JSValue__call(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3275,8 +3290,8 @@ export fn JSFunction__createFromZig(
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3533,8 +3548,8 @@ fn privateApplyNativeMap(
     const opaque_group = context.c_api_group orelse return .{};
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .{};
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3645,8 +3660,8 @@ fn privateCreateNativePromise(
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3675,8 +3690,8 @@ fn privateCommonAbortReasonToJS(
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3896,8 +3911,8 @@ export fn JSC__JSValue__bigIntSum(
     const context = ctxForEvaluation(global) orelse return .empty;
     const lhs = privateBigIntObjectFrom(global, left) orelse return .empty;
     const rhs = privateBigIntObjectFrom(global, right) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3913,8 +3928,8 @@ export fn JSC__JSValue__fromTimevalNoTruncate(
     sec: i64,
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -3971,8 +3986,8 @@ export fn Bun__JSValue__toNumber(encoded: EncodedValue, global: JSContextRef) ca
     const opaque_group = context.c_api_group orelse return std.math.nan(f64);
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return std.math.nan(f64);
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -4001,8 +4016,8 @@ export fn JSC__JSValue__isInstanceOf(
     const opaque_group = context.c_api_group orelse return false;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -4037,8 +4052,8 @@ export fn JSC__JSValue__isIterable(encoded: EncodedValue, global: JSContextRef) 
     const opaque_group = context.c_api_group orelse return false;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -4067,8 +4082,8 @@ export fn JSC__JSValue__stringIncludes(
     const opaque_group = context.c_api_group orelse return false;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -4464,8 +4479,8 @@ fn privateBunStringValue(
     string: *const PrivateBunString,
     max_utf16_units: ?usize,
 ) PrivateBunStringError!Value {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
 
@@ -4509,8 +4524,8 @@ fn privatePublishBunStringError(context: *Context, err: PrivateBunStringError) v
         privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
         return;
     }
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -4661,8 +4676,8 @@ fn privateExternalZigString(
         return .empty;
     }
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     const allocator = if (context.gc != null) context.gpa else context.arena();
@@ -4820,8 +4835,8 @@ export fn JSC__JSValue__createRopeString(
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -5560,8 +5575,8 @@ export fn Bun__ErrorCode__determineSpecificType(
     const context = ctxForEvaluation(global) orelse return PrivateBunString.dead();
     const group = privatePropertyBoundaryGroup(context) orelse return PrivateBunString.dead();
     if (group.pending_exception != null) return PrivateBunString.dead();
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6456,8 +6471,8 @@ export fn StringBuilder__toString(raw: ?*anyopaque, global: JSContextRef) callco
         privatePublishBunStringError(context, error.OutOfMemory);
         return .empty;
     }
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     const units: []const u16 = if (builder.units) |pointer| pointer[0..builder.length] else &.{};
@@ -6590,8 +6605,8 @@ export fn JSC__JSValue__toZigString(
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6635,8 +6650,8 @@ fn privateZigStringErrorInstance(
         return .empty;
     };
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6678,8 +6693,8 @@ export fn ZigString__toJSONObject(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6738,8 +6753,8 @@ fn privateZigStringErrorWithCode(
         return .empty;
     };
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6789,8 +6804,8 @@ fn privateBunStringErrorFactory(
         return .empty;
     };
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6883,8 +6898,8 @@ export fn SystemError__toErrorInstance(this: ?*const PrivateSystemError, global:
         return .empty;
     };
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -6972,8 +6987,8 @@ export fn SystemError__toErrorInstanceWithInfoObject(this: ?*const PrivateSystem
         return .empty;
     };
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7091,8 +7106,8 @@ export fn JSC__JSGlobalObject__createAggregateError(
         privatePublishBunStringError(context, err);
         return .empty;
     };
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7150,8 +7165,8 @@ export fn JSC__JSGlobalObject__createAggregateErrorWithArray(
         privatePublishBunStringError(context, err);
         return .empty;
     };
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7223,8 +7238,8 @@ fn privateLatin1PropertyKey(context: *Context, bytes: [*]const u8, len: u32) ?[]
 }
 
 fn privatePublishPropertyTypeError(context: *Context, message: []const u8) void {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7279,8 +7294,8 @@ export fn JSC__JSValue__createObject2(
     if (group.pending_exception != null) return .empty;
     const first_key = privateZigStringPropertyKey(context, key1) orelse return .empty;
     const second_key = privateZigStringPropertyKey(context, key2) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7373,8 +7388,8 @@ export fn JSC__JSValue__putRecord(
         for (values_ptr[0..values_len], converted) |*string, *slot|
             slot.* = privateRecordString(context, string) orelse return;
 
-        const gc_saved = gc_mod.setActiveHeap(context.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(context);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(context.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         var array_machine = context.interpreter();
@@ -7395,8 +7410,8 @@ export fn JSC__JSValue__putRecord(
         stored = array;
     }
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7460,8 +7475,8 @@ export fn JSC__JSValue__fromEntries(
     // that temporary, so no second semantic branch is required.
     _ = clone;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7498,8 +7513,8 @@ export fn JSC__JSValue__put(
     const target = privateValueFrom(global, target_encoded) orelse return;
     const stored = privateValueFrom(global, value_encoded) orelse return;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7535,8 +7550,8 @@ export fn JSC__JSValue__putBunString(
         privatePublishPropertyTypeError(context, "Target must be an object");
         return;
     }
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7569,8 +7584,8 @@ export fn JSC__JSValue__upsertBunStringArray(
         privatePublishPropertyTypeError(context, "Property value belongs to another VM");
         return .empty;
     };
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7639,8 +7654,8 @@ export fn JSC__JSValue__hasOwnPropertyValue(
         privatePublishPropertyTypeError(context, "Property key belongs to another VM");
         return false;
     };
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7677,8 +7692,8 @@ export fn JSC__JSValue__putToPropertyKey(
     const key_value = privateValueFrom(global, key_encoded) orelse return;
     const stored = privateValueFrom(global, value_encoded) orelse return;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7715,8 +7730,8 @@ export fn JSC__JSValue__deleteProperty(
     const property = privateZigStringPropertyKey(context, key) orelse return false;
     const target = privateValueFrom(global, target_encoded) orelse return false;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7743,8 +7758,8 @@ export fn JSC__JSValue__getPropertyValue(
     const property = privateLatin1PropertyKey(context, bytes, len) orelse return .empty;
     const target = privateValueFrom(global, target_encoded) orelse return .deleted;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .deleted;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7772,8 +7787,8 @@ export fn JSC__JSValue__getIfPropertyExistsImpl(
     const property = privateLatin1PropertyKey(context, bytes, len) orelse return .empty;
     const target = privateValueFrom(global, target_encoded) orelse return .deleted;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .deleted;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7800,8 +7815,8 @@ export fn JSC__JSValue__getOwn(
     const property = privateBunStringPropertyKey(context, key) orelse return .empty;
     const target = privateValueFrom(global, target_encoded) orelse return .empty;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7828,8 +7843,8 @@ export fn JSC__JSValue__getOwnByValue(
     const target = privateValueFrom(global, target_encoded) orelse return .empty;
     const key_value = privateValueFrom(global, key_encoded) orelse return .empty;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -7876,8 +7891,8 @@ fn privateFastBuiltinGet(
     if (group.pending_exception != null) return .empty;
     const target = privateValueFrom(global, target_encoded) orelse return .empty;
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8089,8 +8104,8 @@ export fn Bun__JSPropertyIterator__create(
     const context = ctxForEvaluation(global) orelse return null;
     const group = privatePropertyBoundaryGroup(context) orelse return null;
     if (group.pending_exception != null) return null;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8177,8 +8192,8 @@ fn privatePropertyIteratorGet(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group != value_.group or group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8235,8 +8250,8 @@ export fn JSC__JSValue__symbolFor(
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
     const property = privateZigStringPropertyKey(context, key) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8387,8 +8402,8 @@ export fn JSC__JSValue__forEachPropertyNonIndexed(
     if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint or
         target.asObj().getterSetterCellData() != null) return;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8580,8 +8595,8 @@ export fn ZigString__toDOMExceptionInstance(
     };
     const supplied_message = message_value.asStr();
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -8801,8 +8816,8 @@ export fn JSC__JSValue__getLengthIfPropertyExistsInternal(
     if (object.is_set and !object.is_weak) return @floatFromInt(machine.nativeSetSize(object));
     if (object.is_symbol or object.is_bigint) return std.math.inf(f64);
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     context.pushActiveInterpreter(&machine) catch |err| {
@@ -8911,8 +8926,8 @@ export fn JSC__JSValue__getIfPropertyExistsFromPath(
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9120,8 +9135,8 @@ export fn JSC__JSValue__getNameProperty(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9150,8 +9165,8 @@ export fn JSC__JSValue__getClassName(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9188,8 +9203,8 @@ export fn JSC__JSValue__getName(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9332,8 +9347,8 @@ export fn JSC__JSValue__callCustomInspectFunction(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9375,8 +9390,8 @@ fn privateJSONStringify(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9433,8 +9448,8 @@ export fn JSC__JSValue__isJSXElement(
     const context = ctxForEvaluation(global) orelse return false;
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9505,8 +9520,8 @@ fn privateNoSideEffectStaticString(
 }
 
 fn privateNoSideEffectOwnedString(context: *Context, bytes: []const u8) EncodedValue {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     const projected = Value.strAlloc(context.arena(), bytes) catch return .empty;
@@ -9514,8 +9529,8 @@ fn privateNoSideEffectOwnedString(context: *Context, bytes: []const u8) EncodedV
 }
 
 fn privateNoSideEffectValue(context: *Context, input: Value) !Value {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
 
@@ -9570,8 +9585,8 @@ export fn Bun__promises__isErrorLike(
     const context = ctxForEvaluation(global) orelse return false;
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9681,8 +9696,8 @@ export fn Bun__Process__emitWarning(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9727,8 +9742,8 @@ export fn Bun__promises__emitUnhandledRejectionWarning(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9843,8 +9858,8 @@ export fn Bun__onSignalForJS(signal_number: i32, global: JSContextRef) callconv(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9872,8 +9887,8 @@ export fn Bun__handleUnhandledRejection(
     const context = ctxForEvaluation(global) orelse return 0;
     const group = privatePropertyBoundaryGroup(context) orelse return 0;
     if (group.pending_exception != null) return 0;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9906,8 +9921,8 @@ export fn Bun__emitHandledPromiseEvent(
     const context = ctxForEvaluation(global) orelse return false;
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9939,8 +9954,8 @@ export fn Bun__handleUncaughtException(
     const context = ctxForEvaluation(global) orelse return 0;
     const group = privatePropertyBoundaryGroup(context) orelse return 0;
     if (group.pending_exception != null) return 0;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -9972,8 +9987,8 @@ export fn Bun__wrapUnhandledRejectionErrorForUncaughtException(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -10021,8 +10036,8 @@ fn privateDispatchProcessCodeEvent(global: JSContextRef, event: []const u8, code
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -10063,8 +10078,8 @@ fn privateEmitProcessIPCEvent(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -10125,8 +10140,8 @@ export fn JSC__JSValue__forEach(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -10880,8 +10895,8 @@ fn privateDeepEqualsBoundary(
     const context = ctxForEvaluation(global) orelse return false;
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -10948,8 +10963,8 @@ export fn JSC__JSValue__jestDeepMatch(
     const context = ctxForEvaluation(global) orelse return false;
     const group = privatePropertyBoundaryGroup(context) orelse return false;
     if (group.pending_exception != null) return false;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11124,6 +11139,7 @@ export fn JSC__createStructure(
         // a false strong edge and could leave an untraced relocated pointer.
         .value = Value.undef(),
         .owner = context,
+        .storage_owner = context,
         .private_kind = .structure,
         .structure = descriptor,
     };
@@ -11146,8 +11162,8 @@ export fn JSC__createEmptyObjectWithStructure(
         return .empty;
     const descriptor = structure_box.structure orelse return .empty;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11215,8 +11231,8 @@ export fn JSC__JSObject__create(global: JSContextRef, initial_capacity: usize, c
 /// `instanceof URLSearchParams` with fully working methods.
 export fn URLSearchParams__create(global: JSContextRef, input: ?*const PrivateZigString) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11262,8 +11278,8 @@ export fn URLSearchParams__toString(params: ?*anyopaque, ctx: ?*anyopaque, callb
     const context = boxed.owner;
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11320,8 +11336,8 @@ fn privateCreateFormData(global: JSContextRef, query: ?*const PrivateZigString) 
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11387,8 +11403,8 @@ export fn WebCore__DOMFormData__append(
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11427,8 +11443,8 @@ export fn WebCore__DOMFormData__appendBlob(
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11465,8 +11481,8 @@ export fn WebCore__DOMFormData__count(raw_form: ?*anyopaque) callconv(.c) usize 
     const opaque_group = context.c_api_group orelse return 0;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return 0;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11488,8 +11504,8 @@ fn privateDOMFormDataToQueryString(
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11521,8 +11537,8 @@ export fn DOMFormData__forEach(
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11582,8 +11598,8 @@ fn privatePublishFetchHeadersError(context: *Context, err: fetch_headers.Error) 
         privateSetPendingValue(context, context.reserved_thread_oom_error orelse Value.staticStr("OutOfMemory"));
         return;
     }
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11601,8 +11617,8 @@ fn privatePublishFetchHeadersError(context: *Context, err: fetch_headers.Error) 
 }
 
 fn privatePublishFetchHeadersInitError(context: *Context, message: []const u8) void {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -11628,8 +11644,8 @@ fn privateFetchHeadersWrap(
         return privateEncodedFromRef(@ptrCast(existing));
     }
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12129,8 +12145,8 @@ export fn WebCore__FetchHeaders__createFromJS(global: JSContextRef, encoded: Enc
         };
     }
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12449,8 +12465,8 @@ export fn URL__fragmentIdentifier(raw: ?*anyopaque) callconv(.c) PrivateBunStrin
 /// exception; success returns the owned native record (`URL__deinit` frees).
 export fn URL__fromJS(encoded: EncodedValue, global: JSContextRef) callconv(.c) ?*anyopaque {
     const context = ctxForEvaluation(global) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12480,8 +12496,8 @@ export fn URL__fromJS(encoded: EncodedValue, global: JSContextRef) callconv(.c) 
 /// (exception published), when empty, or when invalid.
 export fn URL__getHrefFromJS(encoded: EncodedValue, global: JSContextRef) callconv(.c) PrivateBunString {
     const context = ctxForEvaluation(global) orelse return PrivateBunString.dead();
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12636,8 +12652,8 @@ fn privateCreateDomUrlValue(context: *Context, machine: *interp.Interpreter, inp
 /// and returns an empty handle (Bun's `RETURN_IF_EXCEPTION → {}`).
 export fn BunString__toJSDOMURL(global: JSContextRef, input: ?*const PrivateBunString) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12658,8 +12674,8 @@ export fn BunString__toJSDOMURL(global: JSContextRef, input: ?*const PrivateBunS
 /// invalid input publishes the TypeError and returns an empty handle.
 export fn BunString__toURL(input: ?*const PrivateZigString, global: JSContextRef) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12759,8 +12775,8 @@ export fn WebCore__DOMURL__fileSystemPath(raw: ?*anyopaque, error_code: ?*c_int)
 
 export fn JSC__JSValue__createEmptyArray(global: JSContextRef, len: usize) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12786,8 +12802,8 @@ export fn JSArray__constructArray(
     len: usize,
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12933,8 +12949,8 @@ export fn JSC__JSValue__putIndex(
     const target = privateValueFrom(global, encoded) orelse return;
     const result = privateValueFrom(global, out) orelse return;
     if (!target.isObject() or !target.asObj().is_array) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12956,8 +12972,8 @@ export fn JSC__JSValue__push(
     const target = privateValueFrom(global, encoded) orelse return;
     const result = privateValueFrom(global, out) orelse return;
     if (!target.isObject() or !target.asObj().is_array) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -12978,8 +12994,8 @@ export fn JSC__JSValue__getDirectIndex(
     const context = ctxForEvaluation(global) orelse return .empty;
     const target = privateValueFrom(global, encoded) orelse return .empty;
     if (!target.isObject()) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -13002,8 +13018,8 @@ export fn JSC__JSObject__getIndex(
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
     const target = privateValueFrom(global, encoded) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -13036,8 +13052,8 @@ fn privateObjectEnumerableProperties(
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -13095,8 +13111,8 @@ export fn JSC__JSValue__getPrototype(encoded: EncodedValue, global: JSContextRef
 
 export fn JSC__JSValue__dateInstanceFromNumber(global: JSContextRef, timestamp: f64) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -13111,8 +13127,8 @@ export fn JSC__JSValue__dateInstanceFromNullTerminatedString(
     chars: [*:0]const u8,
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -13770,8 +13786,8 @@ export fn JSC__JSGlobalObject__generateHeapSnapshot(global: JSContextRef) callco
     };
     defer gpa.free(json);
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const string_arena_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(string_arena_saved);
     var machine = context.interpreter();
@@ -13914,8 +13930,8 @@ fn privateReadableStreamConsume(
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14039,8 +14055,8 @@ fn privateMaterializeTermination(group: *CContextGroup) ?*Boxed {
     }
 
     const context = group.primary;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14182,8 +14198,8 @@ fn privateCreateNativeError(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14456,8 +14472,8 @@ fn privateVMExternalMemory(group: *CContextGroup) usize {
 }
 
 fn privateDrainMicrotasks(context: *Context) void {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14490,8 +14506,8 @@ export fn JSC__JSGlobalObject__queueMicrotaskCallback(
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
     const function = callback orelse return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14517,8 +14533,8 @@ fn privateQueueProcessNextTick(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14577,8 +14593,8 @@ export fn JSC__JSGlobalObject__queueMicrotaskJob(
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14633,8 +14649,8 @@ export fn JSC__VM__drainMicrotasks(vm_ref: ?*anyopaque) callconv(.c) void {
 export fn JSC__JSGlobalObject__handleRejectedPromises(global: JSContextRef) callconv(.c) void {
     const context = ctxForEvaluation(global) orelse return;
     const group = privatePropertyBoundaryGroup(context) orelse return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14700,8 +14716,8 @@ fn privateSerializeJSValue(
     const context = ctxForEvaluation(global) orelse return .{};
     const group = privatePropertyBoundaryGroup(context) orelse return .{};
     if (group.pending_exception != null) return .{};
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14762,8 +14778,8 @@ export fn Bun__JSValue__deserialize(
     const context = ctxForEvaluation(global) orelse return .empty;
     const group = privatePropertyBoundaryGroup(context) orelse return .empty;
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -14833,8 +14849,8 @@ fn privateModuleLoaderEvaluateError(
     kind: []const u8,
     message: []const u8,
 ) EncodedValue {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -15688,8 +15704,8 @@ export fn JSC__JSValue___then(
     const resolve_value = privateValueFrom(global, resolve_encoded) orelse return;
     const reject_value = privateValueFrom(global, reject_encoded) orelse return;
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -15766,8 +15782,8 @@ export fn JSC__JSPromise__wrap(
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -15804,8 +15820,8 @@ export fn JSC__AnyPromise__wrap(
     const opaque_group = context.c_api_group orelse return;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -15964,8 +15980,8 @@ export fn WebCore__AbortSignal__new(global: JSContextRef) callconv(.c) ?*Private
     const opaque_group = context.c_api_group orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return null;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -15980,8 +15996,8 @@ export fn WebCore__AbortSignal__create(global: JSContextRef) callconv(.c) Encode
     const opaque_group = context.c_api_group orelse return .empty;
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -16099,8 +16115,8 @@ export fn WebCore__AbortSignal__signal(
     };
     if (!privateAbortBeginOperation(signal)) return;
     defer privateAbortEndOperation(signal);
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -16231,8 +16247,8 @@ fn strFrom(ref: JSStringRef) ?*JsString {
 
 fn setException(ctx: *Context, exc: ExceptionRef, message: []const u8) void {
     if (exc != null) {
-        const gc_saved = gc_mod.setActiveHeap(ctx.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(ctx);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(ctx.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         const v = Value.strAlloc(ctx.arena(), message) catch Value.staticStr("OutOfMemory");
@@ -16278,8 +16294,8 @@ fn makeEvaluationSyntaxError(
     column: usize,
     byte_offset: usize,
 ) !Value {
-    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(ctx.arena());
     defer _ = strcell.setActiveArena(sa_saved);
 
@@ -16315,8 +16331,8 @@ fn attachEvaluationRuntimeSourceMetadata(
     if (!obj.behavior.is_error) return;
     if (source_url == null and starting_line_number <= 0) return;
 
-    const gc_saved = gc_mod.setActiveHeap(ctx.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(ctx.arena());
     defer _ = strcell.setActiveArena(sa_saved);
 
@@ -19190,8 +19206,8 @@ export fn JSValueIsEqual(ctx: JSContextRef, a: JSValueRef, b: JSValueRef, except
     const c = ctxFrom(ctx) orelse return false;
     const lhs = valueArgFrom(c, a, exception) orelse return false;
     const rhs = valueArgFrom(c, b, exception) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19227,8 +19243,8 @@ export fn JSValueIsInstanceOfConstructor(
     const c = ctxFrom(ctx) orelse return false;
     const candidate = valueArgFrom(c, value_ref, exception) orelse return false;
     const constructor = objectArgFrom(c, constructor_ref, exception) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19256,8 +19272,8 @@ export fn JSValueCompare(
     const c = ctxFrom(ctx) orelse return .undefined;
     const left = valueArgFrom(c, left_ref, exception) orelse return .undefined;
     const right = valueArgFrom(c, right_ref, exception) orelse return .undefined;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19324,8 +19340,8 @@ export fn JSValueMakeNumber(ctx: JSContextRef, n: f64) callconv(.c) JSValueRef {
 export fn JSValueMakeString(ctx: JSContextRef, str: JSStringRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const s = strFrom(str) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     return box(c, Value.strAlloc(c.arena(), s.bytes) catch return null);
@@ -19338,8 +19354,8 @@ export fn JSValueMakeSymbol(ctx: JSContextRef, description: JSStringRef) callcon
         break :blk c.arena().dupe(u8, source.bytes) catch return null;
     } else null;
 
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19358,8 +19374,8 @@ const CBigIntInput = union(enum) {
 
 fn makeCBigInt(ctx: JSContextRef, input: CBigIntInput, exception: ExceptionRef) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19414,8 +19430,8 @@ export fn JSBigIntCreateWithString(ctx: JSContextRef, string: JSStringRef, excep
 export fn JSValueMakeFromJSONString(ctx: JSContextRef, string: JSStringRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const source = strFrom(string) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19434,8 +19450,8 @@ export fn JSValueCreateJSONString(
 ) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
     const input = valueArgFrom(c, value_ref, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19475,8 +19491,8 @@ export fn JSValueToBoolean(ctx: JSContextRef, v: JSValueRef) callconv(.c) bool {
 export fn JSValueToNumber(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) f64 {
     const c = ctxFrom(ctx) orelse return std.math.nan(f64);
     const val = valueArgFrom(c, v, exception) orelse return std.math.nan(f64);
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19527,8 +19543,8 @@ fn valueToIntegerBits(
     var bits: u64 = if (input.isObject() and input.asObj().is_bigint)
         bigIntLow64(input.asObj())
     else blk: {
-        const gc_saved = gc_mod.setActiveHeap(c.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(c);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(c.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         var machine = c.interpreter();
@@ -19573,8 +19589,8 @@ export fn JSValueToUInt64(ctx: JSContextRef, value_ref: JSValueRef, exception: E
 export fn JSValueToStringCopy(ctx: JSContextRef, v: JSValueRef, exception: ExceptionRef) callconv(.c) JSStringRef {
     const c = ctxFrom(ctx) orelse return null;
     const val = valueArgFrom(c, v, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19607,8 +19623,8 @@ export fn JSValueToObject(ctx: JSContextRef, v: JSValueRef, exception: Exception
         setException(c, exception, "TypeError");
         return null;
     }
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19635,7 +19651,7 @@ fn valueProtectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
     // Precise groups route VM-owned private boxes through the hidden owner;
     // ordinary realm-local JSValueRefs remain in their creating realm table.
     if (c.gc == null) return true; // arena contexts keep values for the context lifetime.
-    const root_context = boxed.owner;
+    const root_context = boxed.storage_owner;
     if (root_context.gc != c.gc) return false;
     // `c_api_handles` is read by the mid-script parallel collector; guard it
     // under `realm_lock` (a no-op outside parallel_js).
@@ -19661,7 +19677,7 @@ fn valueProtect(ctx: JSContextRef, v: JSValueRef) bool {
 fn valueUnprotectInContext(c: *Context, boxed: *Boxed, raw: *anyopaque) bool {
     if (valueFromContext(c, @ptrCast(raw)) == null) return false;
     if (c.gc == null) return true;
-    const root_context = boxed.owner;
+    const root_context = boxed.storage_owner;
     if (root_context.gc != c.gc) return false;
     root_context.realmLock();
     defer root_context.realmUnlock();
@@ -19781,8 +19797,8 @@ export fn JSClassRelease(js_class: JSClassRef) callconv(.c) void {
 
 export fn JSObjectMake(ctx: JSContextRef, js_class: JSClassRef, data: ?*anyopaque) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19840,8 +19856,8 @@ export fn JSObjectMakeConstructor(
         return null;
     };
     data.* = .{ .context = c, .class = class, .callback = callback };
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19920,8 +19936,8 @@ export fn JSObjectMakeArray(ctx: JSContextRef, argc: usize, argv: [*c]const JSVa
         return null;
     }
     const args = collectArgs(c, argc, argv, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -19964,8 +19980,8 @@ fn makeBuiltinObject(
     debug_source_url: ?[]const u8,
     debug_start_line: usize,
 ) JSObjectRef {
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -20029,8 +20045,8 @@ export fn JSObjectMakeFunction(
     exception: ExceptionRef,
 ) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     if (parameter_count > 0 and parameter_names == null) {
@@ -20136,8 +20152,8 @@ export fn JSObjectMakeDeferredPromise(ctx: JSContextRef, resolve: [*c]JSObjectRe
         setException(c, exception, "TypeError: resolve and reject out pointers are required");
         return null;
     }
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
 
@@ -20184,8 +20200,8 @@ fn objectArgFrom(ctx: *Context, object: JSObjectRef, exception: ExceptionRef) ?*
 }
 
 fn makeTypedArrayObject(c: *Context, kind: value.TAKind, args: []const Value, exception: ExceptionRef) JSObjectRef {
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -20248,8 +20264,8 @@ fn privateReleaseMmapBytes(bytes: ?*anyopaque, length_context: ?*anyopaque) call
 }
 
 fn privateRejectUint8Array(context: *Context, name: []const u8, message: []const u8) EncodedValue {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20271,8 +20287,8 @@ fn privateMakeUint8Array(
     adopt_deallocator: ?value.ExternalBufferDeallocator,
     deallocator_context: ?*anyopaque,
 ) EncodedValue {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20337,8 +20353,8 @@ fn privateAllocUint8ArrayForCopy(
     is_buffer: bool,
     out_bytes: **anyopaque,
 ) EncodedValue {
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20368,8 +20384,8 @@ fn privateMakeArrayBufferForCopy(
     if (len > 0 and bytes == null)
         return privateRejectUint8Array(context, "TypeError", "non-empty ArrayBuffer copy requires non-null bytes");
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20395,8 +20411,8 @@ fn privateAdoptArrayBuffer(
 ) EncodedValue {
     if (len == 0) return privateMakeArrayBufferForCopy(context, null, 0);
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20660,8 +20676,8 @@ export fn JSC__JSValue__createUninitializedUint8Array(
     len: usize,
 ) callconv(.c) EncodedValue {
     const context = ctxForEvaluation(global) orelse return .empty;
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -20761,8 +20777,8 @@ fn privateMakeExternalBufferValue(
         if (!owner_transferred) _ = owner.release();
     }
 
-    const gc_saved = gc_mod.setActiveHeap(context.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(context);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(context.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = context.interpreter();
@@ -21044,8 +21060,8 @@ fn makeExternalArrayBuffer(
     else
         @as([*]u8, @ptrCast(bytes.?))[0..byte_length];
 
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21267,8 +21283,8 @@ export fn JSObjectGetArrayBufferByteLength(ctx: JSContextRef, object: JSObjectRe
 export fn JSObjectGetPrototype(ctx: JSContextRef, object: JSObjectRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, null) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21287,8 +21303,8 @@ export fn JSObjectSetPrototype(ctx: JSContextRef, object: JSObjectRef, prototype
         proto_value.asObj()
     else
         return;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21301,8 +21317,8 @@ export fn JSObjectHasProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
     const c = ctxFrom(ctx) orelse return false;
     const obj = objectArgFrom(c, object, null) orelse return false;
     const key = strFrom(name) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21330,8 +21346,8 @@ fn propertyKeyBytes(c: *Context, machine: *interp.Interpreter, key_ref: JSValueR
 export fn JSObjectHasPropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
     const c = ctxFrom(ctx) orelse return false;
     const obj = objectArgFrom(c, object, exception) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21356,8 +21372,8 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
         setException(c, exception, "TypeError: property name is null");
         return null;
     };
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21380,8 +21396,8 @@ export fn JSObjectGetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
 export fn JSObjectGetPropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21408,8 +21424,8 @@ export fn JSObjectSetProperty(ctx: JSContextRef, object: JSObjectRef, name: JSSt
         return;
     };
     const property_value = valueArgFrom(c, val, exception) orelse return;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21443,8 +21459,8 @@ export fn JSObjectDeleteProperty(ctx: JSContextRef, object: JSObjectRef, name: J
         setException(c, exception, "TypeError: property name is null");
         return false;
     };
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21472,8 +21488,8 @@ export fn JSObjectSetPropertyForKey(
     const c = ctxFrom(ctx) orelse return;
     const obj = objectArgFrom(c, object, exception) orelse return;
     const property_value = valueArgFrom(c, val, exception) orelse return;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21504,8 +21520,8 @@ export fn JSObjectSetPropertyForKey(
 export fn JSObjectDeletePropertyForKey(ctx: JSContextRef, object: JSObjectRef, property_key: JSValueRef, exception: ExceptionRef) callconv(.c) bool {
     const c = ctxFrom(ctx) orelse return false;
     const obj = objectArgFrom(c, object, exception) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21526,8 +21542,8 @@ export fn JSObjectDeletePropertyForKey(ctx: JSContextRef, object: JSObjectRef, p
 export fn JSObjectGetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, index: c_uint, exception: ExceptionRef) callconv(.c) JSValueRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     const key = std.fmt.allocPrint(c.arena(), "{d}", .{index}) catch {
@@ -21559,8 +21575,8 @@ export fn JSObjectSetPropertyAtIndex(ctx: JSContextRef, object: JSObjectRef, ind
         setException(c, exception, "OutOfMemory");
         return;
     };
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21612,8 +21628,8 @@ export fn JSObjectCallAsFunction(ctx: JSContextRef, function: JSObjectRef, this_
         return null;
     }
     // JS functions / native builtins / error constructors run on the interpreter.
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var interpreter = c.interpreter();
@@ -21757,8 +21773,8 @@ fn ensureClassPrototype(c: *Context, machine: *interp.Interpreter, class: *CClas
 export fn JSObjectMakeFunctionWithCallback(ctx: JSContextRef, name: JSStringRef, callback: JSObjectCallAsFunctionCallback) callconv(.c) JSObjectRef {
     const c = ctxFrom(ctx) orelse return null;
     const cb = callback orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -21780,8 +21796,8 @@ export fn JSObjectCallAsConstructor(ctx: JSContextRef, constructor: JSObjectRef,
         return null;
     };
     const args = collectArgs(c, argc, argv, exception) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var interpreter = c.interpreter();
@@ -21814,8 +21830,8 @@ export fn JSObjectIsConstructor(ctx: JSContextRef, object: JSObjectRef) callconv
 export fn JSObjectCopyPropertyNames(ctx: JSContextRef, object: JSObjectRef) callconv(.c) JSPropertyNameArrayRef {
     const c = ctxFrom(ctx) orelse return null;
     const obj = objectArgFrom(c, object, null) orelse return null;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -22126,8 +22142,8 @@ export fn JSWorkerPostMessage(worker: JSWorkerRef, ctx: JSContextRef, value_ref:
         return false;
     };
     const message_value = valueArgFrom(c, value_ref, exception) orelse return false;
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
@@ -22154,8 +22170,8 @@ export fn JSWorkerReceive(worker: JSWorkerRef, ctx: JSContextRef, timeout_ms: u6
         setException(c, exception, "TypeError: worker is not a worker");
         return null;
     };
-    const gc_saved = gc_mod.setActiveHeap(c.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(c);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(c.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     var machine = c.interpreter();
