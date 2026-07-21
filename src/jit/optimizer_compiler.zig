@@ -927,7 +927,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.ret();
     }
     try memory.publish(assembler.bytes().len);
-    const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values);
+    const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values, &.{});
     errdefer deopt.destroy();
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();

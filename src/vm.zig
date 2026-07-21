@@ -3650,12 +3650,15 @@ fn reconstructNativeSideExit(
 ) EvalError!bool {
     if (native_frame.deopt_index >= metadata.points.len) return false;
     const point = metadata.points[native_frame.deopt_index];
-    if (point.exit_ip != native_frame.exit_ip or point.handler_count != 0 or exec.handlers.items.len != 0 or
-        point.local_count > slots.len or point.local_count > 64 or point.stack_count > 64)
+    if (point.exit_ip != native_frame.exit_ip or point.local_count > slots.len or
+        point.local_count > 64 or point.stack_count > 64 or point.handler_count > 64)
         return false;
     const first: usize = point.first_value;
     const count: usize = point.local_count + point.stack_count;
     if (first > metadata.values.len or count > metadata.values.len - first) return false;
+    const first_handler: usize = point.first_handler;
+    const handler_count: usize = point.handler_count;
+    if (first_handler > metadata.handlers.len or handler_count > metadata.handlers.len - first_handler) return false;
 
     var recovered: [128]Value = undefined;
     for (metadata.values[first .. first + count], 0..) |recovery, index| {
@@ -3663,13 +3666,102 @@ fn reconstructNativeSideExit(
         recovered[index] = Value.fromRawBits(bits);
     }
     const accumulator_bits = point.accumulator.materialize(@ptrCast(slots), scratch) orelse return false;
+    var recovered_handlers: [64]Handler = undefined;
+    for (metadata.handlers[first_handler .. first_handler + handler_count], 0..) |handler, index| {
+        if ((handler.catch_ip == jit.RecoveryHandler.none and handler.finally_ip == jit.RecoveryHandler.none) or
+            handler.stack_depth > point.stack_count)
+            return false;
+        recovered_handlers[index] = .{
+            .catch_pc = handler.catch_ip,
+            .finally_pc = handler.finally_ip,
+            .stack_depth = handler.stack_depth,
+        };
+    }
+
+    try exec.stack.ensureTotalCapacity(allocator, point.stack_count);
+    try exec.handlers.ensureTotalCapacity(allocator, point.handler_count);
     exec.stack.clearRetainingCapacity();
     for (recovered[point.local_count .. point.local_count + point.stack_count]) |value_word|
-        try exec.stack.append(allocator, value_word);
+        exec.stack.appendAssumeCapacity(value_word);
+    exec.handlers.clearRetainingCapacity();
+    for (recovered_handlers[0..handler_count]) |handler| exec.handlers.appendAssumeCapacity(handler);
     @memcpy(slots[0..point.local_count], recovered[0..point.local_count]);
     exec.acc = Value.fromRawBits(accumulator_bits);
     exec.ip = point.exit_ip;
     return true;
+}
+
+test "vm: deoptimization reconstructs nested handlers transactionally" {
+    const metadata = try jit.DeoptMetadata.create(
+        std.testing.allocator,
+        &.{.{
+            .kind = .block_entry,
+            .exit_ip = 9,
+            .first_value = 0,
+            .local_count = 1,
+            .stack_count = 2,
+            .first_handler = 0,
+            .handler_count = 2,
+            .accumulator = .{ .source = .constant, .bits = Value.num(44).rawBits() },
+        }},
+        &.{
+            .{ .source = .constant, .bits = Value.num(11).rawBits() },
+            .{ .source = .constant, .bits = Value.num(22).rawBits() },
+            .{ .source = .constant, .bits = Value.num(33).rawBits() },
+        },
+        &.{
+            .{ .catch_ip = 40, .stack_depth = 0 },
+            .{ .finally_ip = 50, .stack_depth = 1 },
+        },
+    );
+    defer metadata.destroy();
+    var slots = [_]Value{Value.num(99)};
+    var exec = Exec{ .ip = 1, .acc = Value.num(-1) };
+    defer exec.stack.deinit(std.testing.allocator);
+    defer exec.handlers.deinit(std.testing.allocator);
+    try exec.stack.append(std.testing.allocator, Value.num(-2));
+    try exec.handlers.append(std.testing.allocator, .{
+        .catch_pc = 3,
+        .finally_pc = Handler.none,
+        .stack_depth = 0,
+    });
+    const native_frame = jit.NativeFrame{ .exit_ip = 9, .deopt_index = 0 };
+
+    try std.testing.expect(try reconstructNativeSideExit(
+        metadata,
+        &native_frame,
+        &slots,
+        &.{},
+        &exec,
+        std.testing.allocator,
+    ));
+    try std.testing.expectEqual(@as(f64, 11), slots[0].asNum());
+    try std.testing.expectEqualSlices(Value, &.{ Value.num(22), Value.num(33) }, exec.stack.items);
+    try std.testing.expectEqual(@as(f64, 44), exec.acc.asNum());
+    try std.testing.expectEqual(@as(usize, 9), exec.ip);
+    try std.testing.expectEqual(@as(usize, 2), exec.handlers.items.len);
+    try std.testing.expectEqual(@as(u32, 40), exec.handlers.items[0].catch_pc);
+    try std.testing.expectEqual(Handler.none, exec.handlers.items[0].finally_pc);
+    try std.testing.expectEqual(@as(usize, 0), exec.handlers.items[0].stack_depth);
+    try std.testing.expectEqual(Handler.none, exec.handlers.items[1].catch_pc);
+    try std.testing.expectEqual(@as(u32, 50), exec.handlers.items[1].finally_pc);
+    try std.testing.expectEqual(@as(usize, 1), exec.handlers.items[1].stack_depth);
+
+    metadata.handlers[1].stack_depth = 3;
+    slots[0] = Value.num(77);
+    exec.ip = 123;
+    try std.testing.expect(!try reconstructNativeSideExit(
+        metadata,
+        &native_frame,
+        &slots,
+        &.{},
+        &exec,
+        std.testing.allocator,
+    ));
+    try std.testing.expectEqual(@as(f64, 77), slots[0].asNum());
+    try std.testing.expectEqual(@as(usize, 123), exec.ip);
+    try std.testing.expectEqualSlices(Value, &.{ Value.num(22), Value.num(33) }, exec.stack.items);
+    try std.testing.expectEqual(@as(usize, 2), exec.handlers.items.len);
 }
 
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {

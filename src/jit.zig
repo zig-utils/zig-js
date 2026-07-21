@@ -322,8 +322,19 @@ pub const DeoptPoint = struct {
     first_value: u32,
     local_count: u16,
     stack_count: u16,
+    first_handler: u32 = 0,
     handler_count: u16 = 0,
     accumulator: RecoveryValue,
+};
+
+/// One immutable catch/finally record in outer-to-inner order. The VM rebuilds
+/// its private handler representation transactionally during deoptimization.
+pub const RecoveryHandler = struct {
+    catch_ip: u32 = none,
+    finally_ip: u32 = none,
+    stack_depth: u16,
+
+    pub const none = std.math.maxInt(u32);
 };
 
 /// Immutable reconstruction table owned by one published native artifact.
@@ -332,18 +343,27 @@ pub const DeoptMetadata = struct {
     allocator: std.mem.Allocator,
     points: []DeoptPoint,
     values: []RecoveryValue,
+    handlers: []RecoveryHandler,
 
     pub fn create(
         allocator: std.mem.Allocator,
         points: []const DeoptPoint,
         values: []const RecoveryValue,
+        handlers: []const RecoveryHandler,
     ) std.mem.Allocator.Error!*DeoptMetadata {
         const metadata = try allocator.create(DeoptMetadata);
         errdefer allocator.destroy(metadata);
         const owned_points = try allocator.dupe(DeoptPoint, points);
         errdefer allocator.free(owned_points);
         const owned_values = try allocator.dupe(RecoveryValue, values);
-        metadata.* = .{ .allocator = allocator, .points = owned_points, .values = owned_values };
+        errdefer allocator.free(owned_values);
+        const owned_handlers = try allocator.dupe(RecoveryHandler, handlers);
+        metadata.* = .{
+            .allocator = allocator,
+            .points = owned_points,
+            .values = owned_values,
+            .handlers = owned_handlers,
+        };
         return metadata;
     }
 
@@ -351,6 +371,7 @@ pub const DeoptMetadata = struct {
         const allocator = self.allocator;
         allocator.free(self.points);
         allocator.free(self.values);
+        allocator.free(self.handlers);
         allocator.destroy(self);
     }
 };
