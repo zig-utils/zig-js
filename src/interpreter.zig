@@ -8751,6 +8751,110 @@ pub const Interpreter = struct {
         try buf.append(a, @intCast(0x80 | (cu & 0x3F)));
     }
 
+    /// A forward-only (byte, UTF-16-unit) position for one string. A global regex
+    /// scan queries monotonically increasing positions, so threading one cursor
+    /// makes the whole scan's UTF-16↔byte conversions O(n) instead of O(n^2). A
+    /// backward query resets to the start (still correct, just no speedup).
+    const RxCursor = struct {
+        byte: usize = 0,
+        units: usize = 0,
+        fn byteForUtf16(self: *RxCursor, s: []const u8, index: usize) usize {
+            if (index < self.units) {
+                self.byte = 0;
+                self.units = 0;
+            }
+            var i = self.byte;
+            var u = self.units;
+            while (i < s.len) {
+                if (index <= u) break;
+                const su = utf16LenOfSeq(s, i);
+                if (index < u + su) {
+                    self.byte = i;
+                    self.units = u;
+                    return i + jsStringSeqLen(s, i);
+                }
+                u += su;
+                i += jsStringSeqLen(s, i);
+            }
+            self.byte = i;
+            self.units = u;
+            return i;
+        }
+        fn utf16ForByte(self: *RxCursor, s: []const u8, byte: usize) usize {
+            const target = @min(byte, s.len);
+            if (target < self.byte) {
+                self.byte = 0;
+                self.units = 0;
+            }
+            var i = self.byte;
+            var u = self.units;
+            while (i < s.len and i < target) {
+                u += utf16LenOfSeq(s, i);
+                i += jsStringSeqLen(s, i);
+            }
+            self.byte = i;
+            self.units = u;
+            return u;
+        }
+    };
+
+    /// True when `rx` is a plain built-in RegExp whose `exec` is the original
+    /// (not overridden by a subclass). Only then may an internal global loop take
+    /// the fast `regexBuiltinExecWith` path instead of RegExpExec via the property.
+    fn regexpHasBuiltinExec(self: *Interpreter, rx: Value) bool {
+        if (!rx.isObject() or !rx.asObj().behavior.is_regex) return false;
+        const exec = self.getProperty(rx, "exec") catch return false;
+        if (!exec.isObject()) return false;
+        const rc = self.env.get("RegExp") orelse return false;
+        if (!rc.isObject()) return false;
+        const proto = rc.asObj().getOwn("prototype") orelse return false;
+        if (!proto.isObject()) return false;
+        const builtin_exec = proto.asObj().getOwn("exec") orelse return false;
+        return builtin_exec.isObject() and exec.asObj() == builtin_exec.asObj();
+    }
+
+    /// RegExpBuiltinExec with the per-call O(n) setup hoisted out: `search_input`
+    /// and `input_u16_len` are precomputed once by the caller, and the UTF-16↔byte
+    /// conversions resume from the shared `cursor`. Identical result to the
+    /// property-`exec` path; used by the internal global loops.
+    fn regexBuiltinExecWith(self: *Interpreter, o: *value.Object, input: []const u8, input_value: Value, search_input: []const u8, flags: []const u8, input_u16_len: usize, cursor: *RxCursor) EvalError!Value {
+        const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
+        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
+        const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
+        const start_units = if (global or sticky) li else 0;
+        if (start_units > input_u16_len) {
+            if (global or sticky) try self.setRegExpLastIndex(o, 0);
+            return Value.nul();
+        }
+        const start = cursor.byteForUtf16(search_input, start_units);
+        const re = try self.compileRegex(o);
+        const found = re.findFrom(search_input, start) catch null;
+        if (found) |m| {
+            if (sticky and m.start != start) {
+                try self.setRegExpLastIndex(o, 0);
+                return Value.nul();
+            }
+            const mstart = m.start;
+            const mend = m.end;
+            const mstart_units = cursor.utf16ForByte(search_input, mstart);
+            const mend_units = cursor.utf16ForByte(search_input, mend);
+            if (global or sticky) try self.setRegExpLastIndex(o, @floatFromInt(mend_units));
+            recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
+            const arr = try self.newArray();
+            try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
+            for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
+            try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(mstart_units)));
+            try self.setProp(arr.asObj(), "input", input_value); // shared cell (no per-match re-copy)
+            const groups = try self.regexGroups(re, m);
+            try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
+            if (std.mem.indexOfScalar(u8, flags, 'd') != null)
+                try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
+            return arr;
+        }
+        if (global or sticky) try self.setRegExpLastIndex(o, 0);
+        return Value.nul();
+    }
+
     fn regexpSearchInput(self: *Interpreter, input: []const u8, unicode: bool) ![]const u8 {
         if (unicode) return input;
         var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -8776,6 +8880,9 @@ pub const Interpreter = struct {
     }
 
     fn stringSliceFromSearchSpan(self: *Interpreter, input: []const u8, search_input: []const u8, start: usize, end: usize) EvalError![]const u8 {
+        // Common case: no astral chars, so `search_input` IS `input` and the match
+        // byte span is exactly the substring — a direct byte slice (O(match len)).
+        if (search_input.ptr == input.ptr) return input[start..end];
         const start_units = utf16IndexForByteOffset(search_input, start);
         const end_units = utf16IndexForByteOffset(search_input, end);
         var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -8885,10 +8992,22 @@ pub const Interpreter = struct {
         if (!global) return try self.regexpExecGeneric(rx, s);
         const full_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
 
+        // Fast path for a plain built-in RegExp: precompute the search input and
+        // its length ONCE and share a conversion cursor, so the whole scan is O(n)
+        // instead of O(n^2) (each RegExpExec otherwise re-scans/re-allocates).
+        const fast = self.regexpHasBuiltinExec(rx);
+        const search_input = if (fast) try self.regexpSearchInput(s, full_unicode) else "";
+        const input_u16 = if (fast) utf16LenOfString(s) else 0;
+        const input_value = if (fast) try Value.strAlloc(self.arena, s) else Value.undef();
+        var cursor: RxCursor = .{};
+
         try self.setRegExpLikeLastIndex(rx, 0);
         const arr = try self.newArray();
         while (true) {
-            const result = try self.regexpExecGeneric(rx, s);
+            const result = if (fast)
+                try self.regexBuiltinExecWith(rx.asObj(), s, input_value, search_input, flags, input_u16, &cursor)
+            else
+                try self.regexpExecGeneric(rx, s);
             if (result.isNull()) return if (arr.asObj().elementsLen() == 0) Value.nul() else arr;
 
             const match_v = try self.getProperty(result, "0");
@@ -31411,6 +31530,28 @@ pub fn recordRegexpLegacy(self: *Interpreter, input: []const u8, start: usize, e
         if (i < captures.len and captures[i].len > 0) last_paren = cap;
     }
     self.re_legacy.last_paren = dup(a, last_paren);
+}
+
+/// Like `recordRegexpLegacy` but stores borrowed slices into `input` instead of
+/// copying — O(1) instead of O(n). Safe only when `input` and `captures` are
+/// arena-lifetime (they outlive the legacy statics), which the built-in global
+/// loops guarantee. Avoids the O(n^2) of re-copying the whole input per match.
+pub fn recordRegexpLegacyBorrowed(self: *Interpreter, input: []const u8, start: usize, end: usize, captures: []const []const u8) void {
+    const s = @min(start, input.len);
+    const e = @min(end, input.len);
+    self.re_legacy.input = input;
+    self.re_legacy.last_match = input[s..e];
+    self.re_legacy.left_context = input[0..s];
+    self.re_legacy.right_context = input[e..];
+    // The whole-input parts above are arena-stable slices (O(1)); capture strings
+    // may come from a reused match buffer, so copy those small values.
+    var last_paren: []const u8 = "";
+    for (self.re_legacy.groups[0..], 0..) |*g, i| {
+        const cap: []const u8 = if (i < captures.len) (self.arena.dupe(u8, captures[i]) catch "") else "";
+        g.* = cap;
+        if (cap.len > 0) last_paren = cap;
+    }
+    self.re_legacy.last_paren = last_paren;
 }
 
 /// A legacy RegExp accessor getter/setter must be invoked with the %RegExp%
