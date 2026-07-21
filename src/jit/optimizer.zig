@@ -284,7 +284,29 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call, .get_prop => if (ip + 1 < code.len) {
+        .ret,
+        .ret_undef,
+        .throw_op,
+        .abrupt_return,
+        .call,
+        .call_eval,
+        .call_method,
+        .call_spread,
+        .call_method_spread,
+        .call_with_this,
+        .new_call,
+        .new_spread,
+        .tail_call,
+        .tail_call_eval,
+        .tail_call_method,
+        .tail_call_with_this,
+        .get_prop,
+        .get_index,
+        .set_prop,
+        .set_index,
+        .instance_of,
+        .private_in,
+        => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -331,7 +353,29 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call, .get_prop => {},
+            .ret,
+            .ret_undef,
+            .throw_op,
+            .abrupt_return,
+            .call,
+            .call_eval,
+            .call_method,
+            .call_spread,
+            .call_method_spread,
+            .call_with_this,
+            .new_call,
+            .new_spread,
+            .tail_call,
+            .tail_call_eval,
+            .tail_call_method,
+            .tail_call_with_this,
+            .get_prop,
+            .get_index,
+            .set_prop,
+            .set_index,
+            .instance_of,
+            .private_in,
+            => {},
             else => if (index + 1 < blocks_list.items.len) {
                 addSuccessor(block, @intCast(index + 1));
             },
@@ -394,8 +438,14 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
-        .call, .new_call, .tail_call => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
+        .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
+        .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
+        .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
+        .call_spread, .call_method_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
         .get_prop => .{ .required = 1, .removed = 1, .added = 1 },
+        .get_index, .set_prop, .instance_of => .{ .required = 2, .removed = 2, .added = 1 },
+        .set_index => .{ .required = 3, .removed = 3, .added = 1 },
+        .private_in => .{ .required = 1, .removed = 1, .added = 1 },
         else => unreachable,
     };
 }
@@ -781,19 +831,35 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.appendFrameState(.abrupt_return, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
             },
-            .call, .new_call, .tail_call => {
-                const required = std.math.add(usize, inst.a, 1) catch return error.UnsupportedChunk;
+            .call,
+            .call_eval,
+            .call_method,
+            .call_spread,
+            .call_method_spread,
+            .call_with_this,
+            .new_call,
+            .new_spread,
+            .tail_call,
+            .tail_call_eval,
+            .tail_call_method,
+            .tail_call_with_this,
+            => {
+                const effect = depthEffect(inst);
+                const required: usize = @intCast(effect.required);
                 if (depth < required) return error.InvalidControlFlow;
                 // Calls remain bytecode-owned. This state preserves the callee
-                // and arguments before any user or host code can run or throw.
+                // or receiver plus arguments before user or host code can run.
                 try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
-                depth = depth - required + 1;
+                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
             },
-            .get_prop => {
-                if (depth == 0) return error.InvalidControlFlow;
-                // Property lookup may invoke user code or throw. Resume before
-                // it so the interpreter owns every observable effect.
+            .get_prop, .get_index, .set_prop, .set_index, .instance_of, .private_in => {
+                const effect = depthEffect(inst);
+                const required: usize = @intCast(effect.required);
+                if (depth < required) return error.InvalidControlFlow;
+                // Reads, writes, coercions, and brand checks may invoke user
+                // code or throw. Resume before the interpreter performs them.
                 try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
             },
             .push_handler => try handlers.append(allocator, .{
                 .catch_ip = inst.a,
@@ -992,9 +1058,23 @@ fn supports(op: bc.Op) bool {
         .throw_op,
         .abrupt_return,
         .call,
+        .call_eval,
+        .call_method,
+        .call_spread,
+        .call_method_spread,
+        .call_with_this,
         .new_call,
+        .new_spread,
         .tail_call,
+        .tail_call_eval,
+        .tail_call_method,
+        .tail_call_with_this,
         .get_prop,
+        .get_index,
+        .set_prop,
+        .set_index,
+        .instance_of,
+        .private_in,
         => true,
         else => false,
     };

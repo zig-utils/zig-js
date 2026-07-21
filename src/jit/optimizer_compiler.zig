@@ -1462,6 +1462,56 @@ test "optimizer lowering publishes an exact pre-construction side exit" {
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
 }
 
+test "optimizer lowering publishes rooted remaining call and effect side exits" {
+    const Case = struct {
+        op: bc.Op,
+        a: u32 = 0,
+        b: u32 = 0,
+        inputs: u32,
+        kind: jit.DeoptPointKind,
+    };
+    const cases = [_]Case{
+        .{ .op = .call_eval, .a = 1, .inputs = 2, .kind = .call },
+        .{ .op = .call_method, .b = 1, .inputs = 2, .kind = .call },
+        .{ .op = .call_spread, .inputs = 2, .kind = .call },
+        .{ .op = .call_method_spread, .inputs = 2, .kind = .call },
+        .{ .op = .call_with_this, .a = 1, .inputs = 3, .kind = .call },
+        .{ .op = .new_spread, .inputs = 2, .kind = .call },
+        .{ .op = .tail_call_eval, .a = 1, .inputs = 2, .kind = .call },
+        .{ .op = .tail_call_method, .b = 1, .inputs = 2, .kind = .call },
+        .{ .op = .tail_call_with_this, .a = 1, .inputs = 3, .kind = .call },
+        .{ .op = .get_index, .inputs = 2, .kind = .effect },
+        .{ .op = .set_prop, .inputs = 2, .kind = .effect },
+        .{ .op = .set_index, .inputs = 3, .kind = .effect },
+        .{ .op = .instance_of, .inputs = 2, .kind = .effect },
+        .{ .op = .private_in, .inputs = 1, .kind = .effect },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = case.inputs;
+        chunk.local_count = case.inputs;
+        for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emitAB(case.op, case.a, case.b);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+        const point = program.deopt_points[side_exit.deopt_index];
+        try std.testing.expectEqual(case.kind, point.kind);
+        try std.testing.expectEqual(case.inputs, point.exit_ip);
+        try std.testing.expectEqual(std.math.cast(u16, case.inputs).?, point.stack_count);
+        try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
+        const expected_roots = (@as(u64, 1) << @intCast(case.inputs)) - 1;
+        try std.testing.expectEqual(expected_roots, program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
+        try std.testing.expectEqual(@as(u64, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
+    }
+}
+
 test "optimizer compiler executes guarded parameter SSA" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
