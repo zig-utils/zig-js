@@ -130,9 +130,11 @@ compile-link-runtime gate is:
 
 ```sh
 zig build test-home-private-abi
+zig build test-home-private-abi -Dtsan=true
 ```
 
-It covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
+The TSan form instruments both the library and consumer executable. The matrix
+covers empty/immediate/int32/double/NaN/negative-zero behavior, boxed
 empty/nonempty strings, object identity/truthiness, signed minimum and unsigned
 maximum BigInts, negative modulo extraction, exact number fallbacks, and every
 invalid/non-exact boundary. Public accounting stays unchanged at 117 functions

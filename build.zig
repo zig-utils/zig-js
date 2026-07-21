@@ -381,6 +381,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/home_private_value_shims.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_value_fixture.root_module.linkLibrary(home_private_lib);
@@ -529,6 +530,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_abort_signal_fixture.root_module.linkLibrary(bun_private_lib);
@@ -547,6 +549,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_cached_bytecode_fixture.root_module.linkLibrary(bun_private_lib);
@@ -564,6 +567,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_vm_lifecycle.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_vm_lifecycle_fixture.root_module.linkLibrary(bun_private_lib);
@@ -581,6 +585,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_hot_reload.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_hot_reload_fixture.root_module.linkLibrary(home_private_lib);
@@ -593,6 +598,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_hot_reload.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_hot_reload_fixture.root_module.linkLibrary(bun_private_lib);
@@ -612,6 +618,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_process_signal_fixture.root_module.linkLibrary(home_private_lib);
@@ -625,6 +632,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_process_signal_fixture.root_module.linkLibrary(bun_private_lib);
@@ -643,6 +651,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/home_private_script_execution_context.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_script_execution_context_fixture.root_module.linkLibrary(home_private_lib);
@@ -660,6 +669,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_module_registry_shims.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_module_registry_shims_fixture.root_module.linkLibrary(home_private_lib);
@@ -672,6 +682,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_module_registry_shims.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_module_registry_shims_fixture.root_module.linkLibrary(bun_private_lib);
@@ -826,6 +837,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_error_code.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_error_code_fixture.root_module.linkLibrary(home_private_lib);
@@ -838,6 +850,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_error_code.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_error_code_fixture.root_module.linkLibrary(bun_private_lib);
@@ -856,6 +869,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_inspector_agents.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     home_private_inspector_agents_fixture.root_module.linkLibrary(home_private_lib);
@@ -868,6 +882,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/private_inspector_agents.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_inspector_agents_fixture.root_module.linkLibrary(bun_private_lib);
@@ -886,6 +901,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_property_iterator.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_property_iterator_fixture.root_module.linkLibrary(bun_private_lib);
@@ -903,6 +919,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_c_api_extensions.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_c_api_extensions_fixture.root_module.linkLibrary(bun_private_lib);
@@ -921,6 +938,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = true,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_array_buffer_fixture.root_module.linkLibrary(bun_private_lib);
@@ -938,6 +956,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_dom_form_data.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_dom_form_data_fixture.root_module.linkLibrary(bun_private_lib);
@@ -955,6 +974,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_fetch_headers.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_fetch_headers_fixture.root_module.linkLibrary(bun_private_lib);
@@ -966,6 +986,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("tests/abi/bun_private_fetch_headers_bridge_absent.zig"),
             .target = target,
             .optimize = optimize,
+            .sanitize_thread = tsan,
         }),
     });
     bun_private_fetch_headers_bridge_absent_fixture.root_module.linkLibrary(bun_private_lib);
