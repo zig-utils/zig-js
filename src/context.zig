@@ -1405,8 +1405,8 @@ pub const GcCellBacking = struct {
         return self.parallel_cell_bytes_since_collection.load(.acquire);
     }
 
-    fn resetParallelCellBytesSinceCollection(self: *GcCellBacking) void {
-        self.parallel_cell_bytes_since_collection.store(0, .release);
+    fn resetParallelCellBytesSinceCollection(self: *GcCellBacking) usize {
+        return self.parallel_cell_bytes_since_collection.swap(0, .acq_rel);
     }
 
     fn freeOwnedSlotLocked(self: *GcCellBacking, idx: usize, ptr: [*]u8) bool {
@@ -1827,7 +1827,7 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
     backing.publishCellAllocationBatch(&slabs, len, 0);
     try std.testing.expectEqual(publish_locks_before + 1, backing.bucket_lock_acquisitions_for_testing[idx]);
     for (slabs) |slab| try std.testing.expect(backing.ownsCellAllocation(slab));
-    backing.resetParallelCellBytesSinceCollection();
+    _ = backing.resetParallelCellBytesSinceCollection();
     try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
 
     a.free(cells[0]);
@@ -3031,7 +3031,27 @@ pub const Context = struct {
     gc_cooperative_exit_cleanups: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_total: std.atomic.Value(u64) = .init(0),
     gc_cooperative_pause_ns_max: std.atomic.Value(u64) = .init(0),
+    gc_cooperative_rendezvous_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_cooperative_rendezvous_ns_max: std.atomic.Value(u64) = .init(0),
+    gc_cooperative_bytes_reset_total: std.atomic.Value(usize) = .init(0),
+    gc_cooperative_bytes_at_profile_start: std.atomic.Value(usize) = .init(0),
     gc_cooperative_tranche_bytes: usize = 1024 * 1024 * 1024,
+    gc_phase_profile_enabled: std.atomic.Value(bool) = .init(false),
+    gc_phase_started_ns: std.atomic.Value(u64) = .init(0),
+    gc_minor_profile_cycles: std.atomic.Value(u64) = .init(0),
+    gc_minor_prepare_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_minor_trace_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_minor_sweep_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_minor_post_sweep_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_full_profile_cycles: std.atomic.Value(u64) = .init(0),
+    gc_full_prepare_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_full_trace_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_full_sweep_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_full_post_sweep_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_object_batch_calls: std.atomic.Value(u64) = .init(0),
+    gc_object_batch_cells: std.atomic.Value(u64) = .init(0),
+    gc_object_batch_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_object_batch_ns_max: std.atomic.Value(u64) = .init(0),
     /// Stop-the-mutator time spent in automatic single-mutator nursery
     /// collections. Explicit host collections are measured by their caller;
     /// cooperative no-GIL pauses use the counters above.
@@ -3548,6 +3568,41 @@ pub const Context = struct {
         heap: GcHeap,
         backing: GcCellBacking,
         realms: GcRealmRegistry,
+    };
+    pub const CooperativeGcProfile = struct {
+        attempts: u64,
+        collections: u64,
+        timeouts: u64,
+        peer_parks: u64,
+        exit_cleanups: u64,
+        pause_ns_total: u64,
+        pause_ns_max: u64,
+        rendezvous_ns_total: u64,
+        rendezvous_ns_max: u64,
+        tranche_bytes: usize,
+        bytes_reset_total: usize,
+        bytes_at_start: usize,
+        bytes_since_collection: usize,
+        minor_profile_cycles: u64,
+        minor_prepare_ns_total: u64,
+        minor_trace_ns_total: u64,
+        minor_sweep_ns_total: u64,
+        minor_post_sweep_ns_total: u64,
+        full_profile_cycles: u64,
+        full_prepare_ns_total: u64,
+        full_trace_ns_total: u64,
+        full_sweep_ns_total: u64,
+        full_post_sweep_ns_total: u64,
+        object_batch_calls: u64,
+        object_batch_cells: u64,
+        object_batch_ns_total: u64,
+        object_batch_ns_max: u64,
+        heap: GcHeap.Accounting,
+        backing: GcCellBacking.Stats,
+
+        pub fn bytesIssued(self: CooperativeGcProfile) usize {
+            return self.bytes_reset_total + self.bytes_since_collection -| self.bytes_at_start;
+        }
     };
     pub const GcFinalizerStats = struct {
         cells: usize = 0,
@@ -5792,6 +5847,12 @@ pub const Context = struct {
         self.recordParallelGcMax(&self.gc_cooperative_pause_ns_max, elapsed);
     }
 
+    fn recordCooperativeGcRendezvous(self: *Context, started_ns: u64) void {
+        const elapsed = parallelGcNowNs() -| started_ns;
+        _ = self.gc_cooperative_rendezvous_ns_total.fetchAdd(elapsed, .monotonic);
+        self.recordParallelGcMax(&self.gc_cooperative_rendezvous_ns_max, elapsed);
+    }
+
     /// Reclaim a large shared allocation tranche with every mutator frozen at
     /// an existing lock-free checkpoint. The 1 GiB trigger amortizes native
     /// stack publication/scan cost while bounding the former multi-gigabyte
@@ -5808,7 +5869,8 @@ pub const Context = struct {
         // boundary. Forget its tranche so it pays this registry check only once
         // per GiB rather than at every later VM checkpoint.
         if (!self.hasCooperativeRunningPeer(machine)) {
-            backing.resetParallelCellBytesSinceCollection();
+            const reset_bytes = backing.resetParallelCellBytesSinceCollection();
+            _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
             return;
         }
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
@@ -5830,18 +5892,21 @@ pub const Context = struct {
         while (!self.allCooperativePeersStopped(request, machine)) : (spins += 1) {
             if (parallelGcNowNs() >= deadline) {
                 _ = self.gc_cooperative_timeouts.fetchAdd(1, .monotonic);
+                self.recordCooperativeGcRendezvous(started_ns);
                 self.deferParallelGcRetry();
                 return;
             }
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        self.recordCooperativeGcRendezvous(started_ns);
 
         self.gc_scan_native_stack = true;
         self.gc_scan_parked_stacks = true;
         h.collectYoung();
         self.gc_scan_parked_stacks = false;
         self.gc_scan_native_stack = false;
-        backing.resetParallelCellBytesSinceCollection();
+        const reset_bytes = backing.resetParallelCellBytesSinceCollection();
+        _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
         self.gc_par_retry_after_ns.store(0, .release);
         _ = self.gc_cooperative_collections.fetchAdd(1, .monotonic);
     }
@@ -6225,6 +6290,127 @@ pub const Context = struct {
         if (spare >= additional) return;
         const extra = @max(additional, js_thread_reserve_granularity);
         try self.js_threads.ensureTotalCapacity(self.gpa, self.js_threads.items.len + extra);
+    }
+
+    /// Enable the internal collection profiler for one quiescent benchmark
+    /// interval. Normal execution keeps phase clocks disabled; existing
+    /// correctness counters remain independent of this diagnostic boundary.
+    pub fn beginCooperativeGcProfile(self: *Context) bool {
+        if (self.gc == null or self.gc_cell_backing == null or !self.gc_cooperative_enabled) return false;
+        std.debug.assert(!self.hasRunningJsThreads());
+        self.gc_phase_profile_enabled.store(false, .release);
+        inline for (.{
+            &self.gc_cooperative_attempts,
+            &self.gc_cooperative_collections,
+            &self.gc_cooperative_timeouts,
+            &self.gc_cooperative_peer_parks,
+            &self.gc_cooperative_exit_cleanups,
+            &self.gc_cooperative_pause_ns_total,
+            &self.gc_cooperative_pause_ns_max,
+            &self.gc_cooperative_rendezvous_ns_total,
+            &self.gc_cooperative_rendezvous_ns_max,
+            &self.gc_minor_profile_cycles,
+            &self.gc_minor_prepare_ns_total,
+            &self.gc_minor_trace_ns_total,
+            &self.gc_minor_sweep_ns_total,
+            &self.gc_minor_post_sweep_ns_total,
+            &self.gc_full_profile_cycles,
+            &self.gc_full_prepare_ns_total,
+            &self.gc_full_trace_ns_total,
+            &self.gc_full_sweep_ns_total,
+            &self.gc_full_post_sweep_ns_total,
+            &self.gc_object_batch_calls,
+            &self.gc_object_batch_cells,
+            &self.gc_object_batch_ns_total,
+            &self.gc_object_batch_ns_max,
+        }) |counter| counter.store(0, .release);
+        self.gc_cooperative_bytes_reset_total.store(0, .release);
+        self.gc_cooperative_bytes_at_profile_start.store(
+            self.gc_cell_backing.?.parallelCellBytesSinceCollection(),
+            .release,
+        );
+        self.gc_phase_started_ns.store(0, .release);
+        self.gc_phase_profile_enabled.store(true, .release);
+        return true;
+    }
+
+    pub fn endCooperativeGcProfile(self: *Context) ?CooperativeGcProfile {
+        self.gc_phase_profile_enabled.store(false, .release);
+        return self.cooperativeGcProfile();
+    }
+
+    pub fn cooperativeGcProfile(self: *Context) ?CooperativeGcProfile {
+        const h = self.gc orelse return null;
+        const backing = self.gc_cell_backing orelse return null;
+        return .{
+            .attempts = self.gc_cooperative_attempts.load(.acquire),
+            .collections = self.gc_cooperative_collections.load(.acquire),
+            .timeouts = self.gc_cooperative_timeouts.load(.acquire),
+            .peer_parks = self.gc_cooperative_peer_parks.load(.acquire),
+            .exit_cleanups = self.gc_cooperative_exit_cleanups.load(.acquire),
+            .pause_ns_total = self.gc_cooperative_pause_ns_total.load(.acquire),
+            .pause_ns_max = self.gc_cooperative_pause_ns_max.load(.acquire),
+            .rendezvous_ns_total = self.gc_cooperative_rendezvous_ns_total.load(.acquire),
+            .rendezvous_ns_max = self.gc_cooperative_rendezvous_ns_max.load(.acquire),
+            .tranche_bytes = self.gc_cooperative_tranche_bytes,
+            .bytes_reset_total = self.gc_cooperative_bytes_reset_total.load(.acquire),
+            .bytes_at_start = self.gc_cooperative_bytes_at_profile_start.load(.acquire),
+            .bytes_since_collection = backing.parallelCellBytesSinceCollection(),
+            .minor_profile_cycles = self.gc_minor_profile_cycles.load(.acquire),
+            .minor_prepare_ns_total = self.gc_minor_prepare_ns_total.load(.acquire),
+            .minor_trace_ns_total = self.gc_minor_trace_ns_total.load(.acquire),
+            .minor_sweep_ns_total = self.gc_minor_sweep_ns_total.load(.acquire),
+            .minor_post_sweep_ns_total = self.gc_minor_post_sweep_ns_total.load(.acquire),
+            .full_profile_cycles = self.gc_full_profile_cycles.load(.acquire),
+            .full_prepare_ns_total = self.gc_full_prepare_ns_total.load(.acquire),
+            .full_trace_ns_total = self.gc_full_trace_ns_total.load(.acquire),
+            .full_sweep_ns_total = self.gc_full_sweep_ns_total.load(.acquire),
+            .full_post_sweep_ns_total = self.gc_full_post_sweep_ns_total.load(.acquire),
+            .object_batch_calls = self.gc_object_batch_calls.load(.acquire),
+            .object_batch_cells = self.gc_object_batch_cells.load(.acquire),
+            .object_batch_ns_total = self.gc_object_batch_ns_total.load(.acquire),
+            .object_batch_ns_max = self.gc_object_batch_ns_max.load(.acquire),
+            .heap = h.accounting(),
+            .backing = backing.stats(),
+        };
+    }
+
+    pub fn recordGcCollectionPhase(self: *Context, boundary: @import("gc").CollectionPhaseBoundary) void {
+        if (!self.gc_phase_profile_enabled.load(.acquire)) return;
+        const now = parallelGcNowNs();
+        const started = self.gc_phase_started_ns.swap(now, .acq_rel);
+        const elapsed = now -| started;
+        switch (boundary) {
+            .minor_prepare_begin, .full_prepare_begin => {},
+            .minor_trace_begin => _ = self.gc_minor_prepare_ns_total.fetchAdd(elapsed, .monotonic),
+            .minor_sweep_begin => _ = self.gc_minor_trace_ns_total.fetchAdd(elapsed, .monotonic),
+            .minor_sweep_end => _ = self.gc_minor_sweep_ns_total.fetchAdd(elapsed, .monotonic),
+            .minor_post_sweep_end => {
+                _ = self.gc_minor_post_sweep_ns_total.fetchAdd(elapsed, .monotonic);
+                _ = self.gc_minor_profile_cycles.fetchAdd(1, .monotonic);
+            },
+            .full_trace_begin => _ = self.gc_full_prepare_ns_total.fetchAdd(elapsed, .monotonic),
+            .full_sweep_begin => _ = self.gc_full_trace_ns_total.fetchAdd(elapsed, .monotonic),
+            .full_sweep_end => _ = self.gc_full_sweep_ns_total.fetchAdd(elapsed, .monotonic),
+            .full_post_sweep_end => {
+                _ = self.gc_full_post_sweep_ns_total.fetchAdd(elapsed, .monotonic);
+                _ = self.gc_full_profile_cycles.fetchAdd(1, .monotonic);
+            },
+        }
+    }
+
+    pub fn beginGcObjectBatchProfile(self: *Context) ?u64 {
+        if (!self.gc_phase_profile_enabled.load(.monotonic)) return null;
+        return parallelGcNowNs();
+    }
+
+    pub fn finishGcObjectBatchProfile(self: *Context, started_ns: ?u64, cells: usize) void {
+        const started = started_ns orelse return;
+        const elapsed = parallelGcNowNs() -| started;
+        _ = self.gc_object_batch_calls.fetchAdd(1, .monotonic);
+        _ = self.gc_object_batch_cells.fetchAdd(cells, .monotonic);
+        _ = self.gc_object_batch_ns_total.fetchAdd(elapsed, .monotonic);
+        self.recordParallelGcMax(&self.gc_object_batch_ns_max, elapsed);
     }
 
     /// Called under the Thread API lock after a second worker record is
@@ -17113,6 +17299,7 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     // Preserve the original allocation-count pressure after Object cells moved
     // from the 256-byte to the 128-byte slab class.
     ctx.gc_cooperative_tranche_bytes = 512 * 1024;
+    try std.testing.expect(ctx.beginCooperativeGcProfile());
 
     const result = try ctx.evaluate(
         \\function cooperativeChurn(lane) {
@@ -17129,11 +17316,22 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
         \\const second = new Thread(cooperativeChurn, 1);
         \\first.join() + second.join();
     );
+    const profile = ctx.endCooperativeGcProfile() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 2529), result.asNum());
     try std.testing.expect(ctx.gc_cooperative_attempts.load(.monotonic) > 0);
     try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) > 0);
     try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > 0);
-    try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
+    try std.testing.expectEqual(profile.attempts, profile.collections + profile.timeouts);
+    // TSan can suspend a mutator beyond the deliberately short production
+    // rendezvous deadline. A bounded retry is valid there; unsanitized runs
+    // must still complete every election without timing out.
+    if (!builtin.sanitize_thread) try std.testing.expectEqual(@as(u64, 0), profile.timeouts);
+    try std.testing.expectEqual(profile.collections, profile.minor_profile_cycles);
+    try std.testing.expect(profile.bytesIssued() > 0);
+    try std.testing.expect(profile.pause_ns_total >= profile.rendezvous_ns_total);
+    try std.testing.expect(profile.minor_prepare_ns_total > 0);
+    try std.testing.expect(profile.minor_trace_ns_total > 0);
+    try std.testing.expect(profile.minor_sweep_ns_total > 0);
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
 }

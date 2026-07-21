@@ -5,6 +5,7 @@
 //!   bench-comparison-zig-js independent_steady <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js independent_cold <workload> <jobs> <samples> <lanes>
 //!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes>
+//!   bench-comparison-zig-js shared <workload> <jobs> <samples> <lanes> --gc-telemetry
 //!
 //! Independent modes use one creator-thread-affine context per OS worker. In
 //! steady mode worker/context setup and warm-up are outside every timed sample;
@@ -87,6 +88,79 @@ fn printRow(
 ) !void {
     try writer.print("zig-js\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.0}\n", .{
         @tagName(mode), workload, lanes, jobs, sample, elapsed_ns, checksum,
+    });
+}
+
+const gc_telemetry_header = "zig-js-gc\tworkload\tlanes\tjobs\tsample\telapsed_ns\tchecksum\tattempts\tcollections\ttimeouts\tpeer_parks\texit_cleanups\tpause_ns_total\tpause_ns_max\trendezvous_ns_total\trendezvous_ns_max\ttranche_bytes\tbytes_issued\tbytes_reset\tbytes_current\tminor_cycles\tminor_prepare_ns\tminor_trace_ns\tminor_sweep_ns\tminor_post_sweep_ns\tfull_cycles\tfull_prepare_ns\tfull_trace_ns\tfull_sweep_ns\tfull_post_sweep_ns\tobject_batch_calls\tobject_batch_cells\tobject_batch_ns_total\tobject_batch_ns_max\tworker_runs\tworker_run_ns\tworker_run_ns_max\tjoin_wait_ns\tjoin_parks\theap_collections\theap_minor_collections\theap_live_cells\theap_young_cells\theap_young_bytes\tlast_minor_young_bytes\tlast_minor_reclaimed_bytes\tlast_minor_survived_cells\tlast_minor_survived_bytes\tbacking_chunks\tbacking_capacity_slots\tbacking_live_slots\tbacking_free_slots\n";
+
+fn printGcTelemetryRow(
+    writer: *std.Io.Writer,
+    workload: []const u8,
+    lanes: usize,
+    jobs: usize,
+    sample: usize,
+    elapsed_ns: u64,
+    checksum: f64,
+    before: js.Context.CooperativeGcProfile,
+    after: js.Context.CooperativeGcProfile,
+    threads: js.jsthread.ContentionStats,
+) !void {
+    try writer.print("zig-js-gc\t{s}\t{d}\t{d}\t{d}\t{d}\t{d:.0}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}", .{
+        workload,
+        lanes,
+        jobs,
+        sample,
+        elapsed_ns,
+        checksum,
+        after.attempts,
+        after.collections,
+        after.timeouts,
+        after.peer_parks,
+        after.exit_cleanups,
+        after.pause_ns_total,
+        after.pause_ns_max,
+        after.rendezvous_ns_total,
+        after.rendezvous_ns_max,
+        after.tranche_bytes,
+        after.bytesIssued(),
+        after.bytes_reset_total,
+        after.bytes_since_collection,
+        after.minor_profile_cycles,
+        after.minor_prepare_ns_total,
+        after.minor_trace_ns_total,
+        after.minor_sweep_ns_total,
+        after.minor_post_sweep_ns_total,
+        after.full_profile_cycles,
+        after.full_prepare_ns_total,
+        after.full_trace_ns_total,
+        after.full_sweep_ns_total,
+        after.full_post_sweep_ns_total,
+    });
+    try writer.print("\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}", .{
+        after.object_batch_calls,
+        after.object_batch_cells,
+        after.object_batch_ns_total,
+        after.object_batch_ns_max,
+        threads.worker_runs,
+        threads.worker_run_ns,
+        threads.worker_run_ns_max,
+        threads.thread_join_wait_ns,
+        threads.thread_join_parks,
+    });
+    try writer.print("\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        after.heap.collections -| before.heap.collections,
+        after.heap.minor_collections -| before.heap.minor_collections,
+        after.heap.live_cells,
+        after.heap.young_cells,
+        after.heap.young_bytes,
+        after.heap.last_minor_young_bytes,
+        after.heap.last_minor_reclaimed_bytes,
+        after.heap.last_minor_survived_cells,
+        after.heap.last_minor_survived_bytes,
+        after.backing.chunks,
+        after.backing.capacity_slots,
+        after.backing.live_slots,
+        after.backing.free_slots,
     });
 }
 
@@ -307,6 +381,7 @@ fn runShared(
     jobs: usize,
     samples: usize,
     lanes: usize,
+    gc_telemetry: bool,
 ) !void {
     const ctx = try js.Context.createWith(allocator, .{
         .enable_threads = true,
@@ -325,17 +400,28 @@ fn runShared(
     const shared_invocation = try std.fmt.allocPrint(ctx.arena(), "__benchmarkRunShared({d}, {d})", .{
         jobs, lanes,
     });
+    if (gc_telemetry) try writer.writeAll(gc_telemetry_header);
     for (0..samples) |sample| {
+        const before = if (gc_telemetry) ctx.cooperativeGcProfile().? else undefined;
+        if (gc_telemetry) {
+            js.jsthread.resetLifecycleStats();
+            if (!ctx.beginCooperativeGcProfile()) return error.GcTelemetryUnavailable;
+        }
         const started = nowNs(io);
         const result = try ctx.evaluate(shared_invocation);
         const elapsed: u64 = @intCast(nowNs(io) - started);
+        const thread_stats = if (gc_telemetry) js.jsthread.contentionStats() else undefined;
+        if (gc_telemetry) js.jsthread.disableLifecycleStats();
+        const gc_stats = if (gc_telemetry) ctx.endCooperativeGcProfile().? else undefined;
         try printRow(writer, .shared, workload, lanes, jobs, sample, elapsed, result.toNumber());
+        if (gc_telemetry)
+            try printGcTelemetryRow(writer, workload, lanes, jobs, sample, elapsed, result.toNumber(), before, gc_stats, thread_stats);
     }
 }
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 5 and args.len != 6) return error.InvalidArguments;
+    if (args.len < 5 or args.len > 7) return error.InvalidArguments;
 
     const mode = try parseMode(args[1]);
     const workload = args[2];
@@ -343,10 +429,13 @@ pub fn main(init: std.process.Init) !void {
     const samples = try std.fmt.parseUnsigned(usize, args[4], 10);
     const lanes = if (mode == .single)
         1
-    else if (args.len == 6)
+    else if (args.len >= 6)
         try std.fmt.parseUnsigned(usize, args[5], 10)
     else
         return error.InvalidArguments;
+    const gc_telemetry = args.len == 7 and std.mem.eql(u8, args[6], "--gc-telemetry");
+    if (args.len == 7 and !gc_telemetry) return error.InvalidArguments;
+    if (gc_telemetry and mode != .shared) return error.InvalidArguments;
     if (jobs == 0 or samples == 0 or lanes == 0) return error.InvalidArguments;
     if (std.mem.eql(u8, workload, "wasm_threads_wait_notify") and
         (mode != .shared or lanes < 2 or lanes % 2 != 0)) return error.InvalidArguments;
@@ -358,7 +447,7 @@ pub fn main(init: std.process.Init) !void {
         .single => try runSingle(benchmark_context_allocator, init.io, stdout, workload, jobs, samples),
         .independent_steady => try runIndependentSteady(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
         .independent_cold => try runIndependentCold(init.gpa, init.io, stdout, workload, jobs, samples, lanes),
-        .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes),
+        .shared => try runShared(benchmark_context_allocator, init.io, stdout, workload, jobs, samples, lanes, gc_telemetry),
     }
     try stdout.flush();
 }

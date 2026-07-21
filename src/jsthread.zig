@@ -135,6 +135,9 @@ pub const ContentionStats = struct {
     object_element_lock_acquires: u64 = 0,
     object_element_lock_contentions: u64 = 0,
     object_element_lock_spins: u64 = 0,
+    worker_runs: u64 = 0,
+    worker_run_ns: u64 = 0,
+    worker_run_ns_max: u64 = 0,
     thread_join_wait_ns: u64 = 0,
     lock_wait_ns: u64 = 0,
     condition_wait_ns: u64 = 0,
@@ -194,6 +197,9 @@ const ContentionCounters = struct {
     env_lock_acquires: std.atomic.Value(u64) = .init(0),
     env_lock_contentions: std.atomic.Value(u64) = .init(0),
     env_lock_spins: std.atomic.Value(u64) = .init(0),
+    worker_runs: std.atomic.Value(u64) = .init(0),
+    worker_run_ns: std.atomic.Value(u64) = .init(0),
+    worker_run_ns_max: std.atomic.Value(u64) = .init(0),
     thread_join_wait_ns: std.atomic.Value(u64) = .init(0),
     lock_wait_ns: std.atomic.Value(u64) = .init(0),
     condition_wait_ns: std.atomic.Value(u64) = .init(0),
@@ -202,6 +208,7 @@ const ContentionCounters = struct {
 
 var contention_counters: ContentionCounters = .{};
 var contention_stats_enabled: std.atomic.Value(bool) = .init(false);
+var lifecycle_stats_enabled: std.atomic.Value(bool) = .init(false);
 
 fn outOfMemoryCompletionValue(ctx: *Context) Value {
     return ctx.reserved_thread_oom_error orelse Value.staticStr("OutOfMemoryError");
@@ -209,6 +216,7 @@ fn outOfMemoryCompletionValue(ctx: *Context) Value {
 
 pub fn resetContentionStats() void {
     contention_stats_enabled.store(false, .release);
+    lifecycle_stats_enabled.store(false, .release);
     contention_counters.thread_join_parks.store(0, .release);
     contention_counters.lock_contentions.store(0, .release);
     contention_counters.lock_wait_parks.store(0, .release);
@@ -237,12 +245,32 @@ pub fn resetContentionStats() void {
     contention_counters.env_lock_acquires.store(0, .release);
     contention_counters.env_lock_contentions.store(0, .release);
     contention_counters.env_lock_spins.store(0, .release);
+    contention_counters.worker_runs.store(0, .release);
+    contention_counters.worker_run_ns.store(0, .release);
+    contention_counters.worker_run_ns_max.store(0, .release);
     object_profile.reset();
     contention_counters.thread_join_wait_ns.store(0, .release);
     contention_counters.lock_wait_ns.store(0, .release);
     contention_counters.condition_wait_ns.store(0, .release);
     contention_counters.property_wait_ns.store(0, .release);
     contention_stats_enabled.store(true, .release);
+}
+
+/// Lightweight Thread lifetime/join timing for the exact comparison runner.
+/// Unlike the full contention profiler this does not enable per-object,
+/// allocator, queue, or synchronization-path counters inside the workload.
+pub fn resetLifecycleStats() void {
+    lifecycle_stats_enabled.store(false, .release);
+    contention_counters.thread_join_parks.store(0, .release);
+    contention_counters.thread_join_wait_ns.store(0, .release);
+    contention_counters.worker_runs.store(0, .release);
+    contention_counters.worker_run_ns.store(0, .release);
+    contention_counters.worker_run_ns_max.store(0, .release);
+    lifecycle_stats_enabled.store(true, .release);
+}
+
+pub fn disableLifecycleStats() void {
+    lifecycle_stats_enabled.store(false, .release);
 }
 
 pub fn disableContentionStats() void {
@@ -290,6 +318,9 @@ pub fn contentionStats() ContentionStats {
         .object_element_lock_acquires = object.object_element_lock_acquires,
         .object_element_lock_contentions = object.object_element_lock_contentions,
         .object_element_lock_spins = object.object_element_lock_spins,
+        .worker_runs = contention_counters.worker_runs.load(.acquire),
+        .worker_run_ns = contention_counters.worker_run_ns.load(.acquire),
+        .worker_run_ns_max = contention_counters.worker_run_ns_max.load(.acquire),
         .thread_join_wait_ns = contention_counters.thread_join_wait_ns.load(.acquire),
         .lock_wait_ns = contention_counters.lock_wait_ns.load(.acquire),
         .condition_wait_ns = contention_counters.condition_wait_ns.load(.acquire),
@@ -350,6 +381,37 @@ inline fn finishContentionWaitTimer(comptime field: []const u8, start_ns: ?i96) 
     _ = @field(contention_counters, field).fetchAdd(elapsed, .monotonic);
 }
 
+inline fn startLifecycleTimer() ?i96 {
+    if (!lifecycle_stats_enabled.load(.monotonic) and !contention_stats_enabled.load(.monotonic)) return null;
+    return std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
+}
+
+inline fn finishLifecycleTimer(comptime field: []const u8, start_ns: ?i96) void {
+    const start = start_ns orelse return;
+    const elapsed = @as(u64, @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - start, 0)));
+    _ = @field(contention_counters, field).fetchAdd(elapsed, .monotonic);
+}
+
+inline fn recordThreadJoinPark() void {
+    if (!lifecycle_stats_enabled.load(.monotonic) and !contention_stats_enabled.load(.monotonic)) return;
+    _ = contention_counters.thread_join_parks.fetchAdd(1, .monotonic);
+}
+
+inline fn finishWorkerRunTimer(start_ns: ?i96) void {
+    const start = start_ns orelse return;
+    const elapsed = @as(u64, @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds - start, 0)));
+    _ = contention_counters.worker_runs.fetchAdd(1, .monotonic);
+    _ = contention_counters.worker_run_ns.fetchAdd(elapsed, .monotonic);
+    var current = contention_counters.worker_run_ns_max.load(.monotonic);
+    while (elapsed > current) {
+        if (contention_counters.worker_run_ns_max.cmpxchgWeak(current, elapsed, .monotonic, .monotonic)) |observed| {
+            current = observed;
+            continue;
+        }
+        break;
+    }
+}
+
 pub fn currentThreadId() u64 {
     return if (t_current) |rec| rec.id else 0;
 }
@@ -397,6 +459,7 @@ test "jsthread contention stats reset and snapshot" {
     finishContentionWaitTimer("lock_wait_ns", 0);
     finishContentionWaitTimer("condition_wait_ns", 0);
     finishContentionWaitTimer("property_wait_ns", 0);
+    finishWorkerRunTimer(0);
 
     const stats = contentionStats();
     try std.testing.expectEqual(@as(u64, 6), stats.events());
@@ -416,6 +479,9 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.arena_lock_contentions);
     try std.testing.expectEqual(@as(u64, 3), stats.arena_lock_spins);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_runs);
+    try std.testing.expect(stats.worker_run_ns > 0);
+    try std.testing.expectEqual(stats.worker_run_ns, stats.worker_run_ns_max);
     try std.testing.expectEqual(@as(u64, 1), stats.env_lock_acquires);
     try std.testing.expectEqual(@as(u64, 1), stats.env_lock_contentions);
     try std.testing.expectEqual(@as(u64, 5), stats.env_lock_spins);
@@ -466,6 +532,24 @@ test "jsthread contention stats reset and snapshot" {
     try std.testing.expectEqual(@as(u64, 0), contentionStats().object_element_lock_spins);
     try std.testing.expectEqual(@as(u64, 0), contentionStats().waitNs());
     disableContentionStats();
+}
+
+test "jsthread lifecycle profile excludes full contention counters" {
+    disableContentionStats();
+    resetLifecycleStats();
+    recordThreadJoinPark();
+    finishLifecycleTimer("thread_join_wait_ns", 0);
+    finishWorkerRunTimer(0);
+    const stats = contentionStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.thread_join_parks);
+    try std.testing.expect(stats.thread_join_wait_ns > 0);
+    try std.testing.expectEqual(@as(u64, 1), stats.worker_runs);
+    try std.testing.expect(stats.worker_run_ns > 0);
+    try std.testing.expectEqual(@as(u64, 0), stats.events());
+    try std.testing.expectEqual(@as(u64, 0), stats.object_backing_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), stats.object_property_lock_acquires);
+    try std.testing.expectEqual(@as(u64, 0), stats.object_element_lock_acquires);
+    disableLifecycleStats();
 }
 
 /// Install the `Thread` global into an `enable_threads` Context. Called by
@@ -646,6 +730,8 @@ fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
 }
 
 fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
+    const profile_started = startLifecycleTimer();
+    defer finishWorkerRunTimer(profile_started);
     const g = rec.gil;
     defer markThreadExited(rec);
     if (rec.ctx.parallel_js) _ = rec.ctx.parallel_worker_count.fetchAdd(1, .acq_rel);
@@ -3844,13 +3930,13 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     }
     const released_gil = self.use_thread_gil;
     if (released_gil) rec.gil.release();
-    bumpContention("thread_join_parks");
-    const wait_start = startContentionWaitTimer();
+    recordThreadJoinPark();
+    const wait_start = startLifecycleTimer();
     io_compat.conditionWaitTimeout(&rec.done_cond, io, &rec.join_mutex, .{ .duration = .{
         .raw = .fromMilliseconds(5),
         .clock = .awake,
     } }) catch {};
-    finishContentionWaitTimer("thread_join_wait_ns", wait_start);
+    finishLifecycleTimer("thread_join_wait_ns", wait_start);
     if (released_gil) {
         rec.join_mutex.unlock(io);
         rec.gil.acquire();

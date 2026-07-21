@@ -156,6 +156,18 @@ Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw 
 
 The historical [exact-parent slab A/B](.data/object-churn-128-byte-slab-ab-2026-07-15.md) and [amortized-publication A/B](.data/object-churn-amortized-publication-ab-2026-07-16.md) remain causal evidence for accepted changes. Three later candidates were rejected: [owned enumeration](.data/object-churn-owned-enumeration-ab-2026-07-18.md) and [sharded enumeration](.data/object-churn-sharded-enumeration-ab-2026-07-18.md) failed the eight-lane gate, while [sharded pressure accounting](.data/object-churn-pressure-accounting-ab-2026-07-18.md) regressed every lane. These focused runs do not replace the current complete matrix. Read the per-workload rows first; geometric means summarize one exact matrix and do not predict an application.
 
+The opt-in #426 phase profiler keeps those exact workload bytes and checksums
+while timing cooperative rendezvous, nursery prepare/trace/sweep, object-batch
+allocation/publication, worker lifetime, and creator join. It does not enable
+the per-object contention counters or alter normal benchmark output:
+
+```sh
+zig build benchmark-comparison-bin
+python3 tools/object-churn-gc-profile.py zig-out/bin/bench-comparison-zig-js \
+  --raw-out /tmp/object-churn-gc.tsv \
+  --markdown-out /tmp/object-churn-gc.md
+```
+
 ## What is compared
 
 Both runners evaluate the exact source in [`bench/comparison.js`](../bench/comparison.js). Each workload returns an exactly representable integer checksum, and the driver rejects a run if a checksum changes between samples or differs across engines at the same lane count.

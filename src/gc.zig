@@ -2828,6 +2828,10 @@ pub const Binding = struct {
 
     pub const Kind = CellKind;
 
+    pub fn collectionPhaseBoundary(self: *Binding, boundary: gc.CollectionPhaseBoundary) void {
+        self.context.recordGcCollectionPhase(boundary);
+    }
+
     pub fn recoverAllocationFailure(self: *Binding) bool {
         const state = self.context.gc_state orelse return false;
         const realm = state.realms.liveRealmForId(currentRealmId()) orelse return false;
@@ -3761,11 +3765,14 @@ pub fn allocObjectBatch(heap_erased: ?*anyopaque, arena: std.mem.Allocator, out:
     if (out.len == 0) return 0;
     if (heap_erased) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));
+        const realm = active_realm_context orelse heap.ctx.context;
+        const profile_started = realm.beginGcObjectBatchProfile();
         const count = try heap.createBatch(Object, .object, out);
         for (out[0..count]) |o| {
             o.* = .{};
             o.initInlineSlots();
         }
+        realm.finishGcObjectBatchProfile(profile_started, count);
         if (builtin.is_test) _ = object_batch_cells_for_testing.fetchAdd(count, .monotonic);
         return count;
     }
