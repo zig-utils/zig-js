@@ -1514,6 +1514,22 @@ test "optimizer lowering publishes rooted remaining call and effect side exits" 
         .{ .op = .set_index, .inputs = 3, .kind = .effect },
         .{ .op = .instance_of, .inputs = 2, .kind = .effect },
         .{ .op = .private_in, .inputs = 1, .kind = .effect },
+        .{ .op = .neg, .inputs = 1, .kind = .effect },
+        .{ .op = .pos, .inputs = 1, .kind = .effect },
+        .{ .op = .to_numeric, .inputs = 1, .kind = .effect },
+        .{ .op = .inc, .inputs = 1, .kind = .effect },
+        .{ .op = .dec, .inputs = 1, .kind = .effect },
+        .{ .op = .to_property_key, .inputs = 1, .kind = .effect },
+        .{ .op = .bit_not, .inputs = 1, .kind = .effect },
+        .{ .op = .to_string, .inputs = 1, .kind = .effect },
+        .{ .op = .pow, .inputs = 2, .kind = .effect },
+        .{ .op = .in_op, .inputs = 2, .kind = .effect },
+        .{ .op = .bit_and, .inputs = 2, .kind = .effect },
+        .{ .op = .bit_or, .inputs = 2, .kind = .effect },
+        .{ .op = .bit_xor, .inputs = 2, .kind = .effect },
+        .{ .op = .shl, .inputs = 2, .kind = .effect },
+        .{ .op = .shr, .inputs = 2, .kind = .effect },
+        .{ .op = .ushr, .inputs = 2, .kind = .effect },
     };
 
     for (cases) |case| {
