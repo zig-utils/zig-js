@@ -1204,6 +1204,11 @@ pub const Interpreter = struct {
     /// Armed monotonic-nanosecond execution deadline re-checked when the trap
     /// above is consumed. Zero means no time limit (`Watchdog::noTimeLimit`).
     watchdog_deadline_ns: ?*const std.atomic.Value(u64) = null,
+    /// `NeedShellTimeoutCheck` is raised only after the shell timer expires.
+    /// Consume it once at an execution checkpoint and publish the VM's normal
+    /// termination-request word without conflating it with the watchdog bit.
+    shell_timeout_check_flag: ?*std.atomic.Value(bool) = null,
+    termination_request_flag: ?*std.atomic.Value(bool) = null,
     /// The Context's VM lock when `enable_threads` is on (Phase 6): the step
     /// checkpoints yield it when contended, and blocking operations release
     /// it while parked. Null = no threads, zero cost.
@@ -2638,6 +2643,31 @@ pub const Interpreter = struct {
         return self.throwParserSyntaxErrorAt(context, loc, err);
     }
 
+    /// Consume VM trap bits that require work on the executing thread. This is
+    /// shared by the tree walker, bytecode VM, quickened regions, and native
+    /// checkpoint islands so a tier change cannot delay or lose a host trap.
+    pub fn serviceVmTraps(self: *Interpreter) EvalError!void {
+        if (self.shell_timeout_check_flag) |flag| if (flag.swap(false, .acq_rel)) {
+            if (self.termination_request_flag) |requested| requested.store(true, .release);
+            return self.throwError("Error", "worker terminated");
+        };
+        if (self.watchdog_check_flag) |flag| if (flag.swap(false, .acq_rel)) {
+            // JSC `VMTraps::NeedWatchdogCheck`: re-check the armed execution
+            // time limit on the executing thread. A future/disarmed deadline
+            // consumes the trap without disturbing evaluation.
+            if (self.watchdog_deadline_ns) |deadline_ptr| {
+                const deadline = deadline_ptr.load(.acquire);
+                if (deadline != 0) {
+                    const now: u64 = @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
+                    if (now >= deadline) {
+                        if (self.termination_request_flag) |requested| requested.store(true, .release);
+                        return self.throwError("Error", "worker terminated");
+                    }
+                }
+            }
+        };
+    }
+
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         try self.serviceDebugStatement(node);
         self.steps += 1;
@@ -2645,20 +2675,7 @@ pub const Interpreter = struct {
         if ((self.steps & 1023) == 0) {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");
-            if (self.watchdog_check_flag) |wf| if (wf.swap(false, .acq_rel)) {
-                // JSC `VMTraps::NeedWatchdogCheck`: re-check the armed
-                // execution time limit on the executing thread; an elapsed
-                // limit terminates here instead of waiting for the host
-                // watchdog thread's next tick.
-                if (self.watchdog_deadline_ns) |dp| {
-                    const deadline = dp.load(.acquire);
-                    if (deadline != 0) {
-                        const now: u64 = @intCast(@max(std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds, 0));
-                        if (now >= deadline)
-                            return self.throwError("Error", "worker terminated");
-                    }
-                }
-            };
+            try self.serviceVmTraps();
             if (self.use_thread_gil) if (self.gil) |g| g.yieldIfContended();
             // Mid-script GC: the tree-walker holds live `Value`s only as native
             // Zig locals/registers, which the conservative native-stack scan

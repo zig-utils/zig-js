@@ -2732,6 +2732,10 @@ pub const Context = struct {
     /// terminating evaluation once it has elapsed. Null = no trap plumbing.
     watchdog_check_flag: ?*std.atomic.Value(bool) = null,
     watchdog_deadline_ns: ?*const std.atomic.Value(u64) = null,
+    /// VM-wide shell-timeout trap and its published termination-request word.
+    /// Both are owned by the C-API context group and shared by every realm.
+    shell_timeout_check_flag: ?*std.atomic.Value(bool) = null,
+    termination_request_flag: ?*std.atomic.Value(bool) = null,
     /// Internal teardown stop word for shared-realm `Thread`s. `destroy()`
     /// sets this before waiting so unjoined parked/running threads unwind
     /// instead of keeping context teardown blocked forever after an abrupt
@@ -3601,6 +3605,8 @@ pub const Context = struct {
             .stop_flag = self.stop_flag orelse &self.teardown_stop,
             .watchdog_check_flag = self.watchdog_check_flag,
             .watchdog_deadline_ns = self.watchdog_deadline_ns,
+            .shell_timeout_check_flag = self.shell_timeout_check_flag,
+            .termination_request_flag = self.termination_request_flag,
             .main_can_block = self.main_can_block,
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,

@@ -2335,6 +2335,7 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
         if ((vm.steps & 1023) == 0) {
             if (vm.stop_flag) |flag| if (flag.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
+            try vm.serviceVmTraps();
             if (vm.use_thread_gil) if (vm.gil) |gil| gil.yieldIfContended();
             if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
         }
@@ -3567,6 +3568,10 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
         const abrupt = vm.catchableOutOfMemory(vm.throwError("Error", "worker terminated"));
         return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     };
+    vm.serviceVmTraps() catch |err| {
+        const abrupt = vm.catchableOutOfMemory(err);
+        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+    };
     if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
     if (vm.gc_safepoint_fn != null) {
         // The compiler checkpoint island has published canonical frame slots,
@@ -3873,6 +3878,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
         if ((vm.steps & 1023) == 0) {
             if (vm.stop_flag) |sf| if (sf.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
+            try vm.serviceVmTraps();
             if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
             // Mid-script GC: flush the live accumulator/ip into `exec` so the
             // precise tracer (which roots `exec.stack`/`exec.acc`) sees the

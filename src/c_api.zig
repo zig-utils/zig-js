@@ -427,6 +427,18 @@ comptime {
 /// needs no libc and is always available; a tuned allocator can replace it.
 const gpa = std.heap.page_allocator;
 const private_string_allocator = std.heap.c_allocator;
+const PrivateJSCProcessOptions = struct {
+    use_jit: bool = true,
+    use_wasm: bool = true,
+    use_shared_array_buffer: bool = true,
+    use_shadow_realm: bool = true,
+    eval_mode: bool = false,
+    one_shot_startup: bool = false,
+};
+const PrivateJSCInvalidOptionCallback = *const fn ([*]const u8, usize) callconv(.c) void;
+var private_jsc_initialization_state: std.atomic.Value(u8) = .init(0);
+var private_jsc_initialization_owner: std.atomic.Value(u64) = .init(0);
+var private_jsc_process_options: PrivateJSCProcessOptions = .{};
 const private_remote_inspection_default = switch (builtin.os.tag) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => false,
     else => true,
@@ -884,6 +896,7 @@ const CContextGroup = struct {
     ref_count: std.atomic.Value(usize) = .init(1),
     owner_thread: std.Thread.Id,
     primary: *Context,
+    process_options: PrivateJSCProcessOptions,
     /// `JSC__VM__create` owns exactly one group reference. Public context
     /// groups begin with no private owner to release through `JSC__VM__deinit`.
     private_vm_owner_released: std.atomic.Value(bool) = .init(true),
@@ -952,6 +965,10 @@ const CContextGroup = struct {
     /// re-check) at the running interpreter's next step checkpoint. Every
     /// context of this group points its `watchdog_check_flag` here.
     need_watchdog_check: std.atomic.Value(bool) = .init(false),
+    /// `JSC::VMTraps::NeedShellTimeoutCheck`: unlike the watchdog trap this is
+    /// an already-expired shell timer notification. The running interpreter
+    /// consumes it once and publishes the ordinary VM termination request.
+    need_shell_timeout_check: std.atomic.Value(bool) = .init(false),
 
     fn retain(self: *CContextGroup) bool {
         var current = self.ref_count.load(.monotonic);
@@ -13507,9 +13524,88 @@ fn privateGroupFromVM(vm_ref: ?*anyopaque) ?*CContextGroup {
     return @ptrCast(@alignCast(vm_ref orelse return null));
 }
 
+fn privateJSCBooleanOption(value_: []const u8) ?bool {
+    if (std.ascii.eqlIgnoreCase(value_, "true") or std.mem.eql(u8, value_, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(value_, "false") or std.mem.eql(u8, value_, "0")) return false;
+    return null;
+}
+
+fn privateApplyJSCOption(options: *PrivateJSCProcessOptions, text: []const u8) bool {
+    const separator = std.mem.indexOfScalar(u8, text, '=') orelse return false;
+    const name = text[0..separator];
+    const enabled = privateJSCBooleanOption(text[separator + 1 ..]) orelse return false;
+    if (std.ascii.eqlIgnoreCase(name, "useJIT")) {
+        options.use_jit = enabled;
+    } else if (std.ascii.eqlIgnoreCase(name, "useWasm")) {
+        options.use_wasm = enabled;
+    } else if (std.ascii.eqlIgnoreCase(name, "useSharedArrayBuffer")) {
+        options.use_shared_array_buffer = enabled;
+    } else if (std.ascii.eqlIgnoreCase(name, "useShadowRealm")) {
+        options.use_shadow_realm = enabled;
+    } else if (std.ascii.eqlIgnoreCase(name, "evalMode")) {
+        options.eval_mode = enabled;
+    } else if (std.ascii.eqlIgnoreCase(name, "useConcurrentJIT") and !enabled) {
+        // zig-js has no concurrent optimizing compiler; false is its exact
+        // policy and is also the upstream one-shot override.
+    } else return false;
+    return true;
+}
+
+fn privateCurrentJSCProcessOptions() PrivateJSCProcessOptions {
+    var state = private_jsc_initialization_state.load(.acquire);
+    if (state == 1 and private_jsc_initialization_owner.load(.acquire) != @as(u64, @intCast(std.Thread.getCurrentId()))) {
+        var spins: usize = 0;
+        while (state == 1) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            state = private_jsc_initialization_state.load(.acquire);
+        }
+    }
+    return if (state == 2) private_jsc_process_options else .{};
+}
+
+/// Process-wide JSC initialization is a first-call-wins transaction. The
+/// callback receives only invalid `BUN_JSC_` entries; unrelated environment
+/// variables are ignored exactly like the pinned initializer.
+export fn JSCInitialize(
+    env: [*c]const ?[*:0]const u8,
+    count: usize,
+    invalid_option: ?PrivateJSCInvalidOptionCallback,
+    eval_mode: bool,
+    one_shot_startup: bool,
+) callconv(.c) void {
+    if (private_jsc_initialization_state.cmpxchgStrong(0, 1, .acq_rel, .acquire)) |observed| {
+        if (observed == 1 and
+            private_jsc_initialization_owner.load(.acquire) != @as(u64, @intCast(std.Thread.getCurrentId())))
+        {
+            while (private_jsc_initialization_state.load(.acquire) == 1)
+                std.Thread.yield() catch {};
+        }
+        return;
+    }
+    private_jsc_initialization_owner.store(@intCast(std.Thread.getCurrentId()), .release);
+    var options = PrivateJSCProcessOptions{
+        .eval_mode = eval_mode,
+        .one_shot_startup = one_shot_startup,
+    };
+    if (env != null) {
+        var index: usize = 0;
+        while (index < count) : (index += 1) {
+            const entry_ptr = env[index] orelse continue;
+            const entry = std.mem.span(entry_ptr);
+            if (!std.mem.startsWith(u8, entry, "BUN_JSC_")) continue;
+            if (!privateApplyJSCOption(&options, entry[8..]))
+                if (invalid_option) |callback| callback(entry.ptr, entry.len);
+        }
+    }
+    private_jsc_process_options = options;
+    private_jsc_initialization_owner.store(0, .release);
+    private_jsc_initialization_state.store(2, .release);
+}
+
 fn privateCreateVMWithAllocator(allocator: std.mem.Allocator, heap_type: u8) ?*anyopaque {
     if (heap_type > 1) return null;
-    const primary = Context.create(allocator) catch return null;
+    const options = privateCurrentJSCProcessOptions();
+    const primary = Context.createWith(allocator, .{ .enable_jit = options.use_jit }) catch return null;
     const group_ref = createContextGroupForPrimary(primary, allocator) orelse return null;
     const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
     group.heap_type = heap_type;
@@ -14171,6 +14267,15 @@ export fn JSC__VM__hasExecutionTimeLimit(vm_ref: ?*anyopaque) callconv(.c) bool 
 export fn JSC__VM__notifyNeedWatchdogCheck(vm_ref: ?*anyopaque) callconv(.c) void {
     const group = privateGroupFromVM(vm_ref) orelse return;
     group.need_watchdog_check.store(true, .release);
+}
+
+/// `(*arg0).notifyNeedShellTimeoutCheck()` raises JSC's distinct shell-timeout
+/// trap after the shell timer has expired. The executing tier consumes it at
+/// its next shared VM checkpoint, publishes the ordinary termination request,
+/// and throws the same terminal Error as the other cooperative timeout paths.
+export fn JSC__VM__notifyNeedShellTimeoutCheck(vm_ref: ?*anyopaque) callconv(.c) void {
+    const group = privateGroupFromVM(vm_ref) orelse return;
+    group.need_shell_timeout_check.store(true, .release);
 }
 
 /// `(*arg0).notifyNeedDebuggerBreak()` (bindings.cpp:4997): sets the VM's
@@ -16186,16 +16291,20 @@ fn createContextGroupForPrimary(primary: *Context, record_allocator: std.mem.All
         .record_allocator = record_allocator,
         .owner_thread = std.Thread.getCurrentId(),
         .primary = primary,
+        .process_options = privateCurrentJSCProcessOptions(),
         .atom_strings = strcell.InternTable.init(gpa),
     };
     primary.c_api_group = @ptrCast(group);
     primary.watchdog_check_flag = &group.need_watchdog_check;
     primary.watchdog_deadline_ns = &group.execution_deadline_ns;
+    primary.shell_timeout_check_flag = &group.need_shell_timeout_check;
+    primary.termination_request_flag = &group.termination_requested;
     return @ptrCast(group);
 }
 
 export fn JSContextGroupCreate() callconv(.c) JSContextGroupRef {
-    const primary = Context.create(gpa) catch return null;
+    const options = privateCurrentJSCProcessOptions();
+    const primary = Context.createWith(gpa, .{ .enable_jit = options.use_jit }) catch return null;
     return createContextGroupForPrimary(primary, gpa);
 }
 
@@ -16266,6 +16375,20 @@ export fn JSGlobalContextCreate(global_class: ?*anyopaque) callconv(.c) JSContex
     return JSGlobalContextCreateInGroup(null, global_class);
 }
 
+fn privateApplyProcessGlobals(context: *Context, options: PrivateJSCProcessOptions) bool {
+    const DisabledGlobal = struct { name: []const u8, enabled: bool };
+    for ([_]DisabledGlobal{
+        .{ .name = "WebAssembly", .enabled = options.use_wasm },
+        .{ .name = "SharedArrayBuffer", .enabled = options.use_shared_array_buffer },
+        .{ .name = "ShadowRealm", .enabled = options.use_shadow_realm },
+    }) |entry| {
+        if (entry.enabled) continue;
+        _ = context.env.removeVar(entry.name);
+        _ = context.global_object.deleteNamedDataOwn(context.arena(), context.root_shape, entry.name) catch return false;
+    }
+    return true;
+}
+
 export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_class: JSClassRef) callconv(.c) JSContextRef {
     const created_group = group_ref == null;
     const effective_ref = if (created_group) JSContextGroupCreate() else group_ref;
@@ -16286,6 +16409,14 @@ export fn JSGlobalContextCreateInGroup(group_ref: JSContextGroupRef, global_clas
     }
     ctx.watchdog_check_flag = &group.need_watchdog_check;
     ctx.watchdog_deadline_ns = &group.execution_deadline_ns;
+    ctx.shell_timeout_check_flag = &group.need_shell_timeout_check;
+    ctx.termination_request_flag = &group.termination_requested;
+    if (!privateApplyProcessGlobals(ctx, group.process_options)) {
+        ctx.destroySharedArenaRealm();
+        _ = group.release();
+        if (created_group) JSContextGroupRelease(effective_ref);
+        return null;
+    }
     ctx.initCApiRef();
     const ctx_ref: JSContextRef = @ptrCast(ctx);
     if (global_class != null) {
@@ -22147,6 +22278,31 @@ test "private global lifecycle creates isolates and consumes exact ownership" {
     try std.testing.expect(Zig__GlobalObject__createForTestIsolation(null, null) == null);
     try std.testing.expect(Zig__GlobalObject__createForTestIsolation(@ptrFromInt(1), null) == null);
     Zig__GlobalObject__destructOnExit(large);
+}
+
+test "private shell timeout trap is distinct consumed and VM wide" {
+    const group_ref = JSContextGroupCreate() orelse return error.GroupCreateFailed;
+    defer JSContextGroupRelease(group_ref);
+    const first = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(first);
+    const second = JSGlobalContextCreateInGroup(group_ref, null) orelse return error.ContextCreateFailed;
+    defer JSGlobalContextRelease(second);
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const second_context = ctxForEvaluation(second) orelse return error.ContextCreateFailed;
+
+    JSC__VM__notifyNeedShellTimeoutCheck(group_ref);
+    try std.testing.expect(group.need_shell_timeout_check.load(.acquire));
+    try std.testing.expect(!group.termination_requested.load(.acquire));
+    try std.testing.expectError(error.Throw, second_context.evaluate(
+        "let shellTimeoutCounter = 0; while (shellTimeoutCounter < 4096) shellTimeoutCounter++; shellTimeoutCounter",
+    ));
+    try std.testing.expect(!group.need_shell_timeout_check.load(.acquire));
+    try std.testing.expect(group.termination_requested.load(.acquire));
+
+    JSC__VM__clearHasTerminationRequest(group_ref);
+    second_context.exception = null;
+    try std.testing.expectEqual(@as(f64, 42), (try second_context.evaluate("40 + 2")).asNum());
+    JSC__VM__notifyNeedShellTimeoutCheck(null);
 }
 
 test "private retired module registry snapshot shims are exact and inert" {
