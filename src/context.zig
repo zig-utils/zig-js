@@ -608,6 +608,9 @@ test "BudgetAllocator does not recover inside allocator-internal critical sectio
 /// side storage (weak-slot arrays, address indexes, etc.) delegates to `inner`
 /// unchanged.
 pub const GcCellBacking = struct {
+    pub const RealmId = u32;
+    pub const no_realm: RealmId = 0;
+    pub const owner_realm: RealmId = 1;
     const bucket_count = 6;
     const bucket_sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
     const chunk_bytes: usize = 64 * 1024;
@@ -733,6 +736,11 @@ pub const GcCellBacking = struct {
     /// allocation storage remains private until its header is initialized, so a
     /// conservative classifier never races construction memset/field stores.
     bucket_published_bitmaps: [bucket_count]std.ArrayListUnmanaged(FreeBitmap) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
+    /// Stable realm ownership for every issued slot. One vector is allocated
+    /// per slab chunk, so ownership adds no bytes to zig-gc's compact cell
+    /// header and no allocation per cell. Ownership survives unpublication
+    /// through finalization and is cleared only when the slot becomes reusable.
+    bucket_realm_ids: [bucket_count]std.ArrayListUnmanaged([]RealmId) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_addr_index: [bucket_count]std.ArrayListUnmanaged(ChunkAddr) = .{ .empty, .empty, .empty, .empty, .empty, .empty },
     bucket_free_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
     bucket_chunk_counts: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
@@ -868,6 +876,9 @@ pub const GcCellBacking = struct {
         if (self.bucket_published_bitmaps[idx].capacity < needed) {
             self.bucket_published_bitmaps[idx].ensureTotalCapacity(self.inner, target) catch return false;
         }
+        if (self.bucket_realm_ids[idx].capacity < needed) {
+            self.bucket_realm_ids[idx].ensureTotalCapacity(self.inner, target) catch return false;
+        }
         if (self.bucket_addr_index[idx].capacity < needed) {
             self.bucket_addr_index[idx].ensureTotalCapacity(self.inner, target) catch return false;
         }
@@ -882,12 +893,18 @@ pub const GcCellBacking = struct {
         const chunk_len = slots * slot_size;
         if (!self.reserveChunkMetadataLocked(idx, 1)) return false;
         const chunk = self.inner.alignedAlloc(u8, .@"16", chunk_len) catch return false;
+        const realm_ids = self.inner.alloc(RealmId, slots) catch {
+            self.inner.free(chunk);
+            return false;
+        };
+        @memset(realm_ids, no_realm);
         const chunk_idx = self.bucket_chunks[idx].items.len;
         self.bucket_chunks[idx].appendAssumeCapacity(chunk);
         self.bucket_next_offsets[idx].appendAssumeCapacity(0);
         self.bucket_live_counts[idx].appendAssumeCapacity(0);
         self.bucket_free_bitmaps[idx].appendAssumeCapacity(.{});
         self.bucket_published_bitmaps[idx].appendAssumeCapacity(.{});
+        self.bucket_realm_ids[idx].appendAssumeCapacity(realm_ids);
         const start = @intFromPtr(chunk.ptr);
         const end = start + chunk.len;
         const addr_entry = ChunkAddr{ .start = start, .end = end, .chunk_idx = chunk_idx };
@@ -1112,7 +1129,13 @@ pub const GcCellBacking = struct {
         return .{ .backing = self };
     }
 
-    fn setCellPublishedLocked(self: *GcCellBacking, idx: usize, allocation: *anyopaque, published: bool) void {
+    fn setCellPublishedLocked(
+        self: *GcCellBacking,
+        idx: usize,
+        allocation: *anyopaque,
+        published: bool,
+        realm_id: RealmId,
+    ) void {
         const ptr: [*]u8 = @ptrCast(allocation);
         const chunk_idx = self.ownedChunkIndexLocked(idx, ptr) orelse unreachable;
         const chunk = self.bucket_chunks[idx].items[chunk_idx];
@@ -1120,35 +1143,80 @@ pub const GcCellBacking = struct {
         std.debug.assert(offset % bucket_sizes[idx] == 0);
         std.debug.assert(offset < self.bucket_next_offsets[idx].items[chunk_idx]);
         const slot = offset / bucket_sizes[idx];
-        if (published)
-            std.debug.assert(self.bucket_published_bitmaps[idx].items[chunk_idx].insert(slot))
-        else
+        if (published) {
+            std.debug.assert(realm_id != no_realm);
+            const owner = &self.bucket_realm_ids[idx].items[chunk_idx][slot];
+            std.debug.assert(owner.* == no_realm or owner.* == realm_id);
+            owner.* = realm_id;
+            std.debug.assert(self.bucket_published_bitmaps[idx].items[chunk_idx].insert(slot));
+        } else {
             std.debug.assert(self.bucket_published_bitmaps[idx].items[chunk_idx].remove(slot));
+        }
     }
 
-    fn setCellPublished(self: *GcCellBacking, total: usize, allocation: *anyopaque, published: bool) void {
+    fn setCellPublished(self: *GcCellBacking, total: usize, allocation: *anyopaque, published: bool, realm_id: RealmId) void {
         const idx = bucketIndex(total, .@"16") orelse unreachable;
         self.acquireBucket(idx);
         defer self.unlockBucket(idx);
-        self.setCellPublishedLocked(idx, allocation, published);
+        self.setCellPublishedLocked(idx, allocation, published, realm_id);
     }
 
     pub fn publishCellAllocation(self: *GcCellBacking, allocation: *anyopaque, total: usize) void {
-        self.setCellPublished(total, allocation, true);
+        self.publishCellAllocationForRealm(allocation, total, owner_realm);
+    }
+
+    pub fn publishCellAllocationForRealm(self: *GcCellBacking, allocation: *anyopaque, total: usize, realm_id: RealmId) void {
+        self.setCellPublished(total, allocation, true, realm_id);
     }
 
     pub fn publishCellAllocationBatch(self: *GcCellBacking, payloads: []*anyopaque, total: usize, payload_offset: usize) void {
+        self.publishCellAllocationBatchForRealm(payloads, total, payload_offset, owner_realm);
+    }
+
+    pub fn publishCellAllocationBatchForRealm(self: *GcCellBacking, payloads: []*anyopaque, total: usize, payload_offset: usize, realm_id: RealmId) void {
         const idx = bucketIndex(total, .@"16") orelse unreachable;
         self.acquireBucket(idx);
         defer self.unlockBucket(idx);
         for (payloads) |payload| {
             const allocation: *anyopaque = @ptrFromInt(@intFromPtr(payload) - payload_offset);
-            self.setCellPublishedLocked(idx, allocation, true);
+            self.setCellPublishedLocked(idx, allocation, true, realm_id);
         }
     }
 
     pub fn unpublishCellAllocation(self: *GcCellBacking, allocation: *anyopaque, total: usize) void {
-        self.setCellPublished(total, allocation, false);
+        self.setCellPublished(total, allocation, false, no_realm);
+    }
+
+    fn realmIdForAddressInBucketLocked(self: *GcCellBacking, idx: usize, address: usize) RealmId {
+        const entry = self.findChunkAddrLocked(idx, address) orelse return no_realm;
+        const chunk = self.bucket_chunks[idx].items[entry.chunk_idx];
+        const offset = address - @intFromPtr(chunk.ptr);
+        if (offset >= self.bucket_next_offsets[idx].items[entry.chunk_idx]) return no_realm;
+        return self.bucket_realm_ids[idx].items[entry.chunk_idx][offset / bucket_sizes[idx]];
+    }
+
+    /// Resolve either a cell allocation base or an interior payload address to
+    /// its stable realm. This remains valid after unpublication while zig-gc is
+    /// finalizing the cell, and fails closed for private reservations.
+    pub fn realmIdForCellAddress(self: *GcCellBacking, address: usize) RealmId {
+        const hint: usize = @intCast(self.owned_bucket_hint.load(.monotonic));
+        if (hint < bucket_count) {
+            self.acquireBucket(hint);
+            const realm_id = self.realmIdForAddressInBucketLocked(hint, address);
+            self.unlockBucket(hint);
+            if (realm_id != no_realm) return realm_id;
+        }
+        for (0..bucket_count) |idx| {
+            if (idx == hint) continue;
+            self.acquireBucket(idx);
+            const realm_id = self.realmIdForAddressInBucketLocked(idx, address);
+            self.unlockBucket(idx);
+            if (realm_id != no_realm) {
+                self.owned_bucket_hint.store(@intCast(idx), .monotonic);
+                return realm_id;
+            }
+        }
+        return no_realm;
     }
 
     fn recordReusedSlotLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) void {
@@ -1284,9 +1352,20 @@ pub const GcCellBacking = struct {
         const idx = bucketIndex(len, .@"16") orelse unreachable;
         self.acquireBucket(idx);
         defer self.unlockBucket(idx);
-        self.setCellPublishedLocked(idx, old, false);
-        self.setCellPublishedLocked(idx, new, true);
         const old_ptr: [*]u8 = @ptrCast(old);
+        const new_ptr: [*]u8 = @ptrCast(new);
+        const old_chunk_idx = self.ownedChunkIndexLocked(idx, old_ptr) orelse unreachable;
+        const new_chunk_idx = self.ownedChunkIndexLocked(idx, new_ptr) orelse unreachable;
+        const old_chunk = self.bucket_chunks[idx].items[old_chunk_idx];
+        const new_chunk = self.bucket_chunks[idx].items[new_chunk_idx];
+        const old_slot = (@intFromPtr(old_ptr) - @intFromPtr(old_chunk.ptr)) / bucket_sizes[idx];
+        const new_slot = (@intFromPtr(new_ptr) - @intFromPtr(new_chunk.ptr)) / bucket_sizes[idx];
+        const realm_id = self.bucket_realm_ids[idx].items[old_chunk_idx][old_slot];
+        std.debug.assert(realm_id != no_realm);
+        std.debug.assert(self.bucket_realm_ids[idx].items[new_chunk_idx][new_slot] == no_realm);
+        self.bucket_realm_ids[idx].items[new_chunk_idx][new_slot] = realm_id;
+        self.setCellPublishedLocked(idx, old, false, no_realm);
+        self.setCellPublishedLocked(idx, new, true, realm_id);
         std.debug.assert(self.freeOwnedSlotLocked(idx, old_ptr));
     }
 
@@ -1327,6 +1406,7 @@ pub const GcCellBacking = struct {
         std.debug.assert(offset % bucket_sizes[idx] == 0);
         std.debug.assert(offset < self.bucket_next_offsets[idx].items[chunk_idx]);
         std.debug.assert(!self.bucket_published_bitmaps[idx].items[chunk_idx].contains(offset / bucket_sizes[idx]));
+        self.bucket_realm_ids[idx].items[chunk_idx][offset / bucket_sizes[idx]] = no_realm;
         self.bucket_freed_slots[idx] += 1;
         const inserted = self.bucket_free_bitmaps[idx].items[chunk_idx].insert(offset / bucket_sizes[idx]);
         std.debug.assert(inserted);
@@ -1543,6 +1623,7 @@ pub const GcCellBacking = struct {
             const issued_slots = self.bucket_next_offsets[idx].items[chunk_idx] / slot_size;
             expected_free += issued_slots;
 
+            self.inner.free(self.bucket_realm_ids[idx].items[chunk_idx]);
             self.inner.free(chunk);
 
             self.bucket_chunk_counts[idx] -= 1;
@@ -1556,6 +1637,7 @@ pub const GcCellBacking = struct {
         self.bucket_free_bitmaps[idx].shrinkRetainingCapacity(first_trimmed);
         for (self.bucket_published_bitmaps[idx].items[first_trimmed..old_len]) |bitmap| std.debug.assert(!bitmap.any());
         self.bucket_published_bitmaps[idx].shrinkRetainingCapacity(first_trimmed);
+        self.bucket_realm_ids[idx].shrinkRetainingCapacity(first_trimmed);
         self.bucket_next_offsets[idx].shrinkRetainingCapacity(first_trimmed);
         self.bucket_chunks[idx].shrinkRetainingCapacity(first_trimmed);
         self.refreshBucketHintsAfterTrimLocked(idx);
@@ -1590,17 +1672,22 @@ pub const GcCellBacking = struct {
 
     pub fn deinit(self: *GcCellBacking) void {
         for (&self.bucket_chunks, 0..) |*chunks, idx| {
-            for (chunks.items) |chunk| self.inner.free(chunk);
+            for (chunks.items, self.bucket_realm_ids[idx].items) |chunk, realm_ids| {
+                self.inner.free(realm_ids);
+                self.inner.free(chunk);
+            }
             chunks.deinit(self.inner);
             self.bucket_next_offsets[idx].deinit(self.inner);
             self.bucket_live_counts[idx].deinit(self.inner);
             self.bucket_free_bitmaps[idx].deinit(self.inner);
             self.bucket_published_bitmaps[idx].deinit(self.inner);
+            self.bucket_realm_ids[idx].deinit(self.inner);
             self.bucket_addr_index[idx].deinit(self.inner);
             self.bucket_next_offsets[idx] = .empty;
             self.bucket_live_counts[idx] = .empty;
             self.bucket_free_bitmaps[idx] = .empty;
             self.bucket_published_bitmaps[idx] = .empty;
+            self.bucket_realm_ids[idx] = .empty;
             self.bucket_addr_index[idx] = .empty;
             chunks.* = .empty;
             self.bucket_addr_min[idx] = std.math.maxInt(usize);
@@ -1748,14 +1835,18 @@ test "GC cell backing relocation reservation rolls back and commits exact public
     const idx = GcCellBacking.bucketIndex(len, .@"16").?;
 
     const old = backing.reserveRelocationCell(len).?;
-    backing.publishCellAllocation(old, len);
+    const sibling_realm: GcCellBacking.RealmId = 7;
+    backing.publishCellAllocationForRealm(old, len, sibling_realm);
+    try std.testing.expectEqual(sibling_realm, backing.realmIdForCellAddress(@intFromPtr(old)));
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
     try std.testing.expect(backing.ownsCellAllocation(old));
     try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
 
     const rolled_back = backing.reserveRelocationCell(len).?;
+    try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(rolled_back)));
     try std.testing.expectEqual(@as(usize, 2), backing.bucket_live_counts[idx].items[0]);
     backing.releaseRelocationReservation(rolled_back, len);
+    try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(rolled_back)));
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
     try std.testing.expect(!backing.ownsCellAllocation(rolled_back));
 
@@ -1765,11 +1856,55 @@ test "GC cell backing relocation reservation rolls back and commits exact public
     try std.testing.expectEqual(@as(usize, 1), backing.bucket_live_counts[idx].items[0]);
     try std.testing.expect(!backing.ownsCellAllocation(old));
     try std.testing.expect(backing.ownsCellAllocation(destination));
+    try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(old)));
+    try std.testing.expectEqual(sibling_realm, backing.realmIdForCellAddress(@intFromPtr(destination) + 32));
     try std.testing.expectEqual(@as(usize, 0), backing.parallelCellBytesSinceCollection());
 
     backing.unpublishCellAllocation(destination, len);
+    // Finalization runs after unpublication, so the owning realm must remain
+    // discoverable until the actual storage release.
+    try std.testing.expectEqual(sibling_realm, backing.realmIdForCellAddress(@intFromPtr(destination) + 32));
     backing.releaseRelocationReservation(destination, len);
+    try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(destination)));
     try std.testing.expectEqual(@as(usize, 0), backing.bucket_live_counts[idx].items[0]);
+}
+
+test "GC cell backing batch publication and reuse replace stable realm ownership" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator, .parallel = true };
+    defer backing.deinit();
+    const len = 200;
+    const payload_offset = 32;
+    const first_realm: GcCellBacking.RealmId = 41;
+    const reused_realm: GcCellBacking.RealmId = 42;
+
+    var allocations: [3]*anyopaque = undefined;
+    try std.testing.expectEqual(allocations.len, backing.allocateCellBatch(len, &allocations));
+    var payloads: [allocations.len]*anyopaque = undefined;
+    for (allocations, 0..) |allocation, index| {
+        try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(allocation)));
+        payloads[index] = @ptrFromInt(@intFromPtr(allocation) + payload_offset);
+    }
+    backing.publishCellAllocationBatchForRealm(&payloads, len, payload_offset, first_realm);
+    for (payloads) |payload|
+        try std.testing.expectEqual(first_realm, backing.realmIdForCellAddress(@intFromPtr(payload)));
+
+    backing.unpublishCellAllocation(allocations[1], len);
+    try std.testing.expectEqual(first_realm, backing.realmIdForCellAddress(@intFromPtr(payloads[1])));
+    var released = [_]*anyopaque{allocations[1]};
+    backing.freeCellStorageBatch(len, &released);
+    try std.testing.expectEqual(GcCellBacking.no_realm, backing.realmIdForCellAddress(@intFromPtr(payloads[1])));
+
+    var reused: [1]*anyopaque = undefined;
+    try std.testing.expectEqual(@as(usize, 1), backing.allocateCellBatch(len, &reused));
+    try std.testing.expectEqual(@intFromPtr(allocations[1]), @intFromPtr(reused[0]));
+    backing.publishCellAllocationForRealm(reused[0], len, reused_realm);
+    try std.testing.expectEqual(reused_realm, backing.realmIdForCellAddress(@intFromPtr(reused[0]) + payload_offset));
+
+    backing.unpublishCellAllocation(allocations[0], len);
+    backing.unpublishCellAllocation(allocations[2], len);
+    backing.unpublishCellAllocation(reused[0], len);
+    var remaining = [_]*anyopaque{ allocations[0], allocations[2], reused[0] };
+    backing.freeCellStorageBatch(len, &remaining);
 }
 
 test "GC cell backing enumerates only published slots in global address order" {
@@ -2517,6 +2652,9 @@ pub const Context = struct {
     /// when the GC is enabled. The public/internal fields above still hold
     /// stable pointers into this allocation for existing call sites.
     gc_state: ?*GcState = null,
+    /// Stable identity within `gc_state.realms`. Zero is reserved for contexts
+    /// that do not own cells in a precise heap.
+    gc_realm_id: GcCellBacking.RealmId = GcCellBacking.no_realm,
     /// Non-threaded Contexts are creator-thread-affine. Threaded contexts admit
     /// registered shared-realm `Thread`s and use either dedicated no-GIL
     /// synchronization or the explicit `.gil = true` fallback. Debug builds
@@ -3179,6 +3317,7 @@ pub const Context = struct {
         owner: *Context,
         lock: std.atomic.Mutex = .unlocked,
         siblings: std.ArrayListUnmanaged(*Context) = .empty,
+        next_realm_id: GcCellBacking.RealmId = GcCellBacking.owner_realm + 1,
 
         pub fn acquire(self: *GcRealmRegistry) void {
             var spins: usize = 0;
@@ -3211,7 +3350,14 @@ pub const Context = struct {
             defer self.release();
             for (self.siblings.items) |registered|
                 if (registered == realm) return error.RealmAlreadyRegistered;
-            try self.siblings.append(allocator, realm);
+            if (realm.gc_realm_id != GcCellBacking.no_realm)
+                return error.RealmIdentityAlreadyAssigned;
+            if (self.next_realm_id == GcCellBacking.no_realm)
+                return error.RealmIdentityExhausted;
+            try self.siblings.ensureUnusedCapacity(allocator, 1);
+            realm.gc_realm_id = self.next_realm_id;
+            self.next_realm_id +%= 1;
+            self.siblings.appendAssumeCapacity(realm);
         }
 
         /// Remove one stopped sibling from the root set. Dropping realm-owned
@@ -3485,6 +3631,7 @@ pub const Context = struct {
             // Keep the heap, binding, and cell backing in one stable allocation
             // to reduce GC-enabled context lifecycle churn.
             const gc_state = try context_gpa.create(GcState);
+            self.gc_realm_id = GcCellBacking.owner_realm;
             gc_state.binding = .{ .context = self };
             gc_state.realms = .{ .owner = self };
             // GC cells are individually collectable, but their allocation shape

@@ -2846,14 +2846,14 @@ pub const Binding = struct {
     /// edge to conservative classifiers on peer threads.
     pub fn publishCellAllocation(self: *Binding, allocation: *anyopaque, total: usize) void {
         const backing = self.context.gc_cell_backing orelse unreachable;
-        backing.publishCellAllocation(allocation, total);
+        backing.publishCellAllocationForRealm(allocation, total, currentRealmId());
     }
 
     /// Amortize publication synchronization for the VM's same-size object
     /// allocation batches while preserving the same header-before-bit order.
     pub fn publishCellAllocationBatch(self: *Binding, payloads: []*anyopaque, total: usize, payload_offset: usize) void {
         const backing = self.context.gc_cell_backing orelse unreachable;
-        backing.publishCellAllocationBatch(payloads, total, payload_offset);
+        backing.publishCellAllocationBatchForRealm(payloads, total, payload_offset, currentRealmId());
     }
 
     /// Withdraw classification before zig-gc clears/finalizes/reuses a header.
@@ -3275,6 +3275,8 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     defer sibling.destroy();
 
     const state = owner.gc_state.?;
+    try std.testing.expectEqual(ContextMod.GcCellBacking.owner_realm, owner.gc_realm_id);
+    try std.testing.expectEqual(ContextMod.GcCellBacking.no_realm, sibling.gc_realm_id);
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
     state.realms.acquire();
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
@@ -3318,6 +3320,19 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     sibling.c_api_builtin_constructors[0] = Value.obj(&sibling_root);
 
     try state.realms.registerBootstrapped(owner.gpa, sibling);
+    const sibling_realm_id = sibling.gc_realm_id;
+    try std.testing.expect(sibling_realm_id > ContextMod.GcCellBacking.owner_realm);
+    const saved_heap = setActiveHeap(owner.gc);
+    defer _ = setActiveHeap(saved_heap);
+    const saved_realm = setActiveRealmId(sibling_realm_id);
+    const sibling_cell = try owner.gc.?.create(Object, .object);
+    sibling_cell.* = .{};
+    sibling_cell.initInlineSlots();
+    _ = setActiveRealmId(saved_realm);
+    try std.testing.expectEqual(
+        sibling_realm_id,
+        owner.gc_cell_backing.?.realmIdForCellAddress(@intFromPtr(sibling_cell)),
+    );
     try std.testing.expectEqual(@as(usize, 1), state.realms.siblingCount());
     try std.testing.expectError(
         error.RealmAlreadyRegistered,
@@ -3376,6 +3391,7 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     sibling.finalization_cleanup_jobs = .empty;
     try std.testing.expectError(error.OwnerCannotRetire, state.realms.retireQuiescent(owner));
     try state.realms.retireQuiescent(sibling);
+    try std.testing.expectEqual(sibling_realm_id, sibling.gc_realm_id);
     try std.testing.expectEqual(@as(usize, 0), state.realms.siblingCount());
     try std.testing.expectError(error.RealmNotRegistered, state.realms.retireQuiescent(sibling));
 
@@ -3589,6 +3605,7 @@ pub fn allocObjectBatch(heap_erased: ?*anyopaque, arena: std.mem.Allocator, out:
 /// without threading the heap pointer through hundreds of signatures.
 threadlocal var active_heap: ?*anyopaque = null;
 threadlocal var active_interpreter: ?*interp.Interpreter = null;
+threadlocal var active_realm_id: ContextMod.GcCellBacking.RealmId = ContextMod.GcCellBacking.no_realm;
 
 /// Install `h` as this thread's active heap, returning the previous value (so
 /// nested entry points can restore it). Pass null for the arena engine.
@@ -3597,6 +3614,7 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
     active_heap = h;
     if (h) |raw| {
         const heap: *Heap = @ptrCast(@alignCast(raw));
+        active_realm_id = heap.ctx.context.gc_realm_id;
         _ = strcell.setActiveManagedFactory(.{
             .context = raw,
             .create = allocManagedString,
@@ -3612,11 +3630,26 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
         } });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
     } else {
+        active_realm_id = ContextMod.GcCellBacking.no_realm;
         _ = strcell.setActiveManagedFactory(null);
         _ = gc_runtime.setActive(.{});
         _ = gc_runtime.setBarrier(null, null, null);
     }
     return prev;
+}
+
+pub fn currentRealmId() ContextMod.GcCellBacking.RealmId {
+    return active_realm_id;
+}
+
+/// Override only the realm identity while retaining the active shared heap.
+/// A sibling-realm entry point installs its heap first, then its own stable ID;
+/// nested host calls restore both values independently.
+pub fn setActiveRealmId(realm_id: ContextMod.GcCellBacking.RealmId) ContextMod.GcCellBacking.RealmId {
+    std.debug.assert(active_heap != null or realm_id == ContextMod.GcCellBacking.no_realm);
+    const previous = active_realm_id;
+    active_realm_id = realm_id;
+    return previous;
 }
 
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
