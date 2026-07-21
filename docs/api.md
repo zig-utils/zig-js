@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 444
-implemented and 27 pending private symbols; `zig build test-home-private-abi`,
+or extension totals. The pinned Home inventory currently reports 446
+implemented and 25 pending private symbols; `zig build test-home-private-abi`,
 `zig build test-private-jstype`, and the feature-specific private ABI fixtures
 are their focused compile-link-runtime gates.
 
@@ -47,6 +47,8 @@ and bounds-checked GC-barriered offset writes; its exact ABI is recorded in
 Private global creation, same-VM test isolation, execution-context identity
 transfer, and terminal teardown are pinned by
 [`abi/global-object-lifecycle-412.json`](abi/global-object-lifecycle-412.json).
+Process-wide option initialization and the shell-timeout VM trap are pinned by
+[`abi/process-initialization-shell-timeout-417.json`](abi/process-initialization-shell-timeout-417.json).
 The implemented surface covers JSC64 identity, cell equality,
 truthiness, int32 extraction, exact signed/unsigned 64-bit BigInt construction,
 modulo-2^64 BigInt extraction with the pinned int32/Int52 fallbacks, and exact

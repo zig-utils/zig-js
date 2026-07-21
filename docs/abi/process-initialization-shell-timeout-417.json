@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "contract": "process-initialization-shell-timeout",
+  "issue": 417,
+  "parent_issues": [140, 163, 164],
+  "roadmap_issue": 134,
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "home_jsc": {
+      "path": "packages/runtime/src/jsc/jsc.zig",
+      "sha256": "945808647bf400a3077b6995d9753ccb89866cb1f9b640c6228b97df37455ba0"
+    },
+    "home_vm": {
+      "path": "packages/runtime/src/jsc/VM.zig",
+      "sha256": "660a2242bbbf688586bea6d8b2d027a8cc0f9cb353df96cbfeb8603c079f8a82"
+    },
+    "bun_jsc": {
+      "path": "src/jsc/jsc.zig",
+      "sha256": "945808647bf400a3077b6995d9753ccb89866cb1f9b640c6228b97df37455ba0"
+    },
+    "bun_vm": {
+      "path": "src/jsc/VM.zig",
+      "sha256": "6aa27bf811b684b1ee841364f96bbcb442009548d385e031f8a80f91c8dec16c"
+    },
+    "bun_initialization": {
+      "path": "src/jsc/bindings/ZigGlobalObject.cpp",
+      "sha256": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04"
+    },
+    "bun_vm_trap": {
+      "path": "src/jsc/bindings/bindings.cpp",
+      "sha256": "15d26ecb2b659fafe0c1f76494ed9d1c71c26b839f33c053ce5f179f3c336692"
+    }
+  },
+  "implementation": [
+    "src/c_api.zig",
+    "src/context.zig",
+    "src/interpreter.zig",
+    "src/vm.zig"
+  ],
+  "fixtures": [
+    "tests/abi/process_initialization_fixture_support.zig",
+    "tests/abi/home_private_process_initialization.zig",
+    "tests/abi/bun_private_process_initialization.zig"
+  ],
+  "symbols": [
+    "JSCInitialize",
+    "JSC__VM__notifyNeedShellTimeoutCheck"
+  ],
+  "semantics": [
+    "JSCInitialize is a process-wide first-call-wins transaction with release/acquire publication and blocking concurrent callers.",
+    "a callback that re-enters JSCInitialize on the winning thread returns without deadlocking or replacing partial state.",
+    "exactly count nullable sentinel-terminated C-string slots are inspected; only BUN_JSC_ entries are parsed and unrelated environment entries or null slots are ignored.",
+    "invalid names and boolean values invoke the first caller callback once per entry with the complete original byte slice.",
+    "supported useJIT, useWasm, useSharedArrayBuffer, useShadowRealm, evalMode, and false useConcurrentJIT options are case-insensitive and first-call stable.",
+    "one-shot startup records a single-worker policy; zig-js already has no concurrent optimizing-JIT or helper-marker startup to disable.",
+    "future C context groups snapshot the published process policy; disabled WebAssembly, SharedArrayBuffer, and ShadowRealm globals are absent from every exposed realm.",
+    "the process JIT option controls ordinary context-group and private-VM primary creation while explicit specialized context constructors retain their own option contract.",
+    "NeedShellTimeoutCheck has a VM-wide atomic word distinct from termination, watchdog, and debugger-break state.",
+    "the tree walker, bytecode VM, quickened regions, and native checkpoint islands share one trap-consumption path.",
+    "consumption clears the shell trap exactly once, publishes the normal termination request, and throws terminal Error on the executing realm only.",
+    "the VM argument follows the pinned private ABI valid-handle precondition; null notification is inert and a trap raised on one live VM cannot affect another live VM."
+  ]
+}

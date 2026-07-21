@@ -23,6 +23,7 @@ WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed
 WASM_STREAMING_RESPONSE_FEED_CONTRACT = ROOT / "docs/abi/wasm-streaming-response-feed-410.json"
 SQL_OBJECT_STRUCTURE_CONTRACT = ROOT / "docs/abi/sql-object-structure-411.json"
 GLOBAL_OBJECT_LIFECYCLE_CONTRACT = ROOT / "docs/abi/global-object-lifecycle-412.json"
+PROCESS_INITIALIZATION_CONTRACT = ROOT / "docs/abi/process-initialization-shell-timeout-417.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -935,6 +936,84 @@ def validate_global_object_lifecycle_contract(
         fail("global-object lifecycle semantic inventory is incomplete or duplicated")
 
 
+def validate_process_initialization_contract(
+    home_root: Path | None = None,
+    bun_root: Path | None = None,
+) -> None:
+    if not PROCESS_INITIALIZATION_CONTRACT.is_file():
+        fail(f"missing checked-in process initialization contract {PROCESS_INITIALIZATION_CONTRACT}")
+    contract = json.loads(PROCESS_INITIALIZATION_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "process-initialization-shell-timeout"
+        or contract.get("issue") != 417
+        or contract.get("parent_issues") != [140, 163, 164]
+        or contract.get("roadmap_issue") != 134
+        or contract.get("revisions")
+        != {"home": REVISION, "bun": "4982b91e3702094330f3be3883354c52b8c01323"}
+    ):
+        fail("process initialization contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "home_jsc",
+        "home_vm",
+        "bun_jsc",
+        "bun_vm",
+        "bun_initialization",
+        "bun_vm_trap",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("process initialization source inventory drift")
+    for source in sources.values():
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"path", "sha256"}
+            or not isinstance(source["path"], str)
+            or not isinstance(source["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+        ):
+            fail("invalid process initialization source contract")
+    for root, key in (
+        (home_root, "home_jsc"),
+        (home_root, "home_vm"),
+        (bun_root, "bun_jsc"),
+        (bun_root, "bun_vm"),
+        (bun_root, "bun_initialization"),
+        (bun_root, "bun_vm_trap"),
+    ):
+        if root is None:
+            continue
+        source = sources[key]
+        path = root / source["path"]
+        if not path.is_file() or sha256(path) != source["sha256"]:
+            fail(f"process initialization source drift for {source['path']}")
+    implementation = contract.get("implementation")
+    if implementation != ["src/c_api.zig", "src/context.zig", "src/interpreter.zig", "src/vm.zig"]:
+        fail("process initialization implementation inventory drift")
+    fixtures = contract.get("fixtures")
+    if fixtures != [
+        "tests/abi/process_initialization_fixture_support.zig",
+        "tests/abi/home_private_process_initialization.zig",
+        "tests/abi/bun_private_process_initialization.zig",
+    ]:
+        fail("process initialization fixture inventory drift")
+    for relative in (*implementation, *fixtures):
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            fail(f"missing process initialization evidence {relative}")
+    expected_symbols = {"JSCInitialize", "JSC__VM__notifyNeedShellTimeoutCheck"}
+    symbols = contract.get("symbols")
+    if (
+        not isinstance(symbols, list)
+        or set(symbols) != expected_symbols
+        or len(symbols) != len(expected_symbols)
+        or not expected_symbols <= set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    ):
+        fail("process initialization export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("process initialization semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -972,6 +1051,7 @@ def main() -> None:
     validate_wasm_streaming_response_feed_contract()
     validate_sql_object_structure_contract(args.home_root.resolve() if args.home_root else None)
     validate_global_object_lifecycle_contract(args.home_root.resolve() if args.home_root else None)
+    validate_process_initialization_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

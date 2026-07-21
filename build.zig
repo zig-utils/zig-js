@@ -445,6 +445,40 @@ pub fn build(b: *std.Build) void {
     private_global_lifecycle_test_step.dependOn(&run_home_private_global_lifecycle_fixture.step);
     private_global_lifecycle_test_step.dependOn(&run_bun_private_global_lifecycle_fixture.step);
 
+    const home_private_process_initialization_fixture = b.addExecutable(.{
+        .name = "home-private-process-initialization",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_private_process_initialization.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    home_private_process_initialization_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_process_initialization_fixture = b.addRunArtifact(home_private_process_initialization_fixture);
+    run_home_private_process_initialization_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_process_initialization_fixture = b.addExecutable(.{
+        .name = "bun-private-process-initialization",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_process_initialization.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    bun_private_process_initialization_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_process_initialization_fixture = b.addRunArtifact(bun_private_process_initialization_fixture);
+    run_bun_private_process_initialization_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_process_initialization_test_step = b.step(
+        "test-private-process-initialization",
+        "Compile, link, and run both pinned process initialization boundaries",
+    );
+    private_process_initialization_test_step.dependOn(&run_home_private_process_initialization_fixture.step);
+    private_process_initialization_test_step.dependOn(&run_bun_private_process_initialization_fixture.step);
+
     const bun_private_abort_signal_fixture = b.addExecutable(.{
         .name = "bun-private-abort-signal",
         .root_module = b.createModule(.{

@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 471 (444 implemented, 27 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 471 (446 implemented, 25 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
@@ -61,7 +61,7 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 444 are implemented and 27 remain pending
+Of the private entries, 446 are implemented and 25 remain pending
 until #163 provides their type/layout contracts, shims, and consumer evidence.
 `JSFunctionCall` remains revision-pinned in the declaration inventory but is
 not part of that denominator: each runtime-generated FFI module defines the
@@ -796,8 +796,8 @@ precedence; foreign context groups observe the same process-wide zone, and the
 pinned date-cache reset is vacuous because zig-js caches none. zig-js `Date`
 local-time methods remain UTC-coincident by engine design.
 
-The VM trap-notification slice adds the two pinned `VMTraps` notifies that
-have zig-js consumers. `JSC__VM__notifyNeedWatchdogCheck` sets a VM-wide trap
+The VM trap-notification slices implement all three pinned `VMTraps`
+notifications used by zig-js consumers. `JSC__VM__notifyNeedWatchdogCheck` sets a VM-wide trap
 bit that the running interpreter consumes at its next step checkpoint,
 re-checking the armed execution deadline on the executing thread and
 terminating once it has elapsed — the synchronous half of the watchdog,
@@ -812,9 +812,10 @@ debugger is attached, matching a JSC trap without one. The inspector's
 pause-request word is atomic end-to-end so a cross-thread notify cannot race
 the runtime thread's consume, both exports tolerate a null VM, and the
 fixture covers disarmed, future, and elapsed trap consumption against bounded
-and unbounded loops plus termination attribution. The third pinned notify,
-`JSC__VM__notifyNeedShellTimeoutCheck`, stays rejected: it is jsc-shell
-`--timeout` machinery with no possible zig-js consumer.
+and unbounded loops plus termination attribution.
+`JSC__VM__notifyNeedShellTimeoutCheck` now has its own VM-wide trap word. Every
+execution tier consumes it at the same checkpoint, publishes the ordinary
+termination request, and throws once without disturbing another VM.
 
 The Bun-only object-marshalling boundary mirrors `JSC::constructEmptyObject`
 followed by the consumer initializer (bindings.cpp:2477), the path Bun's
@@ -1172,7 +1173,7 @@ profile contains 484 unique symbols from 59 hashed files:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #164 | 461 (435 implemented, 26 pending) |
+| Private JSC/Bun/WebCore ABI under #164 | 461 (437 implemented, 24 pending) |
 | Public-C overlap | 22 |
 | Consumer-generated definition (`JSFunctionCall`) | 1 |
 | **Total** | **484** |
@@ -1192,6 +1193,7 @@ zig build test-bun-private-dom-form-data -Dprivate-abi-consumer=bun
 zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun
 zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun
 zig build test-private-global-lifecycle
+zig build test-private-process-initialization
 zig build test-private-hot-reload
 zig build test-private-error-code
 zig build test-private-inspector-agents
@@ -1207,7 +1209,11 @@ real VM/realm creation, same-VM test isolation, execution-context identity
 transfer, terminal teardown, retained-reference behavior, and wrong-thread or
 foreign-handle rejection. Independent Home and Bun executables exercise it.
 
+The [process initialization contract](process-initialization-shell-timeout-417.json)
+pins first-call option publication and the distinct shell-timeout trap across
+the tree walker, bytecode VM, quickened regions, and native checkpoints.
+
 The audit rejects revision, file hash, declaration digest, classification,
 calling-convention, implementation-status, and Home-comparison drift. It does
-not claim complete Bun runtime compatibility; #164 remains open for the 26
+not claim complete Bun runtime compatibility; #164 remains open for the 24
 pending core entries and later wider/generated profiles.
