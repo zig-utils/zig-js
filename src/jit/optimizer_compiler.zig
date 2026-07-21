@@ -1361,6 +1361,29 @@ test "optimizer lowering publishes an exact pre-call side exit" {
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
 }
 
+test "optimizer lowering publishes an exact pre-construction side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.new_call, 1);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
+    try std.testing.expectEqual(@as(u16, 2), point.stack_count);
+}
+
 test "optimizer compiler executes guarded parameter SSA" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
