@@ -254,7 +254,7 @@ pub const Tier = struct {
     }
 };
 
-pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop };
+pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated };
 pub const numeric_scratch_capacity = 64;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
@@ -286,6 +286,9 @@ pub const NativeFrame = extern struct {
     /// Index into the published artifact's immutable deoptimization table.
     /// Generated code sets this together with `exit_ip` before `side_exit`.
     deopt_index: usize = std.math.maxInt(usize),
+    /// Owner generation checked by optimizer code before observable work.
+    invalidation_generation: ?*const std.atomic.Value(u64) = null,
+    expected_invalidation_generation: u64 = 0,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -465,6 +468,8 @@ pub const CompiledCode = struct {
     osr: ?*OsrMetadata = null,
     /// False for an artifact that may only be entered through an exact OSR row.
     entry_enabled: bool = true,
+    invalidation_generation: ?*const std.atomic.Value(u64) = null,
+    expected_invalidation_generation: u64 = 0,
     /// A side exit may have executed observable bytecode and must resume from
     /// `deopt`; direct/restart-only entry paths reject such artifacts.
     has_side_exits: bool = false,
@@ -492,6 +497,7 @@ pub const Owner = struct {
     optimizer_tiers: std.ArrayListUnmanaged(*OptimizerTier) = .empty,
     active_leases: std.atomic.Value(usize) = .init(0),
     invalidating: std.atomic.Value(bool) = .init(false),
+    invalidation_generation: std.atomic.Value(u64) = .init(0),
 
     pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
 
@@ -541,6 +547,8 @@ pub const Owner = struct {
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
+        owned.invalidation_generation = &self.invalidation_generation;
+        owned.expected_invalidation_generation = self.invalidation_generation.load(.acquire);
         self.codes.appendAssumeCapacity(owned);
         self.tiers.appendAssumeCapacity(tier);
         tier.publishReady(owned);
@@ -566,6 +574,8 @@ pub const Owner = struct {
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
+        owned.invalidation_generation = &self.invalidation_generation;
+        owned.expected_invalidation_generation = self.invalidation_generation.load(.acquire);
         if (!tier.publishReady(claim, owned)) return error.Invalidated;
         self.codes.appendAssumeCapacity(owned);
         self.optimizer_tiers.appendAssumeCapacity(tier);
@@ -671,6 +681,7 @@ pub const Owner = struct {
         while (self.invalidating.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             while (self.invalidating.load(.acquire)) std.Thread.yield() catch {};
         }
+        _ = self.invalidation_generation.fetchAdd(1, .acq_rel);
     }
 };
 

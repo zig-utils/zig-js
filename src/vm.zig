@@ -3692,11 +3692,14 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .remainder = nativeRemainder,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+        .invalidation_generation = native.invalidation_generation,
+        .expected_invalidation_generation = native.expected_invalidation_generation,
     };
     return switch (native.run(&native_frame)) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
+        .invalidated => .miss,
         .side_exit => side_exit: {
             std.debug.assert(native.has_side_exits);
             const target = exec orelse break :side_exit .miss;
@@ -3741,11 +3744,14 @@ fn tryRunOsrNative(
         .remainder = nativeRemainder,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+        .invalidation_generation = native.invalidation_generation,
+        .expected_invalidation_generation = native.expected_invalidation_generation,
     };
     return switch (native.run(&native_frame)) {
         .complete => .{ .complete = Value.fromRawBits(native_frame.result_bits) },
         .throw => error.Throw,
         .stop => error.OutOfMemory,
+        .invalidated => .miss,
         .side_exit => side_exit: {
             const deopt = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(deopt, &native_frame, slots, &scratch, exec, vm.arena))
@@ -3774,6 +3780,8 @@ fn tryRunUnmanagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slot
     var native_frame = jit.NativeFrame{
         .slots = if (frame_slots == 0) null else @ptrCast(live_slots.ptr),
         .scratch = scratch[0..].ptr,
+        .invalidation_generation = native.invalidation_generation,
+        .expected_invalidation_generation = native.expected_invalidation_generation,
     };
     return switch (native.run(&native_frame)) {
         .complete => Value.fromRawBits(native_frame.result_bits),

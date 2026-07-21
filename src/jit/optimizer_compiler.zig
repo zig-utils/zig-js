@@ -544,6 +544,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try assembler.moveRegister64(12, 0); // stable NativeFrame
     try assembler.load64(13, 12, frameOffset("slots"));
     try assembler.load64(14, 12, frameOffset("scratch"));
+    try emitInvalidationPoll(&assembler);
 
     for (program.operations) |operation| {
         if (program.side_exit_branch != null and operation.block != optimizer.Block.none and operation.block != program.execution_block) continue;
@@ -631,6 +632,20 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .manages_steps = program.side_exit_branch != null,
         .has_side_exits = program.side_exit_branch != null,
     };
+}
+
+fn emitInvalidationPoll(assembler: *aarch64.Assembler) !void {
+    try assembler.load64(9, 12, frameOffset("invalidation_generation"));
+    try assembler.compareImmediate64(9, 0);
+    const no_owner = try assembler.branchConditionPlaceholder(.eq);
+    try assembler.load64(10, 9, 0);
+    try assembler.load64(11, 12, frameOffset("expected_invalidation_generation"));
+    try assembler.compareRegister64(10, 11);
+    const current = try assembler.branchConditionPlaceholder(.eq);
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
+    try assembler.ret();
+    try assembler.patchConditionBranch(no_owner, assembler.position());
+    try assembler.patchConditionBranch(current, assembler.position());
 }
 
 fn emitSideExit(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
@@ -982,6 +997,14 @@ test "optimizer compiler executes one loop-header OSR region" {
     try std.testing.expectEqual(@as(u64, 4), steps);
     try std.testing.expectEqual(jit.DeoptPointKind.edge, compiled.deopt.?.points[frame.deopt_index].kind);
 
+    var invalidation_generation: std.atomic.Value(u64) = .init(1);
+    frame.invalidation_generation = &invalidation_generation;
+    frame.expected_invalidation_generation = 0;
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.invalidated, compiled.run(&frame));
+    try std.testing.expectEqual(@as(u64, 0), steps);
+
+    invalidation_generation.store(0, .release);
     slots[1] = Value.num(9).rawBits();
     try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
     steps = 0;
