@@ -26,8 +26,8 @@ compile-link-runtime fixture. It remains deliberately separate from private
 Home/Bun ABI work.
 
 Private-profile exports are audited independently and never inflate the public
-or extension totals. The pinned Home inventory currently reports 446
-implemented and 1 pending private symbol; 25 consumer-provided declarations
+or extension totals. The pinned Home inventory currently reports all 447
+private symbols implemented; 25 consumer-provided declarations
 are tracked separately and rejected as duplicate zig-js exports. `zig build test-home-private-abi`,
 `zig build test-private-jstype`, and the feature-specific private ABI fixtures
 are their focused compile-link-runtime gates.
@@ -345,10 +345,12 @@ The structured exception boundary retains creation-time frames separately from
 `.stack` and fills caller-owned Home/Bun buffers through the exact 48-byte trace,
 72-byte frame, 12-byte position, and 216-byte exception layouts. Full projection
 classifies Error, DOMException, primitive, and system-like values; owns its
-strings; preserves the stable exception cell; and reports the cause runtime
+error/system strings; preserves the stable exception cell; and reports the cause runtime
 type. The second pass resolves the retained script identity and copies the
-current source line plus capped preceding lines with exact zero-based numbers,
-including through a sibling realm. The combined 352-symbol fixture also covers
+current source line plus capped preceding lines with exact zero-based numbers.
+Those source-line strings borrow an independently retained provider and survive
+collection or VM teardown; replacement and cross-thread final release are
+covered explicitly. The combined 392-symbol fixture also covers
 foreign-VM failures, exception clearing, callback reentrancy, and already-settled
 targets.
 

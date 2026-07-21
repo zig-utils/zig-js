@@ -44,7 +44,7 @@ calling convention. The exact current denominator is:
 
 | Classification | Symbols |
 |---|---:|
-| Private JSC/Bun/WebCore ABI under #163 | 447 (446 implemented, 1 pending) |
+| Private JSC/Bun/WebCore ABI under #163 | 447 (447 implemented, 0 pending) |
 | Overlap with zig-js's completed public C target | 59 |
 | Platform libc imports | 7 |
 | Consumer-provided definitions | 25 |
@@ -61,8 +61,8 @@ zig build home-private-abi-audit -Dhome-source-root="$HOME/Code/Home/lang"
 ```
 
 This inventory is the denominator, not a claim that the whole surface works.
-Of the private entries, 446 are implemented and 1 remains pending
-until #163 provides their type/layout contracts, shims, and consumer evidence.
+All 447 private entries are implemented with pinned type/layout contracts,
+shims, and consumer evidence under #163.
 The [consumer-provider contract](consumer-provided-private-exports-422.json)
 pins 24 Bun/Home host definitions and rejects duplicate zig-js exports.
 `JSFunctionCall` is the 25th external entry: each runtime-generated FFI module
@@ -717,6 +717,13 @@ remain empty and no source provider is retained. The consumer fixture covers a
 line-41 named script, nested function/global frames, same-VM sibling access,
 foreign rejection, capacity truncation, and explicit string release.
 
+Full `ZigException` projection uses a retained source provider for its separate
+source-line pass. The returned static BunStrings borrow the provider's copied
+script source, so they remain valid across precise collection and terminal VM
+teardown. Replacement releases the previous provider, final release may occur
+on another thread, and null release is inert. The exact ownership and upstream
+source hashes are pinned by the [source-provider contract](source-provider-lifecycle-424.json).
+
 `Bun__attachAsyncStackFromPromise` adds the complementary native-error path:
 pending Promises point to exact suspended async frames and transparent parent
 links, while queued reactions retain activations only until delivery. The
@@ -1132,7 +1139,8 @@ FFI cell regardless of VM ownership.
 from retained creation-time metadata rather than parsing `.stack`; the
 position-only path owns its function/URL BunStrings and returns no source-line
 provider. Full `ZigException` projection and its second source-line pass retain
-the same frame/script identity and own every returned string. The combined
+the same frame/script identity; source-line strings borrow its retained provider
+while all other returned strings are owned. The combined
 runtime fixtures cover these semantics; the two profile-selected JSType exports
 retain their separate Home/Bun runtime fixtures.
 

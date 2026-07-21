@@ -48,8 +48,8 @@ zig build home-private-abi-audit \
 ```
 
 This verifies the live revision, every source hash, signature, classification,
-and calling convention. It replaces a vague source-level estimate: the 471
-private imports are now 446 implemented / 1 pending under #163. Another 25
+and calling convention. It replaces a vague source-level estimate: all 447
+private imports are implemented under #163. Another 25
 declarations are consumer-provided (24 pinned Bun/Home host definitions plus
 the generated `JSFunctionCall`) and are deliberately not zig-js exports. The generated
 FFI wrapper emits and resolves `JSFunctionCall` inside its own compiled module,
@@ -296,12 +296,14 @@ owned BunStrings and exact zero-based positions through Home's pinned
 `ZigStackTrace`/`ZigStackFrame` layouts; it never parses the mutable `.stack`
 string. Full `ZigException` conversion adds the exact 216-byte layout, owned
 error/system fields, cause type, stable exception-cell identity, and a capped
-second pass over current/preceding source lines by retained script ID.
+second pass over current/preceding source lines. Those line strings borrow a
+retained provider whose copied source survives precise GC and terminal VM
+teardown; replacement and cross-thread final release are explicit.
 `Bun__attachAsyncStackFromPromise` complements creation-time traces for
 stackless native errors by walking pending await/transparent-forwarding links,
 with exact suspension positions, a per-segment 32-hop guard, realm stack limits,
 precise GC retention, and existing/materialized-stack preservation. The
-352-symbol combined fixture covers sibling realms, foreign VMs, callback
+392-symbol combined fixture covers sibling realms, foreign VMs, callback
 reentrancy, exception clearing, settled-target no-ops, and the complete
 DOMException code matrix. Seven Home-only
 JSMap shims create selected-realm native maps and directly implement
