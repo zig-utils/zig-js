@@ -38,6 +38,11 @@ pub const Operation = struct {
     immediate: u64 = 0,
 };
 
+const CopyPair = struct {
+    destination: u8,
+    source: u8,
+};
+
 pub const BranchSelection = struct {
     condition: u8,
     false_result: u8,
@@ -369,14 +374,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
+    var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    try appendEdgeCopies(graph, header, body, body, allocator, &operations, &types, &initialized);
+    try appendEdgeCopies(graph, header, body, body, allocator, &operations, &types, &initialized, &scratch_slots);
     try appendBlockOperations(graph, body, false, allocator, &operations, &types, &initialized);
-    try appendEdgeCopies(graph, body, header, body, allocator, &operations, &types, &initialized);
+    try appendEdgeCopies(graph, body, header, body, allocator, &operations, &types, &initialized, &scratch_slots);
 
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
     errdefer deopt_points.deinit(allocator);
@@ -412,7 +418,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .true_steps = @intCast(plan.blocks[header].instruction_count + plan.blocks[body].instruction_count),
             .true_block = body,
         },
-        .scratch_slots = @intCast(graph.nodes.len),
+        .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = local_mask,
         .bytecode_steps = plan.blocks[header].instruction_count + plan.blocks[body].instruction_count,
@@ -478,6 +484,7 @@ fn appendEdgeCopies(
     operations: *std.ArrayListUnmanaged(Operation),
     types: *[jit.numeric_scratch_capacity]ValueType,
     initialized: *[jit.numeric_scratch_capacity]bool,
+    scratch_slots: *usize,
 ) !void {
     var found: ?optimizer.Edge = null;
     for (graph.edges) |edge| if (edge.from == from and edge.to == to) {
@@ -485,23 +492,99 @@ fn appendEdgeCopies(
         found = edge;
     };
     const edge = found orelse return error.UnsupportedChunk;
-    var ordinal: usize = 0;
+    var copies: [jit.numeric_scratch_capacity]CopyPair = undefined;
+    var copy_count: usize = 0;
     for (graph.nodes) |node| if (node.kind == .block_argument and node.block == to) {
-        if (ordinal >= edge.argument_count) return error.UnsupportedChunk;
-        const source = graph.edge_arguments[edge.first_argument + ordinal];
+        if (copy_count >= edge.argument_count) return error.UnsupportedChunk;
+        const source = graph.edge_arguments[edge.first_argument + copy_count];
         if (source >= initialized.len or !initialized[source] or types[source] != .number)
             return error.UnsupportedChunk;
+        copies[copy_count] = .{
+            .destination = @intCast(node.id),
+            .source = @intCast(source),
+        };
+        copy_count += 1;
+    };
+    if (copy_count != edge.argument_count) return error.UnsupportedChunk;
+
+    // Validate the complete incoming state before mutating type/initialization
+    // state, then schedule the assignment with true parallel-copy semantics.
+    // One-slot-per-SSA lowering makes current graphs acyclic, while the cycle
+    // breaker keeps this boundary correct when scratch slots are coalesced.
+    try appendParallelCopies(allocator, operations, operation_block, copies[0..copy_count], scratch_slots);
+    for (copies[0..copy_count]) |copy| {
+        const destination = copy.destination;
+        types[destination] = .number;
+        initialized[destination] = true;
+    }
+}
+
+fn appendParallelCopies(
+    allocator: std.mem.Allocator,
+    operations: *std.ArrayListUnmanaged(Operation),
+    operation_block: u32,
+    copies: []const CopyPair,
+    scratch_slots: *usize,
+) !void {
+    var pending: [jit.numeric_scratch_capacity]CopyPair = undefined;
+    var pending_count: usize = 0;
+    for (copies) |copy| {
+        if (copy.destination >= jit.numeric_scratch_capacity or copy.source >= jit.numeric_scratch_capacity)
+            return error.UnsupportedChunk;
+        if (copy.destination == copy.source) continue;
+        if (pending_count == pending.len) return error.UnsupportedChunk;
+        for (pending[0..pending_count]) |existing| if (existing.destination == copy.destination)
+            return error.UnsupportedChunk;
+        pending[pending_count] = copy;
+        pending_count += 1;
+    }
+
+    var temporary_slot: ?u8 = null;
+    while (pending_count != 0) {
+        var ready: ?usize = null;
+        for (pending[0..pending_count], 0..) |copy, index| {
+            var destination_is_live_source = false;
+            for (pending[0..pending_count]) |other| if (other.source == copy.destination) {
+                destination_is_live_source = true;
+                break;
+            };
+            if (!destination_is_live_source) {
+                ready = index;
+                break;
+            }
+        }
+
+        if (ready) |index| {
+            const copy = pending[index];
+            try operations.append(allocator, .{
+                .kind = .copy,
+                .destination = copy.destination,
+                .block = operation_block,
+                .lhs = copy.source,
+            });
+            for (index + 1..pending_count) |next| pending[next - 1] = pending[next];
+            pending_count -= 1;
+            continue;
+        }
+
+        const saved_destination = pending[0].destination;
+        const temporary = temporary_slot orelse temporary: {
+            if (scratch_slots.* >= jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+            const slot: u8 = @intCast(scratch_slots.*);
+            scratch_slots.* += 1;
+            temporary_slot = slot;
+            break :temporary slot;
+        };
         try operations.append(allocator, .{
             .kind = .copy,
-            .destination = @intCast(node.id),
+            .destination = temporary,
             .block = operation_block,
-            .lhs = @intCast(source),
+            .lhs = saved_destination,
         });
-        types[node.id] = .number;
-        initialized[node.id] = true;
-        ordinal += 1;
-    };
-    if (ordinal != edge.argument_count) return error.UnsupportedChunk;
+        for (pending[0..pending_count]) |*copy| {
+            if (copy.source == saved_destination) copy.source = temporary;
+        }
+    }
 }
 
 fn appendBlockOperations(
@@ -904,6 +987,33 @@ fn makeExactBranchChunk(allocator: std.mem.Allocator) !bc.Chunk {
     return chunk;
 }
 
+test "optimizer schedules edge assignments as parallel copies" {
+    var operations: std.ArrayListUnmanaged(Operation) = .empty;
+    defer operations.deinit(std.testing.allocator);
+    var scratch_slots: usize = 3;
+    try appendParallelCopies(
+        std.testing.allocator,
+        &operations,
+        7,
+        &.{
+            .{ .destination = 0, .source = 1 },
+            .{ .destination = 1, .source = 0 },
+            .{ .destination = 2, .source = 1 },
+        },
+        &scratch_slots,
+    );
+
+    try std.testing.expectEqual(@as(usize, 4), scratch_slots);
+    try std.testing.expectEqual(@as(usize, 4), operations.items.len);
+    var values = [_]u64{ 10, 20, 30, 0 };
+    for (operations.items) |operation| {
+        try std.testing.expectEqual(OperationKind.copy, operation.kind);
+        try std.testing.expectEqual(@as(u32, 7), operation.block);
+        values[operation.destination] = values[operation.lhs];
+    }
+    try std.testing.expectEqualSlices(u64, &.{ 20, 10, 20 }, values[0..3]);
+}
+
 test "optimizer lowerer produces portable guarded numeric operations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1247,4 +1357,97 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, 14), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
+}
+
+test "optimizer loop OSR preserves parallel multi-local backedges" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 4;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    const ten = try chunk.addConst(Value.num(10));
+    const twenty = try chunk.addConst(Value.num(20));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, ten);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, twenty);
+    _ = try chunk.emit(.store_local, 3);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 10);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 26);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_local, 3);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.store_local, 3);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 10);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(10, 4, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    var slots = [_]u64{
+        Value.num(5).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(10).rawBits(),
+        Value.num(20).rawBits(),
+    };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 26), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 84), steps);
+    const exit = compiled.deopt.?.points[frame.deopt_index];
+    const expected = [_]f64{ 5, 5, 20, 10 };
+    for (expected, 0..) |value, local| {
+        const recovered = compiled.deopt.?.values[exit.first_value + local].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(value, Value.fromRawBits(recovered).asNum());
+    }
+
+    slots = .{
+        Value.num(5).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(10).rawBits(),
+        Value.num(20).rawBits(),
+    };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    frame.steps_until_checkpoint = compiled.bytecode_steps * 2 + 1;
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 10), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 32), steps);
+    const checkpoint = compiled.deopt.?.points[frame.deopt_index];
+    const checkpoint_expected = [_]f64{ 5, 2, 10, 20 };
+    for (checkpoint_expected, 0..) |value, local| {
+        const recovered = compiled.deopt.?.values[checkpoint.first_value + local].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(value, Value.fromRawBits(recovered).asNum());
+    }
 }

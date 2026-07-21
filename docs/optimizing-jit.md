@@ -19,7 +19,7 @@ The optimizing tier is under construction in [#146](https://github.com/zig-utils
 
 On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by `+`, `-`, `*`, `/`, relational comparisons, and numeric equality. It also accepts one Boolean branch into two terminal returns. Equal-cost paths complete natively; unequal-cost paths execute the common prefix and resume the selected successor in bytecode. Equal-cost branch-local numeric expressions are safe to evaluate eagerly because every live input is guarded and the accepted operations have no observable coercion effects.
 
-Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges/loops, remainder, coercions, precise stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
+Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges and nested control, remainder, coercions, movable pointer stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
 
 ## Deoptimization foundation
 
@@ -31,7 +31,7 @@ The first generated side exit handles a guarded numeric branch whose two paths h
 
 Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Loop headers produce an immutable OSR-entry contract with exact IP, locals, operand-stack depth, handler depth, accumulator, and VM-to-SSA scratch imports. Entry is ineligible on any shape mismatch.
 
-The first AArch64 loop OSR region handles a guarded numeric header plus one straight-line numeric body. After a hot backedge, native code imports the exact header frame, copies SSA arguments across body and backedges, and executes multiple iterations before reconstructing the exit edge. Every native header polls the owner invalidation generation and checks the remaining budget and 1,024-step checkpoint distance; a pending boundary side-exits the exact current header before executing more work. Zero, one, and many body iterations have exact recovery and step-accounting coverage. General parallel-copy cycles, nested loop control, and broader loop shapes remain tracked by #435.
+The first AArch64 loop OSR region handles a guarded numeric header plus one straight-line numeric body. After a hot backedge, native code imports the exact header frame, applies block arguments as parallel assignments, and executes multiple iterations before reconstructing the exit edge. The lowering schedules acyclic moves safely and breaks cycles with one reusable scratch slot; a multi-local loop that swaps two values on every backedge verifies exact recovery. Every native header polls the owner invalidation generation and checks the remaining budget and 1,024-step checkpoint distance, side-exiting the exact current header before pending work. Zero, one, and many body iterations, guard refusal, multi-local backedges, and checkpoint recovery are covered. Nested loop control and broader loop shapes remain tracked by #435.
 
 Executable-code invalidation now closes native entry immediately while existing owner leases keep published mappings alive. Function entry and direct calls poll the owner before entering native code. Optimizer machine code then compares the artifact's owner generation before its first operation, closing the race after the VM poll; the native loop repeats that poll at every header and side-exits exact current state when it changes. Rejection before work performs no step accounting or state mutation, while a later poll preserves completed iterations and resumes bytecode at the current header.
 
@@ -43,5 +43,6 @@ zig build test -Dtest-filter='constant SSA return converges'
 zig build test -Dtest-filter='guarded parameter SSA'
 zig build test -Dtest-filter='optimizer exact branch'
 zig build test -Dtest-filter='optimizer enters a loop header'
+zig build test-jit -Dtest-filter='parallel'
 zig build test -Dtest-filter='unsupported optimizer input caches rejection'
 ```

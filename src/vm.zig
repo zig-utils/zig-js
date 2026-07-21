@@ -7442,6 +7442,18 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     try std.testing.expectEqual(steps_before_refusal, machine.steps);
     owner.invalidating.store(false, .release);
 
+    refused_slots[1] = Value.boolVal(false);
+    try std.testing.expectEqual(NativeRunOutcome.miss, try tryRunLoopOsr(
+        &machine,
+        &refused_exec,
+        function_chunk,
+        &refused_frame,
+        null,
+    ));
+    try std.testing.expectEqual(steps_before_refusal, machine.steps);
+    try std.testing.expectEqual(artifact.osr.?.entries[0].entry_ip, refused_exec.ip);
+    refused_slots[1] = Value.num(1);
+
     try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
         &machine,
         &refused_exec,
