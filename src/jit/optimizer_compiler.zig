@@ -288,7 +288,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             bytecode_steps = graph.returns[0].origin + 1;
         } else if (graph.returns.len == 0) {
             var throw_index: ?u16 = null;
-            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .call) {
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .call or state.kind == .effect) {
                 if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
                 throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
                 bytecode_steps = state.origin;
@@ -366,6 +366,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .throw_ => .throw_,
                 .abrupt_return => .abrupt_return,
                 .call => .call,
+                .effect => .effect,
             },
             .exit_ip = state.origin,
             .first_value = first_value,
@@ -1413,6 +1414,29 @@ test "optimizer lowering publishes an exact pre-tail-call side exit" {
     try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
     try std.testing.expectEqual(@as(u64, 0b11), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
+}
+
+test "optimizer lowering publishes an exact pre-property-effect side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.effect, point.kind);
+    try std.testing.expectEqual(@as(u32, 1), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 1), point.stack_count);
+    try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
 }
 
 test "optimizer lowering publishes an exact pre-construction side exit" {

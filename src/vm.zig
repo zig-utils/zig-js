@@ -7857,6 +7857,46 @@ test "vm: optimizer pre-construction side exit resumes a constructor parameter" 
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
+test "vm: optimizer property-effect side exit preserves caught downstream exceptions" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function boom() { throw 7; }
+        \\function read(o) { try { const f = o.value; return f(); } catch { return 99; } }
+        \\const bad = { value: boom };
+        \\read(bad); read(bad); read(bad); read(bad); read(bad);
+        \\read(bad); read(bad); read(bad); read(bad); read(bad)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const read_chunk = root.fns.items[1].chunk.?;
+    const artifact = read_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    var effect_index: ?usize = null;
+    for (artifact.deopt.?.points, 0..) |point, index| {
+        if (point.kind == .effect) effect_index = index;
+    }
+    const index = effect_index orelse return error.TestUnexpectedResult;
+    const point = artifact.deopt.?.points[index];
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u64, 1), artifact.stack_maps.?.forDeopt(index).?.frame_pointer_slots);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
 test "vm: optimizer executes multiple iterations after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

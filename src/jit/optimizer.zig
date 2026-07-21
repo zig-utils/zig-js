@@ -87,7 +87,7 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, call };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, call, effect };
 
 pub const HandlerState = struct {
     catch_ip: u32,
@@ -284,7 +284,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call => if (ip + 1 < code.len) {
+        .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call, .get_prop => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -331,7 +331,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call => {},
+            .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call, .get_prop => {},
             else => if (index + 1 < blocks_list.items.len) {
                 addSuccessor(block, @intCast(index + 1));
             },
@@ -395,6 +395,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
         .call, .new_call, .tail_call => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
+        .get_prop => .{ .required = 1, .removed = 1, .added = 1 },
         else => unreachable,
     };
 }
@@ -788,6 +789,12 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth = depth - required + 1;
             },
+            .get_prop => {
+                if (depth == 0) return error.InvalidControlFlow;
+                // Property lookup may invoke user code or throw. Resume before
+                // it so the interpreter owns every observable effect.
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+            },
             .push_handler => try handlers.append(allocator, .{
                 .catch_ip = inst.a,
                 .finally_ip = inst.b,
@@ -987,6 +994,7 @@ fn supports(op: bc.Op) bool {
         .call,
         .new_call,
         .tail_call,
+        .get_prop,
         => true,
         else => false,
     };
