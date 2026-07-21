@@ -27,7 +27,7 @@ Optimizer SSA retains deterministic locals-plus-operand-stack frame states at ev
 
 The first generated side exit handles a guarded numeric branch whose two paths have unequal bytecode costs. Native code executes and accounts for the common prefix, publishes the selected successor state, and resumes that path in bytecode without restarting the function. Entry declines before doing work when the prefix would cross a budget or 1,024-step checkpoint.
 
-Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Executable loop OSR, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
+Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Loop headers now produce an immutable OSR-entry contract with exact IP, locals, operand-stack depth, handler depth, accumulator, and VM-to-SSA scratch imports. Entry is ineligible on any shape mismatch, and backends do not publish this metadata until they can execute the corresponding loop. Executable loop OSR, handlers/exceptions, invalidation polling, and movable-value stack maps remain open under #432.
 
 Focused verification:
 

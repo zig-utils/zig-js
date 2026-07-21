@@ -71,6 +71,55 @@ pub const Program = struct {
     }
 };
 
+/// Build the exact interpreter-to-SSA import contract for every reachable loop
+/// header. This is deliberately separate from executable lowering so an
+/// unsupported backend can reject publication without losing OSR state.
+pub fn buildOsrMetadata(plan: *const optimizer.Plan, allocator: std.mem.Allocator) !*jit.OsrMetadata {
+    const graph = &plan.graph;
+    var entries: std.ArrayListUnmanaged(jit.OsrEntry) = .empty;
+    defer entries.deinit(allocator);
+    var imports: std.ArrayListUnmanaged(jit.OsrImport) = .empty;
+    defer imports.deinit(allocator);
+
+    for (plan.blocks) |header| {
+        var has_backedge = false;
+        for (graph.edges) |edge| if (edge.to == header.id and edge.from != optimizer.Block.none) {
+            const predecessor = plan.blocks[edge.from];
+            if (predecessor.start >= header.start) {
+                has_backedge = true;
+                break;
+            }
+        };
+        if (!has_backedge) continue;
+
+        const state = blockEntryState(graph.frame_states, header.id) orelse return error.UnsupportedChunk;
+        const first_import: u32 = @intCast(imports.items.len);
+        const first: usize = state.first_value;
+        const count: usize = state.local_count + state.stack_count;
+        if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
+            return error.UnsupportedChunk;
+        for (graph.frame_state_values[first .. first + count], 0..) |value, index| {
+            if (value >= graph.nodes.len) return error.UnsupportedChunk;
+            const node = graph.nodes[value];
+            if (node.kind != .block_argument or node.block != header.id or value >= jit.numeric_scratch_capacity)
+                return error.UnsupportedChunk;
+            try imports.append(allocator, .{
+                .source = if (index < state.local_count) .frame_slot else .stack_slot,
+                .source_index = @intCast(if (index < state.local_count) index else index - state.local_count),
+                .destination = @intCast(value),
+            });
+        }
+        try entries.append(allocator, .{
+            .entry_ip = state.origin,
+            .first_import = first_import,
+            .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+            .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+            .accumulator_bits = Value.undef().rawBits(),
+        });
+    }
+    return jit.OsrMetadata.create(allocator, entries.items, imports.items);
+}
+
 const ValueType = enum { number, boolean, other };
 
 pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
@@ -284,6 +333,11 @@ fn blockEntryStateIndex(states: []const optimizer.FrameState, block: u32) error{
     for (states, 0..) |state, index| if (state.kind == .block_entry and state.block == block)
         return std.math.cast(u16, index) orelse error.UnsupportedChunk;
     return error.UnsupportedChunk;
+}
+
+fn blockEntryState(states: []const optimizer.FrameState, block: u32) ?optimizer.FrameState {
+    for (states) |state| if (state.kind == .block_entry and state.block == block) return state;
+    return null;
 }
 
 fn returnForBlock(returns: []const optimizer.ReturnValue, block: u32) ?optimizer.ReturnValue {
@@ -650,4 +704,61 @@ test "optimizer compiler side exits asymmetric control exactly" {
     try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
     try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
+}
+
+test "optimizer loop OSR metadata imports an exact VM frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 2;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 14);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    const metadata = try buildOsrMetadata(&plan, std.testing.allocator);
+    defer metadata.destroy();
+
+    try std.testing.expectEqual(@as(usize, 1), metadata.entries.len);
+    const entry_index = metadata.findEntry(4, 2, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(metadata.findEntry(4, 2, 1, 0, Value.undef().rawBits()) == null);
+    try std.testing.expect(metadata.findEntry(4, 2, 0, 1, Value.undef().rawBits()) == null);
+    try std.testing.expect(metadata.findEntry(4, 2, 0, 0, Value.nul().rawBits()) == null);
+
+    const slots = [_]u64{ Value.num(9).rawBits(), Value.num(3).rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(metadata.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    const entry = metadata.entries[entry_index];
+    for (metadata.imports[entry.first_import .. entry.first_import + entry.local_count], 0..) |import, index| {
+        try std.testing.expectEqual(jit.OsrImportSource.frame_slot, import.source);
+        try std.testing.expectEqual(@as(u16, @intCast(index)), import.source_index);
+        try std.testing.expectEqual(slots[index], scratch[import.destination]);
+    }
+    try std.testing.expect(!metadata.prepareScratch(entry_index, slots[0..1], &.{}, &scratch));
+
+    const last_import = entry.first_import + entry.local_count - 1;
+    const saved_destination = metadata.imports[last_import].destination;
+    metadata.imports[last_import].destination = std.math.maxInt(u8);
+    scratch = @splat(0xfeed_face);
+    try std.testing.expect(!metadata.prepareScratch(entry_index, &slots, &.{}, scratch[0..2]));
+    try std.testing.expectEqualSlices(u64, &.{ 0xfeed_face, 0xfeed_face }, scratch[0..2]);
+    metadata.imports[last_import].destination = saved_destination;
 }

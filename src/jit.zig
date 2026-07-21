@@ -349,6 +349,101 @@ pub const DeoptMetadata = struct {
     }
 };
 
+pub const OsrImportSource = enum(u8) { frame_slot, stack_slot };
+
+/// One exact VM value imported into an optimizer SSA scratch slot on OSR entry.
+pub const OsrImport = struct {
+    source: OsrImportSource,
+    source_index: u16,
+    destination: u8,
+};
+
+/// Eligibility is intentionally exact. A different IP, stack shape, handler
+/// depth, or accumulator must continue in bytecode rather than guessing state.
+pub const OsrEntry = struct {
+    entry_ip: u32,
+    first_import: u32,
+    local_count: u16,
+    stack_count: u16,
+    handler_count: u16 = 0,
+    accumulator_bits: u64,
+};
+
+/// Immutable loop-entry table prepared from optimizer SSA. Backends may only
+/// advertise an entry after they can consume every import in its selected row.
+pub const OsrMetadata = struct {
+    allocator: std.mem.Allocator,
+    entries: []OsrEntry,
+    imports: []OsrImport,
+
+    pub fn create(
+        allocator: std.mem.Allocator,
+        entries: []const OsrEntry,
+        imports: []const OsrImport,
+    ) std.mem.Allocator.Error!*OsrMetadata {
+        const metadata = try allocator.create(OsrMetadata);
+        errdefer allocator.destroy(metadata);
+        const owned_entries = try allocator.dupe(OsrEntry, entries);
+        errdefer allocator.free(owned_entries);
+        const owned_imports = try allocator.dupe(OsrImport, imports);
+        metadata.* = .{ .allocator = allocator, .entries = owned_entries, .imports = owned_imports };
+        return metadata;
+    }
+
+    pub fn destroy(self: *OsrMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.entries);
+        allocator.free(self.imports);
+        allocator.destroy(self);
+    }
+
+    pub fn findEntry(
+        self: *const OsrMetadata,
+        entry_ip: usize,
+        local_count: usize,
+        stack_count: usize,
+        handler_count: usize,
+        accumulator_bits: u64,
+    ) ?usize {
+        for (self.entries, 0..) |entry, index| {
+            if (entry.entry_ip == entry_ip and entry.local_count == local_count and
+                entry.stack_count == stack_count and entry.handler_count == handler_count and
+                entry.accumulator_bits == accumulator_bits)
+                return index;
+        }
+        return null;
+    }
+
+    pub fn prepareScratch(
+        self: *const OsrMetadata,
+        entry_index: usize,
+        frame_slots: []const u64,
+        operand_stack: []const u64,
+        scratch: []u64,
+    ) bool {
+        if (entry_index >= self.entries.len) return false;
+        const entry = self.entries[entry_index];
+        if (frame_slots.len != entry.local_count or operand_stack.len != entry.stack_count) return false;
+        const first: usize = entry.first_import;
+        const count: usize = entry.local_count + entry.stack_count;
+        if (first > self.imports.len or count > self.imports.len - first) return false;
+        for (self.imports[first .. first + count]) |import| {
+            if (import.destination >= scratch.len) return false;
+            switch (import.source) {
+                .frame_slot => if (import.source_index >= frame_slots.len) return false,
+                .stack_slot => if (import.source_index >= operand_stack.len) return false,
+            }
+        }
+        for (self.imports[first .. first + count]) |import| {
+            scratch[import.destination] = switch (import.source) {
+                .frame_slot => frame_slots[import.source_index],
+                .stack_slot => operand_stack[import.source_index],
+            };
+        }
+        return true;
+    }
+};
+
 pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
