@@ -17,9 +17,9 @@ The optimizing tier is under construction in [#146](https://github.com/zig-utils
 
 ## Executable subset
 
-On supported AArch64 hosts, one reachable straight-line SSA return lowers to immutable native code. The subset includes primitive constants and returns plus guarded Number parameters used by `+`, `-`, `*`, `/`, relational comparisons, and numeric equality. Every live parameter guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta.
+On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by `+`, `-`, `*`, `/`, relational comparisons, and numeric equality. It also accepts one Boolean branch into two terminal returns when both paths execute exactly the same number of bytecode instructions; unequal paths fail closed. Branch-local numeric expressions are safe to evaluate eagerly because every live input is guarded and the accepted operations have no observable coercion effects.
 
-Control-flow merges, remainder, coercions, multiple returns, OSR/deoptimization, precise stack maps, properties, arrays, and additional backends remain tracked by #431, #432, #132, #133, and #434. Executable-artifact concurrency/lifetime remains under #433. No JSC-compatible optimizing-tier counters are exposed yet.
+Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges/loops, unequal-path control, remainder, coercions, OSR/deoptimization, precise stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
 
 Focused verification:
 
@@ -27,5 +27,6 @@ Focused verification:
 zig build test-jit
 zig build test -Dtest-filter='constant SSA return converges'
 zig build test -Dtest-filter='guarded parameter SSA'
+zig build test -Dtest-filter='optimizer exact branch'
 zig build test -Dtest-filter='unsupported optimizer input caches rejection'
 ```

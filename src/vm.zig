@@ -7107,6 +7107,51 @@ test "vm: guarded parameter SSA executes and side exits before accounting" {
     try std.testing.expectEqual(first_steps, machine.steps - steps_before_guard);
 }
 
+test "vm: optimizer exact branch converges across both paths" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function choose(x, y) { if (x < y) return x + 10; return y + 20; }
+        \\choose(1, 2); choose(3, 2); choose(2, 4); choose(5, 1);
+        \\choose(3, 8); choose(9, 4); choose(2, 7); choose(8, 3);
+        \\choose(1, 9); choose(9, 1)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+    try std.testing.expectEqual(@as(u64, 0b11), artifact.required_numeric_slots);
+    try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+
+    var branch_slots = [_]Value{ Value.num(1), Value.num(2) };
+    var branch_frame = Frame{ .slots = &branch_slots, .parent = null };
+    var branch_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 11), (try run(&machine, function_chunk, &branch_frame)).asNum());
+    try std.testing.expectEqual(@as(u64, artifact.bytecode_steps), machine.steps - branch_start);
+    branch_slots = .{ Value.num(3), Value.num(2) };
+    branch_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 22), (try run(&machine, function_chunk, &branch_frame)).asNum());
+    try std.testing.expectEqual(@as(u64, artifact.bytecode_steps), machine.steps - branch_start);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

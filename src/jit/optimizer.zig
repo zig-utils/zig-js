@@ -79,18 +79,28 @@ pub const ReturnValue = struct {
     value: ValueId,
 };
 
+pub const BranchValue = struct {
+    block: u32,
+    origin: u32,
+    condition: ValueId,
+    false_block: u32,
+    true_block: u32,
+};
+
 pub const ValueGraph = struct {
     allocator: std.mem.Allocator,
     nodes: []ValueNode,
     edges: []Edge,
     edge_arguments: []ValueId,
     returns: []ReturnValue,
+    branches: []BranchValue,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
         self.allocator.free(self.edges);
         self.allocator.free(self.edge_arguments);
         self.allocator.free(self.returns);
+        self.allocator.free(self.branches);
         self.* = undefined;
     }
 };
@@ -173,6 +183,13 @@ pub const Plan = struct {
             try out.appendSlice(allocator, ")\n");
         }
         for (self.graph.returns) |ret| try out.print(allocator, "return b{d} @{d} %{d}\n", .{ ret.block, ret.origin, ret.value });
+        for (self.graph.branches) |branch| try out.print(allocator, "branch b{d} @{d} %{d} -> b{d},b{d}\n", .{
+            branch.block,
+            branch.origin,
+            branch.condition,
+            branch.false_block,
+            branch.true_block,
+        });
         return out.toOwnedSlice(allocator);
     }
 };
@@ -283,6 +300,7 @@ const GraphBuilder = struct {
     edge_arguments: std.ArrayListUnmanaged(ValueId) = .empty,
     roots: std.ArrayListUnmanaged(ValueId) = .empty,
     returns: std.ArrayListUnmanaged(ReturnValue) = .empty,
+    branches: std.ArrayListUnmanaged(BranchValue) = .empty,
 
     fn deinit(self: *GraphBuilder) void {
         self.nodes.deinit(self.allocator);
@@ -290,6 +308,7 @@ const GraphBuilder = struct {
         self.edge_arguments.deinit(self.allocator);
         self.roots.deinit(self.allocator);
         self.returns.deinit(self.allocator);
+        self.branches.deinit(self.allocator);
     }
 
     fn appendNode(self: *GraphBuilder, node: ValueNode) std.mem.Allocator.Error!ValueId {
@@ -514,6 +533,14 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 if (depth == 0) return error.InvalidControlFlow;
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
+                if (block.successor_count != 2) return error.InvalidControlFlow;
+                try builder.branches.append(allocator, .{
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .condition = stack[depth],
+                    .false_block = block.successors[0],
+                    .true_block = block.successors[1],
+                });
             },
             .ret => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -635,12 +662,22 @@ fn compactValueGraph(
         .origin = old.origin,
         .value = remap[old.value],
     };
+    const branches = try allocator.alloc(BranchValue, builder.branches.items.len);
+    errdefer allocator.free(branches);
+    for (builder.branches.items, branches) |old, *branch| branch.* = .{
+        .block = old.block,
+        .origin = old.origin,
+        .condition = remap[old.condition],
+        .false_block = old.false_block,
+        .true_block = old.true_block,
+    };
     return .{
         .allocator = allocator,
         .nodes = nodes,
         .edges = owned_edges,
         .edge_arguments = owned_edge_arguments,
         .returns = returns,
+        .branches = branches,
     };
 }
 
@@ -718,6 +755,8 @@ test "optimizer control-flow plans are deterministic" {
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "%3 @3 jump_if_false 8 0") != null);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "block_argument") != null);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "edge entry -> b0") != null);
+    try std.testing.expectEqual(@as(usize, 1), first.graph.branches.len);
+    try std.testing.expect(std.mem.indexOf(u8, first_dump, "branch b0 @3") != null);
 }
 
 test "optimizer SSA block arguments close loop backedges" {

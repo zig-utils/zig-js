@@ -36,10 +36,17 @@ pub const Operation = struct {
     immediate: u64 = 0,
 };
 
+pub const BranchSelection = struct {
+    condition: u8,
+    false_result: u8,
+    true_result: u8,
+};
+
 pub const Program = struct {
     allocator: std.mem.Allocator,
     operations: []Operation,
     result: u8,
+    branch: ?BranchSelection,
     scratch_slots: u8,
     frame_slots: u32,
     required_numeric_slots: u64,
@@ -55,21 +62,26 @@ const ValueType = enum { number, boolean, other };
 
 pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
     const graph = &plan.graph;
-    if (graph.returns.len != 1 or graph.returns[0].block != 0 or graph.edges.len != 1 or
-        graph.edges[0].from != optimizer.Block.none or graph.edges[0].to != 0 or
-        graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64)
+    if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
+        graph.branches.len > 1)
         return error.UnsupportedChunk;
 
     var aliases: [jit.numeric_scratch_capacity]optimizer.ValueId = @splat(optimizer.ValueNode.none);
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
-    const entry = graph.edges[0];
-    var entry_argument: usize = entry.first_argument;
-    for (graph.nodes) |node| if (node.kind == .block_argument and node.block == 0) {
-        if (entry_argument >= entry.first_argument + entry.argument_count) return error.UnsupportedChunk;
-        aliases[node.id] = graph.edge_arguments[entry_argument];
-        entry_argument += 1;
+    for (graph.nodes, 0..) |node, node_index| if (node.kind == .block_argument) {
+        var ordinal: usize = 0;
+        for (graph.nodes[0..node_index]) |previous| if (previous.kind == .block_argument and previous.block == node.block) {
+            ordinal += 1;
+        };
+        var incoming: ?optimizer.Edge = null;
+        for (graph.edges) |edge| if (edge.to == node.block) {
+            if (incoming != null) return error.UnsupportedChunk;
+            incoming = edge;
+        };
+        const edge = incoming orelse return error.UnsupportedChunk;
+        if (ordinal >= edge.argument_count) return error.UnsupportedChunk;
+        aliases[node.id] = graph.edge_arguments[edge.first_argument + ordinal];
     };
-    if (entry_argument != entry.first_argument + entry.argument_count) return error.UnsupportedChunk;
 
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
@@ -154,16 +166,64 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .mod => return error.UnsupportedChunk,
     };
 
-    const result = try resolveAlias(graph.returns[0].value, aliases);
+    var result: optimizer.ValueId = 0;
+    var branch_selection: ?BranchSelection = null;
+    var bytecode_steps: u32 = 0;
+    if (graph.branches.len == 0) {
+        if (graph.returns.len != 1 or graph.returns[0].block != 0 or graph.edges.len != 1 or
+            graph.edges[0].from != optimizer.Block.none or graph.edges[0].to != 0)
+            return error.UnsupportedChunk;
+        result = try resolveAlias(graph.returns[0].value, aliases);
+        bytecode_steps = graph.returns[0].origin + 1;
+    } else {
+        const branch = graph.branches[0];
+        if (branch.block != 0 or graph.edges.len != 3 or graph.returns.len != 2 or
+            branch.false_block == branch.true_block or branch.false_block >= plan.blocks.len or
+            branch.true_block >= plan.blocks.len or plan.blocks[branch.false_block].successor_count != 0 or
+            plan.blocks[branch.true_block].successor_count != 0)
+            return error.UnsupportedChunk;
+        var saw_entry = false;
+        var saw_false = false;
+        var saw_true = false;
+        for (graph.edges) |edge| {
+            if (edge.from == optimizer.Block.none and edge.to == 0) saw_entry = true else if (edge.from == 0 and edge.to == branch.false_block) saw_false = true else if (edge.from == 0 and edge.to == branch.true_block) saw_true = true else return error.UnsupportedChunk;
+        }
+        if (!saw_entry or !saw_false or !saw_true) return error.UnsupportedChunk;
+        const false_return = returnForBlock(graph.returns, branch.false_block) orelse return error.UnsupportedChunk;
+        const true_return = returnForBlock(graph.returns, branch.true_block) orelse return error.UnsupportedChunk;
+        const condition = try resolveAlias(branch.condition, aliases);
+        if (types[condition] != .boolean) return error.UnsupportedChunk;
+        const false_result = try resolveAlias(false_return.value, aliases);
+        const true_result = try resolveAlias(true_return.value, aliases);
+        const false_steps = plan.blocks[0].instruction_count + plan.blocks[branch.false_block].instruction_count;
+        const true_steps = plan.blocks[0].instruction_count + plan.blocks[branch.true_block].instruction_count;
+        if (false_steps != true_steps) return error.UnsupportedChunk;
+        bytecode_steps = false_steps;
+        branch_selection = .{
+            .condition = @intCast(condition),
+            .false_result = @intCast(false_result),
+            .true_result = @intCast(true_result),
+        };
+    }
     return .{
         .allocator = allocator,
         .operations = try operations.toOwnedSlice(allocator),
         .result = @intCast(result),
+        .branch = branch_selection,
         .scratch_slots = @intCast(graph.nodes.len),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = required_numeric_slots,
-        .bytecode_steps = graph.returns[0].origin + 1,
+        .bytecode_steps = bytecode_steps,
     };
+}
+
+fn returnForBlock(returns: []const optimizer.ReturnValue, block: u32) ?optimizer.ReturnValue {
+    var found: ?optimizer.ReturnValue = null;
+    for (returns) |ret| if (ret.block == block) {
+        if (found != null) return null;
+        found = ret;
+    };
+    return found;
 }
 
 fn resolveAlias(initial: optimizer.ValueId, aliases: [jit.numeric_scratch_capacity]optimizer.ValueId) error{UnsupportedChunk}!optimizer.ValueId {
@@ -223,7 +283,19 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
     };
-    try assembler.load64(9, 14, try slotOffset(program.result));
+    if (program.branch) |branch| {
+        try assembler.load64(9, 14, try slotOffset(branch.condition));
+        try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+        try assembler.compareRegister64(9, 10);
+        const false_jump = try assembler.branchConditionPlaceholder(.eq);
+        try assembler.load64(9, 14, try slotOffset(branch.true_result));
+        const done = try assembler.branchPlaceholder();
+        try assembler.patchConditionBranch(false_jump, assembler.position());
+        try assembler.load64(9, 14, try slotOffset(branch.false_result));
+        try assembler.patchBranch(done, assembler.position());
+    } else {
+        try assembler.load64(9, 14, try slotOffset(program.result));
+    }
     try assembler.store64(9, 12, frameOffset("result_bits"));
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
     try assembler.ret();
@@ -276,6 +348,23 @@ fn frameOffset(comptime field: []const u8) u15 {
     return @intCast(@offsetOf(jit.NativeFrame, field));
 }
 
+fn makeExactBranchChunk(allocator: std.mem.Allocator) !bc.Chunk {
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    const eleven = try chunk.addConst(Value.num(11));
+    const twenty_two = try chunk.addConst(Value.num(22));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 6);
+    _ = try chunk.emit(.load_const, eleven);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.load_const, twenty_two);
+    _ = try chunk.emit(.ret, 0);
+    return chunk;
+}
+
 test "optimizer lowerer produces portable guarded numeric operations" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -297,6 +386,7 @@ test "optimizer lowerer produces portable guarded numeric operations" {
     try std.testing.expectEqual(@as(u64, 0b11), program.required_numeric_slots);
     try std.testing.expectEqual(@as(u32, 2), program.frame_slots);
     try std.testing.expectEqual(@as(u32, 6), program.bytecode_steps);
+    try std.testing.expect(program.branch == null);
     try std.testing.expectEqual(OperationKind.mul, program.operations[program.operations.len - 1].kind);
 }
 
@@ -368,7 +458,36 @@ test "optimizer compiler preserves numeric comparison semantics" {
     }
 }
 
-test "optimizer compiler rejects control and remainder before publication" {
+test "optimizer lowerer accepts exact two-way SSA control" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeExactBranchChunk(arena.allocator());
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    try std.testing.expect(program.branch != null);
+    try std.testing.expectEqual(@as(u32, 6), program.bytecode_steps);
+}
+
+test "optimizer compiler executes exact two-way SSA control" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeExactBranchChunk(arena.allocator());
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    var slots = [_]Value{ Value.num(1), Value.num(2) };
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    var frame = jit.NativeFrame{ .slots = @ptrCast(slots[0..].ptr), .scratch = scratch[0..].ptr };
+    try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+    try std.testing.expectEqual(@as(f64, 11), Value.fromRawBits(frame.result_bits).asNum());
+    slots = .{ Value.num(3), Value.num(2) };
+    try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+    try std.testing.expectEqual(@as(f64, 22), Value.fromRawBits(frame.result_bits).asNum());
+}
+
+test "optimizer compiler rejects remainder and asymmetric control before publication" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -380,4 +499,22 @@ test "optimizer compiler rejects control and remainder before publication" {
     _ = try chunk.emit(.mod, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
+
+    var asymmetric = bc.Chunk.init(arena.allocator());
+    asymmetric.param_count = 1;
+    asymmetric.local_count = 1;
+    const zero = try asymmetric.addConst(Value.num(0));
+    const one = try asymmetric.addConst(Value.num(1));
+    const two_value = try asymmetric.addConst(Value.num(2));
+    _ = try asymmetric.emit(.load_local, 0);
+    _ = try asymmetric.emit(.load_const, zero);
+    _ = try asymmetric.emit(.lt, 0);
+    _ = try asymmetric.emit(.jump_if_false, 8);
+    _ = try asymmetric.emit(.load_const, one);
+    _ = try asymmetric.emit(.load_const, zero);
+    _ = try asymmetric.emit(.pop, 0);
+    _ = try asymmetric.emit(.ret, 0);
+    _ = try asymmetric.emit(.load_const, two_value);
+    _ = try asymmetric.emit(.ret, 0);
+    try std.testing.expectError(error.UnsupportedChunk, compile(&asymmetric));
 }
