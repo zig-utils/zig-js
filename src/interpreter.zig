@@ -1221,6 +1221,10 @@ pub const Interpreter = struct {
     /// arena engine. Cell allocation funnels through `gc_mod.allocObject` etc.,
     /// which use this when set. See docs/threads/P7-gc-design.md.
     gc: ?*anyopaque = null,
+    /// Owning realm for host operations that use an Interpreter outside the
+    /// Context evaluate entry point (for example Worker structured clone).
+    /// Type-erased to keep the interpreter module independent of Context.
+    gc_realm_context: ?*anyopaque = null,
     /// Backing allocator for GC-owned object side data. Null keeps the legacy
     /// arena ownership path; non-null means ArrayBuffer metadata/bytes must be
     /// released by the GC finalizer.

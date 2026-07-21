@@ -871,6 +871,8 @@ pub const Worker = struct {
 
     /// Main-side send: serialize `v` from `from`'s realm into the inbox.
     pub fn postMessage(w: *Worker, from: *interp.Interpreter, v: Value) value.HostError!void {
+        const gc_saved = gc_mod.setActiveMachineContext(from);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const bytes = try serializeForChannel(&w.inbox, from, v);
         try enqueueOwned(&w.inbox, from, bytes);
     }
@@ -879,6 +881,8 @@ pub const Worker = struct {
     /// `into`'s realm. Null when the worker closed its side or `timeout_ms`
     /// elapsed.
     pub fn receive(w: *Worker, into: *interp.Interpreter, timeout_ms: ?u64) value.HostError!?Value {
+        const gc_saved = gc_mod.setActiveMachineContext(into);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const bytes = w.outbox.pop(timeout_ms) orelse return null;
         defer alloc.free(bytes);
         return try structured_clone.deserialize(into, bytes);
@@ -1108,6 +1112,8 @@ fn workerMain(w: *Worker) void {
     const ctx = Context.createWith(alloc, w.context_options) catch {
         return;
     };
+    const gc_saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
     if (w.inspector_backend != null) ctx.initCApiRef();
     defer {
         if (w.inspector_backend != null) std.debug.assert(ctx.releaseCApiRef());

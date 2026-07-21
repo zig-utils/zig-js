@@ -654,8 +654,8 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     }
     if (!rec.ctx.parallel_js) g.acquire();
     defer if (!rec.ctx.parallel_js) g.release();
-    const gc_saved = gc_mod.setActiveHeap(rec.ctx.gc);
-    defer _ = gc_mod.setActiveHeap(gc_saved);
+    const gc_saved = gc_mod.setActiveContext(rec.ctx);
+    defer gc_mod.restoreActiveContext(gc_saved);
     const sa_saved = strcell.setActiveArena(rec.ctx.arena());
     defer _ = strcell.setActiveArena(sa_saved);
     // Register this spawned thread's native-stack scan boundary. Mid-script

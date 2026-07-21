@@ -1219,6 +1219,22 @@ pub const GcCellBacking = struct {
         return no_realm;
     }
 
+    pub fn hasRealmCells(self: *GcCellBacking, realm_id: RealmId) bool {
+        if (realm_id == no_realm) return false;
+        inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
+            for (self.bucket_realm_ids[idx].items) |realm_ids| {
+                for (realm_ids) |owner| {
+                    if (owner != realm_id) continue;
+                    self.unlockBucket(idx);
+                    return true;
+                }
+            }
+            self.unlockBucket(idx);
+        }
+        return false;
+    }
+
     fn recordReusedSlotLocked(self: *GcCellBacking, idx: usize, chunk_idx: usize) void {
         self.bucket_reused_allocs[idx] += 1;
         self.bucket_live_counts[idx].items[chunk_idx] += 1;
@@ -3317,6 +3333,10 @@ pub const Context = struct {
         owner: *Context,
         lock: std.atomic.Mutex = .unlocked,
         siblings: std.ArrayListUnmanaged(*Context) = .empty,
+        /// Retired realms no longer contribute roots, but remain addressable by
+        /// stable cell ownership until their final cell and deferred callback
+        /// have drained. #419 performs the final release/destruction phase.
+        retiring: std.ArrayListUnmanaged(*Context) = .empty,
         next_realm_id: GcCellBacking.RealmId = GcCellBacking.owner_realm + 1,
 
         pub fn acquire(self: *GcRealmRegistry) void {
@@ -3371,10 +3391,62 @@ pub const Context = struct {
             defer self.release();
             for (self.siblings.items, 0..) |registered, index| {
                 if (registered != realm) continue;
+                try self.retiring.ensureUnusedCapacity(self.owner.gpa, 1);
                 _ = self.siblings.orderedRemove(index);
+                self.retiring.appendAssumeCapacity(realm);
                 return;
             }
             return error.RealmNotRegistered;
+        }
+
+        /// Complete retirement only after collection has finalized and freed
+        /// every cell attributed to the realm. This prevents stale callback
+        /// routing while allowing the live root list to stop retaining it.
+        pub fn releaseRetired(self: *GcRealmRegistry, realm: *Context) !void {
+            if (!realm.preciseRealmIsQuiescent()) return error.RealmNotQuiescent;
+            if (self.owner.gc_cell_backing) |backing|
+                if (backing.hasRealmCells(realm.gc_realm_id)) return error.RealmCellsRemain;
+            self.acquire();
+            defer self.release();
+            for (self.retiring.items, 0..) |registered, index| {
+                if (registered != realm) continue;
+                _ = self.retiring.orderedRemove(index);
+                return;
+            }
+            return error.RealmNotRetiring;
+        }
+
+        /// Resolve a live or retiring realm without retaining the registry
+        /// lock across collector/embedder work. Callers rely on the retirement
+        /// contract above to keep the Context allocation alive until release.
+        pub fn realmForId(self: *GcRealmRegistry, realm_id: GcCellBacking.RealmId) ?*Context {
+            if (realm_id == GcCellBacking.no_realm) return null;
+            self.acquire();
+            defer self.release();
+            if (realm_id == self.owner.gc_realm_id) return self.owner;
+            for (self.siblings.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
+            for (self.retiring.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
+            return null;
+        }
+
+        /// Copy every callback target under the registry lock; callbacks run
+        /// only after it is released. Null means the caller-provided stack was
+        /// too small and should be retried with a larger temporary buffer.
+        pub fn copyCallbackRealms(self: *GcRealmRegistry, output: []*Context) ?[]*Context {
+            self.acquire();
+            defer self.release();
+            const needed = 1 + self.siblings.items.len + self.retiring.items.len;
+            if (output.len < needed) return null;
+            output[0] = self.owner;
+            @memcpy(output[1 .. 1 + self.siblings.items.len], self.siblings.items);
+            @memcpy(output[1 + self.siblings.items.len .. needed], self.retiring.items);
+            return output[0..needed];
+        }
+
+        pub fn callbackRealmCount(self: *GcRealmRegistry) usize {
+            self.acquire();
+            defer self.release();
+            return 1 + self.siblings.items.len + self.retiring.items.len;
         }
 
         pub fn siblingCount(self: *GcRealmRegistry) usize {
@@ -3385,7 +3457,9 @@ pub const Context = struct {
 
         fn deinit(self: *GcRealmRegistry, allocator: std.mem.Allocator) void {
             std.debug.assert(self.siblings.items.len == 0);
+            std.debug.assert(self.retiring.items.len == 0);
             self.siblings.deinit(allocator);
+            self.retiring.deinit(allocator);
         }
     };
 
@@ -3681,8 +3755,8 @@ pub const Context = struct {
         // enabled; restore on return so a nested createWith on this thread is
         // unaffected. Creating the heap first means even these roots are GC
         // cells (required once mid-run collection marks from them).
-        const gc_saved = gc_mod.setActiveHeap(self.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
         defer _ = strcell.setActiveArena(sa_saved);
 
@@ -3833,6 +3907,7 @@ pub const Context = struct {
             .use_thread_gil = self.gil != null and !self.parallel_js,
             .gil = self.gil,
             .gc = self.gc,
+            .gc_realm_context = if (self.gc != null) self else null,
             // Interpreter-owned buffers are reclaimable side storage, not GC
             // cells. Allocate them directly from the Context allocator so a
             // budget miss can trigger collection before retrying. Routing them
@@ -5981,8 +6056,8 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
-        const gc_saved = gc_mod.setActiveHeap(self.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
         defer _ = strcell.setActiveArena(sa_saved);
 
@@ -6012,8 +6087,8 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
-        const gc_saved = gc_mod.setActiveHeap(self.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         // Register this frame as the high boundary of the live native stack so a
@@ -6317,8 +6392,8 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
-        const gc_saved = gc_mod.setActiveHeap(self.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         // See `evaluate`: register the native-stack scan boundary for mid-script
@@ -6441,8 +6516,8 @@ pub const Context = struct {
         if (self.gil) |g| if (!self.parallel_js) g.acquire();
         defer if (self.gil) |g| if (!self.parallel_js) g.release();
         self.assertOwnerThread();
-        const gc_saved = gc_mod.setActiveHeap(self.gc);
-        defer _ = gc_mod.setActiveHeap(gc_saved);
+        const gc_saved = gc_mod.setActiveContext(self);
+        defer gc_mod.restoreActiveContext(gc_saved);
         const sa_saved = strcell.setActiveArena(self.arena());
         defer _ = strcell.setActiveArena(sa_saved);
         const ss_saved = stack_scan.enter(@frameAddress());

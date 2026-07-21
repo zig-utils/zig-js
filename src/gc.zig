@@ -2829,7 +2829,16 @@ pub const Binding = struct {
     pub const Kind = CellKind;
 
     pub fn recoverAllocationFailure(self: *Binding) bool {
-        return self.context.collectForAllocationFailure(currentInterpreter());
+        const state = self.context.gc_state orelse return false;
+        const realm = state.realms.realmForId(currentRealmId()) orelse return false;
+        return realm.collectForAllocationFailure(currentInterpreter());
+    }
+
+    fn realmForCell(self: *Binding, cell: *anyopaque) ?*ContextMod.Context {
+        const state = self.context.gc_state orelse return null;
+        const backing = self.context.gc_cell_backing orelse return null;
+        const realm_id = backing.realmIdForCellAddress(@intFromPtr(cell));
+        return state.realms.realmForId(realm_id);
     }
 
     /// Optional zig-gc fast membership hook. The reusable cell backing can
@@ -2901,7 +2910,15 @@ pub const Binding = struct {
     /// Optional zig-gc weak-pass gate. Runtime constructors publish the
     /// Context's monotonic bit before weak semantic state becomes observable.
     pub fn hasWeakWork(self: *Binding) bool {
-        return self.context.gc_weak_work.load(.acquire);
+        const state = self.context.gc_state orelse return self.context.gc_weak_work.load(.acquire);
+        state.realms.acquire();
+        defer state.realms.release();
+        if (state.realms.owner.gc_weak_work.load(.acquire)) return true;
+        for (state.realms.siblings.items) |realm|
+            if (realm.gc_weak_work.load(.acquire)) return true;
+        for (state.realms.retiring.items) |realm|
+            if (realm.gc_weak_work.load(.acquire)) return true;
+        return false;
     }
 
     pub fn classifyConservativeInterior(self: *Binding, address: usize) gc.InteriorOwnership {
@@ -3152,27 +3169,64 @@ pub const Binding = struct {
     }
 
     pub fn afterWeak(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        const ctx = self.realmForCell(cell) orelse return;
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
                 // The heap running this collection is the Context's own (afterWeak
                 // only fires mid-collect), and marks are still valid (pre-sweep).
-                const heap = self.context.gc orelse return;
-                if (pruneDeadWeakEntries(o, heap)) self.context.queueFinalizationRegistryCleanup(o);
+                const heap = ctx.gc orelse return;
+                if (pruneDeadWeakEntries(o, heap)) ctx.queueFinalizationRegistryCleanup(o);
             },
             else => {},
         }
     }
 
     pub fn afterWeakRoots(self: *Binding) void {
-        self.context.runPrivateWeakFinalizers();
+        // Weak targets are clear now, but their host callbacks are arbitrary
+        // reentrant code. Drain every live/retiring realm from `afterSweep`,
+        // after collector locks and registry locks are both released.
+        _ = self;
     }
 
     /// Drain embedder callbacks only after zig-gc has completed sweep, released
     /// its allocation lock, and restored allocation publication. Cell
     /// finalizers themselves merely enqueue stable Context-owned records.
     pub fn afterSweep(self: *Binding) void {
-        self.context.runDeferredPostSweepCallbacks();
+        const state = self.context.gc_state orelse {
+            self.context.runPrivateWeakFinalizers();
+            self.context.runDeferredPostSweepCallbacks();
+            return;
+        };
+        var local: [8]*ContextMod.Context = undefined;
+        if (state.realms.copyCallbackRealms(&local)) |realms| {
+            for (realms) |realm| {
+                realm.runPrivateWeakFinalizers();
+                realm.runDeferredPostSweepCallbacks();
+            }
+            return;
+        }
+        var capacity = state.realms.callbackRealmCount();
+        while (true) {
+            const allocated = std.heap.page_allocator.alloc(*ContextMod.Context, capacity) catch {
+                // Every queue is persistent; leaving sibling work queued is
+                // fail-closed and a later sweep retries it. Always service the
+                // immutable owner without allocating.
+                state.realms.owner.runPrivateWeakFinalizers();
+                state.realms.owner.runDeferredPostSweepCallbacks();
+                return;
+            };
+            if (state.realms.copyCallbackRealms(allocated)) |realms| {
+                defer std.heap.page_allocator.free(allocated);
+                for (realms) |realm| {
+                    realm.runPrivateWeakFinalizers();
+                    realm.runDeferredPostSweepCallbacks();
+                }
+                return;
+            }
+            std.heap.page_allocator.free(allocated);
+            capacity = state.realms.callbackRealmCount();
+        }
     }
 
     /// A cell is being reclaimed. Arena-mode `ArrayBufferData` is released with
@@ -3180,11 +3234,12 @@ pub const Binding = struct {
     /// slabs individually. A SharedArrayBuffer wrapper owns one realm retain
     /// that must be released when the wrapper cell dies.
     pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
-        if (self.context.gc_finalizer_stats_out) |stats| stats.addKind(kind);
+        const ctx = self.realmForCell(cell) orelse return;
+        if (ctx.gc_finalizer_stats_out) |stats| stats.addKind(kind);
         switch (kind) {
             .object => {
                 const o: *Object = @ptrCast(@alignCast(cell));
-                if (o.cApiObjectOwner()) |owner| self.context.queueCApiObjectFinish(owner);
+                if (o.cApiObjectOwner()) |owner| ctx.queueCApiObjectFinish(owner);
                 if (o.wasmGcReference()) |state| {
                     if (state.root) |root| if (state.release) |release| release(root, o);
                     state.root = null;
@@ -3198,68 +3253,68 @@ pub const Binding = struct {
                 // Buffer metadata now lives in the cold sidecar. Release it
                 // before finalizeObjectBacking destroys that sidecar.
                 if (o.arrayBuffer()) |ab| {
-                    if (self.context.gc_finalizer_stats_out) |stats| {
+                    if (ctx.gc_finalizer_stats_out) |stats| {
                         stats.array_buffers += 1;
                         if (ab.shared != null) stats.shared_array_buffers += 1;
                     }
                     if (ab.native_handle.swap(null, .acq_rel)) |handle| handle.releaseWrapper();
                     if (ab.shared) |storage| {
-                        const sab_released = self.context.sab_retains.releaseTracked(storage);
+                        const sab_released = ctx.sab_retains.releaseTracked(storage);
                         std.debug.assert(sab_released);
                         if (sab_released) ab.shared = null;
                     } else if (ab.external_owner) |owner| {
-                        self.context.queueExternalOwnerRelease(owner);
+                        ctx.queueExternalOwnerRelease(owner);
                         ab.external_owner = null;
                     } else if (ab.gc_owned and ab.local_data.len > 0) {
-                        self.context.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
-                        _ = @atomicRmw(usize, &self.context.gc_array_buffer_bytes_live, .Sub, ab.local_data.len, .monotonic);
+                        ctx.gpa.rawFree(ab.local_data, .@"8", @returnAddress());
+                        _ = @atomicRmw(usize, &ctx.gc_array_buffer_bytes_live, .Sub, ab.local_data.len, .monotonic);
                         ab.local_data = &.{};
                     }
                     if (ab.gc_owned) {
-                        self.context.gpa.destroy(ab);
+                        ctx.gpa.destroy(ab);
                         o.clearArrayBuffer();
                     }
                 }
                 const backing_flags = o.backingFlagsSnapshot();
                 if (hasObjectBacking(backing_flags) or o.privateBrands() != null) {
-                    const released = finalizeObjectBacking(o, o.backingAllocatorIfActive() orelse self.context.gpa);
+                    const released = finalizeObjectBacking(o, o.backingAllocatorIfActive() orelse ctx.gpa);
                     if (released > 0) {
-                        if (self.context.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
-                        _ = @atomicRmw(usize, &self.context.gc_object_backing_stores_live, .Sub, released, .monotonic);
+                        if (ctx.gc_finalizer_stats_out) |stats| stats.object_backing_releases += released;
+                        _ = @atomicRmw(usize, &ctx.gc_object_backing_stores_live, .Sub, released, .monotonic);
                     }
                 }
             },
             .string => {
                 const string: *StringCell = @ptrCast(@alignCast(cell));
                 if (string.externalOwner()) |owner| {
-                    self.context.queueExternalStringRelease(owner);
+                    ctx.queueExternalStringRelease(owner);
                     string.setExternalOwner(null);
                 }
-                if (string.bytes.len > 0) self.context.gpa.free(@constCast(string.bytes));
-                _ = @atomicRmw(usize, &self.context.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
+                if (string.bytes.len > 0) ctx.gpa.free(@constCast(string.bytes));
+                _ = @atomicRmw(usize, &ctx.gc_string_bytes_live, .Sub, string.bytes.len, .monotonic);
                 string.bytes = &.{};
                 string.setGcManaged(false);
             },
             .environment => finalizeEnv(@ptrCast(@alignCast(cell))),
             .generator => finalizeGenerator(
                 @ptrCast(@alignCast(cell)),
-                self.context.gpa,
-                &self.context.gc_generator_backing_stores_live,
+                ctx.gpa,
+                &ctx.gc_generator_backing_stores_live,
             ),
             .promise => {
                 const p: *promise.Promise = @ptrCast(@alignCast(cell));
                 if (p.gc_owned) {
                     const count = p.on_fulfill.items.len + p.on_reject.items.len +
                         @intFromBool(p.on_fulfill_inline != null) + @intFromBool(p.on_reject_inline != null);
-                    if (self.context.gc_finalizer_stats_out) |stats| stats.promise_reactions += count;
-                    p.on_fulfill.deinit(self.context.gpa);
-                    p.on_reject.deinit(self.context.gpa);
+                    if (ctx.gc_finalizer_stats_out) |stats| stats.promise_reactions += count;
+                    p.on_fulfill.deinit(ctx.gpa);
+                    p.on_reject.deinit(ctx.gpa);
                     p.on_fulfill_inline = null;
                     p.on_reject_inline = null;
                     p.on_fulfill = .empty;
                     p.on_reject = .empty;
                     if (count > 0) {
-                        _ = @atomicRmw(usize, &self.context.gc_promise_reactions_live, .Sub, count, .monotonic);
+                        _ = @atomicRmw(usize, &ctx.gc_promise_reactions_live, .Sub, count, .monotonic);
                     }
                 }
             },
@@ -3275,6 +3330,14 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     defer sibling.destroy();
 
     const state = owner.gc_state.?;
+    var owner_finalizers = ContextMod.Context.GcFinalizerStats{};
+    var sibling_finalizers = ContextMod.Context.GcFinalizerStats{};
+    owner.gc_finalizer_stats_out = &owner_finalizers;
+    sibling.gc_finalizer_stats_out = &sibling_finalizers;
+    defer {
+        owner.gc_finalizer_stats_out = null;
+        sibling.gc_finalizer_stats_out = null;
+    }
     try std.testing.expectEqual(ContextMod.GcCellBacking.owner_realm, owner.gc_realm_id);
     try std.testing.expectEqual(ContextMod.GcCellBacking.no_realm, sibling.gc_realm_id);
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
@@ -3324,15 +3387,18 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     try std.testing.expect(sibling_realm_id > ContextMod.GcCellBacking.owner_realm);
     const saved_heap = setActiveHeap(owner.gc);
     defer _ = setActiveHeap(saved_heap);
-    const saved_realm = setActiveRealmId(sibling_realm_id);
+    const saved_realm = setActiveRealm(sibling);
     const sibling_cell = try owner.gc.?.create(Object, .object);
     sibling_cell.* = .{};
     sibling_cell.initInlineSlots();
-    _ = setActiveRealmId(saved_realm);
+    const sibling_string = try allocManagedString(@ptrCast(owner.gc.?), sibling.gpa, "sibling-owned");
+    _ = setActiveRealm(saved_realm.?);
     try std.testing.expectEqual(
         sibling_realm_id,
         owner.gc_cell_backing.?.realmIdForCellAddress(@intFromPtr(sibling_cell)),
     );
+    try std.testing.expectEqual(sibling_realm_id, owner.gc_cell_backing.?.realmIdForCellAddress(@intFromPtr(sibling_string)));
+    try std.testing.expectEqual(@as(usize, "sibling-owned".len), sibling.gc_string_bytes_live);
     try std.testing.expectEqual(@as(usize, 1), state.realms.siblingCount());
     try std.testing.expectError(
         error.RealmAlreadyRegistered,
@@ -3394,6 +3460,35 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     try std.testing.expectEqual(sibling_realm_id, sibling.gc_realm_id);
     try std.testing.expectEqual(@as(usize, 0), state.realms.siblingCount());
     try std.testing.expectError(error.RealmNotRegistered, state.realms.retireQuiescent(sibling));
+    try std.testing.expectEqual(sibling, state.realms.realmForId(sibling_realm_id).?);
+    try std.testing.expectError(error.RealmCellsRemain, state.realms.releaseRetired(sibling));
+
+    const WeakCallback = struct {
+        fn run(raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    const ExternalCallback = struct {
+        fn run(_: ?*anyopaque, raw: ?*anyopaque) callconv(.c) void {
+            const calls: *usize = @ptrCast(@alignCast(raw.?));
+            calls.* += 1;
+        }
+    };
+    var weak_callback_calls: usize = 0;
+    var external_callback_calls: usize = 0;
+    var weak_root = ContextMod.Context.PrivateWeakRoot{
+        .notify_on_collect = .init(true),
+        .finalize_fn = WeakCallback.run,
+        .finalize_context = &weak_callback_calls,
+    };
+    try sibling.private_weak_roots.append(sibling.gpa, &weak_root);
+    defer sibling.private_weak_roots.clearRetainingCapacity();
+    const external_owner = try sibling.createExternalBufferOwner(null, ExternalCallback.run, &external_callback_calls);
+    sibling.queueExternalOwnerRelease(external_owner);
+    state.binding.afterSweep();
+    try std.testing.expectEqual(@as(usize, 1), weak_callback_calls);
+    try std.testing.expectEqual(@as(usize, 1), external_callback_calls);
 
     visitor.owner_marks = 0;
     visitor.sibling_marks = 0;
@@ -3401,6 +3496,15 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     state.binding.traceRoots(&visitor);
     try std.testing.expectEqual(@as(usize, 1), visitor.owner_marks);
     try std.testing.expectEqual(@as(usize, 0), visitor.sibling_marks);
+
+    owner.c_api_builtin_constructors[0] = saved_owner_constructor;
+    sibling.c_api_builtin_constructors[0] = saved_sibling_constructor;
+    owner.collectGarbage();
+    try std.testing.expectEqual(@as(usize, 1), sibling_finalizers.objects);
+    try std.testing.expectEqual(@as(usize, 1), sibling_finalizers.strings);
+    try std.testing.expectEqual(@as(usize, 0), sibling.gc_string_bytes_live);
+    try state.realms.releaseRetired(sibling);
+    try std.testing.expectEqual(@as(?*ContextMod.Context, null), state.realms.realmForId(sibling_realm_id));
 }
 
 test "precise heap realm registry serializes concurrent add and retire" {
@@ -3489,6 +3593,7 @@ test "precise heap realm registry serializes concurrent add and retire" {
     for (&threads) |*thread| thread.join();
     for (&workers) |*worker| try std.testing.expectEqual(@as(?anyerror, null), worker.result);
     try std.testing.expectEqual(@as(usize, 0), state.realms.siblingCount());
+    for (siblings) |sibling| try state.realms.releaseRetired(sibling);
 }
 
 /// The engine's GC heap type. `Context` holds one behind `enable_gc`.
@@ -3606,6 +3711,19 @@ pub fn allocObjectBatch(heap_erased: ?*anyopaque, arena: std.mem.Allocator, out:
 threadlocal var active_heap: ?*anyopaque = null;
 threadlocal var active_interpreter: ?*interp.Interpreter = null;
 threadlocal var active_realm_id: ContextMod.GcCellBacking.RealmId = ContextMod.GcCellBacking.no_realm;
+threadlocal var active_realm_context: ?*ContextMod.Context = null;
+
+fn installActiveRealm(heap: *Heap, realm: *ContextMod.Context) void {
+    std.debug.assert(realm.gc == heap);
+    std.debug.assert(realm.gc_realm_id != ContextMod.GcCellBacking.no_realm);
+    active_realm_context = realm;
+    active_realm_id = realm.gc_realm_id;
+    const backing_allocator = if (realm.parallel_js) heap.backing else realm.gpa;
+    _ = gc_runtime.setActive(.{ .object_backing = .{
+        .allocator = backing_allocator,
+        .stores_live = &realm.gc_object_backing_stores_live,
+    } });
+}
 
 /// Install `h` as this thread's active heap, returning the previous value (so
 /// nested entry points can restore it). Pass null for the arena engine.
@@ -3614,22 +3732,15 @@ pub fn setActiveHeap(h: ?*anyopaque) ?*anyopaque {
     active_heap = h;
     if (h) |raw| {
         const heap: *Heap = @ptrCast(@alignCast(raw));
-        active_realm_id = heap.ctx.context.gc_realm_id;
+        installActiveRealm(heap, heap.ctx.context);
         _ = strcell.setActiveManagedFactory(.{
             .context = raw,
             .create = allocManagedString,
             .create_owned = allocManagedStringOwned,
         });
-        // Non-cell object side stores do not need the GC cell slab classifier in
-        // single-mutator GC mode. True-parallel JS keeps the synchronized wrapper
-        // because the embedder's allocator may not be thread-safe.
-        const backing_allocator = if (heap.ctx.context.parallel_js) heap.backing else heap.ctx.context.gpa;
-        _ = gc_runtime.setActive(.{ .object_backing = .{
-            .allocator = backing_allocator,
-            .stores_live = &heap.ctx.context.gc_object_backing_stores_live,
-        } });
         _ = gc_runtime.setBarrier(raw, barrierThunk, weakBarrierThunk);
     } else {
+        active_realm_context = null;
         active_realm_id = ContextMod.GcCellBacking.no_realm;
         _ = strcell.setActiveManagedFactory(null);
         _ = gc_runtime.setActive(.{});
@@ -3642,22 +3753,51 @@ pub fn currentRealmId() ContextMod.GcCellBacking.RealmId {
     return active_realm_id;
 }
 
-/// Override only the realm identity while retaining the active shared heap.
-/// A sibling-realm entry point installs its heap first, then its own stable ID;
-/// nested host calls restore both values independently.
-pub fn setActiveRealmId(realm_id: ContextMod.GcCellBacking.RealmId) ContextMod.GcCellBacking.RealmId {
-    std.debug.assert(active_heap != null or realm_id == ContextMod.GcCellBacking.no_realm);
-    const previous = active_realm_id;
-    active_realm_id = realm_id;
+/// Install the realm-local side-storage/accounting target while retaining the
+/// active shared heap. Sibling entry points restore this independently from the
+/// heap so nested calls preserve both allocation dimensions.
+pub fn setActiveRealm(realm: *ContextMod.Context) ?*ContextMod.Context {
+    const raw = active_heap orelse unreachable;
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    const previous = active_realm_context;
+    installActiveRealm(heap, realm);
     return previous;
 }
 
+pub const ActiveContextState = struct {
+    heap: ?*anyopaque,
+    realm: ?*ContextMod.Context,
+};
+
+/// Atomically-at-the-call-site switch both allocation dimensions. Context
+/// entry points use this instead of restoring only a heap pointer, which would
+/// silently collapse a nested sibling call back onto the heap owner.
+pub fn setActiveContext(realm: *ContextMod.Context) ActiveContextState {
+    const previous = ActiveContextState{ .heap = active_heap, .realm = active_realm_context };
+    _ = setActiveHeap(realm.gc);
+    if (realm.gc != null) _ = setActiveRealm(realm);
+    return previous;
+}
+
+pub fn restoreActiveContext(previous: ActiveContextState) void {
+    _ = setActiveHeap(previous.heap);
+    if (previous.heap != null) _ = setActiveRealm(previous.realm.?);
+}
+
+pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState {
+    const raw = machine.gc_realm_context orelse
+        return .{ .heap = active_heap, .realm = active_realm_context };
+    const realm: *ContextMod.Context = @ptrCast(@alignCast(raw));
+    return setActiveContext(realm);
+}
+
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
-    errdefer heap.ctx.context.gpa.free(bytes);
+    const realm = active_realm_context orelse heap.ctx.context;
+    errdefer realm.gpa.free(bytes);
     const cell = try heap.create(StringCell, .string);
     cell.* = .{ .bytes = bytes, .hash = strcell.hashBytes(bytes) };
     cell.setGcManaged(true);
-    _ = @atomicRmw(usize, &heap.ctx.context.gc_string_bytes_live, .Add, bytes.len, .monotonic);
+    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, bytes.len, .monotonic);
     return cell;
 }
 
@@ -3667,7 +3807,8 @@ fn allocManagedString(
     source: []const u8,
 ) std.mem.Allocator.Error!*StringCell {
     const heap: *Heap = @ptrCast(@alignCast(raw));
-    const bytes = try strcell.canonicalizeSurrogates(heap.ctx.context.gpa, source);
+    const realm = active_realm_context orelse heap.ctx.context;
+    const bytes = try strcell.canonicalizeSurrogates(realm.gpa, source);
     return finishManagedString(heap, bytes);
 }
 
@@ -3677,7 +3818,8 @@ fn allocManagedStringOwned(
     source: []u8,
 ) std.mem.Allocator.Error!*StringCell {
     const heap: *Heap = @ptrCast(@alignCast(raw));
-    const target_allocator = heap.ctx.context.gpa;
+    const realm = active_realm_context orelse heap.ctx.context;
+    const target_allocator = realm.gpa;
     if (source_allocator.ptr == target_allocator.ptr and
         source_allocator.vtable == target_allocator.vtable and
         std.mem.indexOfScalar(u8, source, 0xED) == null)
@@ -3817,8 +3959,9 @@ pub fn allocGenerator(arena: std.mem.Allocator) std.mem.Allocator.Error!*vm.Gene
 pub fn initGeneratorBacking(g: *vm.Generator) void {
     if (active_heap) |h| {
         const heap: *Heap = @ptrCast(@alignCast(h));
-        g.backing_allocator = heap.ctx.context.gpa;
-        g.backing_stores_live = &heap.ctx.context.gc_generator_backing_stores_live;
+        const realm = active_realm_context orelse heap.ctx.context;
+        g.backing_allocator = realm.gpa;
+        g.backing_stores_live = &realm.gc_generator_backing_stores_live;
     }
 }
 pub fn allocBoundFn(arena: std.mem.Allocator) std.mem.Allocator.Error!*interp.Interpreter.BoundFn {
