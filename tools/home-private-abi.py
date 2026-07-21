@@ -21,6 +21,7 @@ FETCH_BODY_CONTRACT = ROOT / "docs/abi/fetch-body-lifecycle-407.json"
 WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
 WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed-409.json"
 WASM_STREAMING_RESPONSE_FEED_CONTRACT = ROOT / "docs/abi/wasm-streaming-response-feed-410.json"
+SQL_OBJECT_STRUCTURE_CONTRACT = ROOT / "docs/abi/sql-object-structure-411.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -775,6 +776,83 @@ def validate_wasm_streaming_response_feed_contract() -> None:
         fail("Wasm Response feed semantic inventory is incomplete or duplicated")
 
 
+def validate_sql_object_structure_contract(
+    home_root: Path | None = None,
+    bun_root: Path | None = None,
+) -> None:
+    if not SQL_OBJECT_STRUCTURE_CONTRACT.is_file():
+        fail(f"missing checked-in SQL object Structure contract {SQL_OBJECT_STRUCTURE_CONTRACT}")
+    contract = json.loads(SQL_OBJECT_STRUCTURE_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "sql-object-structure"
+        or contract.get("issue") != 411
+        or contract.get("parent_issues") != [140, 163, 164]
+        or contract.get("roadmap_issue") != 134
+        or contract.get("revisions") != {
+            "home": REVISION,
+            "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+            "bun_webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0",
+        }
+    ):
+        fail("SQL object Structure contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "home_js_object",
+        "bun_js_object",
+        "bun_sql_client",
+        "bun_webkit_js_object",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("SQL object Structure source inventory drift")
+    for source in sources.values():
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"path", "sha256"}
+            or not isinstance(source["path"], str)
+            or not isinstance(source["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+        ):
+            fail("invalid SQL object Structure source contract")
+    for root, key in ((home_root, "home_js_object"), (bun_root, "bun_js_object"), (bun_root, "bun_sql_client")):
+        if root is None:
+            continue
+        source = sources[key]
+        path = root / source["path"]
+        if not path.is_file() or sha256(path) != source["sha256"]:
+            fail(f"SQL object Structure source drift for {source['path']}")
+    if contract.get("implementation") != ["src/c_api.zig", "src/value.zig"]:
+        fail("SQL object Structure implementation inventory drift")
+    fixtures = contract.get("fixtures")
+    if not isinstance(fixtures, list) or fixtures != [
+        "tests/abi/home_private_value_shims.zig",
+        "tests/abi/bun_private_sql_structure.zig",
+    ]:
+        fail("SQL object Structure fixture inventory drift")
+    for relative in (*contract["implementation"], *fixtures):
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            fail(f"missing SQL object Structure implementation evidence {relative}")
+    expected_symbols = {
+        "JSC__JSObject__maxInlineCapacity",
+        "JSC__createStructure",
+        "JSC__createEmptyObjectWithStructure",
+        "JSC__putDirectOffset",
+    }
+    symbols = contract.get("symbols")
+    source_text = EXPORT_SOURCE.read_text()
+    if (
+        not isinstance(symbols, list)
+        or set(symbols) != expected_symbols
+        or len(symbols) != len(expected_symbols)
+        or not expected_symbols - {"JSC__JSObject__maxInlineCapacity"} <= set(EXPORT_RE.findall(source_text))
+        or re.search(r"^export const JSC__JSObject__maxInlineCapacity\s*:", source_text, re.M) is None
+    ):
+        fail("SQL object Structure export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 8 or len(semantics) != len(set(semantics)):
+        fail("SQL object Structure semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -810,6 +888,7 @@ def main() -> None:
     validate_wasm_streaming_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_compiler_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_response_feed_contract()
+    validate_sql_object_structure_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

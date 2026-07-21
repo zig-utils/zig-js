@@ -802,6 +802,9 @@ def main() -> None:
     validate_wasm_streaming_contract(args.bun_root.resolve() if args.bun_root else None)
     validate_wasm_streaming_compiler_contract(args.bun_root.resolve() if args.bun_root else None)
     scanner.validate_wasm_streaming_response_feed_contract()
+    scanner.validate_sql_object_structure_contract(
+        bun_root=args.bun_root.resolve() if args.bun_root else None
+    )
     totals = stored["totals"]
     classes = totals["by_classification"]
     statuses = totals["by_status"]
