@@ -31,7 +31,7 @@ The first generated side exit handles a guarded numeric branch whose two paths h
 
 Every CFG edge also retains its exact locals-plus-stack state separately from the target block-entry state. This distinction matters at loop headers: the preheader and backedge can supply different SSA values to the same block arguments. Loop headers produce an immutable OSR-entry contract with exact IP, locals, operand-stack depth, handler depth, accumulator, and VM-to-SSA scratch imports. Entry is ineligible on any shape mismatch.
 
-The first AArch64 loop OSR region handles a guarded numeric header plus one straight-line numeric body. After a hot backedge, native code imports the exact header frame, applies block arguments as parallel assignments, and executes multiple iterations before reconstructing the exit edge. The lowering schedules acyclic moves safely and breaks cycles with one reusable scratch slot; a multi-local loop that swaps two values on every backedge verifies exact recovery. Every native header polls the owner invalidation generation and checks the remaining budget and 1,024-step checkpoint distance, side-exiting the exact current header before pending work. Zero, one, and many body iterations, guard refusal, multi-local backedges, and checkpoint recovery are covered. Nested loop control and broader loop shapes remain tracked by #435.
+The first AArch64 loop OSR region handles a guarded numeric header with either a straight-line body or one equal-cost inner `if/else` diamond. After a hot backedge, native code imports the exact header frame, applies block arguments as parallel assignments, and executes multiple iterations before reconstructing the exit edge. The lowering breaks copy cycles with one reusable scratch slot; swapped multi-local backedges verify exact recovery. Every native header polls invalidation and checks the remaining budget and 1,024-step checkpoint distance, side-exiting exact current state before pending work. Zero, one, and many iterations, both inner arms, guard refusal, and checkpoint recovery are covered. Unequal inner paths, deeper control, and active-loop invalidation races remain tracked by #435.
 
 Executable-code invalidation now closes native entry immediately while existing owner leases keep published mappings alive. Function entry and direct calls poll the owner before entering native code. Optimizer machine code then compares the artifact's owner generation before its first operation, closing the race after the VM poll; the native loop repeats that poll at every header and side-exits exact current state when it changes. Rejection before work performs no step accounting or state mutation, while a later poll preserves completed iterations and resumes bytecode at the current header.
 
@@ -44,5 +44,6 @@ zig build test -Dtest-filter='guarded parameter SSA'
 zig build test -Dtest-filter='optimizer exact branch'
 zig build test -Dtest-filter='optimizer enters a loop header'
 zig build test-jit -Dtest-filter='parallel'
+zig build test-jit -Dtest-filter='nested branch'
 zig build test -Dtest-filter='unsupported optimizer input caches rejection'
 ```

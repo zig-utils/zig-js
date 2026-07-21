@@ -57,6 +57,15 @@ pub const SideExitBranch = struct {
     false_steps: u12,
     true_steps: u12,
     true_block: ?u32 = null,
+    nested_loop: ?NestedLoopBranch = null,
+};
+
+pub const NestedLoopBranch = struct {
+    entry_block: u32,
+    condition: u8,
+    false_block: u32,
+    true_block: u32,
+    merge_block: u32,
 };
 
 pub const Program = struct {
@@ -351,7 +360,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
 fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
     const graph = &plan.graph;
     if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
-        graph.branches.len != 1)
+        graph.branches.len == 0 or graph.branches.len > 2)
         return error.UnsupportedChunk;
 
     const osr = try buildOsrMetadata(plan, allocator);
@@ -365,12 +374,58 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         header_block = block.id;
     };
     const header = header_block orelse return error.UnsupportedChunk;
-    const branch = graph.branches[0];
+    var outer_branch: ?optimizer.BranchValue = null;
+    var inner_branch: ?optimizer.BranchValue = null;
+    for (graph.branches) |candidate| {
+        if (candidate.block == header) {
+            if (outer_branch != null) return error.UnsupportedChunk;
+            outer_branch = candidate;
+        } else {
+            if (inner_branch != null) return error.UnsupportedChunk;
+            inner_branch = candidate;
+        }
+    }
+    const branch = outer_branch orelse return error.UnsupportedChunk;
     if (branch.block != header or branch.false_block == branch.true_block) return error.UnsupportedChunk;
-    const body = branch.true_block;
-    if (body >= plan.blocks.len or plan.blocks[body].successor_count != 1 or
-        plan.blocks[body].successors[0] != header)
-        return error.UnsupportedChunk;
+
+    var body: ?u32 = null;
+    var nested_loop: ?NestedLoopBranch = null;
+    var latch: u32 = undefined;
+    var true_steps: u32 = undefined;
+    if (inner_branch) |nested| {
+        if (nested.block != branch.true_block or nested.false_block == nested.true_block or
+            nested.false_block >= plan.blocks.len or nested.true_block >= plan.blocks.len)
+            return error.UnsupportedChunk;
+        const false_arm = plan.blocks[nested.false_block];
+        const true_arm = plan.blocks[nested.true_block];
+        if (false_arm.successor_count != 1 or true_arm.successor_count != 1 or
+            false_arm.successors[0] != true_arm.successors[0])
+            return error.UnsupportedChunk;
+        const merge = false_arm.successors[0];
+        if (merge >= plan.blocks.len or plan.blocks[merge].successor_count != 1 or
+            plan.blocks[merge].successors[0] != header)
+            return error.UnsupportedChunk;
+        const false_steps = try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block, merge });
+        const nested_true_steps = try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block, merge });
+        if (false_steps != nested_true_steps) return error.UnsupportedChunk;
+        latch = merge;
+        true_steps = false_steps;
+        nested_loop = .{
+            .entry_block = nested.block,
+            .condition = @intCast(nested.condition),
+            .false_block = nested.false_block,
+            .true_block = nested.true_block,
+            .merge_block = merge,
+        };
+    } else {
+        const straight_body = branch.true_block;
+        if (straight_body >= plan.blocks.len or plan.blocks[straight_body].successor_count != 1 or
+            plan.blocks[straight_body].successors[0] != header)
+            return error.UnsupportedChunk;
+        body = straight_body;
+        latch = straight_body;
+        true_steps = try sumInstructionCounts(plan, &.{ header, straight_body });
+    }
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
@@ -380,9 +435,27 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    try appendEdgeCopies(graph, header, body, body, allocator, &operations, &types, &initialized, &scratch_slots);
-    try appendBlockOperations(graph, body, false, allocator, &operations, &types, &initialized);
-    try appendEdgeCopies(graph, body, header, body, allocator, &operations, &types, &initialized, &scratch_slots);
+    if (nested_loop) |nested| {
+        try appendEdgeCopies(graph, header, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized);
+        if (types[nested.condition] != .boolean) return error.UnsupportedChunk;
+
+        try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized);
+        try appendEdgeCopies(graph, nested.true_block, nested.merge_block, nested.true_block, allocator, &operations, &types, &initialized, &scratch_slots);
+
+        try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized);
+        try appendEdgeCopies(graph, nested.false_block, nested.merge_block, nested.false_block, allocator, &operations, &types, &initialized, &scratch_slots);
+
+        try appendBlockOperations(graph, nested.merge_block, false, allocator, &operations, &types, &initialized);
+        try appendEdgeCopies(graph, nested.merge_block, header, nested.merge_block, allocator, &operations, &types, &initialized, &scratch_slots);
+    } else {
+        const straight_body = body.?;
+        try appendEdgeCopies(graph, header, straight_body, straight_body, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized);
+        try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &scratch_slots);
+    }
 
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
     errdefer deopt_points.deinit(allocator);
@@ -390,7 +463,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer deopt_values.deinit(allocator);
     const entry_index = try appendBlockEntryDeopt(graph, &initialized, header, allocator, &deopt_points, &deopt_values);
     const false_index = try appendEdgeDeopt(graph, &initialized, header, branch.false_block, allocator, &deopt_points, &deopt_values);
-    const true_index = try appendEdgeDeopt(graph, &initialized, body, header, allocator, &deopt_points, &deopt_values);
+    const true_index = try appendEdgeDeopt(graph, &initialized, latch, header, allocator, &deopt_points, &deopt_values);
 
     const owned_operations = try operations.toOwnedSlice(allocator);
     errdefer allocator.free(owned_operations);
@@ -404,6 +477,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         std.math.maxInt(u64)
     else
         (@as(u64, 1) << @intCast(chunk.local_count)) - 1;
+    const exit_steps = std.math.cast(u12, plan.blocks[header].instruction_count) orelse return error.UnsupportedChunk;
+    const iteration_steps = std.math.cast(u12, true_steps) orelse return error.UnsupportedChunk;
     return .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -414,14 +489,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .entry_deopt_index = entry_index,
             .false_deopt_index = false_index,
             .true_deopt_index = true_index,
-            .false_steps = @intCast(plan.blocks[header].instruction_count),
-            .true_steps = @intCast(plan.blocks[header].instruction_count + plan.blocks[body].instruction_count),
+            .false_steps = exit_steps,
+            .true_steps = iteration_steps,
             .true_block = body,
+            .nested_loop = nested_loop,
         },
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = local_mask,
-        .bytecode_steps = plan.blocks[header].instruction_count + plan.blocks[body].instruction_count,
+        .bytecode_steps = true_steps,
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
         .stack_maps = stack_maps,
@@ -429,6 +505,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .execution_block = header,
         .entry_enabled = false,
     };
+}
+
+fn sumInstructionCounts(plan: *const optimizer.Plan, blocks: []const u32) error{UnsupportedChunk}!u32 {
+    var total: u32 = 0;
+    for (blocks) |block| {
+        if (block >= plan.blocks.len) return error.UnsupportedChunk;
+        total = std.math.add(u32, total, plan.blocks[block].instruction_count) catch return error.UnsupportedChunk;
+    }
+    return total;
 }
 
 fn primitiveStackMaps(allocator: std.mem.Allocator, deopt_count: usize) ![]jit.StackMap {
@@ -773,9 +858,21 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        const body = branch.true_block.?;
-        for (program.operations) |operation| if (operation.block == body)
-            try emitOperation(&assembler, operation);
+        if (branch.nested_loop) |nested| {
+            try emitBlockOperations(&assembler, program, nested.entry_block);
+            try assembler.load64(9, 14, try slotOffset(nested.condition));
+            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+            try assembler.compareRegister64(9, 10);
+            const nested_false_jump = try assembler.branchConditionPlaceholder(.eq);
+            try emitBlockOperations(&assembler, program, nested.true_block);
+            const nested_done = try assembler.branchPlaceholder();
+            try assembler.patchConditionBranch(nested_false_jump, assembler.position());
+            try emitBlockOperations(&assembler, program, nested.false_block);
+            try assembler.patchBranch(nested_done, assembler.position());
+            try emitBlockOperations(&assembler, program, nested.merge_block);
+        } else {
+            try emitBlockOperations(&assembler, program, branch.true_block.?);
+        }
         try emitStepIncrement(&assembler, branch.true_steps);
         try assembler.subtractImmediate64(15, 15, branch.true_steps);
         try assembler.subtractImmediate64(16, 16, branch.true_steps);
@@ -853,6 +950,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .manages_steps = program.side_exit_branch != null,
         .has_side_exits = program.side_exit_branch != null,
     };
+}
+
+fn emitBlockOperations(assembler: *aarch64.Assembler, program: *const Program, block: u32) !void {
+    for (program.operations) |operation| if (operation.block == block)
+        try emitOperation(assembler, operation);
 }
 
 fn emitOperation(assembler: *aarch64.Assembler, operation: Operation) !void {
@@ -1445,6 +1547,105 @@ test "optimizer loop OSR preserves parallel multi-local backedges" {
     try std.testing.expectEqual(@as(u64, 32), steps);
     const checkpoint = compiled.deopt.?.points[frame.deopt_index];
     const checkpoint_expected = [_]f64{ 5, 2, 10, 20 };
+    for (checkpoint_expected, 0..) |value, local| {
+        const recovered = compiled.deopt.?.values[checkpoint.first_value + local].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(value, Value.fromRawBits(recovered).asNum());
+    }
+}
+
+test "optimizer loop OSR executes an equal-cost nested branch" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 3;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    const two = try chunk.addConst(Value.num(2));
+    const ten = try chunk.addConst(Value.num(10));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 7);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 33);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, two);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 21);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, ten);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 27);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 27);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 7);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(u32, 20), compiled.bytecode_steps);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(7, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    var slots = [_]u64{
+        Value.num(4).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(0).rawBits(),
+    };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 33), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 84), steps);
+    const exit = compiled.deopt.?.points[frame.deopt_index];
+    const expected = [_]f64{ 4, 4, 22 };
+    for (expected, 0..) |value, local| {
+        const recovered = compiled.deopt.?.values[exit.first_value + local].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(value, Value.fromRawBits(recovered).asNum());
+    }
+
+    slots = .{
+        Value.num(4).rawBits(),
+        Value.num(0).rawBits(),
+        Value.num(0).rawBits(),
+    };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    frame.steps_until_checkpoint = compiled.bytecode_steps * 2 + 1;
+    steps = 0;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 7), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 40), steps);
+    const checkpoint = compiled.deopt.?.points[frame.deopt_index];
+    const checkpoint_expected = [_]f64{ 4, 2, 20 };
     for (checkpoint_expected, 0..) |value, local| {
         const recovered = compiled.deopt.?.values[checkpoint.first_value + local].materialize(&slots, &scratch) orelse
             return error.TestUnexpectedResult;
