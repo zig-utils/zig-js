@@ -117,8 +117,24 @@ const OperandStack = struct {
 
     pub inline fn append(self: *OperandStack, allocator: std.mem.Allocator, item: Value) std.mem.Allocator.Error!void {
         if (self.items.len == self.capacity) try self.grow(allocator);
+        self.appendAssumeCapacity(item);
+    }
+
+    pub inline fn appendAssumeCapacity(self: *OperandStack, item: Value) void {
+        std.debug.assert(self.items.len < self.capacity);
         self.items.len += 1;
         self.items[self.items.len - 1] = item;
+    }
+
+    pub fn ensureTotalCapacity(self: *OperandStack, allocator: std.mem.Allocator, new_capacity: usize) std.mem.Allocator.Error!void {
+        if (new_capacity <= self.capacity) return;
+        var list: std.ArrayListUnmanaged(Value) = .{
+            .items = self.items,
+            .capacity = self.capacity,
+        };
+        try list.ensureTotalCapacity(allocator, new_capacity);
+        self.items = list.items;
+        self.capacity = list.capacity;
     }
 
     noinline fn grow(self: *OperandStack, allocator: std.mem.Allocator) std.mem.Allocator.Error!void {
