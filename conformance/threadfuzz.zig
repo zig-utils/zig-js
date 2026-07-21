@@ -57,6 +57,7 @@ var watchdog_cleanup_acknowledged = std.atomic.Value(bool).init(false);
 var watchdog_expect_timeout = std.atomic.Value(bool).init(false);
 var watchdog_context_lock: std.atomic.Mutex = .unlocked;
 var watchdog_context: ?*js.Context = null;
+var watchdog_case_name: []const u8 = "seed";
 
 const watchdog_tsan_amplify_timeout_ms: i64 = 300_000;
 const watchdog_cleanup_grace_ms: i64 = 30_000;
@@ -148,6 +149,7 @@ fn seedWatchdogMain() void {
         else
             "unknown";
         const claimed_seed = watchdog_seed.load(.acquire);
+        const claimed_case_name = watchdog_case_name;
         var requested_termination = false;
         if (watchdog_context) |ctx| {
             ctx.requestTermination();
@@ -155,10 +157,11 @@ fn seedWatchdogMain() void {
         }
         watchdog_context_lock.unlock();
         std.debug.print(
-            "threadfuzz {s}: seed {d} exceeded per-seed timeout {d} ms; {s}; waiting up to {d} ms for clean teardown\n",
+            "threadfuzz {s}: seed {d} case {s} exceeded per-case timeout {d} ms; {s}; waiting up to {d} ms for clean teardown\n",
             .{
                 profile_name,
                 claimed_seed,
+                claimed_case_name,
                 claimed_timeout_ms,
                 if (requested_termination) "requested cooperative VM termination" else "no active context was available to interrupt",
                 watchdog_cleanup_grace_ms,
@@ -173,8 +176,8 @@ fn seedWatchdogMain() void {
         }
         if (!watchdog_enabled.load(.acquire) or watchdog_cleanup_acknowledged.load(.acquire)) continue;
         std.debug.print(
-            "threadfuzz {s}: seed {d} did not finish teardown within {d} ms; forcing process abort\n",
-            .{ profile_name, claimed_seed, watchdog_cleanup_grace_ms },
+            "threadfuzz {s}: seed {d} case {s} did not finish teardown within {d} ms; forcing process abort\n",
+            .{ profile_name, claimed_seed, claimed_case_name, watchdog_cleanup_grace_ms },
         );
         std.process.exit(125);
     }
@@ -201,7 +204,7 @@ fn stopSeedWatchdog() void {
     watchdog_context_lock.unlock();
 }
 
-fn noteSeed(profile: WatchdogProfile, seed: u64) void {
+fn noteSeedCase(profile: WatchdogProfile, seed: u64, comptime case_name: []const u8) void {
     if (!watchdog_enabled.load(.acquire)) return;
     lockWatchdogContext();
     defer watchdog_context_lock.unlock();
@@ -212,6 +215,7 @@ fn noteSeed(profile: WatchdogProfile, seed: u64) void {
     watchdog_cleanup_acknowledged.store(false, .release);
     watchdog_profile.store(@intFromEnum(profile), .release);
     watchdog_seed.store(seed, .release);
+    watchdog_case_name = case_name;
     const configured_timeout_ms = watchdog_configured_timeout_ms.load(.acquire);
     const profile_timeout_ms = if (!watchdog_timeout_explicit.load(.acquire) and
         builtin.sanitize_thread and profile == .amplify)
@@ -221,6 +225,10 @@ fn noteSeed(profile: WatchdogProfile, seed: u64) void {
     watchdog_timeout_ms.store(profile_timeout_ms, .release);
     watchdog_started_ms.store(watchdogNowMs(), .release);
     watchdog_active.store(true, .release);
+}
+
+fn noteSeed(profile: WatchdogProfile, seed: u64) void {
+    noteSeedCase(profile, seed, "seed");
 }
 
 fn finishSeed() void {
@@ -237,6 +245,7 @@ fn finishSeed() void {
 
 fn runWatchedSeedCase(
     comptime profile: WatchdogProfile,
+    comptime case_name: []const u8,
     comptime caseFn: fn (std.mem.Allocator, u64) anyerror!bool,
     gpa: std.mem.Allocator,
     seed: u64,
@@ -247,7 +256,7 @@ fn runWatchedSeedCase(
     // watchdog even though no single subcase is hung; reset the same seed window
     // before each subcase so the watchdog remains a hang detector instead of an
     // aggregate runtime cap.
-    noteSeed(profile, seed);
+    noteSeedCase(profile, seed, case_name);
     defer finishSeed();
     if (!(try caseFn(gpa, seed))) failures.* += 1;
 }
@@ -20658,7 +20667,7 @@ pub fn main(init: std.process.Init) !void {
                 runThreadLocalTerminationCleanupInterleaving,
                 runNestedThreadAsyncJoinCleanupInterleaving,
             }) |case_fn| {
-                try runWatchedSeedCase(.lifecycle, case_fn, gpa, seed, &lfail);
+                try runWatchedSeedCase(.lifecycle, "lifecycle-subcase", case_fn, gpa, seed, &lfail);
             }
             finishSeed();
         }
@@ -20733,51 +20742,51 @@ pub fn main(init: std.process.Init) !void {
             const seed = base_seed +% mi;
             noteSeed(.midgc, seed);
             defer finishSeed();
-            try runWatchedSeedCase(.midgc, runMidScriptWaitPumpGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptTerminationReactionGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptPromisePublicationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptPropertyWaitAsyncLateSettlementGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptMicrotaskChurnGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptLateAsyncJoinCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptLateAsyncJoinRejectCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptCreatorOwnedBufferGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptSyncWaitCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptSyncWaitBurstCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptSyncTimeoutGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptAtomicsMutexLockIfAvailableGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptAtomicsConditionWaitGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptAsyncHoldReleaseWaiterCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptAsyncHoldThrowFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptNestedThreadAsyncJoinCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptFinalizationAsyncJoinCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWaitAsyncFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptConditionAsyncFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalLifecycleGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptThreadLocalTerminationCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptThreadRestrictLifecycleGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptThreadRestrictFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerThreadFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerThreadFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerExceptionCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerExceptionCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerCloseTerminateGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerCloseTerminateGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateFinalizationGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
-            try runWatchedSeedCase(.midgc, runMidScriptWeakCollectionGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "wait-pump", runMidScriptWaitPumpGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "termination-reaction", runMidScriptTerminationReactionGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "promise-publication", runMidScriptPromisePublicationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "property-wait-async-late-settlement", runMidScriptPropertyWaitAsyncLateSettlementGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "microtask-churn", runMidScriptMicrotaskChurnGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "late-async-join-cleanup", runMidScriptLateAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "late-async-join-reject-cleanup", runMidScriptLateAsyncJoinRejectCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "creator-owned-buffer", runMidScriptCreatorOwnedBufferGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "sync-wait-cleanup", runMidScriptSyncWaitCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "sync-wait-burst-cleanup", runMidScriptSyncWaitBurstCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "sync-timeout", runMidScriptSyncTimeoutGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "atomics-mutex-lock-if-available", runMidScriptAtomicsMutexLockIfAvailableGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "atomics-condition-wait", runMidScriptAtomicsConditionWaitGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "async-hold-release-waiter-cleanup", runMidScriptAsyncHoldReleaseWaiterCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "async-hold-throw-finalization", runMidScriptAsyncHoldThrowFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "nested-thread-async-join-cleanup", runMidScriptNestedThreadAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "finalization-async-join-cleanup", runMidScriptFinalizationAsyncJoinCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "wait-async-finalization", runMidScriptWaitAsyncFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "condition-async-finalization", runMidScriptConditionAsyncFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "thread-local-lifecycle", runMidScriptThreadLocalLifecycleGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "thread-local-finalization", runMidScriptThreadLocalFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "thread-local-termination-cleanup", runMidScriptThreadLocalTerminationCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "thread-restrict-lifecycle", runMidScriptThreadRestrictLifecycleGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "thread-restrict-finalization", runMidScriptThreadRestrictFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-creator-owned-buffer-cleanup", runMidScriptWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-creator-owned-buffer-cleanup", runMidScriptModuleWorkerCreatorOwnedBufferCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-cleanup", runMidScriptWorkerCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-cleanup", runMidScriptModuleWorkerCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-thread-finalization", runMidScriptWorkerThreadFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-thread-finalization", runMidScriptModuleWorkerThreadFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-exception-cleanup", runMidScriptWorkerExceptionCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-exception-cleanup", runMidScriptModuleWorkerExceptionCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-close-terminate", runMidScriptWorkerCloseTerminateGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-close-terminate", runMidScriptModuleWorkerCloseTerminateGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-terminate-finalization", runMidScriptWorkerTerminateFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-terminate-finalization", runMidScriptModuleWorkerTerminateFinalizationGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-terminate-thread-teardown", runMidScriptWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-terminate-thread-teardown", runMidScriptModuleWorkerTerminateThreadTeardownGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-terminate-condition-async-cleanup", runMidScriptWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-terminate-condition-async-cleanup", runMidScriptModuleWorkerTerminateConditionAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-terminate-wait-async-cleanup", runMidScriptWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-terminate-wait-async-cleanup", runMidScriptModuleWorkerTerminateWaitAsyncCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "worker-terminate-thread-local-async-hold-cleanup", runMidScriptWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "module-worker-terminate-thread-local-async-hold-cleanup", runMidScriptModuleWorkerTerminateThreadLocalAsyncHoldCleanupGc, gpa, seed, &mfail);
+            try runWatchedSeedCase(.midgc, "weak-collection", runMidScriptWeakCollectionGc, gpa, seed, &mfail);
         }
         printProfileSummary("midgc", iters * 45, base_seed, mfail, run_started_ms);
         if (mfail != 0) std.process.exit(1);

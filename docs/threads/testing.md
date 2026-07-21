@@ -225,7 +225,8 @@ profiles also run with a per-seed watchdog by default; set
 `THREADFUZZ_SEED_TIMEOUT_MS=0` to disable it, or set a larger millisecond value
 for slow local/TSan machines. Amplified TSan runs default to a calibrated
 300-second window; every other profile retains the 120-second default. When it
-fires, the watchdog prints the active profile and seed, requests allocation-free
+fires, the watchdog prints the active profile, seed, and independently timed
+subcase, requests allocation-free
 cooperative termination from the active context, and allows 30 seconds for its
 JavaScript threads to unwind and join. A clean teardown exits with status 124;
 failure to acknowledge teardown within that grace period force-aborts with
