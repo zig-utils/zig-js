@@ -45,7 +45,7 @@ The pinned SQL row fast path has a real opaque Structure, shared object shapes,
 and bounds-checked GC-barriered offset writes; its exact ABI is recorded in
 [`abi/sql-object-structure-411.json`](abi/sql-object-structure-411.json).
 Private global creation, same-VM test isolation, execution-context identity
-transfer, and terminal teardown are pinned by
+transfer, precise old-realm reclamation, and terminal teardown are pinned by
 [`abi/global-object-lifecycle-412.json`](abi/global-object-lifecycle-412.json).
 Process-wide option initialization and the shell-timeout VM trap are pinned by
 [`abi/process-initialization-shell-timeout-417.json`](abi/process-initialization-shell-timeout-417.json).

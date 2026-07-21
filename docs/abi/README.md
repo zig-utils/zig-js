@@ -1206,8 +1206,9 @@ shared engine shapes, GC barriers, and a compiled runtime fixture.
 
 The [global-object lifecycle contract](global-object-lifecycle-412.json) owns
 real VM/realm creation, same-VM test isolation, execution-context identity
-transfer, terminal teardown, retained-reference behavior, and wrong-thread or
-foreign-handle rejection. Independent Home and Bun executables exercise it.
+transfer, precise old-realm reclamation, protected-handle lifetime, exact-once
+external finalization, and wrong-thread or foreign-handle rejection.
+Independent Home and Bun executables exercise the pinned signatures.
 
 The [process initialization contract](process-initialization-shell-timeout-417.json)
 pins first-call option publication and the distinct shell-timeout trap across
