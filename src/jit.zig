@@ -138,33 +138,51 @@ pub const OptimizerTierState = enum(u8) {
 pub const OptimizerTier = struct {
     state: std.atomic.Value(OptimizerTierState) = .init(.cold),
     plan: std.atomic.Value(usize) = .init(0),
-    generation: std.atomic.Value(u32) = .init(0),
-    installed_compiles: std.atomic.Value(u32) = .init(0),
+    generation: std.atomic.Value(u64) = .init(0),
+    installed_compiles: std.atomic.Value(u64) = .init(0),
+    publication_lock: std.atomic.Mutex = .unlocked,
+
+    pub const CompilationClaim = struct {
+        generation: u64,
+    };
 
     pub fn beginProfiling(self: *OptimizerTier) void {
         _ = self.state.cmpxchgStrong(.cold, .profiling, .acq_rel, .acquire);
     }
 
-    pub fn claimCompilation(self: *OptimizerTier, profile: *const OptimizerProfile, threshold: u64) bool {
+    pub fn claimCompilation(self: *OptimizerTier, profile: *const OptimizerProfile, threshold: u64) ?CompilationClaim {
         std.debug.assert(threshold > 0);
         self.beginProfiling();
-        if (profile.entries.load(.acquire) < threshold) return false;
-        return self.state.cmpxchgStrong(.profiling, .compiling, .acq_rel, .acquire) == null;
+        if (profile.entries.load(.acquire) < threshold) return null;
+        self.acquirePublicationLock();
+        defer self.publication_lock.unlock();
+        if (self.state.load(.acquire) != .profiling) return null;
+        const current_generation = self.generation.load(.acquire);
+        self.state.store(.compiling, .release);
+        return .{ .generation = current_generation };
     }
 
-    pub fn publishReady(self: *OptimizerTier, plan: *const anyopaque) void {
-        std.debug.assert(self.state.load(.acquire) == .compiling);
+    pub fn publishReady(self: *OptimizerTier, claim: CompilationClaim, plan: *const anyopaque) bool {
+        self.acquirePublicationLock();
+        defer self.publication_lock.unlock();
+        if (self.state.load(.acquire) != .compiling or self.generation.load(.acquire) != claim.generation) return false;
         self.plan.store(@intFromPtr(plan), .monotonic);
         _ = self.installed_compiles.fetchAdd(1, .monotonic);
         self.state.store(.ready, .release);
+        return true;
     }
 
-    pub fn publishRejected(self: *OptimizerTier) void {
-        std.debug.assert(self.state.load(.acquire) == .compiling);
+    pub fn publishRejected(self: *OptimizerTier, claim: CompilationClaim) bool {
+        self.acquirePublicationLock();
+        defer self.publication_lock.unlock();
+        if (self.state.load(.acquire) != .compiling or self.generation.load(.acquire) != claim.generation) return false;
         self.state.store(.rejected, .release);
+        return true;
     }
 
     pub fn invalidate(self: *OptimizerTier) void {
+        self.acquirePublicationLock();
+        defer self.publication_lock.unlock();
         self.state.store(.invalidating, .release);
         _ = self.generation.fetchAdd(1, .acq_rel);
         self.plan.store(0, .release);
@@ -178,8 +196,12 @@ pub const OptimizerTier = struct {
         return @ptrFromInt(address);
     }
 
-    pub fn compileCount(self: *const OptimizerTier) u32 {
+    pub fn compileCount(self: *const OptimizerTier) u64 {
         return self.installed_compiles.load(.acquire);
+    }
+
+    fn acquirePublicationLock(self: *OptimizerTier) void {
+        while (!self.publication_lock.tryLock()) std.atomic.spinLoopHint();
     }
 };
 
@@ -592,20 +614,74 @@ test "optimizer tier publishes only installed plans and counts recompiles" {
     var second_plan: u8 = 2;
 
     profile.observeEntry();
-    try std.testing.expect(!tier.claimCompilation(&profile, 2));
+    try std.testing.expect(tier.claimCompilation(&profile, 2) == null);
     profile.observeEntry();
-    try std.testing.expect(tier.claimCompilation(&profile, 2));
-    tier.publishReady(&first_plan);
+    const stale_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
+    tier.invalidate();
+    try std.testing.expect(!tier.publishReady(stale_claim, &first_plan));
+    try std.testing.expectEqual(@as(u64, 0), tier.compileCount());
+
+    const first_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tier.publishReady(first_claim, &first_plan));
     try std.testing.expectEqual(&first_plan, tier.loadPlan(u8).?);
-    try std.testing.expectEqual(@as(u32, 1), tier.compileCount());
+    try std.testing.expectEqual(@as(u64, 1), tier.compileCount());
 
     tier.invalidate();
     try std.testing.expect(tier.loadPlan(u8) == null);
-    try std.testing.expect(tier.claimCompilation(&profile, 2));
-    tier.publishReady(&second_plan);
+    const second_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tier.publishReady(second_claim, &second_plan));
     try std.testing.expectEqual(&second_plan, tier.loadPlan(u8).?);
-    try std.testing.expectEqual(@as(u32, 2), tier.compileCount());
-    try std.testing.expectEqual(@as(u32, 1), tier.generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), tier.compileCount());
+
+    tier.invalidate();
+    const rejected_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(tier.publishRejected(rejected_claim));
+    try std.testing.expect(tier.claimCompilation(&profile, 2) == null);
+    try std.testing.expectEqual(OptimizerTierState.rejected, tier.state.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 3), tier.generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), tier.compileCount());
+}
+
+test "optimizer publication and invalidation races converge" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var profile = OptimizerProfile{};
+    profile.observeEntry();
+    var tier = OptimizerTier{};
+    const claim = tier.claimCompilation(&profile, 1) orelse return error.TestUnexpectedResult;
+    var plan: u8 = 1;
+    const Shared = struct {
+        tier: *OptimizerTier,
+        claim: OptimizerTier.CompilationClaim,
+        plan: *u8,
+        start: std.atomic.Value(bool) = .init(false),
+        published: std.atomic.Value(bool) = .init(false),
+
+        fn awaitStart(shared: *@This()) void {
+            while (!shared.start.load(.acquire)) std.atomic.spinLoopHint();
+        }
+
+        fn publish(shared: *@This()) void {
+            shared.awaitStart();
+            shared.published.store(shared.tier.publishReady(shared.claim, shared.plan), .release);
+        }
+
+        fn invalidate(shared: *@This()) void {
+            shared.awaitStart();
+            shared.tier.invalidate();
+        }
+    };
+    var shared = Shared{ .tier = &tier, .claim = claim, .plan = &plan };
+    var publisher = try std.Thread.spawn(.{}, Shared.publish, .{&shared});
+    var invalidator = try std.Thread.spawn(.{}, Shared.invalidate, .{&shared});
+    shared.start.store(true, .release);
+    publisher.join();
+    invalidator.join();
+
+    try std.testing.expectEqual(OptimizerTierState.profiling, tier.state.load(.acquire));
+    try std.testing.expect(tier.loadPlan(u8) == null);
+    try std.testing.expect(tier.compileCount() == 0 or tier.compileCount() == 1);
+    try std.testing.expectEqual(shared.published.load(.acquire), tier.compileCount() == 1);
 }
 
 test "native entry publishes an exact result word through the stable ABI" {

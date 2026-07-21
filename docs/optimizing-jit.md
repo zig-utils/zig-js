@@ -8,7 +8,7 @@ The optimizing tier is under construction in [#146](https://github.com/zig-utils
 
 - per-function entry, branch, backedge, result/property value-kind, and shape observations;
 - per-entry local deltas, merged atomically once, so hot loops do not perform atomic profile increments;
-- a publication state machine and generation counter distinct from baseline code;
+- a serialized publication state machine and generation counter distinct from baseline code, with stale claims rejected and unsupported plans cached;
 - compile counts that advance only when an optimizer plan is actually installed;
 - deterministic CFG plus block-argument SSA for the current numeric/control bytecode subset;
 - effect-aware canonicalization and dead-value elimination, including loop-carried locals and operand stacks; and

@@ -6925,7 +6925,7 @@ test "vm: optimizer profiles aggregate function behavior without claiming execut
     try std.testing.expect(profile.polymorphic_shapes);
     try std.testing.expectEqual(jit.OptimizerTierState.profiling, function_chunk.optimizer_tier.state.load(.acquire));
     try std.testing.expect(function_chunk.optimizer_tier.loadPlan(u8) == null);
-    try std.testing.expectEqual(@as(u32, 0), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expectEqual(@as(u64, 0), function_chunk.optimizer_tier.compileCount());
 }
 
 test "vm: speculative unsigned parameter guards are exact" {
