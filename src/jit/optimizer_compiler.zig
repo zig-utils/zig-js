@@ -62,6 +62,7 @@ pub const Program = struct {
     bytecode_steps: u32,
     deopt_points: []jit.DeoptPoint,
     deopt_values: []jit.RecoveryValue,
+    stack_maps: []jit.StackMap,
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
@@ -70,6 +71,7 @@ pub const Program = struct {
         self.allocator.free(self.operations);
         self.allocator.free(self.deopt_points);
         self.allocator.free(self.deopt_values);
+        self.allocator.free(self.stack_maps);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
@@ -318,6 +320,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     errdefer allocator.free(owned_deopt_points);
     const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
     errdefer allocator.free(owned_deopt_values);
+    const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
+    errdefer allocator.free(stack_maps);
     return .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -330,6 +334,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .bytecode_steps = bytecode_steps,
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
+        .stack_maps = stack_maps,
     };
 }
 
@@ -433,6 +438,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(owned_deopt_points);
     const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
     errdefer allocator.free(owned_deopt_values);
+    const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
+    errdefer allocator.free(stack_maps);
     const local_mask: u64 = if (chunk.local_count == 64)
         std.math.maxInt(u64)
     else
@@ -454,10 +461,22 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .bytecode_steps = plan.blocks[header].instruction_count,
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
+        .stack_maps = stack_maps,
         .osr = osr,
         .execution_block = header,
         .entry_enabled = false,
     };
+}
+
+fn primitiveStackMaps(allocator: std.mem.Allocator, deopt_count: usize) ![]jit.StackMap {
+    const maps = try allocator.alloc(jit.StackMap, deopt_count);
+    for (maps, 0..) |*map, index| map.* = .{
+        .deopt_index = std.math.cast(u16, index) orelse {
+            allocator.free(maps);
+            return error.UnsupportedChunk;
+        },
+    };
+    return maps;
 }
 
 fn appendEdgeDeopt(
@@ -612,6 +631,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try memory.publish(assembler.bytes().len);
     const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values);
     errdefer deopt.destroy();
+    const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
+    errdefer stack_maps.destroy();
     const osr = if (program.osr) |metadata|
         try jit.OsrMetadata.create(std.heap.page_allocator, metadata.entries, metadata.imports)
     else
@@ -627,6 +648,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .required_numeric_slots = program.required_numeric_slots,
         .max_stack_depth = program.scratch_slots,
         .deopt = deopt,
+        .stack_maps = stack_maps,
         .osr = osr,
         .entry_enabled = program.entry_enabled,
         .manages_steps = program.side_exit_branch != null,
@@ -733,6 +755,11 @@ test "optimizer lowerer produces portable guarded numeric operations" {
     try std.testing.expectEqual(@as(u32, 6), program.bytecode_steps);
     try std.testing.expect(program.branch == null);
     try std.testing.expectEqual(@as(usize, 2), program.deopt_points.len);
+    try std.testing.expectEqual(program.deopt_points.len, program.stack_maps.len);
+    for (program.stack_maps) |map| {
+        try std.testing.expectEqual(@as(u64, 0), map.frame_pointer_slots);
+        try std.testing.expectEqual(@as(u64, 0), map.scratch_pointer_slots);
+    }
     try std.testing.expectEqual(jit.DeoptPointKind.block_entry, program.deopt_points[0].kind);
     try std.testing.expectEqual(jit.DeoptPointKind.return_, program.deopt_points[1].kind);
     try std.testing.expectEqual(OperationKind.mul, program.operations[program.operations.len - 1].kind);
@@ -761,6 +788,7 @@ test "optimizer compiler executes guarded parameter SSA" {
     try std.testing.expectEqual(jit.CodeKind.optimizer, compiled.kind);
     try std.testing.expectEqual(@as(u64, 0b11), compiled.required_numeric_slots);
     try std.testing.expectEqual(@as(usize, 2), compiled.deopt.?.points.len);
+    try std.testing.expectEqual(compiled.deopt.?.points.len, compiled.stack_maps.?.maps.len);
     try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
     try std.testing.expectEqual(@as(f64, 42), Value.fromRawBits(frame.result_bits).asNum());
 
@@ -996,6 +1024,9 @@ test "optimizer compiler executes one loop-header OSR region" {
     try std.testing.expectEqual(@as(usize, 8), frame.exit_ip);
     try std.testing.expectEqual(@as(u64, 4), steps);
     try std.testing.expectEqual(jit.DeoptPointKind.edge, compiled.deopt.?.points[frame.deopt_index].kind);
+    const stack_map = compiled.stack_maps.?.forDeopt(frame.deopt_index) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), stack_map.frame_pointer_slots);
+    try std.testing.expectEqual(@as(u64, 0), stack_map.scratch_pointer_slots);
 
     var invalidation_generation: std.atomic.Value(u64) = .init(1);
     frame.invalidation_generation = &invalidation_generation;

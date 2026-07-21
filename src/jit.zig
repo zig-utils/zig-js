@@ -352,6 +352,37 @@ pub const DeoptMetadata = struct {
     }
 };
 
+/// Precise movable-root locations at one optimizer recovery/safepoint record.
+/// Bit `n` names frame or scratch slot `n`; unlisted words are non-pointers.
+pub const StackMap = struct {
+    deopt_index: u16,
+    frame_pointer_slots: u64 = 0,
+    scratch_pointer_slots: u64 = 0,
+};
+
+pub const StackMapMetadata = struct {
+    allocator: std.mem.Allocator,
+    maps: []StackMap,
+
+    pub fn create(allocator: std.mem.Allocator, maps: []const StackMap) std.mem.Allocator.Error!*StackMapMetadata {
+        const metadata = try allocator.create(StackMapMetadata);
+        errdefer allocator.destroy(metadata);
+        metadata.* = .{ .allocator = allocator, .maps = try allocator.dupe(StackMap, maps) };
+        return metadata;
+    }
+
+    pub fn destroy(self: *StackMapMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.maps);
+        allocator.destroy(self);
+    }
+
+    pub fn forDeopt(self: *const StackMapMetadata, deopt_index: usize) ?StackMap {
+        for (self.maps) |map| if (map.deopt_index == deopt_index) return map;
+        return null;
+    }
+};
+
 pub const OsrImportSource = enum(u8) { frame_slot, stack_slot };
 
 /// One exact VM value imported into an optimizer SSA scratch slot on OSR entry.
@@ -465,6 +496,7 @@ pub const CompiledCode = struct {
     required_u32_slots: u64 = 0,
     max_stack_depth: u8 = 0,
     deopt: ?*DeoptMetadata = null,
+    stack_maps: ?*StackMapMetadata = null,
     osr: ?*OsrMetadata = null,
     /// False for an artifact that may only be entered through an exact OSR row.
     entry_enabled: bool = true,
@@ -477,6 +509,7 @@ pub const CompiledCode = struct {
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();
         if (self.deopt) |metadata| metadata.destroy();
+        if (self.stack_maps) |metadata| metadata.destroy();
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
