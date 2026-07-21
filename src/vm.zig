@@ -3896,6 +3896,9 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
             .deoptimized => return null,
             .miss => {},
         }
+        // An OSR-only artifact intentionally enters from a bytecode backedge.
+        // Do not let the baseline tier consume the whole activation first.
+        if (!artifact.entry_enabled and artifact.osr != null) return null;
     }
 
     var code = chunk.tier.loadCode();
@@ -7393,7 +7396,7 @@ test "vm: optimizer asymmetric branch resumes without restarting" {
     try std.testing.expectEqual(ordinary_delta, machine.steps - 1022);
 }
 
-test "vm: optimizer enters a loop header after a hot backedge" {
+test "vm: optimizer executes a full iteration after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7422,7 +7425,6 @@ test "vm: optimizer enters a loop header after a hot backedge" {
     try std.testing.expect(artifact.osr != null);
     try std.testing.expect(artifact.has_side_exits);
     try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
-    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 
     var refused_slots = [_]Value{ Value.num(6), Value.num(1) };
     var refused_frame = Frame{ .slots = &refused_slots, .parent = null };
@@ -7439,11 +7441,26 @@ test "vm: optimizer enters a loop header after a hot backedge" {
     ));
     try std.testing.expectEqual(steps_before_refusal, machine.steps);
     owner.invalidating.store(false, .release);
+
+    try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
+        &machine,
+        &refused_exec,
+        function_chunk,
+        &refused_frame,
+        null,
+    ));
+    try std.testing.expectEqual(@as(f64, 2), refused_slots[1].asNum());
+    try std.testing.expectEqual(@as(usize, artifact.osr.?.entries[0].entry_ip), refused_exec.ip);
+    try std.testing.expectEqual(steps_before_refusal + artifact.bytecode_steps, machine.steps);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+    machine.steps = steps_before_refusal;
     machine.jit_execution_allowed = false;
 
+    const osr_after_manual = optimizer_osr_entries.load(.monotonic);
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 6), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_after_manual);
 
     machine.steps = 1022;
     var slots = [_]Value{ Value.num(2), Value.num(0) };
