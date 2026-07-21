@@ -273,7 +273,6 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     const code = chunk.code.items;
     if (code.len == 0) return error.EmptyChunk;
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
-    for (code) |inst| if (!supports(inst.op)) return error.UnsupportedChunk;
 
     const starts = try allocator.alloc(bool, code.len);
     defer allocator.free(starts);
@@ -337,6 +336,27 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, @intCast(index + 1));
             },
         }
+    }
+
+    // Handler targets are block boundaries but not normal successors. Permit
+    // them to remain bytecode-only after a mandatory native exit such as an
+    // explicit throw; every instruction the optimizer can actually reach must
+    // still belong to the supported subset.
+    const reachable = try allocator.alloc(bool, blocks_list.items.len);
+    defer allocator.free(reachable);
+    @memset(reachable, false);
+    reachable[0] = true;
+    var reachable_queue: std.ArrayListUnmanaged(u32) = .empty;
+    defer reachable_queue.deinit(allocator);
+    try reachable_queue.append(allocator, 0);
+    var reachable_index: usize = 0;
+    while (reachable_index < reachable_queue.items.len) : (reachable_index += 1) {
+        const block = blocks_list.items[reachable_queue.items[reachable_index]];
+        for (code[block.start..block.end]) |inst| if (!supports(inst.op)) return error.UnsupportedChunk;
+        for (block.successors[0..block.successor_count]) |successor| if (!reachable[successor]) {
+            reachable[successor] = true;
+            try reachable_queue.append(allocator, successor);
+        };
     }
 
     const instructions = try allocator.alloc(Instruction, code.len);
@@ -1105,11 +1125,12 @@ test "optimizer models throw as a resumable terminal frame" {
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
     const seven = try chunk.addConst(RuntimeValue.num(7));
-    _ = try chunk.emitAB(.push_handler, 4, std.math.maxInt(u32));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 4);
     _ = try chunk.emit(.load_const, seven);
     _ = try chunk.emit(.throw_op, 0);
     _ = try chunk.emit(.ret_undef, 0);
-    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.push_completion, 0);
+    _ = try chunk.emit(.end_finally, 0);
 
     var plan = try build(&chunk, std.testing.allocator);
     defer plan.deinit();
@@ -1124,7 +1145,8 @@ test "optimizer models throw as a resumable terminal frame" {
     try std.testing.expectEqual(@as(u32, 1), state.stack_count);
     try std.testing.expectEqual(@as(u32, 1), state.handler_count);
     const handler = plan.graph.handler_states[state.first_handler];
-    try std.testing.expectEqual(@as(u32, 4), handler.catch_ip);
+    try std.testing.expectEqual(std.math.maxInt(u32), handler.catch_ip);
+    try std.testing.expectEqual(@as(u32, 4), handler.finally_ip);
     try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
 }
 
@@ -1167,6 +1189,12 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try chunk.emit(.new_object, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
+
+    var calling = bc.Chunk.init(arena.allocator());
+    _ = try calling.emit(.load_undefined, 0);
+    _ = try calling.emit(.call, 0);
+    _ = try calling.emit(.ret, 0);
+    try std.testing.expectError(error.UnsupportedChunk, build(&calling, std.testing.allocator));
 
     var invalid = bc.Chunk.init(arena.allocator());
     _ = try invalid.emit(.jump, 1);
