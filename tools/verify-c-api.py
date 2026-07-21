@@ -38,6 +38,12 @@ PRIVATE_SUPPORT_EXPORTS = {
     # Generated bindgen adapter: the consumer inventories the three methods on
     # the leaked ArrayBuffer pointer, while C++ performs this producer step.
     "JSC__IDLArrayBufferRef__convertToExtern",
+    # Native SQL row materializers consume the inventoried createStructure
+    # descriptor through two C++-declared helpers that do not appear in the
+    # pinned Zig extern inventories. Their exact trio is owned by #411's
+    # machine-readable SQL object-structure contract.
+    "JSC__createEmptyObjectWithStructure",
+    "JSC__putDirectOffset",
 }
 INCLUDE = ROOT / "include/JavaScriptCore"
 SOURCE = ROOT / "src/c_api.zig"
