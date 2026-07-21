@@ -60,6 +60,11 @@ pub const SideExitBranch = struct {
     nested_loop: ?NestedLoopBranch = null,
 };
 
+pub const SideExit = struct {
+    deopt_index: u16,
+    steps: u12,
+};
+
 pub const NestedLoopBranch = struct {
     entry_block: u32,
     condition: u8,
@@ -73,6 +78,7 @@ pub const Program = struct {
     operations: []Operation,
     result: u8,
     branch: ?BranchSelection,
+    side_exit: ?SideExit,
     side_exit_branch: ?SideExitBranch,
     scratch_slots: u8,
     frame_slots: u32,
@@ -263,14 +269,27 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
 
     var result: optimizer.ValueId = 0;
     var branch_selection: ?BranchSelection = null;
+    var side_exit: ?SideExit = null;
     var side_exit_branch: ?SideExitBranch = null;
     var bytecode_steps: u32 = 0;
     if (graph.branches.len == 0) {
-        if (graph.returns.len != 1 or graph.returns[0].block != 0 or graph.edges.len != 1 or
-            graph.edges[0].from != optimizer.Block.none or graph.edges[0].to != 0)
+        if (graph.edges.len != 1 or graph.edges[0].from != optimizer.Block.none or graph.edges[0].to != 0)
             return error.UnsupportedChunk;
-        result = try resolveAlias(graph.returns[0].value, aliases);
-        bytecode_steps = graph.returns[0].origin + 1;
+        if (graph.returns.len == 1 and graph.returns[0].block == 0) {
+            result = try resolveAlias(graph.returns[0].value, aliases);
+            bytecode_steps = graph.returns[0].origin + 1;
+        } else if (graph.returns.len == 0) {
+            var throw_index: ?u16 = null;
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_) {
+                if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
+                throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
+                bytecode_steps = state.origin;
+            };
+            side_exit = .{
+                .deopt_index = throw_index orelse return error.UnsupportedChunk,
+                .steps = std.math.cast(u12, bytecode_steps) orelse return error.UnsupportedChunk,
+            };
+        } else return error.UnsupportedChunk;
     } else {
         const branch = graph.branches[0];
         if (branch.block != 0 or graph.edges.len != 3 or graph.returns.len != 2 or
@@ -332,6 +351,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .block_entry => .block_entry,
                 .branch => .branch,
                 .return_ => .return_,
+                .throw_ => .throw_,
             },
             .exit_ip = state.origin,
             .first_value = first_value,
@@ -357,6 +377,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .operations = owned_operations,
         .result = @intCast(result),
         .branch = branch_selection,
+        .side_exit = side_exit,
         .side_exit_branch = side_exit_branch,
         .scratch_slots = @intCast(graph.nodes.len),
         .frame_slots = chunk.local_count,
@@ -498,6 +519,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .operations = owned_operations,
         .result = 0,
         .branch = null,
+        .side_exit = null,
         .side_exit_branch = .{
             .condition = @intCast(branch.condition),
             .entry_deopt_index = entry_index,
@@ -881,7 +903,12 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
 
     for (program.operations) |operation| if (operation.block == optimizer.Block.none)
         try emitOperation(&assembler, operation);
-    if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
+    if (program.side_exit) |side_exit| {
+        for (program.operations) |operation| if (operation.block == program.execution_block)
+            try emitOperation(&assembler, operation);
+        try emitStepIncrement(&assembler, side_exit.steps);
+        try emitSideExit(&assembler, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
+    } else if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
         try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
         try assembler.load64(16, 12, frameOffset("steps_until_budget"));
         const loop_top = assembler.position();
@@ -958,7 +985,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try emitOperation(&assembler, operation);
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
-    if (program.side_exit_branch == null) {
+    if (program.side_exit == null and program.side_exit_branch == null) {
         try assembler.store64(9, 12, frameOffset("result_bits"));
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
         try assembler.ret();
@@ -991,8 +1018,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .stack_maps = stack_maps,
         .osr = osr,
         .entry_enabled = program.entry_enabled,
-        .manages_steps = program.side_exit_branch != null,
-        .has_side_exits = program.side_exit_branch != null,
+        .manages_steps = program.side_exit != null or program.side_exit_branch != null,
+        .has_side_exits = program.side_exit != null or program.side_exit_branch != null,
     };
 }
 
@@ -1230,6 +1257,47 @@ test "optimizer lowering publishes frame-state handlers" {
     for (program.deopt_points) |point| {
         try std.testing.expectEqual(@as(u32, 0), point.first_handler);
         try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    }
+}
+
+test "optimizer lowering publishes an exact throw side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(Value.num(7));
+    _ = try chunk.emitAB(.push_handler, 4, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.throw_op, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 1), side_exit.deopt_index);
+    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    try std.testing.expectEqual(@as(u32, 2), program.bytecode_steps);
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.throw_, point.kind);
+    try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 1), point.stack_count);
+    try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    try std.testing.expectEqual(@as(u32, 4), program.deopt_handlers[point.first_handler].catch_ip);
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        try std.testing.expect(compiled.manages_steps);
+        try std.testing.expect(compiled.has_side_exits);
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var steps: u64 = 0;
+        var frame = jit.NativeFrame{ .scratch = &scratch, .steps = &steps };
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+        try std.testing.expectEqual(@as(usize, 2), frame.exit_ip);
+        try std.testing.expectEqual(@as(u64, 2), steps);
+        try std.testing.expectEqual(jit.DeoptPointKind.throw_, compiled.deopt.?.points[frame.deopt_index].kind);
     }
 }
 

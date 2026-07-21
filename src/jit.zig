@@ -314,7 +314,7 @@ pub const RecoveryValue = struct {
     }
 };
 
-pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, edge };
+pub const DeoptPointKind = enum(u8) { block_entry, branch, return_, throw_, edge };
 
 pub const DeoptPoint = struct {
     kind: DeoptPointKind,

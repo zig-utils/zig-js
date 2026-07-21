@@ -74,7 +74,7 @@ Run `zig build --help` for the full command list.
 
 - remaining JSC framework/private and Bun/Home ABI surfaces;
 - 10 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
-- automatic/concurrent compaction, a moving nursery, and optimizing-tier execution beyond handler-aware numeric SSA (calls and throwing operations still reject), resumable side exits, and poll-safe loop OSR with parallel backedges and one equal-cost inner branch; see the [optimizer status](docs/optimizing-jit.md).
+- automatic/concurrent compaction, a moving nursery, and optimizing-tier execution beyond handler-aware numeric SSA (explicit `throw` resumes in bytecode; calls still reject), resumable side exits, and poll-safe loop OSR with parallel backedges and one equal-cost inner branch; see the [optimizer status](docs/optimizing-jit.md).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 

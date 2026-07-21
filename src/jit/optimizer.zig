@@ -87,7 +87,7 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_ };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_ };
 
 pub const HandlerState = struct {
     catch_ip: u32,
@@ -285,7 +285,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret, .ret_undef => if (ip + 1 < code.len) {
+        .ret, .ret_undef, .throw_op => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -332,7 +332,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret, .ret_undef => {},
+            .ret, .ret_undef, .throw_op => {},
             else => if (index + 1 < blocks_list.items.len) {
                 addSuccessor(block, @intCast(index + 1));
             },
@@ -370,7 +370,7 @@ const DepthEffect = struct {
 fn depthEffect(op: bc.Op) DepthEffect {
     return switch (op) {
         .load_const, .load_undefined, .load_null, .load_true, .load_false, .load_local => .{ .required = 0, .removed = 0, .added = 1 },
-        .pop, .jump_if_false, .ret => .{ .required = 1, .removed = 1, .added = 0 },
+        .pop, .jump_if_false, .ret, .throw_op => .{ .required = 1, .removed = 1, .added = 0 },
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
@@ -744,6 +744,14 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .value = result,
                 });
             },
+            .throw_op => {
+                if (depth == 0) return error.InvalidControlFlow;
+                // Preserve the pre-instruction state. Native execution exits
+                // here, then the interpreter executes throw_op exactly once so
+                // debugger notification and handler unwinding stay canonical.
+                try builder.appendFrameState(.throw_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                depth -= 1;
+            },
             .push_handler => try handlers.append(allocator, .{
                 .catch_ip = inst.a,
                 .finally_ip = inst.b,
@@ -938,6 +946,7 @@ fn supports(op: bc.Op) bool {
         .ret_undef,
         .push_handler,
         .pop_handler,
+        .throw_op,
         => true,
         else => false,
     };
@@ -1091,6 +1100,34 @@ test "optimizer frame states preserve active normal-flow handlers" {
     }
 }
 
+test "optimizer models throw as a resumable terminal frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(RuntimeValue.num(7));
+    _ = try chunk.emitAB(.push_handler, 4, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.throw_op, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 0), plan.graph.returns.len);
+    var throw_state: ?FrameState = null;
+    for (plan.graph.frame_states) |state| if (state.kind == .throw_) {
+        try std.testing.expect(throw_state == null);
+        throw_state = state;
+    };
+    const state = throw_state orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 2), state.origin);
+    try std.testing.expectEqual(@as(u32, 1), state.stack_count);
+    try std.testing.expectEqual(@as(u32, 1), state.handler_count);
+    const handler = plan.graph.handler_states[state.first_handler];
+    try std.testing.expectEqual(@as(u32, 4), handler.catch_ip);
+    try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
+}
+
 test "optimizer canonicalizes pure values and removes dead SSA" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1130,11 +1167,6 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try chunk.emit(.new_object, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
-
-    var throwing = bc.Chunk.init(arena.allocator());
-    _ = try throwing.emit(.load_undefined, 0);
-    _ = try throwing.emit(.throw_op, 0);
-    try std.testing.expectError(error.UnsupportedChunk, build(&throwing, std.testing.allocator));
 
     var invalid = bc.Chunk.init(arena.allocator());
     _ = try invalid.emit(.jump, 1);
