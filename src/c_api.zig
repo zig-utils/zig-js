@@ -25684,6 +25684,7 @@ test "private external ZigString callbacks are exact-once and post-sweep" {
                 .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
+                .process_options = .{},
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
@@ -27689,6 +27690,7 @@ test "private embedding references retain strong targets and clear weak targets"
                 .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
+                .process_options = .{},
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
@@ -30926,6 +30928,7 @@ test "private rooted native value containers retain and release exact cells" {
                 .record_allocator = gpa,
                 .owner_thread = std.Thread.getCurrentId(),
                 .primary = primary,
+                .process_options = .{},
                 .atom_strings = strcell.InternTable.init(gpa),
             };
             primary.c_api_group = @ptrCast(group);
