@@ -3337,6 +3337,11 @@ pub const Context = struct {
         /// stable cell ownership until their final cell and deferred callback
         /// have drained. #419 performs the final release/destruction phase.
         retiring: std.ArrayListUnmanaged(*Context) = .empty,
+        /// Partially initialized realms own attributed cells but do not yet
+        /// contribute roots or qualify for allocation-recovery collection.
+        /// Bootstrap is collection-free; on failure the caller collects those
+        /// cells while this callback-routing tombstone remains registered.
+        bootstrapping: std.ArrayListUnmanaged(*Context) = .empty,
         next_realm_id: GcCellBacking.RealmId = GcCellBacking.owner_realm + 1,
 
         pub fn acquire(self: *GcRealmRegistry) void {
@@ -3370,14 +3375,53 @@ pub const Context = struct {
             defer self.release();
             for (self.siblings.items) |registered|
                 if (registered == realm) return error.RealmAlreadyRegistered;
+            try self.siblings.ensureUnusedCapacity(allocator, 1);
+            if (realm.gc_realm_id == GcCellBacking.no_realm) {
+                if (self.next_realm_id == GcCellBacking.no_realm)
+                    return error.RealmIdentityExhausted;
+                realm.gc_realm_id = self.next_realm_id;
+                self.next_realm_id +%= 1;
+            } else {
+                var bootstrap_index: ?usize = null;
+                for (self.bootstrapping.items, 0..) |candidate, index| {
+                    if (candidate == realm) bootstrap_index = index;
+                }
+                const index = bootstrap_index orelse return error.RealmIdentityAlreadyAssigned;
+                _ = self.bootstrapping.orderedRemove(index);
+            }
+            self.siblings.appendAssumeCapacity(realm);
+        }
+
+        /// Reserve a stable identity before the first precise cell is created.
+        /// Bootstrapping realms are callback-addressable but deliberately not
+        /// traced as roots until `registerBootstrapped` publishes completion.
+        pub fn beginBootstrap(self: *GcRealmRegistry, allocator: std.mem.Allocator, realm: *Context) !void {
+            if (realm == self.owner) return error.OwnerCannotBeSibling;
+            if (realm.gc != self.owner.gc or realm.gc_state != self.owner.gc_state)
+                return error.ForeignPreciseHeap;
+            self.acquire();
+            defer self.release();
             if (realm.gc_realm_id != GcCellBacking.no_realm)
                 return error.RealmIdentityAlreadyAssigned;
             if (self.next_realm_id == GcCellBacking.no_realm)
                 return error.RealmIdentityExhausted;
-            try self.siblings.ensureUnusedCapacity(allocator, 1);
+            try self.bootstrapping.ensureUnusedCapacity(allocator, 1);
             realm.gc_realm_id = self.next_realm_id;
             self.next_realm_id +%= 1;
-            self.siblings.appendAssumeCapacity(realm);
+            self.bootstrapping.appendAssumeCapacity(realm);
+        }
+
+        pub fn releaseFailedBootstrap(self: *GcRealmRegistry, realm: *Context) !void {
+            if (self.owner.gc_cell_backing) |backing|
+                if (backing.hasRealmCells(realm.gc_realm_id)) return error.RealmCellsRemain;
+            self.acquire();
+            defer self.release();
+            for (self.bootstrapping.items, 0..) |candidate, index| {
+                if (candidate != realm) continue;
+                _ = self.bootstrapping.orderedRemove(index);
+                return;
+            }
+            return error.RealmBootstrapNotRegistered;
         }
 
         /// Remove one stopped sibling from the root set. Dropping realm-owned
@@ -3426,6 +3470,16 @@ pub const Context = struct {
             if (realm_id == self.owner.gc_realm_id) return self.owner;
             for (self.siblings.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
             for (self.retiring.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
+            for (self.bootstrapping.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
+            return null;
+        }
+
+        pub fn liveRealmForId(self: *GcRealmRegistry, realm_id: GcCellBacking.RealmId) ?*Context {
+            if (realm_id == GcCellBacking.no_realm) return null;
+            self.acquire();
+            defer self.release();
+            if (realm_id == self.owner.gc_realm_id) return self.owner;
+            for (self.siblings.items) |realm| if (realm.gc_realm_id == realm_id) return realm;
             return null;
         }
 
@@ -3435,18 +3489,20 @@ pub const Context = struct {
         pub fn copyCallbackRealms(self: *GcRealmRegistry, output: []*Context) ?[]*Context {
             self.acquire();
             defer self.release();
-            const needed = 1 + self.siblings.items.len + self.retiring.items.len;
+            const needed = 1 + self.siblings.items.len + self.retiring.items.len + self.bootstrapping.items.len;
             if (output.len < needed) return null;
             output[0] = self.owner;
             @memcpy(output[1 .. 1 + self.siblings.items.len], self.siblings.items);
-            @memcpy(output[1 + self.siblings.items.len .. needed], self.retiring.items);
+            const bootstrap_start = 1 + self.siblings.items.len + self.retiring.items.len;
+            @memcpy(output[1 + self.siblings.items.len .. bootstrap_start], self.retiring.items);
+            @memcpy(output[bootstrap_start..needed], self.bootstrapping.items);
             return output[0..needed];
         }
 
         pub fn callbackRealmCount(self: *GcRealmRegistry) usize {
             self.acquire();
             defer self.release();
-            return 1 + self.siblings.items.len + self.retiring.items.len;
+            return 1 + self.siblings.items.len + self.retiring.items.len + self.bootstrapping.items.len;
         }
 
         pub fn siblingCount(self: *GcRealmRegistry) usize {
@@ -3458,8 +3514,10 @@ pub const Context = struct {
         fn deinit(self: *GcRealmRegistry, allocator: std.mem.Allocator) void {
             std.debug.assert(self.siblings.items.len == 0);
             std.debug.assert(self.retiring.items.len == 0);
+            std.debug.assert(self.bootstrapping.items.len == 0);
             self.siblings.deinit(allocator);
             self.retiring.deinit(allocator);
+            self.bootstrapping.deinit(allocator);
         }
     };
 

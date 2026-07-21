@@ -2830,7 +2830,7 @@ pub const Binding = struct {
 
     pub fn recoverAllocationFailure(self: *Binding) bool {
         const state = self.context.gc_state orelse return false;
-        const realm = state.realms.realmForId(currentRealmId()) orelse return false;
+        const realm = state.realms.liveRealmForId(currentRealmId()) orelse return false;
         return realm.collectForAllocationFailure(currentInterpreter());
     }
 
@@ -2917,6 +2917,8 @@ pub const Binding = struct {
         for (state.realms.siblings.items) |realm|
             if (realm.gc_weak_work.load(.acquire)) return true;
         for (state.realms.retiring.items) |realm|
+            if (realm.gc_weak_work.load(.acquire)) return true;
+        for (state.realms.bootstrapping.items) |realm|
             if (realm.gc_weak_work.load(.acquire)) return true;
         return false;
     }
@@ -3369,6 +3371,11 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     sibling.gc_binding = owner.gc_binding;
     sibling.gc_cell_backing = owner.gc_cell_backing;
     sibling.gc_state = owner.gc_state;
+    try state.realms.beginBootstrap(owner.gpa, sibling);
+    const sibling_realm_id = sibling.gc_realm_id;
+    try std.testing.expect(sibling_realm_id > ContextMod.GcCellBacking.owner_realm);
+    try std.testing.expectEqual(sibling, state.realms.realmForId(sibling_realm_id).?);
+    try std.testing.expectEqual(@as(?*ContextMod.Context, null), state.realms.liveRealmForId(sibling_realm_id));
 
     var owner_root = Object{};
     var sibling_root = Object{};
@@ -3383,8 +3390,6 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     sibling.c_api_builtin_constructors[0] = Value.obj(&sibling_root);
 
     try state.realms.registerBootstrapped(owner.gpa, sibling);
-    const sibling_realm_id = sibling.gc_realm_id;
-    try std.testing.expect(sibling_realm_id > ContextMod.GcCellBacking.owner_realm);
     const saved_heap = setActiveHeap(owner.gc);
     defer _ = setActiveHeap(saved_heap);
     const saved_realm = setActiveRealm(sibling);
@@ -3505,6 +3510,28 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     try std.testing.expectEqual(@as(usize, 0), sibling.gc_string_bytes_live);
     try state.realms.releaseRetired(sibling);
     try std.testing.expectEqual(@as(?*ContextMod.Context, null), state.realms.realmForId(sibling_realm_id));
+
+    const failed = try ContextMod.Context.create(std.testing.allocator);
+    const failed_heap = .{
+        .gc = failed.gc,
+        .binding = failed.gc_binding,
+        .backing = failed.gc_cell_backing,
+        .state = failed.gc_state,
+    };
+    failed.gc = owner.gc;
+    failed.gc_binding = owner.gc_binding;
+    failed.gc_cell_backing = owner.gc_cell_backing;
+    failed.gc_state = owner.gc_state;
+    try state.realms.beginBootstrap(owner.gpa, failed);
+    const previous_failed_realm = setActiveRealm(failed);
+    try std.testing.expect(!state.binding.recoverAllocationFailure());
+    _ = setActiveRealm(previous_failed_realm.?);
+    try state.realms.releaseFailedBootstrap(failed);
+    failed.gc = failed_heap.gc;
+    failed.gc_binding = failed_heap.binding;
+    failed.gc_cell_backing = failed_heap.backing;
+    failed.gc_state = failed_heap.state;
+    failed.destroy();
 }
 
 test "precise heap realm registry serializes concurrent add and retire" {
@@ -3548,6 +3575,7 @@ test "precise heap realm registry serializes concurrent add and retire" {
         sibling.gc_binding = owner.gc_binding;
         sibling.gc_cell_backing = owner.gc_cell_backing;
         sibling.gc_state = owner.gc_state;
+        try state.realms.beginBootstrap(owner.gpa, sibling);
     }
 
     const Operation = enum { register, retire };
