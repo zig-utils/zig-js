@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "contract": "global-object-lifecycle",
+  "issue": 412,
+  "parent_issues": [140, 163, 164],
+  "roadmap_issue": 134,
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "sources": {
+    "home_global_object": {
+      "path": "packages/runtime/src/jsc/JSGlobalObject.zig",
+      "sha256": "b7f74131f8316ebce31fa65add121e73367e6c2d4bbe59eb8c53643a5e6189b2"
+    },
+    "home_virtual_machine": {
+      "path": "packages/runtime/src/jsc/VirtualMachine.zig",
+      "sha256": "ef7297f46964ec677414bb1496f92dd10dec4966d21df28e046784e07b5670e1"
+    },
+    "bun_global_object": {
+      "path": "src/jsc/JSGlobalObject.zig",
+      "sha256": "acb3aba5a555edecf26a13c672b59a2c32554194b6b7d0e7fad38d8f4c2db1ab"
+    },
+    "bun_virtual_machine": {
+      "path": "src/jsc/VirtualMachine.zig",
+      "sha256": "8ce0ae2b45cec903d949ef52d0dcdeb2abb3b9bbe910aa644f99420cf8e9d667"
+    },
+    "bun_implementation": {
+      "path": "src/jsc/bindings/ZigGlobalObject.cpp",
+      "sha256": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04"
+    }
+  },
+  "implementation": ["src/c_api.zig"],
+  "fixtures": [
+    "tests/abi/global_lifecycle_fixture_support.zig",
+    "tests/abi/home_private_global_lifecycle.zig",
+    "tests/abi/bun_private_global_lifecycle.zig"
+  ],
+  "symbols": [
+    "Zig__GlobalObject__create",
+    "Zig__GlobalObject__createForTestIsolation",
+    "Zig__GlobalObject__destructOnExit"
+  ],
+  "semantics": [
+    "create owns one private VM reference and one exposed global-context reference; allocation failure releases both without publishing a partial lifecycle.",
+    "mini mode selects the small heap tag and ordinary mode selects the large heap tag while both preserve one VM identity for their exposed realm.",
+    "console, execution-context, eval-mode, worker, and heap-mode metadata are copied into the lifecycle record without dereferencing opaque embedder pointers.",
+    "positive worker or macro execution-context identifiers above one are installed exactly and remain process-unique; main/default globals receive a non-zero lazy identity.",
+    "test isolation creates a fresh realm on the same VM, with new globals, intrinsics, module state, jobs, and object graph.",
+    "test isolation transfers the inherited process lookup to the replacement and assigns the retired realm a fresh unpublished identifier.",
+    "the retired realm loses the private creator reference; an explicit public retain keeps only its allocation alive until the matching release.",
+    "destruct-on-exit atomically consumes the private lifecycle once, requests terminal shutdown, releases the private VM owner, then releases the creator context reference.",
+    "null, foreign, stale, and repeated lifecycle operations are inert; wrong-thread isolation returns null and wrong-thread teardown leaves ownership untouched.",
+    "ordinary public contexts are never consumed by the private teardown boundary.",
+    "the process execution-context registry is retired before the final VM allocation is freed, so concurrent identifier lookup cannot publish a stale global.",
+    "Home and Bun compile and link independent executables against their respective private ABI tag profiles."
+  ]
+}

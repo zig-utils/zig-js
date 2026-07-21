@@ -174,6 +174,9 @@ jobs:
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Doptimize=ReleaseSafe
               zig build test-bun-private-sql-structure -Dprivate-abi-consumer=bun -Dtsan=true
+              zig build test-private-global-lifecycle
+              zig build test-private-global-lifecycle -Doptimize=ReleaseSafe
+              zig build test-private-global-lifecycle -Dtsan=true
               zig build test-bun-private-abort-signal -Dprivate-abi-consumer=bun
               zig build test-bun-private-cached-bytecode -Dprivate-abi-consumer=bun
               zig build test-bun-private-vm-lifecycle -Dprivate-abi-consumer=bun

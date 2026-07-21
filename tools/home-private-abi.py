@@ -22,6 +22,7 @@ WASM_STREAMING_CONTRACT = ROOT / "docs/abi/wasm-streaming-api-408.json"
 WASM_STREAMING_COMPILER_CONTRACT = ROOT / "docs/abi/wasm-streaming-compiler-feed-409.json"
 WASM_STREAMING_RESPONSE_FEED_CONTRACT = ROOT / "docs/abi/wasm-streaming-response-feed-410.json"
 SQL_OBJECT_STRUCTURE_CONTRACT = ROOT / "docs/abi/sql-object-structure-411.json"
+GLOBAL_OBJECT_LIFECYCLE_CONTRACT = ROOT / "docs/abi/global-object-lifecycle-412.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -853,6 +854,87 @@ def validate_sql_object_structure_contract(
         fail("SQL object Structure semantic inventory is incomplete or duplicated")
 
 
+def validate_global_object_lifecycle_contract(
+    home_root: Path | None = None,
+    bun_root: Path | None = None,
+) -> None:
+    if not GLOBAL_OBJECT_LIFECYCLE_CONTRACT.is_file():
+        fail(f"missing checked-in global-object lifecycle contract {GLOBAL_OBJECT_LIFECYCLE_CONTRACT}")
+    contract = json.loads(GLOBAL_OBJECT_LIFECYCLE_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "global-object-lifecycle"
+        or contract.get("issue") != 412
+        or contract.get("parent_issues") != [140, 163, 164]
+        or contract.get("roadmap_issue") != 134
+        or contract.get("revisions") != {
+            "home": REVISION,
+            "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+        }
+    ):
+        fail("global-object lifecycle contract schema, revisions, or issue lineage drift")
+    sources = contract.get("sources")
+    expected_sources = {
+        "home_global_object",
+        "home_virtual_machine",
+        "bun_global_object",
+        "bun_virtual_machine",
+        "bun_implementation",
+    }
+    if not isinstance(sources, dict) or set(sources) != expected_sources:
+        fail("global-object lifecycle source inventory drift")
+    for source in sources.values():
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"path", "sha256"}
+            or not isinstance(source["path"], str)
+            or not isinstance(source["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None
+        ):
+            fail("invalid global-object lifecycle source contract")
+    for root, key in (
+        (home_root, "home_global_object"),
+        (home_root, "home_virtual_machine"),
+        (bun_root, "bun_global_object"),
+        (bun_root, "bun_virtual_machine"),
+        (bun_root, "bun_implementation"),
+    ):
+        if root is None:
+            continue
+        source = sources[key]
+        path = root / source["path"]
+        if not path.is_file() or sha256(path) != source["sha256"]:
+            fail(f"global-object lifecycle source drift for {source['path']}")
+    if contract.get("implementation") != ["src/c_api.zig"]:
+        fail("global-object lifecycle implementation inventory drift")
+    fixtures = contract.get("fixtures")
+    if fixtures != [
+        "tests/abi/global_lifecycle_fixture_support.zig",
+        "tests/abi/home_private_global_lifecycle.zig",
+        "tests/abi/bun_private_global_lifecycle.zig",
+    ]:
+        fail("global-object lifecycle fixture inventory drift")
+    for relative in (*contract["implementation"], *fixtures):
+        if not isinstance(relative, str) or not (ROOT / relative).is_file():
+            fail(f"missing global-object lifecycle evidence {relative}")
+    expected_symbols = {
+        "Zig__GlobalObject__create",
+        "Zig__GlobalObject__createForTestIsolation",
+        "Zig__GlobalObject__destructOnExit",
+    }
+    symbols = contract.get("symbols")
+    if (
+        not isinstance(symbols, list)
+        or set(symbols) != expected_symbols
+        or len(symbols) != len(expected_symbols)
+        or not expected_symbols <= set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    ):
+        fail("global-object lifecycle export inventory drift")
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 10 or len(semantics) != len(set(semantics)):
+        fail("global-object lifecycle semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -889,6 +971,7 @@ def main() -> None:
     validate_wasm_streaming_compiler_contract(args.home_root.resolve() if args.home_root else None)
     validate_wasm_streaming_response_feed_contract()
     validate_sql_object_structure_contract(args.home_root.resolve() if args.home_root else None)
+    validate_global_object_lifecycle_contract(args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

@@ -411,6 +411,40 @@ pub fn build(b: *std.Build) void {
     );
     bun_private_sql_structure_test_step.dependOn(&run_bun_private_sql_structure_fixture.step);
 
+    const home_private_global_lifecycle_fixture = b.addExecutable(.{
+        .name = "home-private-global-lifecycle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/home_private_global_lifecycle.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    home_private_global_lifecycle_fixture.root_module.linkLibrary(home_private_lib);
+    const run_home_private_global_lifecycle_fixture = b.addRunArtifact(home_private_global_lifecycle_fixture);
+    run_home_private_global_lifecycle_fixture.step.dependOn(&home_private_abi_audit_cmd.step);
+
+    const bun_private_global_lifecycle_fixture = b.addExecutable(.{
+        .name = "bun-private-global-lifecycle",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/abi/bun_private_global_lifecycle.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .sanitize_thread = tsan,
+        }),
+    });
+    bun_private_global_lifecycle_fixture.root_module.linkLibrary(bun_private_lib);
+    const run_bun_private_global_lifecycle_fixture = b.addRunArtifact(bun_private_global_lifecycle_fixture);
+    run_bun_private_global_lifecycle_fixture.step.dependOn(&bun_private_abi_audit_cmd.step);
+    const private_global_lifecycle_test_step = b.step(
+        "test-private-global-lifecycle",
+        "Compile, link, and run both pinned global-object lifecycle boundaries",
+    );
+    private_global_lifecycle_test_step.dependOn(&run_home_private_global_lifecycle_fixture.step);
+    private_global_lifecycle_test_step.dependOn(&run_bun_private_global_lifecycle_fixture.step);
+
     const bun_private_abort_signal_fixture = b.addExecutable(.{
         .name = "bun-private-abort-signal",
         .root_module = b.createModule(.{

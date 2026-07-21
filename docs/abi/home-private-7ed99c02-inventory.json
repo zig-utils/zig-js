@@ -96,8 +96,8 @@
     },
     "by_status": {
       "external": 8,
-      "implemented": 500,
-      "pending": 30
+      "implemented": 503,
+      "pending": 27
     }
   },
   "declarations": [
@@ -5924,10 +5924,11 @@
       "line": 863,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__create(*anyopaque, i32, bool, bool, ?*anyopaque) *JSGlobalObject;",
       "declaration_sha256": "b6d42a49738f10fbf075f7b94684d8f788e85afb3f47e348424c11ca45736e5f",
-      "issue": 163
+      "issue": 412,
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Zig__GlobalObject__createForTestIsolation",
@@ -5935,10 +5936,11 @@
       "line": 884,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__createForTestIsolation(old_global: *JSGlobalObject, console: *anyopaque) *JSGlobalObject;",
       "declaration_sha256": "9952f60baef68f698632fef102db7ed7ec8786e6bd6fd8dabbf89a2c9ae864f5",
-      "issue": 163
+      "issue": 412,
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Zig__GlobalObject__destructOnExit",
@@ -5946,10 +5948,11 @@
       "line": 958,
       "calling_convention": "C",
       "classification": "private_jsc",
-      "status": "pending",
+      "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__destructOnExit(*JSGlobalObject) void;",
       "declaration_sha256": "1f21b303cd9aea83ebbe4815d1662c0a2f526ec0e64772f45d0101ab12c4df8f",
-      "issue": 163
+      "issue": 412,
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "Zig__GlobalObject__getModuleRegistryMap",
