@@ -54,13 +54,12 @@ than new correctness architecture.
   the mid-script parallel-GC use-after-free found by the fuzzer.
 - `-Dtest262-parallel-js` runs a broad language-surface slice in GIL-free
   parallel contexts and asserts no new failures versus the baseline.
-- PR-249 coverage contains 235 compatible promoted files out of 259 executable
-  PR-249 files: 233 in normal mode plus 2 `parallel_js`-only witnesses, covered
+- PR-249 coverage contains 243 promoted files out of 259 executable files: 241
+  in normal mode plus 2 `parallel_js`-only witnesses, covered
   by the sharded no-GIL
   ThreadSanitizer corpus gate.
-- The excluded JSC-specific spawned-thread WebAssembly-refusal case conflicts
-  with zig-js's supported worker-Wasm contract; a native unit test covers
-  validation, compilation, instantiation, and execution in both GIL modes.
+- Six JSC-private or intentionally incompatible premises have terminal
+  dispositions; the remaining 10 optimizing-tier cases are owned by #429.
 - The no-GIL `cve/mc-dos-waiter-table-storm.js` focused gate covers property
   `Atomics.waitAsync` tickets removed by a peer while their owning spawned
   thread is closing its stack-local microtask queue; late settlements reroute to
@@ -70,10 +69,9 @@ than new correctness architecture.
   between `asyncJoin` publication and native thread teardown without weakening
   the waiter-root reclamation threshold. Arm labels and failure-only engine
   diagnostics keep future stalls attributable.
-- The reference-only PR-249 tail is checked by
-  `zig build threads-reference-audit`, so unsupported shell hooks, JIT,
-  WebAssembly, and heap-cap/OOM witnesses stay explicit instead of
-  becoming accidental no-op passes.
+- The PR-249 tail is checked by
+  `zig build threads-reference-audit threads-reference-probes`, so blockers and
+  terminal premises cannot become accidental no-op passes.
 
 Remaining: keep widening generated and hand-written stress toward exceptions,
 termination, cleanup, waiters, and cross-thread lifecycle.

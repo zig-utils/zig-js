@@ -77,9 +77,8 @@ mode is independently shippable and testable; for this engine it is the
    threads-test`) that evaluates each file in an enable_threads Context with
    the shim prelude. Start with `api/thread-basic.js`, `api/lock-basic.js`,
    `api/condition-basic.js`, `atomics/property-load-store.js` and grow.
-   Their `cve/`, `jit/`, `gc-stress/` dirs stay reference-only (target
-   machinery a GIL'd tree-walker structurally lacks); record skips with
-   reasons.
+   Keep growing to the exact inventory; current blockers and terminal premises
+   are verifier-owned rather than directory-wide skips.
 
 ## Order of work (each its own commit)
 

@@ -13,8 +13,7 @@ zig build threads-test
 zig build threads-test -Dthreads-shard-index=0 -Dthreads-shard-count=4
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=sync/condition-wait-notify.js
-zig build threads-reference-audit
-python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
+zig build threads-reference-audit threads-reference-probes
 zig build test -Dtsan=true
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=20
@@ -161,12 +160,13 @@ world-stopped finish.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 235 compatible promoted files out of 259 executable PR-249 files: 233
-in the default `zig build threads-test` allowlist plus 2 `parallel_js`-only
-witnesses. The JSC-specific `api/wasm-refused-sd7.js` case stays reference-only:
-its required refusal conflicts with zig-js intentionally supporting WebAssembly
-inside shared-realm Threads. The native unit suite checks module validation,
-compilation, instantiation, and execution from a Thread in both GIL modes.
+contains 243 promoted files out of 259 executable PR-249 files: 241 in the
+default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
+Ten optimizing-tier files remain blocked by
+[#429](https://github.com/zig-utils/zig-js/issues/429); six JSC-private or
+intentionally incompatible premises have verifier-enforced terminal
+dispositions. The native unit suite checks WebAssembly validation, compilation,
+instantiation, and execution from a Thread in both GIL modes.
 It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor
@@ -528,10 +528,10 @@ baseline arena engine.
 
 `zig build threads-reference-audit` verifies the checked-in [PR-249
 inventory](../.data/pr249-reference-inventory.json): all 339 vendored files are
-checksummed, all 259 executable cases have an explicit state, and every one of
-the 24 reference-only executables names stable dependencies, required hooks,
-and owner issues. The gate rejects file, checksum, allowlist, hook, and
-disposition drift without inflating the green allowlist with no-op passes.
+checksummed and all 259 executable cases are exactly classified as 243
+promoted, 10 blocked, or 6 terminal. The gate rejects file, checksum,
+allowlist, hook, dependency, and disposition drift without inflating the green
+allowlist with no-op passes.
 
 `zig build threads-profile` is not a pass/fail correctness gate. It is the local
 scaling and contention profiler for issue #1. The wall-clock columns compare the
@@ -879,93 +879,45 @@ zig build threadfuzz-bin
 ./zig-out/bin/threadfuzz moduleworkerclose 5 1
 ```
 
-## Remaining Reference-Only Areas
+## PR-249 Terminal Inventory
 
-The default corpus is intentionally not a "run every file" mode. Remaining
-PR-249 files stay reference-only for concrete reasons:
+Eight #428 files now run maintained behavior in both serialized and no-GIL
+modes: `congc-t{3,4,5,9,11}`, the weak-global registry race, the buffer-growth
+storm, and the sort/apply marker-pressure storm. `$vm.createGlobalObject()` is
+a real child-realm constructor with fresh intrinsics, VM-shared symbols, and
+collector synchronization.
 
-- WebAssembly-required CVE files remain out until this engine has the matching
-  WebAssembly construction, compilation, relocation, and grow behavior.
-- `api/wasm-refused-sd7.js` remains out because it requires JSC's v1 policy of
-  throwing `TypeError` for every WebAssembly entry point on a spawned Thread.
-  zig-js deliberately supports that surface; the unit witness `threads:
-  WebAssembly compiles and executes in shared-realm workers` verifies the
-  supported contract under both parallel and serialized/GIL execution.
-- JIT/CVE files that require JSC-specific code artifact hooks, ASAN controls,
-  stop counters, disassembly controls, or retired-artifact machinery remain out
-  until real engine behavior backs those hooks.
-- `cve/mc-df-arraycopy-relabel.js` remains out because it depends on JSC's
-  butterfly verification shell option and a typed-array set length race shape
-  whose current zig-js failure is still the documented `RangeError` blocker.
-  The portable zig-js contract is covered by
-  `TypedArray set snapshots array-like source length` and
-  `parallel_js: TypedArray set snapshots array-like source length under no-GIL grow`:
-  source length is snapshotted once, so growth before the snapshot can reject
-  when it no longer fits the destination, while growth after the snapshot does
-  not extend the copy.
-- `cve/mc-life-creator-thread-dies.js` still depends on a reference-shell
-  detach race that constructs fresh `Int32Array` views after the source
-  `ArrayBuffer` has been transferred. zig-js keeps the normal detached-buffer
-  constructor `TypeError` there instead of weakening `TypedArray` validation.
-  The portable creator-owned storage subset is covered by the unit witness
-  `threads: creator-owned ArrayBuffer storage survives creator exit, GC, resize,
-  and transfer` plus `threadfuzz creatorbuffers`. Together they check
-  child-created `SharedArrayBuffer` / `ArrayBuffer` storage after creator exit,
-  sibling reads, GC pressure, post-creator resize, and post-creator
-  `ArrayBuffer.transfer()`.
-- `dw2-marklistset-storm.js` remains out because it targets JSC's shared-GC
-  mark-list machinery. The portable graph/parse/ownership half of
-  `w16-c1-prevent-collection.js` is promoted by
-  `zig build test-private-heap-snapshot`: both WebKit and V8 forms are parsed
-  across repeated snapshots under Debug, ReleaseSafe, and TSan. The original
-  concurrent `Heap::preventCollection` gate remains reference-only because it
-  is a JSC shared-collector election hook, not a portable snapshot property.
-- Helper/preload files such as `harness.js`, `bench/harness.js`,
-  `scaling/harness.js`, `resources/assert.js`, and
-  `vmstate/resources/workload.js` are not counted as standalone remaining
-  tests.
+The 16 unpromoted executables are explicit:
 
-Promote a reference-only file only when the engine implements the behavior, the
-file passes reliably under Zig `0.17-dev`, and the docs/issue counts are updated
-in the same change.
+- 10 optimizing-tier cases are blocked by #146/#429.
+- 3 incompatible premises require spawned-thread Wasm refusal, suppress a
+  specification-permitted `TypedArray.set` `RangeError`, or construct a view
+  after transfer detaches its buffer.
+- 3 JSC-private premises require `$vm.sharedHeapTest` or
+  `Heap::preventCollection` internals that zig-js does not pretend to expose.
 
-Run the reference audit after promotion attempts:
+Six promoted files also record branch-level terminal premises for JSC-private
+diagnostic machinery while their portable stress paths execute normally. Five
+helper/preload files are not standalone tests. The inventory stores every
+reason, required hook, owner issue, and expected default/no-GIL outcome; the
+[exact evidence](../.data/pr249-non-jit-resolution-2026-07-21.json) records the
+28 default/no-GIL release runs plus 8 focused TSan passes.
 
 ```sh
-zig build threads-reference-audit
-python3 tools/threads-reference-audit.py --print-inventory
-python3 tools/threads-reference-audit.py --format markdown
+zig build threads-reference-audit threads-reference-probes
 python3 tools/threads-reference-audit.py --format json
-python3 tools/threads-reference-audit.py --probe-candidates
-python3 tools/threads-reference-audit.py --run-probes --probe-timeout 60
-python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60
-python3 tools/threads-reference-audit.py --scan-reference-only --probe-timeout 20
+python3 tools/threads-reference-audit.py --print-disposition-probes
+python3 tools/threads-reference-audit.py --scan-unpromoted --probe-timeout 60
 ```
 
-`--run-probes` executes the closest reference-only candidates with focused
-`threads-test` commands and returns nonzero on any failure or timeout. A timed
-out or failing probe is not promotion evidence; keep the file reference-only
-until the underlying behavior lands and the focused run passes reliably. Failed
-probes print focused runner evidence before the Zig build tail so the concrete
-JS error, corpus failure, or timeout is visible in one command.
-`--format json` emits the same allowlist counts, reference-only categories,
-closest probe commands, and expected current blocker evidence in a stable
-machine-readable form for CI reports, dashboards, or issue-tracker updates. The
-top-level `promoted_executable`, `executable_total`,
-`reference_only_executable`, and `helper_preload` fields mirror the nested
-sections so simple status scripts can read coverage without understanding the
-full category schema.
-`--expect-current-blockers` flips that maintenance check into a negative gate:
-it succeeds only while the nearest probes still fail or time out with the
-documented blocker evidence. If it starts failing because a probe passes, or
-because the failure shape changed, re-run that single `-Dthreads-case=...`
-probe, promote the file only when the underlying behavior is implemented, and
-update the docs/issue tracker in the same change.
-`--scan-reference-only` is a slower opt-in broom for issue audits: it runs every
-remaining executable reference-only file and fails only if one unexpectedly
-passes. Expected reference-only passes are machine-listed separately for cases
-that are known to skip JSC-only premises or that pass only in serialized mode
-while their no-GIL promotion arm remains too expensive.
+`threads-reference-probes` builds the runner once, then verifies the bounded
+terminal outcomes and their exact error evidence. The slower unpromoted scan is
+for deliberate issue audits, not every local edit.
+
+TSan runs `dw2-marklistset-storm.js` with 2 workers × 18 rounds plus the main
+mutator. Worker seed 0 requests GC at round 16 while the other lanes mutate;
+normal and no-GIL release runs execute the untouched 16 lanes × 120 rounds.
+The exact Debug+TSan CI build completes this profile in 326.285 seconds.
 
 ## Docs Checks
 

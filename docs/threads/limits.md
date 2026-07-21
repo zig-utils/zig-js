@@ -4,8 +4,8 @@ The core JavaScript multithreading architecture for issue #1 is implemented:
 isolated agents/workers, shared memory, structured clone, Workers, and
 shared-realm `Thread`s are all present, and shared-realm threads run
 true-parallel by default. The remaining work is production hardening:
-performance, documentation, stress breadth, and promotion of reference-only
-tests as the matching engine features land.
+performance, documentation, stress breadth, and the 10 optimizing-tier PR-249
+cases tracked by #429.
 
 ## Supported Today
 
@@ -708,23 +708,12 @@ Issue #1 remains the umbrella status page.
   race-gated while deeper sanitizer expansion continues. Keep extending it
   toward more teardown ordering, broader cross-realm scheduling, and richer
   cleanup/finalization interleavings.
-- **Reference-only PR-249 files.** Promote only when the engine implements the
-  behavior and the file is reliable under Zig `0.17-dev`, especially the
-  WebAssembly-required files, the incompatible JSC worker-Wasm refusal policy,
-  JIT/shell-hook witnesses, JSC-specific mark-list
-  or the shared-collector `preventCollection` probe, detached-buffer fresh-view
-  reference assumptions, and typed-array race-shape probes.
-  The portable graph/parse/ownership portion of the heap-snapshot case is now
-  covered by `zig build test-private-heap-snapshot`; the JSC-only collector
-  election gate remains explicitly outside that promotion.
-  Run
-  `python3 tools/threads-reference-audit.py --run-probes --expect-current-blockers --probe-timeout 60`
-  to keep the nearest-probe negative baseline honest: it passes only while
-  those files still fail or time out with their documented blocker evidence,
-  and fails when a candidate starts passing or changes failure shape. Use
-  `python3 tools/threads-reference-audit.py --format json` when automation needs
-  the same counts, blocker categories, promotion probes, and expected blocker
-  evidence without scraping human-readable output.
+- **PR-249 tail.** The exact inventory has 243 promoted files, 10
+  optimizing-tier blockers owned by #429, and 6 terminal JSC-private or
+  intentionally incompatible premises. Run
+  `zig build threads-reference-audit threads-reference-probes`; use
+  `python3 tools/threads-reference-audit.py --format json` for automation or
+  `--scan-unpromoted` for a deliberate full tail audit.
 - **TC39 structs tracking.** Keep `proposal-structs` tracking in
   [P8-structs.md](./P8-structs.md) and this issue; do not split it into a
   parallel tracker.
