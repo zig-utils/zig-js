@@ -22,6 +22,167 @@ pub const supported = is_darwin and switch (builtin.cpu.arch) {
 
 pub const TierState = enum(u8) { cold, compiling, ready, rejected };
 
+/// Coarse value categories collected per function for optimizer decisions.
+/// Profiles are advisory: generated code must guard every assumption derived
+/// from them and deoptimize when a guard fails.
+pub const ProfileValueKind = enum(u3) {
+    undefined,
+    null,
+    boolean,
+    number,
+    string,
+    object,
+};
+
+/// Per-function optimizer profile. Mutators accumulate observations in a
+/// thread-local `Delta` and merge once per VM entry, avoiding atomic traffic in
+/// hot loops while still making snapshots race-free under shared-realm JS.
+pub const OptimizerProfile = struct {
+    entries: std.atomic.Value(u64) = .init(0),
+    branches_taken: std.atomic.Value(u64) = .init(0),
+    branches_not_taken: std.atomic.Value(u64) = .init(0),
+    backedges: std.atomic.Value(u64) = .init(0),
+    value_kinds: std.atomic.Value(u8) = .init(0),
+    first_shape: std.atomic.Value(usize) = .init(0),
+    polymorphic_shapes: std.atomic.Value(bool) = .init(false),
+
+    pub const Delta = struct {
+        branches_taken: u64 = 0,
+        branches_not_taken: u64 = 0,
+        backedges: u64 = 0,
+        value_kinds: u8 = 0,
+        first_shape: usize = 0,
+        polymorphic_shapes: bool = false,
+
+        pub fn observeBranch(self: *Delta, taken: bool) void {
+            if (taken) self.branches_taken +%= 1 else self.branches_not_taken +%= 1;
+        }
+
+        pub fn observeBackedge(self: *Delta) void {
+            self.backedges +%= 1;
+        }
+
+        pub fn observeValue(self: *Delta, kind: ProfileValueKind) void {
+            self.value_kinds |= @as(u8, 1) << @backingInt(kind);
+        }
+
+        pub fn observeShape(self: *Delta, token: usize) void {
+            if (token == 0) return;
+            if (self.first_shape == 0) {
+                self.first_shape = token;
+            } else if (self.first_shape != token) {
+                self.polymorphic_shapes = true;
+            }
+        }
+    };
+
+    pub const Snapshot = struct {
+        entries: u64,
+        branches_taken: u64,
+        branches_not_taken: u64,
+        backedges: u64,
+        value_kinds: u8,
+        first_shape: usize,
+        polymorphic_shapes: bool,
+
+        pub fn sawValue(self: Snapshot, kind: ProfileValueKind) bool {
+            return self.value_kinds & (@as(u8, 1) << @backingInt(kind)) != 0;
+        }
+    };
+
+    pub fn observeEntry(self: *OptimizerProfile) void {
+        _ = self.entries.fetchAdd(1, .monotonic);
+    }
+
+    pub fn merge(self: *OptimizerProfile, delta: Delta) void {
+        if (delta.branches_taken != 0) _ = self.branches_taken.fetchAdd(delta.branches_taken, .monotonic);
+        if (delta.branches_not_taken != 0) _ = self.branches_not_taken.fetchAdd(delta.branches_not_taken, .monotonic);
+        if (delta.backedges != 0) _ = self.backedges.fetchAdd(delta.backedges, .monotonic);
+        if (delta.value_kinds != 0) _ = self.value_kinds.fetchOr(delta.value_kinds, .monotonic);
+        if (delta.first_shape != 0) self.observeShape(delta.first_shape);
+        if (delta.polymorphic_shapes) self.polymorphic_shapes.store(true, .release);
+    }
+
+    pub fn snapshot(self: *const OptimizerProfile) Snapshot {
+        return .{
+            .entries = self.entries.load(.acquire),
+            .branches_taken = self.branches_taken.load(.acquire),
+            .branches_not_taken = self.branches_not_taken.load(.acquire),
+            .backedges = self.backedges.load(.acquire),
+            .value_kinds = self.value_kinds.load(.acquire),
+            .first_shape = self.first_shape.load(.acquire),
+            .polymorphic_shapes = self.polymorphic_shapes.load(.acquire),
+        };
+    }
+
+    fn observeShape(self: *OptimizerProfile, token: usize) void {
+        if (self.first_shape.cmpxchgStrong(0, token, .acq_rel, .acquire)) |existing| {
+            if (existing != token) self.polymorphic_shapes.store(true, .release);
+        }
+    }
+};
+
+pub const OptimizerTierState = enum(u8) {
+    cold,
+    profiling,
+    compiling,
+    ready,
+    rejected,
+    invalidating,
+};
+
+/// A publication state machine distinct from the baseline `Tier`. The plan
+/// pointer is opaque here so the architecture-neutral IR can evolve without a
+/// bytecode ↔ optimizer import cycle. Its owner must retain the plan for every
+/// execution lease that can observe `ready`.
+pub const OptimizerTier = struct {
+    state: std.atomic.Value(OptimizerTierState) = .init(.cold),
+    plan: std.atomic.Value(usize) = .init(0),
+    generation: std.atomic.Value(u32) = .init(0),
+    installed_compiles: std.atomic.Value(u32) = .init(0),
+
+    pub fn beginProfiling(self: *OptimizerTier) void {
+        _ = self.state.cmpxchgStrong(.cold, .profiling, .acq_rel, .acquire);
+    }
+
+    pub fn claimCompilation(self: *OptimizerTier, profile: *const OptimizerProfile, threshold: u64) bool {
+        std.debug.assert(threshold > 0);
+        self.beginProfiling();
+        if (profile.entries.load(.acquire) < threshold) return false;
+        return self.state.cmpxchgStrong(.profiling, .compiling, .acq_rel, .acquire) == null;
+    }
+
+    pub fn publishReady(self: *OptimizerTier, plan: *const anyopaque) void {
+        std.debug.assert(self.state.load(.acquire) == .compiling);
+        self.plan.store(@intFromPtr(plan), .monotonic);
+        _ = self.installed_compiles.fetchAdd(1, .monotonic);
+        self.state.store(.ready, .release);
+    }
+
+    pub fn publishRejected(self: *OptimizerTier) void {
+        std.debug.assert(self.state.load(.acquire) == .compiling);
+        self.state.store(.rejected, .release);
+    }
+
+    pub fn invalidate(self: *OptimizerTier) void {
+        self.state.store(.invalidating, .release);
+        _ = self.generation.fetchAdd(1, .acq_rel);
+        self.plan.store(0, .release);
+        self.state.store(.profiling, .release);
+    }
+
+    pub fn loadPlan(self: *const OptimizerTier, comptime T: type) ?*const T {
+        if (self.state.load(.acquire) != .ready) return null;
+        const address = self.plan.load(.monotonic);
+        if (address == 0) return null;
+        return @ptrFromInt(address);
+    }
+
+    pub fn compileCount(self: *const OptimizerTier) u32 {
+        return self.installed_compiles.load(.acquire);
+    }
+};
+
 /// Per-chunk hotness and single-writer compilation claim.
 ///
 /// Entrants that lose the claim never wait: they continue in bytecode while
@@ -386,6 +547,65 @@ test "Tier permits one concurrent compiler" {
     try std.testing.expectEqual(@as(u32, 1), shared.claims.load(.monotonic));
     try std.testing.expectEqual(TierState.compiling, shared.tier.loadState());
     shared.tier.publishRejected();
+}
+
+test "optimizer profiles merge race-free per-entry deltas" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const Shared = struct {
+        profile: OptimizerProfile = .{},
+
+        fn observe(shared: *@This(), shape: usize) void {
+            for (0..1000) |_| {
+                shared.profile.observeEntry();
+                var delta = OptimizerProfile.Delta{};
+                delta.observeBranch(true);
+                delta.observeBranch(false);
+                delta.observeBackedge();
+                delta.observeValue(.number);
+                delta.observeShape(shape);
+                shared.profile.merge(delta);
+            }
+        }
+    };
+
+    var shared = Shared{};
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index| {
+        thread.* = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, index + 1 });
+    }
+    for (&threads) |*thread| thread.join();
+
+    const snapshot = shared.profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 4000), snapshot.entries);
+    try std.testing.expectEqual(@as(u64, 4000), snapshot.branches_taken);
+    try std.testing.expectEqual(@as(u64, 4000), snapshot.branches_not_taken);
+    try std.testing.expectEqual(@as(u64, 4000), snapshot.backedges);
+    try std.testing.expect(snapshot.sawValue(.number));
+    try std.testing.expect(snapshot.polymorphic_shapes);
+}
+
+test "optimizer tier publishes only installed plans and counts recompiles" {
+    var profile = OptimizerProfile{};
+    var tier = OptimizerTier{};
+    var first_plan: u8 = 1;
+    var second_plan: u8 = 2;
+
+    profile.observeEntry();
+    try std.testing.expect(!tier.claimCompilation(&profile, 2));
+    profile.observeEntry();
+    try std.testing.expect(tier.claimCompilation(&profile, 2));
+    tier.publishReady(&first_plan);
+    try std.testing.expectEqual(&first_plan, tier.loadPlan(u8).?);
+    try std.testing.expectEqual(@as(u32, 1), tier.compileCount());
+
+    tier.invalidate();
+    try std.testing.expect(tier.loadPlan(u8) == null);
+    try std.testing.expect(tier.claimCompilation(&profile, 2));
+    tier.publishReady(&second_plan);
+    try std.testing.expectEqual(&second_plan, tier.loadPlan(u8).?);
+    try std.testing.expectEqual(@as(u32, 2), tier.compileCount());
+    try std.testing.expectEqual(@as(u32, 1), tier.generation.load(.acquire));
 }
 
 test "native entry publishes an exact result word through the stable ABI" {

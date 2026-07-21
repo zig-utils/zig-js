@@ -91,6 +91,7 @@ test {
     _ = @import("compiler.zig");
     _ = @import("vm.zig");
     _ = @import("jit.zig");
+    _ = @import("jit/optimizer.zig");
     _ = @import("context.zig");
     _ = @import("c_api.zig");
     _ = @import("gc.zig");

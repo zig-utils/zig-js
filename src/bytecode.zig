@@ -547,10 +547,13 @@ pub const Chunk = struct {
     /// inlining. Kept per callee chunk so rebinding a call site naturally
     /// selects or rejects the replacement function's own plan.
     quick_leaf_plan: ?*anyopaque = null,
-    /// Hotness and race-safe native-tier publication state. It remains cold
-    /// until VM entry observation is wired to a backend; keeping it on the
-    /// chunk makes the eventual shared-realm path single-writer by construction.
+    /// Hotness and race-safe baseline native-tier publication state.
     tier: jit.Tier = .{},
+    /// Advisory observations and publication state for the distinct optimizing
+    /// tier. The optimizer may consume snapshots, but generated code must guard
+    /// every resulting assumption and preserve baseline/interpreter fallback.
+    optimizer_profile: jit.OptimizerProfile = .{},
+    optimizer_tier: jit.OptimizerTier = .{},
 
     pub fn init(arena: std.mem.Allocator) Chunk {
         return .{ .arena = arena };

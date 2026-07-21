@@ -1,5 +1,7 @@
 # Baseline native tier
 
+This is the currently executable native JavaScript tier. The separate [optimizing-tier foundation](optimizing-jit.md) does not execute plans or replace the baseline fallback.
+
 Issue [#52](https://github.com/zig-utils/zig-js/issues/52) tracks the first
 native-code tier above the bytecode VM. Its purpose is general engine
 throughput: compile bytecode that has proved hot, preserve the interpreter's

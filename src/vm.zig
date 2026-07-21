@@ -3599,6 +3599,17 @@ fn generatorHandlersAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Alloca
     return if (gen) |g| g.handlersAllocator(vm.arena) else vm.arena;
 }
 
+fn optimizerProfileKind(observed: Value) jit.ProfileValueKind {
+    return switch (observed.kind()) {
+        .undefined => .undefined,
+        .null => .null,
+        .boolean => .boolean,
+        .number => .number,
+        .string => .string,
+        .object => .object,
+    };
+}
+
 /// Enter an already-compiled numeric chunk over caller-owned primitive slots.
 /// The compiler's complete-opcode selection proves that these slots and its
 /// scratch stack contain only Numbers/primitive immediates at safepoints.
@@ -3742,7 +3753,14 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     vm.depth += 1;
     defer vm.depth -= 1;
     const result = try tryRunManagedNative(vm, native, slots[0..slot_count]);
-    if (builtin.is_test and result != null) _ = quick_native_direct_call_hits.fetchAdd(1, .monotonic);
+    if (result) |native_value| {
+        chunk.optimizer_tier.beginProfiling();
+        chunk.optimizer_profile.observeEntry();
+        var optimizer_delta = jit.OptimizerProfile.Delta{};
+        optimizer_delta.observeValue(optimizerProfileKind(native_value));
+        chunk.optimizer_profile.merge(optimizer_delta);
+        if (builtin.is_test) _ = quick_native_direct_call_hits.fetchAdd(1, .monotonic);
+    }
     return result;
 }
 
@@ -3751,6 +3769,10 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 /// to snapshot `exec` and suspend. For a normal call `gen` is null and
 /// `gen_yield` never appears (the compiler emits it only into generator chunks).
 fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+    chunk.optimizer_tier.beginProfiling();
+    chunk.optimizer_profile.observeEntry();
+    var optimizer_delta = jit.OptimizerProfile.Delta{};
+    defer chunk.optimizer_profile.merge(optimizer_delta);
     const saved_debug_call_frame = vm.debug_call_frame;
     const saved_stack_trace_call_frame = vm.stack_trace_call_frame;
     var debug_call_frame: interp.DebugCallFrame = undefined;
@@ -3793,12 +3815,15 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     exec.frame = frame; // so a mid-script collection roots this activation's slots
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
-    if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| return result;
+    if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| {
+        optimizer_delta.observeValue(optimizerProfileKind(result));
+        return result;
+    }
     // Run the instruction stream; if a throw escapes and an active handler can
     // catch it, unwind to that handler's catch block and resume. Otherwise the
     // throw propagates to the caller (uncaught — the generator/function ends).
     while (true) {
-        return runChunk(vm, exec, chunk, frame, gen) catch |e| {
+        return runChunk(vm, exec, chunk, frame, gen, &optimizer_delta) catch |e| {
             const abrupt = if (exec.handlers.items.len > 0) vm.catchableOutOfMemory(e) else e;
             if (abrupt == error.Throw and exec.handlers.items.len > 0) {
                 const stack_alloc = generatorStackAllocator(vm, gen);
@@ -3850,7 +3875,14 @@ fn serviceVmStackStatement(vm: *Interpreter, node: *const ast.Node) void {
 /// The instruction loop proper. Operates on `exec.stack` directly so the
 /// operand stack is always current when a throw unwinds (and persists across a
 /// generator's yield/resume). Returns the completion value or propagates a throw.
-fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!Value {
+fn runChunk(
+    vm: *Interpreter,
+    exec: *Exec,
+    chunk: *Chunk,
+    frame: ?*Frame,
+    gen: ?*Generator,
+    optimizer_delta: *jit.OptimizerProfile.Delta,
+) EvalError!Value {
     const stack = &exec.stack;
     const stack_alloc = generatorStackAllocator(vm, gen);
     const handlers_alloc = generatorHandlersAllocator(vm, gen);
@@ -4236,23 +4268,36 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, result);
             },
 
-            .jump => ip = inst.a,
-            .jump_if_false => if (!stack.pop().?.toBoolean()) {
+            .jump => {
+                if (inst.a <= ip - 1) optimizer_delta.observeBackedge();
                 ip = inst.a;
             },
-            .jump_if_true_peek => if (stack.items[stack.items.len - 1].toBoolean()) {
-                ip = inst.a;
+            .jump_if_false => {
+                const taken = !stack.pop().?.toBoolean();
+                optimizer_delta.observeBranch(taken);
+                if (taken) ip = inst.a;
             },
-            .jump_if_false_peek => if (!stack.items[stack.items.len - 1].toBoolean()) {
-                ip = inst.a;
+            .jump_if_true_peek => {
+                const taken = stack.items[stack.items.len - 1].toBoolean();
+                optimizer_delta.observeBranch(taken);
+                if (taken) ip = inst.a;
+            },
+            .jump_if_false_peek => {
+                const taken = !stack.items[stack.items.len - 1].toBoolean();
+                optimizer_delta.observeBranch(taken);
+                if (taken) ip = inst.a;
             },
             .jump_if_nullish_peek => {
                 const v = stack.items[stack.items.len - 1];
-                if (v.isNull() or v.isUndefined()) ip = inst.a;
+                const taken = v.isNull() or v.isUndefined();
+                optimizer_delta.observeBranch(taken);
+                if (taken) ip = inst.a;
             },
             .jump_if_not_nullish_peek => {
                 const v = stack.items[stack.items.len - 1];
-                if (!v.isNull() and !v.isUndefined()) ip = inst.a;
+                const taken = !v.isNull() and !v.isUndefined();
+                optimizer_delta.observeBranch(taken);
+                if (taken) ip = inst.a;
             },
 
             .load_this => try stack.append(stack_alloc, vm.this_value),
@@ -4336,6 +4381,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
+                        if (o.shape) |shape| optimizer_delta.observeShape(@intFromPtr(shape));
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
@@ -4378,6 +4424,7 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     }
                     result = try vm.getProperty(obj, name); // arrays, strings, proto chain, null/undefined
                 }
+                optimizer_delta.observeValue(optimizerProfileKind(result));
                 try stack.append(stack_alloc, result);
             },
             .get_index => {
@@ -4727,14 +4774,26 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 try stack.append(stack_alloc, try construct(vm, callee, args));
             },
 
-            .ret => return stack.pop().?,
-            .ret_undef => return Value.undef(),
+            .ret => {
+                const result = stack.pop().?;
+                optimizer_delta.observeValue(optimizerProfileKind(result));
+                return result;
+            },
+            .ret_undef => {
+                optimizer_delta.observeValue(.undefined);
+                return Value.undef();
+            },
             .abrupt_return => {
                 // A return that must run enclosing `finally` blocks first: unwind
                 // to the nearest finally carrying a "return" completion (which
                 // `end_finally` re-propagates), or return directly if none.
                 const rv = stack.pop().?;
-                if (try unwindToFinally(vm, gen, exec, rv, .ret)) |fpc| ip = fpc else return rv;
+                if (try unwindToFinally(vm, gen, exec, rv, .ret)) |fpc| {
+                    ip = fpc;
+                } else {
+                    optimizer_delta.observeValue(optimizerProfileKind(rv));
+                    return rv;
+                }
             },
             .abrupt_break, .abrupt_continue => {
                 // A break/continue that crosses a `finally`: run the enclosing
@@ -4932,7 +4991,12 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // enclosing finally before terminating, so nested finallys all
                     // run (return value / break-or-continue target rides as cval).
                     .ret => {
-                        if (try unwindToFinally(vm, gen, exec, cval, .ret)) |fpc| ip = fpc else return cval;
+                        if (try unwindToFinally(vm, gen, exec, cval, .ret)) |fpc| {
+                            ip = fpc;
+                        } else {
+                            optimizer_delta.observeValue(optimizerProfileKind(cval));
+                            return cval;
+                        }
                     },
                     .break_, .continue_ => {
                         if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.asNum());
@@ -4940,9 +5004,13 @@ fn runChunk(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                 }
             },
 
-            .halt => return acc,
+            .halt => {
+                optimizer_delta.observeValue(optimizerProfileKind(acc));
+                return acc;
+            },
         }
     }
+    optimizer_delta.observeValue(optimizerProfileKind(acc));
     return acc;
 }
 
@@ -6276,6 +6344,8 @@ const Activation = struct {
     exec: Exec = .{},
     chunk: *Chunk,
     frame: *Frame,
+    optimizer_delta: jit.OptimizerProfile.Delta = .{},
+    optimizer_profile_active: bool = false,
     /// Full backing store retained when `frame.slots` is narrowed for a call.
     /// Keeping capacity here lets a later activation with no more locals reuse
     /// the same allocation.
@@ -6309,6 +6379,11 @@ const Activation = struct {
 /// here avoids retaining one frame/slot/Exec allocation for every completed JS
 /// call until Context teardown.
 fn releaseActivation(vm: *Interpreter, act: *Activation) void {
+    if (act.optimizer_profile_active) {
+        act.chunk.optimizer_profile.merge(act.optimizer_delta);
+        act.optimizer_delta = .{};
+        act.optimizer_profile_active = false;
+    }
     if (act.frame.escaped.load(.monotonic)) return;
     act.exec.stack.clearRetainingCapacity();
     act.exec.handlers.clearRetainingCapacity();
@@ -6378,6 +6453,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .frame = frame,
         .slot_storage = slot_storage,
         .next_free = null,
+        .optimizer_delta = .{},
+        .optimizer_profile_active = false,
         .saved_this = vm.this_value,
         .saved_strict = vm.strict,
         .saved_env = vm.env,
@@ -6590,15 +6667,21 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 
     while (acts.items.len > 0) {
         const cur = acts.items[acts.items.len - 1];
+        if (!cur.optimizer_profile_active) {
+            cur.chunk.optimizer_tier.beginProfiling();
+            cur.chunk.optimizer_profile.observeEntry();
+            cur.optimizer_profile_active = true;
+        }
         vm.stack_trace_call_frame = &cur.stack_trace_call_frame;
         if (cur.debug_environment != null) {
             vm.debug_call_frame = &cur.debug_call_frame;
             try syncDebugEnvironmentFromFrame(cur);
         }
-        const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result|
-            native_result
-        else
-            runChunk(vm, &cur.exec, cur.chunk, cur.frame, null);
+        const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result| result: {
+            cur.optimizer_delta.observeValue(optimizerProfileKind(native_result));
+            break :result native_result;
+        } else
+            runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
         if (cur.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
@@ -6799,6 +6882,50 @@ test "vm: hot primitive constant function tiers through native entry" {
     machine.steps = 1022;
     try std.testing.expectEqual(@as(f64, 42), (try run(&machine, function_chunk, null)).asNum());
     try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+    const optimizer_profile = function_chunk.optimizer_profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 4), optimizer_profile.entries);
+    try std.testing.expect(optimizer_profile.sawValue(.number));
+}
+
+test "vm: optimizer profiles aggregate function behavior without claiming execution" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator,
+        \\function hot(o, n) {
+        \\  var total = 0;
+        \\  for (var i = 0; i < n; i = i + 1) {
+        \\    if (i < 2) total = total + o.x;
+        \\    else total = total + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\hot({ x: 2 }, 4);
+        \\hot({ pad: 0, x: 3 }, 3);
+        \\hot({ x: 4, tail: 0 }, 2);
+    );
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    _ = try run(&machine, root, null);
+
+    const function_chunk = root.fns.items[0].chunk.?;
+    const profile = function_chunk.optimizer_profile.snapshot();
+    try std.testing.expectEqual(@as(u64, 3), profile.entries);
+    try std.testing.expect(profile.branches_taken > 0);
+    try std.testing.expect(profile.branches_not_taken > 0);
+    try std.testing.expect(profile.backedges > 0);
+    try std.testing.expect(profile.sawValue(.number));
+    try std.testing.expect(profile.polymorphic_shapes);
+    try std.testing.expectEqual(jit.OptimizerTierState.profiling, function_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(function_chunk.optimizer_tier.loadPlan(u8) == null);
+    try std.testing.expectEqual(@as(u32, 0), function_chunk.optimizer_tier.compileCount());
 }
 
 test "vm: speculative unsigned parameter guards are exact" {
