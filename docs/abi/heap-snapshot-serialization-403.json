@@ -7,7 +7,7 @@
     "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
     "bun": "4982b91e3702094330f3be3883354c52b8c01323",
     "webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0",
-    "zig_gc": "c17c01af7ee8a38bbe1b47bc02751653d2b81afc"
+    "zig_gc": "09f1d51aa3825e5aaf0c45105a717a1216f1aa11"
   },
   "sources": {
     "packages/runtime/src/jsc/BunHeapProfiler.zig": "c29c22a19125ba72c5a3d428bee38bd9c117e6e8f8dea61a1909cc7b424a7b60",

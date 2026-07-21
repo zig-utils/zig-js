@@ -489,7 +489,7 @@ def validate_heap_snapshot_contract(bun_root: Path | None) -> None:
         "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
         "bun": REVISION,
         "webkit": "cd821fecca0d39c8bac874c283d956868c7f0de0",
-        "zig_gc": "c17c01af7ee8a38bbe1b47bc02751653d2b81afc",
+        "zig_gc": "09f1d51aa3825e5aaf0c45105a717a1216f1aa11",
     }:
         fail("heap snapshot revision set drift")
     sources = contract.get("sources")
