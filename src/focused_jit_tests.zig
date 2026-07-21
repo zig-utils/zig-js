@@ -8,5 +8,6 @@ test {
     _ = @import("jit.zig");
     _ = @import("jit/compiler.zig");
     _ = @import("jit/optimizer.zig");
+    _ = @import("jit/optimizer_compiler.zig");
     _ = @import("jit/aarch64.zig");
 }

@@ -73,16 +73,24 @@ pub const Edge = struct {
     argument_count: u32,
 };
 
+pub const ReturnValue = struct {
+    block: u32,
+    origin: u32,
+    value: ValueId,
+};
+
 pub const ValueGraph = struct {
     allocator: std.mem.Allocator,
     nodes: []ValueNode,
     edges: []Edge,
     edge_arguments: []ValueId,
+    returns: []ReturnValue,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
         self.allocator.free(self.edges);
         self.allocator.free(self.edge_arguments);
+        self.allocator.free(self.returns);
         self.* = undefined;
     }
 };
@@ -164,6 +172,7 @@ pub const Plan = struct {
             }
             try out.appendSlice(allocator, ")\n");
         }
+        for (self.graph.returns) |ret| try out.print(allocator, "return b{d} @{d} %{d}\n", .{ ret.block, ret.origin, ret.value });
         return out.toOwnedSlice(allocator);
     }
 };
@@ -273,12 +282,14 @@ const GraphBuilder = struct {
     edges: std.ArrayListUnmanaged(Edge) = .empty,
     edge_arguments: std.ArrayListUnmanaged(ValueId) = .empty,
     roots: std.ArrayListUnmanaged(ValueId) = .empty,
+    returns: std.ArrayListUnmanaged(ReturnValue) = .empty,
 
     fn deinit(self: *GraphBuilder) void {
         self.nodes.deinit(self.allocator);
         self.edges.deinit(self.allocator);
         self.edge_arguments.deinit(self.allocator);
         self.roots.deinit(self.allocator);
+        self.returns.deinit(self.allocator);
     }
 
     fn appendNode(self: *GraphBuilder, node: ValueNode) std.mem.Allocator.Error!ValueId {
@@ -508,8 +519,21 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 if (depth == 0) return error.InvalidControlFlow;
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
+                try builder.returns.append(allocator, .{
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .value = stack[depth],
+                });
             },
-            .ret_undef => {},
+            .ret_undef => {
+                const result = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
+                try builder.roots.append(allocator, result);
+                try builder.returns.append(allocator, .{
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .value = result,
+                });
+            },
             else => unreachable,
         };
 
@@ -603,11 +627,20 @@ fn compactValueGraph(
     const owned_edges = try edges.toOwnedSlice(allocator);
     errdefer allocator.free(owned_edges);
     const owned_edge_arguments = try edge_arguments.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_edge_arguments);
+    const returns = try allocator.alloc(ReturnValue, builder.returns.items.len);
+    errdefer allocator.free(returns);
+    for (builder.returns.items, returns) |old, *ret| ret.* = .{
+        .block = old.block,
+        .origin = old.origin,
+        .value = remap[old.value],
+    };
     return .{
         .allocator = allocator,
         .nodes = nodes,
         .edges = owned_edges,
         .edge_arguments = owned_edge_arguments,
+        .returns = returns,
     };
 }
 

@@ -25,6 +25,7 @@ const agent = @import("agent.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const jit = @import("jit.zig");
 const jit_compiler = @import("jit/compiler.zig");
+const optimizer_compiler = @import("jit/optimizer_compiler.zig");
 
 const Value = value.Value;
 const Chunk = bc.Chunk;
@@ -37,6 +38,7 @@ const EvalError = interp.EvalError;
 const async_gen_request_reserve_granularity: usize = 16;
 const native_tier_entry_threshold: u32 = 3;
 const eager_native_tier_entry_threshold: u32 = 1;
+const optimizer_tier_entry_threshold: u64 = 8;
 const inline_call_depth_limit: u8 = 32;
 
 fn bindThisForCall(vm: *Interpreter, func: *Function, this_val: Value) EvalError!Value {
@@ -888,6 +890,8 @@ pub fn quickObjectAllocationReserveRefillsForTesting() u64 {
 var quick_global_binding_hits: std.atomic.Value(u64) = .init(0);
 var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_native_attempts: std.atomic.Value(u64) = .init(0);
+var optimizer_native_hits: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
     std.debug.assert(builtin.is_test);
@@ -3669,11 +3673,82 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
+fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk) ?*const jit.CompiledCode {
+    var artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
+    if (artifact == null) if (owner.claimOptimizerCompilation(
+        &chunk.optimizer_tier,
+        &chunk.optimizer_profile,
+        optimizer_tier_entry_threshold,
+    )) |claim_value| {
+        var claim = claim_value;
+        var compiled = optimizer_compiler.compile(chunk) catch |err| {
+            if (err == error.OutOfMemory) {
+                chunk.optimizer_tier.invalidate();
+            } else {
+                _ = chunk.optimizer_tier.publishRejected(claim.claim);
+            }
+            claim.release();
+            return null;
+        };
+        _ = owner.adoptOptimizerAndPublish(&chunk.optimizer_tier, claim.claim, compiled) catch {
+            compiled.deinit();
+            chunk.optimizer_tier.invalidate();
+            claim.release();
+            return null;
+        };
+        claim.release();
+        artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
+    };
+    return artifact;
+}
+
+fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*Frame) EvalError!?Value {
+    if (native.manages_steps) {
+        const current_frame = frame;
+        if (native.frame_slots > 0) {
+            const cf = current_frame orelse return null;
+            if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return null;
+        }
+        const result = try tryRunManagedNative(vm, native, if (current_frame) |cf| cf.slots else &.{});
+        if (builtin.is_test and native.kind == .optimizer and result != null)
+            _ = optimizer_native_hits.fetchAdd(1, .monotonic);
+        return result;
+    }
+
+    // Preserve runChunk's exact step/checkpoint contract. A native entry may
+    // cover an interval only when it neither exceeds the budget nor crosses a
+    // 1024-step termination/GIL/GC checkpoint; those rare boundaries stay in
+    // bytecode and are retried on the next clean entry.
+    const instruction_count: u64 = native.bytecode_steps;
+    const end_steps = std.math.add(u64, vm.steps, instruction_count) catch return null;
+    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return null;
+    const saved_steps = vm.steps;
+    vm.steps = end_steps;
+
+    var native_frame = jit.NativeFrame{};
+    return switch (native.run(&native_frame)) {
+        .complete => result: {
+            if (builtin.is_test and native.kind == .optimizer)
+                _ = optimizer_native_hits.fetchAdd(1, .monotonic);
+            break :result Value.fromRawBits(native_frame.result_bits);
+        },
+        else => {
+            vm.steps = saved_steps;
+            return null;
+        },
+    };
+}
+
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
     if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
     const owner = vm.jit_owner orelse return null;
 
     if (!vm.jit_execution_allowed) return null;
+    if (loadOrCompileOptimizer(owner, chunk)) |artifact| {
+        if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
+        if (try tryExecuteNative(vm, artifact, frame)) |result| return result;
+    }
+
     var code = chunk.tier.loadCode();
     // Candidate numeric chunks compile on their first call: a substantial loop
     // repays the baseline compiler cost immediately, and cold contexts have no
@@ -3700,34 +3775,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         code = chunk.tier.loadCode();
     };
     const native = code orelse return null;
-
-    if (native.manages_steps) {
-        const current_frame = frame;
-        if (native.frame_slots > 0) {
-            const cf = current_frame orelse return null;
-            if (cf.slots.len < native.frame_slots or cf.escaped.load(.monotonic)) return null;
-        }
-        return try tryRunManagedNative(vm, native, if (current_frame) |cf| cf.slots else &.{});
-    }
-
-    // Preserve runChunk's exact step/checkpoint contract. A native entry may
-    // cover an interval only when it neither exceeds the budget nor crosses a
-    // 1024-step termination/GIL/GC checkpoint; those rare boundaries stay in
-    // bytecode and are retried on the next clean entry.
-    const instruction_count: u64 = native.bytecode_steps;
-    const end_steps = std.math.add(u64, vm.steps, instruction_count) catch return null;
-    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return null;
-    const saved_steps = vm.steps;
-    vm.steps = end_steps;
-
-    var native_frame = jit.NativeFrame{};
-    return switch (native.run(&native_frame)) {
-        .complete => Value.fromRawBits(native_frame.result_bits),
-        else => {
-            vm.steps = saved_steps;
-            return null;
-        },
-    };
+    return tryExecuteNative(vm, native, frame);
 }
 
 /// A ready numeric leaf has no object/upvalue/`this`/eval opcode and its native
@@ -3736,10 +3784,30 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
 /// and recycling a heap activation. Extra arguments stay rooted on the caller's
 /// operand stack; only formal parameters are copied, matching buildActivation.
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
-    if (vm.jit_owner == null or !vm.jit_execution_allowed) return null;
+    const owner = vm.jit_owner orelse return null;
+    if (!vm.jit_execution_allowed) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
-    const native = chunk.tier.loadCode() orelse return null;
+    const optimizer_artifact = loadOrCompileOptimizer(owner, chunk);
+    if (optimizer_artifact) |artifact| if (!artifact.manages_steps and artifact.frame_slots == 0) {
+        if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
+        try vm.stackGuard();
+        vm.depth += 1;
+        defer vm.depth -= 1;
+        if (try tryExecuteNative(vm, artifact, null)) |native_value| {
+            chunk.optimizer_tier.beginProfiling();
+            chunk.optimizer_profile.observeEntry();
+            var optimizer_delta = jit.OptimizerProfile.Delta{};
+            optimizer_delta.observeValue(optimizerProfileKind(native_value));
+            chunk.optimizer_profile.merge(optimizer_delta);
+            if (builtin.is_test) _ = quick_native_direct_call_hits.fetchAdd(1, .monotonic);
+            return native_value;
+        }
+    };
+    const native = if (optimizer_artifact) |artifact|
+        if (artifact.manages_steps) artifact else chunk.tier.loadCode() orelse return null
+    else
+        chunk.tier.loadCode() orelse return null;
     if (!native.manages_steps) return null;
     const slot_count: usize = @intCast(native.frame_slots);
     if (slot_count != func.local_count or slot_count > 64 or native.frame_slots != chunk.local_count) return null;
@@ -3760,6 +3828,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
         optimizer_delta.observeValue(optimizerProfileKind(native_value));
         chunk.optimizer_profile.merge(optimizer_delta);
         if (builtin.is_test) _ = quick_native_direct_call_hits.fetchAdd(1, .monotonic);
+        if (builtin.is_test and native.kind == .optimizer) _ = optimizer_native_hits.fetchAdd(1, .monotonic);
     }
     return result;
 }
@@ -6924,8 +6993,68 @@ test "vm: optimizer profiles aggregate function behavior without claiming execut
     try std.testing.expect(profile.sawValue(.number));
     try std.testing.expect(profile.polymorphic_shapes);
     try std.testing.expectEqual(jit.OptimizerTierState.profiling, function_chunk.optimizer_tier.state.load(.acquire));
-    try std.testing.expect(function_chunk.optimizer_tier.loadPlan(u8) == null);
+    try std.testing.expect(function_chunk.optimizer_tier.loadArtifact(u8) == null);
     try std.testing.expectEqual(@as(u64, 0), function_chunk.optimizer_tier.compileCount());
+}
+
+test "vm: constant SSA return converges across bytecode baseline and optimizer" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = "function answer() { return (1 + 2) * 14; } answer()";
+    try std.testing.expectEqual(@as(f64, 42), (try vmRun(allocator, source)).asNum());
+
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    const baseline_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    try std.testing.expectEqual(jit.TierState.ready, function_chunk.tier.loadState());
+    for (1..16) |_| try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+    try std.testing.expectEqual(jit.OptimizerTierState.ready, function_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+    const steps_before_optimizer = machine.steps;
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(baseline_steps, machine.steps - steps_before_optimizer);
+}
+
+test "vm: unsupported optimizer input caches rejection and preserves fallback" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var parser = try Parser.init(allocator, "function inc(x) { return x + 1; } inc(41)");
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    for (0..10) |_| try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    const function_chunk = root.fns.items[0].chunk.?;
+    try std.testing.expectEqual(jit.OptimizerTierState.rejected, function_chunk.optimizer_tier.state.load(.acquire));
+    try std.testing.expect(function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expectEqual(@as(u64, 0), function_chunk.optimizer_tier.compileCount());
+    try std.testing.expectEqual(hits_before, optimizer_native_hits.load(.monotonic));
 }
 
 test "vm: speculative unsigned parameter guards are exact" {

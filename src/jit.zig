@@ -131,13 +131,13 @@ pub const OptimizerTierState = enum(u8) {
     invalidating,
 };
 
-/// A publication state machine distinct from the baseline `Tier`. The plan
+/// A publication state machine distinct from the baseline `Tier`. The artifact
 /// pointer is opaque here so the architecture-neutral IR can evolve without a
-/// bytecode ↔ optimizer import cycle. Its owner must retain the plan for every
-/// execution lease that can observe `ready`.
+/// bytecode ↔ optimizer import cycle. Its owner must retain the artifact for
+/// every execution lease that can observe `ready`.
 pub const OptimizerTier = struct {
     state: std.atomic.Value(OptimizerTierState) = .init(.cold),
-    plan: std.atomic.Value(usize) = .init(0),
+    artifact: std.atomic.Value(usize) = .init(0),
     generation: std.atomic.Value(u64) = .init(0),
     installed_compiles: std.atomic.Value(u64) = .init(0),
     publication_lock: std.atomic.Mutex = .unlocked,
@@ -162,11 +162,11 @@ pub const OptimizerTier = struct {
         return .{ .generation = current_generation };
     }
 
-    pub fn publishReady(self: *OptimizerTier, claim: CompilationClaim, plan: *const anyopaque) bool {
+    pub fn publishReady(self: *OptimizerTier, claim: CompilationClaim, artifact: *const anyopaque) bool {
         self.acquirePublicationLock();
         defer self.publication_lock.unlock();
         if (self.state.load(.acquire) != .compiling or self.generation.load(.acquire) != claim.generation) return false;
-        self.plan.store(@intFromPtr(plan), .monotonic);
+        self.artifact.store(@intFromPtr(artifact), .monotonic);
         _ = self.installed_compiles.fetchAdd(1, .monotonic);
         self.state.store(.ready, .release);
         return true;
@@ -185,13 +185,13 @@ pub const OptimizerTier = struct {
         defer self.publication_lock.unlock();
         self.state.store(.invalidating, .release);
         _ = self.generation.fetchAdd(1, .acq_rel);
-        self.plan.store(0, .release);
+        self.artifact.store(0, .release);
         self.state.store(.profiling, .release);
     }
 
-    pub fn loadPlan(self: *const OptimizerTier, comptime T: type) ?*const T {
+    pub fn loadArtifact(self: *const OptimizerTier, comptime T: type) ?*const T {
         if (self.state.load(.acquire) != .ready) return null;
-        const address = self.plan.load(.monotonic);
+        const address = self.artifact.load(.monotonic);
         if (address == 0) return null;
         return @ptrFromInt(address);
     }
@@ -287,9 +287,12 @@ pub const NativeFrame = extern struct {
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 
+pub const CodeKind = enum(u8) { baseline, optimizer };
+
 pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
+    kind: CodeKind = .baseline,
     /// Number of bytecode dispatches represented by a successful native entry.
     /// Used to preserve the interpreter's step-budget/checkpoint accounting.
     bytecode_steps: u32 = 0,
@@ -322,6 +325,7 @@ pub const Owner = struct {
     lock: std.atomic.Mutex = .unlocked,
     codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
     tiers: std.ArrayListUnmanaged(*Tier) = .empty,
+    optimizer_tiers: std.ArrayListUnmanaged(*OptimizerTier) = .empty,
     active_leases: std.atomic.Value(usize) = .init(0),
     invalidating: std.atomic.Value(bool) = .init(false),
 
@@ -331,6 +335,16 @@ pub const Owner = struct {
         owner: *Owner,
 
         pub fn release(self: *Compilation) void {
+            _ = self.owner.active_leases.fetchSub(1, .release);
+            self.* = undefined;
+        }
+    };
+
+    pub const OptimizerCompilation = struct {
+        owner: *Owner,
+        claim: OptimizerTier.CompilationClaim,
+
+        pub fn release(self: *OptimizerCompilation) void {
             _ = self.owner.active_leases.fetchSub(1, .release);
             self.* = undefined;
         }
@@ -369,6 +383,31 @@ pub const Owner = struct {
         return owned;
     }
 
+    /// Adopt and publish one immutable optimizer artifact under the same owner
+    /// lease as baseline code. Owner→tier lock ordering is shared with `clear`,
+    /// so deletion cannot miss or overtake a successful publication.
+    pub fn adoptOptimizerAndPublish(
+        self: *Owner,
+        tier: *OptimizerTier,
+        claim: OptimizerTier.CompilationClaim,
+        compiled: CompiledCode,
+    ) AdoptError!*CompiledCode {
+        const allocator = self.allocator orelse return error.OutOfMemory;
+        const owned = try allocator.create(CompiledCode);
+        errdefer allocator.destroy(owned);
+
+        self.acquireLock();
+        defer self.lock.unlock();
+        if (self.invalidating.load(.acquire)) return error.Invalidated;
+        try self.codes.ensureUnusedCapacity(allocator, 1);
+        try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
+        owned.* = compiled;
+        if (!tier.publishReady(claim, owned)) return error.Invalidated;
+        self.codes.appendAssumeCapacity(owned);
+        self.optimizer_tiers.appendAssumeCapacity(tier);
+        return owned;
+    }
+
     /// Protect one outer VM execution, amortizing invalidation synchronization
     /// across every native entry it performs. Nested VM calls inherit the same
     /// lease through `Interpreter.jit_execution_depth`.
@@ -394,6 +433,25 @@ pub const Owner = struct {
         return .{ .owner = self };
     }
 
+    pub fn claimOptimizerCompilation(
+        self: *Owner,
+        tier: *OptimizerTier,
+        profile: *const OptimizerProfile,
+        threshold: u64,
+    ) ?OptimizerCompilation {
+        if (self.invalidating.load(.acquire)) return null;
+        _ = self.active_leases.fetchAdd(1, .acquire);
+        if (self.invalidating.load(.acquire)) {
+            _ = self.active_leases.fetchSub(1, .release);
+            return null;
+        }
+        const claim = tier.claimCompilation(profile, threshold) orelse {
+            _ = self.active_leases.fetchSub(1, .release);
+            return null;
+        };
+        return .{ .owner = self, .claim = claim };
+    }
+
     /// Invalidate every published tier before releasing executable mappings.
     /// A later entry observes `.cold` and may compile a fresh mapping.
     pub fn clear(self: *Owner) void {
@@ -404,6 +462,8 @@ pub const Owner = struct {
         self.acquireLock();
         for (self.tiers.items) |tier| tier.invalidate();
         self.tiers.clearRetainingCapacity();
+        for (self.optimizer_tiers.items) |tier| tier.invalidate();
+        self.optimizer_tiers.clearRetainingCapacity();
         const allocator = self.allocator.?;
         for (self.codes.items) |code| {
             code.deinit();
@@ -419,12 +479,15 @@ pub const Owner = struct {
         self.beginInvalidation();
         while (self.active_leases.load(.acquire) != 0) std.Thread.yield() catch {};
         self.acquireLock();
+        for (self.tiers.items) |tier| tier.invalidate();
+        for (self.optimizer_tiers.items) |tier| tier.invalidate();
         for (self.codes.items) |code| {
             code.deinit();
             allocator.destroy(code);
         }
         self.codes.deinit(allocator);
         self.tiers.deinit(allocator);
+        self.optimizer_tiers.deinit(allocator);
         self.lock.unlock();
         self.* = .{};
     }
@@ -607,7 +670,7 @@ test "optimizer profiles merge race-free per-entry deltas" {
     try std.testing.expect(snapshot.polymorphic_shapes);
 }
 
-test "optimizer tier publishes only installed plans and counts recompiles" {
+test "optimizer tier publishes only installed artifacts and counts recompiles" {
     var profile = OptimizerProfile{};
     var tier = OptimizerTier{};
     var first_plan: u8 = 1;
@@ -623,14 +686,14 @@ test "optimizer tier publishes only installed plans and counts recompiles" {
 
     const first_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
     try std.testing.expect(tier.publishReady(first_claim, &first_plan));
-    try std.testing.expectEqual(&first_plan, tier.loadPlan(u8).?);
+    try std.testing.expectEqual(&first_plan, tier.loadArtifact(u8).?);
     try std.testing.expectEqual(@as(u64, 1), tier.compileCount());
 
     tier.invalidate();
-    try std.testing.expect(tier.loadPlan(u8) == null);
+    try std.testing.expect(tier.loadArtifact(u8) == null);
     const second_claim = tier.claimCompilation(&profile, 2) orelse return error.TestUnexpectedResult;
     try std.testing.expect(tier.publishReady(second_claim, &second_plan));
-    try std.testing.expectEqual(&second_plan, tier.loadPlan(u8).?);
+    try std.testing.expectEqual(&second_plan, tier.loadArtifact(u8).?);
     try std.testing.expectEqual(@as(u64, 2), tier.compileCount());
 
     tier.invalidate();
@@ -679,7 +742,7 @@ test "optimizer publication and invalidation races converge" {
     invalidator.join();
 
     try std.testing.expectEqual(OptimizerTierState.profiling, tier.state.load(.acquire));
-    try std.testing.expect(tier.loadPlan(u8) == null);
+    try std.testing.expect(tier.loadArtifact(u8) == null);
     try std.testing.expect(tier.compileCount() == 0 or tier.compileCount() == 1);
     try std.testing.expectEqual(shared.published.load(.acquire), tier.compileCount() == 1);
 }
@@ -711,6 +774,29 @@ test "Owner releases adopted executable mappings" {
     var frame = NativeFrame{};
     try std.testing.expectEqual(ExitStatus.complete, code.run(&frame));
     try std.testing.expectEqual(@as(u64, 0x1234), frame.result_bits);
+}
+
+test "Owner adopts and invalidates optimizer artifacts under one lease" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var profile = OptimizerProfile{};
+    profile.observeEntry();
+    var tier = OptimizerTier{};
+    var compilation = owner.claimOptimizerCompilation(&tier, &profile, 1) orelse return error.TestUnexpectedResult;
+    var compiled = try compileConstantEntry(0x4321);
+    compiled.kind = .optimizer;
+    _ = try owner.adoptOptimizerAndPublish(&tier, compilation.claim, compiled);
+    compilation.release();
+    try std.testing.expectEqual(CodeKind.optimizer, tier.loadArtifact(CompiledCode).?.kind);
+    try std.testing.expectEqual(@as(u64, 1), tier.compileCount());
+
+    owner.clear();
+    try std.testing.expectEqual(OptimizerTierState.profiling, tier.state.load(.acquire));
+    try std.testing.expect(tier.loadArtifact(CompiledCode) == null);
+    try std.testing.expectEqual(@as(usize, 0), owner.codes.items.len);
+    try std.testing.expectEqual(@as(usize, 0), owner.optimizer_tiers.items.len);
 }
 
 test "Owner invalidates tiers only after active native leases retire" {
