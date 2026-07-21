@@ -170,9 +170,11 @@ python3 tools/object-churn-gc-profile.py zig-out/bin/bench-comparison-zig-js \
 
 The July 21 [raw samples](.data/object-churn-gc-phases-2026-07-21.tsv) and
 [summary](.data/object-churn-gc-phases-2026-07-21.md) attribute the eight-lane
-collector pause primarily to nursery sweep and motivate the bounded #427
-whole-run reclamation experiment. This focused profile does not replace the
-complete comparison matrix or its README scores.
+collector pause primarily to nursery sweep. The resulting #427 whole-run
+reclamation experiment was [rejected by its exact A/B](.data/object-churn-whole-run-reclamation-ab-2026-07-21.md):
+it reduced sweep only 0.7% and regressed wall time 0.9%, so both activations
+were reverted. These focused profiles do not replace the complete comparison
+matrix or its README scores.
 
 ## What is compared
 
