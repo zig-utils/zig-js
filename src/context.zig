@@ -5324,6 +5324,13 @@ pub const Context = struct {
     fn collectMidScript(raw_ctx: *anyopaque, raw_machine: *anyopaque) void {
         const self: *Context = @ptrCast(@alignCast(raw_ctx));
         const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+        // Root tracing reacquires the realm's promise/object/waiter registries.
+        // Native helpers can reach a VM checkpoint while one of those locks is
+        // held (for example while publishing an Atomics.waitAsync result). Do
+        // not elect or join a collection from that critical section: the
+        // current cycle remains abort-safe and a later lock-free checkpoint
+        // will publish or collect normally.
+        if (gc_runtime.inTraceSensitiveLock()) return;
         const h = self.gc orelse return;
         const precise_roots = machine.gc_precise_safepoint;
         if (machine.gc_moving_safepoint and self.gc_compaction_requested.load(.acquire)) {

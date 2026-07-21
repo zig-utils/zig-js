@@ -203,12 +203,16 @@ pub const Gil = struct {
         return g.tasks.items.len - g.tasks_head;
     }
 
-    /// Lock/unlock the property-mode Atomics waiter table. No JS or promise
-    /// settlement runs while this mutex is held.
+    /// Lock/unlock the property-mode Atomics waiter table. The collector takes
+    /// this mutex while tracing pending ticket roots, so allocation recovery
+    /// and mid-script collection must fail closed until it is released. No JS
+    /// or promise settlement runs while this mutex is held.
     pub fn lockPropWaiters(g: *Gil) void {
         g.prop_mutex.lockUncancelable(agent.engineIo());
+        gc_runtime.enterTraceSensitiveLock();
     }
     pub fn unlockPropWaiters(g: *Gil) void {
+        gc_runtime.leaveTraceSensitiveLock();
         g.prop_mutex.unlock(agent.engineIo());
     }
 
@@ -546,5 +550,14 @@ test "gil: API bookkeeping lock is trace-sensitive" {
     g.lockApi();
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
     g.unlockApi();
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+}
+
+test "gil: property waiter lock is trace-sensitive" {
+    var g = Gil{};
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    g.lockPropWaiters();
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    g.unlockPropWaiters();
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
 }

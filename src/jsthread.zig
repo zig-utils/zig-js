@@ -2806,6 +2806,13 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
     };
     const p_obj = try promise.newPromise(self);
     const res = (try self.newObject()).asObj();
+    // Build the externally visible result before publishing the ticket. These
+    // property writes may allocate; the collector traces `g.prop_async` under
+    // `prop_mutex`, so doing them after publication while still holding that
+    // mutex can self-deadlock allocation recovery. Prebuilding also makes
+    // publication failure-atomic: every queued ticket has a complete result.
+    try self.setProp(res, "async", Value.boolVal(true));
+    try self.setProp(res, "value", Value.obj(p_obj));
     const now = std.Io.Timestamp.now(agent.engineIo(), .awake).nanoseconds;
     t.* = .{
         .obj = o,
@@ -2834,8 +2841,6 @@ pub fn propWaitAsync(self: *Interpreter, args: []const Value, timeout_ns: ?u64) 
     };
     queued = true;
     bumpContention("property_wait_async_enqueued");
-    try self.setProp(res, "async", Value.boolVal(true));
-    try self.setProp(res, "value", Value.obj(p_obj));
     return Value.obj(res);
 }
 
@@ -2848,10 +2853,16 @@ fn settlePropAsync(self: *Interpreter, t: *PropAsyncTicket, outcome: []const u8)
         if (t.thread) |rec| {
             const io = agent.engineIo();
             rec.join_mutex.lockUncancelable(io);
+            // The parallel root walk takes this mutex before tracing the same
+            // completion record. Promise settlement can grow the selected job
+            // queue, so suppress collection/recovery until the queue choice and
+            // enqueue are atomically published against thread teardown.
+            gc_runtime.enterTraceSensitiveLock();
             const target = if (rec.microtasks == t.microtasks) t.microtasks else &rec.ctx.microtasks;
             self.microtasks = target;
             promise.resolve(self, pp, outcome_value) catch {};
             self.microtasks = saved_microtasks;
+            gc_runtime.leaveTraceSensitiveLock();
             rec.join_mutex.unlock(io);
         } else {
             self.microtasks = t.microtasks;
