@@ -13568,12 +13568,9 @@ pub const Interpreter = struct {
             var items: std.ArrayListUnmanaged(Value) = .empty;
             while (k < ilen) : (k += 1) try items.append(self.arena, try self.arrIndexGet(o, k));
             const ri = items.items;
-            var i: usize = 1;
-            while (i < ri.len) : (i += 1) {
-                const key = ri[i];
-                var j = i;
-                while (j > 0 and (try self.sortCompare(ri[j - 1], key, cmp)) > 0) : (j -= 1) ri[j] = ri[j - 1];
-                ri[j] = key;
+            if (ri.len > 1) {
+                const temp = try self.arena.alloc(Value, ri.len);
+                try self.mergeSortValues(ri, temp, cmp, sortCompare);
             }
             try result.asObj().replaceDenseElementsAndSetLength(self.arena, ri, ri.len);
             return result;
@@ -13898,12 +13895,9 @@ pub const Interpreter = struct {
                 if (try self.arrIndexPresent(o, i)) try present.append(self.arena, try self.arrIndexGet(o, i));
             }
             const ps = present.items;
-            var a_i: usize = 1;
-            while (a_i < ps.len) : (a_i += 1) { // insertion sort (comparator may throw)
-                const key = ps[a_i];
-                var j = a_i;
-                while (j > 0 and (try self.sortCompareSpec(ps[j - 1], key, cmp)) > 0) : (j -= 1) ps[j] = ps[j - 1];
-                ps[j] = key;
+            if (ps.len > 1) {
+                const temp = try self.arena.alloc(Value, ps.len);
+                try self.mergeSortValues(ps, temp, cmp, sortCompareSpec);
             }
             const dense_plain_array = o.is_array and
                 o.accessorsMap() == null and
@@ -14121,6 +14115,55 @@ pub const Interpreter = struct {
             .eq => 0,
             .gt => 1,
         };
+    }
+
+    /// Stable O(n log n) bottom-up merge sort of `buf` using a fallible JS
+    /// comparator (`compareFn` may run user code, throw, and re-enter — it works
+    /// on this local copy). `temp` is scratch of the same length. Replaces the
+    /// former insertion sort used by Array.prototype.sort/toSorted.
+    fn mergeSortValues(
+        self: *Interpreter,
+        buf: []Value,
+        temp: []Value,
+        cmp: Value,
+        comptime compareFn: fn (*Interpreter, Value, Value, Value) EvalError!f64,
+    ) EvalError!void {
+        if (buf.len < 2) return;
+        var from = buf;
+        var to = temp;
+        var width: usize = 1;
+        while (width < buf.len) : (width *= 2) {
+            var start: usize = 0;
+            while (start < buf.len) : (start += width * 2) {
+                const mid = @min(start + width, buf.len);
+                const end = @min(start + width * 2, buf.len);
+                var i = start;
+                var j = mid;
+                var k = start;
+                // Stable: take the left run on a tie (compareFn <= 0).
+                while (i < mid and j < end) : (k += 1) {
+                    if ((try compareFn(self, from[i], from[j], cmp)) <= 0) {
+                        to[k] = from[i];
+                        i += 1;
+                    } else {
+                        to[k] = from[j];
+                        j += 1;
+                    }
+                }
+                while (i < mid) : (k += 1) {
+                    to[k] = from[i];
+                    i += 1;
+                }
+                while (j < end) : (k += 1) {
+                    to[k] = from[j];
+                    j += 1;
+                }
+            }
+            const swap = from;
+            from = to;
+            to = swap;
+        }
+        if (from.ptr != buf.ptr) @memcpy(buf, from);
     }
 
     fn numberMethod(self: *Interpreter, n: f64, name: []const u8, args: []const Value) EvalError!?Value {
