@@ -376,8 +376,10 @@ pub const DeoptMetadata = struct {
     }
 };
 
-/// Precise movable-root locations at one optimizer recovery/safepoint record.
-/// Bit `n` names frame or scratch slot `n`; unlisted words are non-pointers.
+/// Precise movable-root candidates at one optimizer recovery/safepoint record.
+/// Bit `n` names a boxed frame or scratch slot whose runtime tag may identify a
+/// movable cell; the collector validates that tag. Unlisted words are proven
+/// primitive for this record.
 pub const StackMap = struct {
     deopt_index: u16,
     frame_pointer_slots: u64 = 0,

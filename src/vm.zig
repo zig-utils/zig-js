@@ -7746,6 +7746,43 @@ test "vm: optimizer pre-call side exit resumes a function-valued parameter" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
+test "vm: optimizer pre-tail-call side exit resumes a function-valued parameter" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function plus(x) { return x + 5; }
+        \\function invoke(f, x) { return f(x); }
+        \\invoke(plus, 0); invoke(plus, 1); invoke(plus, 2); invoke(plus, 3); invoke(plus, 4);
+        \\invoke(plus, 5); invoke(plus, 6); invoke(plus, 7); invoke(plus, 8); invoke(plus, 9)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const invoke_chunk = root.fns.items[1].chunk.?;
+    const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    var call_index: ?usize = null;
+    for (artifact.deopt.?.points, 0..) |point, index| {
+        if (point.kind == .call) call_index = index;
+    }
+    const index = call_index orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0b11), artifact.stack_maps.?.forDeopt(index).?.frame_pointer_slots);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
 test "vm: optimizer pre-call side exit preserves caught call exceptions" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

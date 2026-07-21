@@ -348,7 +348,11 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         const count: usize = state.local_count + state.stack_count;
         for (graph.frame_state_values[first .. first + count]) |value| {
             const resolved = try resolveAlias(value, aliases);
-            try deopt_values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(resolved) });
+            const node = graph.nodes[resolved];
+            try deopt_values.append(allocator, if (node.kind == .argument and !numeric_inputs[resolved])
+                .{ .source = .frame_slot, .index = @intCast(node.immediate) }
+            else
+                .{ .source = .scratch_slot, .index = @intCast(resolved) });
         }
         const first_handler: usize = state.first_handler;
         const handler_count: usize = state.handler_count;
@@ -380,7 +384,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     errdefer allocator.free(owned_deopt_values);
     const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
     errdefer allocator.free(owned_deopt_handlers);
-    const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
+    const stack_maps = try recoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values);
     errdefer allocator.free(stack_maps);
     return .{
         .allocator = allocator,
@@ -571,6 +575,29 @@ fn primitiveStackMaps(allocator: std.mem.Allocator, deopt_count: usize) ![]jit.S
             return error.UnsupportedChunk;
         },
     };
+    return maps;
+}
+
+fn recoveryStackMaps(
+    allocator: std.mem.Allocator,
+    points: []const jit.DeoptPoint,
+    values: []const jit.RecoveryValue,
+) ![]jit.StackMap {
+    const maps = try primitiveStackMaps(allocator, points.len);
+    errdefer allocator.free(maps);
+    for (points, maps) |point, *map| {
+        const first: usize = point.first_value;
+        const count: usize = point.local_count + point.stack_count;
+        if (first > values.len or count > values.len - first) return error.UnsupportedChunk;
+        for (values[first .. first + count]) |recovery| switch (recovery.source) {
+            .frame_slot => map.frame_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk),
+            .scratch_slot, .constant => {},
+        };
+        if (point.accumulator.source == .frame_slot)
+            map.frame_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
+    }
     return maps;
 }
 
@@ -1359,6 +1386,33 @@ test "optimizer lowering publishes an exact pre-call side exit" {
     try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
     try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
+    const map = program.stack_maps[side_exit.deopt_index];
+    try std.testing.expectEqual(@as(u64, 0b11), map.frame_pointer_slots);
+    try std.testing.expectEqual(@as(u64, 0), map.scratch_pointer_slots);
+    for (program.deopt_values[point.first_value .. point.first_value + point.local_count + point.stack_count]) |recovery|
+        try std.testing.expectEqual(jit.RecoverySource.frame_slot, recovery.source);
+}
+
+test "optimizer lowering publishes an exact pre-tail-call side exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.tail_call, 1);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
+    try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+    try std.testing.expectEqual(@as(u16, 2), point.stack_count);
+    try std.testing.expectEqual(@as(u64, 0b11), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
 }
 
 test "optimizer lowering publishes an exact pre-construction side exit" {

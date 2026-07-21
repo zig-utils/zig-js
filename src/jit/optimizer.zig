@@ -284,7 +284,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call => if (ip + 1 < code.len) {
+        .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -331,7 +331,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call => {},
+            .ret, .ret_undef, .throw_op, .abrupt_return, .call, .new_call, .tail_call => {},
             else => if (index + 1 < blocks_list.items.len) {
                 addSuccessor(block, @intCast(index + 1));
             },
@@ -394,7 +394,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .store_local => .{ .required = 1, .removed = 0, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler => .{ .required = 0, .removed = 0, .added = 0 },
-        .call, .new_call => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
+        .call, .new_call, .tail_call => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         else => unreachable,
     };
 }
@@ -780,7 +780,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.appendFrameState(.abrupt_return, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
             },
-            .call, .new_call => {
+            .call, .new_call, .tail_call => {
                 const required = std.math.add(usize, inst.a, 1) catch return error.UnsupportedChunk;
                 if (depth < required) return error.InvalidControlFlow;
                 // Calls remain bytecode-owned. This state preserves the callee
@@ -986,6 +986,7 @@ fn supports(op: bc.Op) bool {
         .abrupt_return,
         .call,
         .new_call,
+        .tail_call,
         => true,
         else => false,
     };
