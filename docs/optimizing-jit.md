@@ -21,6 +21,10 @@ On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable nat
 
 Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. General merges/loops, unequal-path control, remainder, coercions, OSR/deoptimization, precise stack maps, properties, arrays, and additional backends remain tracked by #146 and its child issues. No JSC-compatible optimizing-tier counters are exposed yet.
 
+## Deoptimization foundation
+
+Optimizer SSA now retains deterministic locals-plus-operand-stack frame states at every reachable block entry, branch, and return. Lowering resolves those states to immutable recovery records owned by the published artifact, including the exact resume IP, accumulator value, handler depth, and source scratch slot for every value. No partially executed side exit is enabled yet: #432 must first connect these records to `Exec` reconstruction and dynamic step/checkpoint accounting.
+
 Focused verification:
 
 ```sh

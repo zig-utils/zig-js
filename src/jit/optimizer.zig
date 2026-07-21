@@ -87,6 +87,21 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
+pub const FrameStateKind = enum { block_entry, branch, return_ };
+
+/// Immutable interpreter reconstruction state at an optimizer entry or exit.
+/// Values are SSA ids in locals-then-operand-stack order. Keeping the boundary
+/// explicit prevents a future side exit from guessing at dead values or
+/// restarting bytecode after observable work has already happened.
+pub const FrameState = struct {
+    kind: FrameStateKind,
+    block: u32,
+    origin: u32,
+    first_value: u32,
+    local_count: u32,
+    stack_count: u32,
+};
+
 pub const ValueGraph = struct {
     allocator: std.mem.Allocator,
     nodes: []ValueNode,
@@ -94,6 +109,8 @@ pub const ValueGraph = struct {
     edge_arguments: []ValueId,
     returns: []ReturnValue,
     branches: []BranchValue,
+    frame_states: []FrameState,
+    frame_state_values: []ValueId,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
@@ -101,6 +118,8 @@ pub const ValueGraph = struct {
         self.allocator.free(self.edge_arguments);
         self.allocator.free(self.returns);
         self.allocator.free(self.branches);
+        self.allocator.free(self.frame_states);
+        self.allocator.free(self.frame_state_values);
         self.* = undefined;
     }
 };
@@ -190,6 +209,22 @@ pub const Plan = struct {
             branch.false_block,
             branch.true_block,
         });
+        for (self.graph.frame_states) |state| {
+            try out.print(allocator, "state {s} b{d} @{d} locals={d} stack={d} (", .{
+                @tagName(state.kind),
+                state.block,
+                state.origin,
+                state.local_count,
+                state.stack_count,
+            });
+            const first: usize = state.first_value;
+            const count: usize = state.local_count + state.stack_count;
+            for (self.graph.frame_state_values[first .. first + count], 0..) |value, index| {
+                if (index != 0) try out.append(allocator, ',');
+                try out.print(allocator, "%{d}", .{value});
+            }
+            try out.appendSlice(allocator, ")\n");
+        }
         return out.toOwnedSlice(allocator);
     }
 };
@@ -301,6 +336,8 @@ const GraphBuilder = struct {
     roots: std.ArrayListUnmanaged(ValueId) = .empty,
     returns: std.ArrayListUnmanaged(ReturnValue) = .empty,
     branches: std.ArrayListUnmanaged(BranchValue) = .empty,
+    frame_states: std.ArrayListUnmanaged(FrameState) = .empty,
+    frame_state_values: std.ArrayListUnmanaged(ValueId) = .empty,
 
     fn deinit(self: *GraphBuilder) void {
         self.nodes.deinit(self.allocator);
@@ -309,6 +346,8 @@ const GraphBuilder = struct {
         self.roots.deinit(self.allocator);
         self.returns.deinit(self.allocator);
         self.branches.deinit(self.allocator);
+        self.frame_states.deinit(self.allocator);
+        self.frame_state_values.deinit(self.allocator);
     }
 
     fn appendNode(self: *GraphBuilder, node: ValueNode) std.mem.Allocator.Error!ValueId {
@@ -351,6 +390,29 @@ const GraphBuilder = struct {
         });
         if (may_have_effect) try self.roots.append(self.allocator, id);
         return id;
+    }
+
+    fn appendFrameState(
+        self: *GraphBuilder,
+        kind: FrameStateKind,
+        block: u32,
+        origin: u32,
+        locals: []const ValueId,
+        stack: []const ValueId,
+    ) std.mem.Allocator.Error!void {
+        const first_value: u32 = @intCast(self.frame_state_values.items.len);
+        try self.frame_state_values.appendSlice(self.allocator, locals);
+        try self.frame_state_values.appendSlice(self.allocator, stack);
+        try self.roots.appendSlice(self.allocator, locals);
+        try self.roots.appendSlice(self.allocator, stack);
+        try self.frame_states.append(self.allocator, .{
+            .kind = kind,
+            .block = block,
+            .origin = origin,
+            .first_value = first_value,
+            .local_count = @intCast(locals.len),
+            .stack_count = @intCast(stack.len),
+        });
     }
 };
 
@@ -483,6 +545,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         @memcpy(locals, entry[0..local_count]);
         @memcpy(stack[0..entry_depth], entry[local_count..]);
         var depth: usize = entry_depth;
+        try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth]);
 
         for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (inst.op) {
             .load_const => {
@@ -531,6 +594,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .jump => {},
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
+                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 if (block.successor_count != 2) return error.InvalidControlFlow;
@@ -544,6 +608,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .ret => {
                 if (depth == 0) return error.InvalidControlFlow;
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 try builder.returns.append(allocator, .{
@@ -553,6 +618,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 });
             },
             .ret_undef => {
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
                 const result = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
                 try builder.roots.append(allocator, result);
                 try builder.returns.append(allocator, .{
@@ -671,6 +737,11 @@ fn compactValueGraph(
         .false_block = old.false_block,
         .true_block = old.true_block,
     };
+    const frame_states = try allocator.dupe(FrameState, builder.frame_states.items);
+    errdefer allocator.free(frame_states);
+    const frame_state_values = try allocator.alloc(ValueId, builder.frame_state_values.items.len);
+    errdefer allocator.free(frame_state_values);
+    for (builder.frame_state_values.items, frame_state_values) |old, *value| value.* = remap[old];
     return .{
         .allocator = allocator,
         .nodes = nodes,
@@ -678,6 +749,8 @@ fn compactValueGraph(
         .edge_arguments = owned_edge_arguments,
         .returns = returns,
         .branches = branches,
+        .frame_states = frame_states,
+        .frame_state_values = frame_state_values,
     };
 }
 
@@ -757,6 +830,9 @@ test "optimizer control-flow plans are deterministic" {
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "edge entry -> b0") != null);
     try std.testing.expectEqual(@as(usize, 1), first.graph.branches.len);
     try std.testing.expect(std.mem.indexOf(u8, first_dump, "branch b0 @3") != null);
+    try std.testing.expectEqual(@as(usize, 6), first.graph.frame_states.len);
+    try std.testing.expect(std.mem.indexOf(u8, first_dump, "state branch b0 @3 locals=1 stack=1") != null);
+    for (first.graph.frame_state_values) |value| try std.testing.expect(value < first.graph.nodes.len);
 }
 
 test "optimizer SSA block arguments close loop backedges" {

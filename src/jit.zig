@@ -289,6 +289,55 @@ pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
 
 pub const CodeKind = enum(u8) { baseline, optimizer };
 
+pub const RecoverySource = enum(u8) { frame_slot, scratch_slot, constant };
+
+pub const RecoveryValue = struct {
+    source: RecoverySource,
+    index: u8 = 0,
+    bits: u64 = 0,
+};
+
+pub const DeoptPointKind = enum(u8) { block_entry, branch, return_ };
+
+pub const DeoptPoint = struct {
+    kind: DeoptPointKind,
+    exit_ip: u32,
+    first_value: u32,
+    local_count: u16,
+    stack_count: u16,
+    handler_count: u16 = 0,
+    accumulator: RecoveryValue,
+};
+
+/// Immutable reconstruction table owned by one published native artifact.
+/// Values are stored in locals-then-operand-stack order for each point.
+pub const DeoptMetadata = struct {
+    allocator: std.mem.Allocator,
+    points: []DeoptPoint,
+    values: []RecoveryValue,
+
+    pub fn create(
+        allocator: std.mem.Allocator,
+        points: []const DeoptPoint,
+        values: []const RecoveryValue,
+    ) std.mem.Allocator.Error!*DeoptMetadata {
+        const metadata = try allocator.create(DeoptMetadata);
+        errdefer allocator.destroy(metadata);
+        const owned_points = try allocator.dupe(DeoptPoint, points);
+        errdefer allocator.free(owned_points);
+        const owned_values = try allocator.dupe(RecoveryValue, values);
+        metadata.* = .{ .allocator = allocator, .points = owned_points, .values = owned_values };
+        return metadata;
+    }
+
+    pub fn destroy(self: *DeoptMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.points);
+        allocator.free(self.values);
+        allocator.destroy(self);
+    }
+};
+
 pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
@@ -306,9 +355,11 @@ pub const CompiledCode = struct {
     /// failed speculative integer entry restarts safely at bytecode IP zero.
     required_u32_slots: u64 = 0,
     max_stack_depth: u8 = 0,
+    deopt: ?*DeoptMetadata = null,
 
     pub fn deinit(self: *CompiledCode) void {
         self.memory.deinit();
+        if (self.deopt) |metadata| metadata.destroy();
         self.* = undefined;
     }
 

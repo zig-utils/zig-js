@@ -51,9 +51,13 @@ pub const Program = struct {
     frame_slots: u32,
     required_numeric_slots: u64,
     bytecode_steps: u32,
+    deopt_points: []jit.DeoptPoint,
+    deopt_values: []jit.RecoveryValue,
 
     pub fn deinit(self: *Program) void {
         self.allocator.free(self.operations);
+        self.allocator.free(self.deopt_points);
+        self.allocator.free(self.deopt_values);
         self.* = undefined;
     }
 };
@@ -205,15 +209,48 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             .true_result = @intCast(true_result),
         };
     }
+    var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
+    errdefer deopt_points.deinit(allocator);
+    var deopt_values: std.ArrayListUnmanaged(jit.RecoveryValue) = .empty;
+    errdefer deopt_values.deinit(allocator);
+    for (graph.frame_states) |state| {
+        const first_value: u32 = @intCast(deopt_values.items.len);
+        const first: usize = state.first_value;
+        const count: usize = state.local_count + state.stack_count;
+        for (graph.frame_state_values[first .. first + count]) |value| {
+            const resolved = try resolveAlias(value, aliases);
+            try deopt_values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(resolved) });
+        }
+        try deopt_points.append(allocator, .{
+            .kind = switch (state.kind) {
+                .block_entry => .block_entry,
+                .branch => .branch,
+                .return_ => .return_,
+            },
+            .exit_ip = state.origin,
+            .first_value = first_value,
+            .local_count = @intCast(state.local_count),
+            .stack_count = @intCast(state.stack_count),
+            .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
+        });
+    }
+    const owned_operations = try operations.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_operations);
+    const owned_deopt_points = try deopt_points.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_points);
+    const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_values);
     return .{
         .allocator = allocator,
-        .operations = try operations.toOwnedSlice(allocator),
+        .operations = owned_operations,
         .result = @intCast(result),
         .branch = branch_selection,
         .scratch_slots = @intCast(graph.nodes.len),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = required_numeric_slots,
         .bytecode_steps = bytecode_steps,
+        .deopt_points = owned_deopt_points,
+        .deopt_values = owned_deopt_values,
     };
 }
 
@@ -300,6 +337,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
     try assembler.ret();
     try memory.publish(assembler.bytes().len);
+    const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values);
+    errdefer deopt.destroy();
 
     return .{
         .memory = memory,
@@ -309,6 +348,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .frame_slots = program.frame_slots,
         .required_numeric_slots = program.required_numeric_slots,
         .max_stack_depth = program.scratch_slots,
+        .deopt = deopt,
     };
 }
 
@@ -387,6 +427,9 @@ test "optimizer lowerer produces portable guarded numeric operations" {
     try std.testing.expectEqual(@as(u32, 2), program.frame_slots);
     try std.testing.expectEqual(@as(u32, 6), program.bytecode_steps);
     try std.testing.expect(program.branch == null);
+    try std.testing.expectEqual(@as(usize, 2), program.deopt_points.len);
+    try std.testing.expectEqual(jit.DeoptPointKind.block_entry, program.deopt_points[0].kind);
+    try std.testing.expectEqual(jit.DeoptPointKind.return_, program.deopt_points[1].kind);
     try std.testing.expectEqual(OperationKind.mul, program.operations[program.operations.len - 1].kind);
 }
 
@@ -412,6 +455,7 @@ test "optimizer compiler executes guarded parameter SSA" {
     var frame = jit.NativeFrame{ .slots = @ptrCast(slots[0..].ptr), .scratch = scratch[0..].ptr };
     try std.testing.expectEqual(jit.CodeKind.optimizer, compiled.kind);
     try std.testing.expectEqual(@as(u64, 0b11), compiled.required_numeric_slots);
+    try std.testing.expectEqual(@as(usize, 2), compiled.deopt.?.points.len);
     try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
     try std.testing.expectEqual(@as(f64, 42), Value.fromRawBits(frame.result_bits).asNum());
 
@@ -468,6 +512,7 @@ test "optimizer lowerer accepts exact two-way SSA control" {
     defer program.deinit();
     try std.testing.expect(program.branch != null);
     try std.testing.expectEqual(@as(u32, 6), program.bytecode_steps);
+    try std.testing.expectEqual(@as(usize, 6), program.deopt_points.len);
 }
 
 test "optimizer compiler executes exact two-way SSA control" {
