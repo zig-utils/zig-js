@@ -445,6 +445,17 @@ var private_inspector_sessions: std.ArrayListUnmanaged(*CInspectorSession) = .em
 var private_script_execution_contexts_lock: std.atomic.Mutex = .unlocked;
 var private_script_execution_contexts: std.AutoHashMapUnmanaged(u32, *Context) = .empty;
 var next_private_script_execution_context_id: std.atomic.Value(u32) = .init(1);
+const PrivateGlobalLifecycle = struct {
+    context: *Context,
+    group: *CContextGroup,
+    console: ?*anyopaque,
+    execution_context_id: i32,
+    mini_mode: bool,
+    eval_mode: bool,
+    worker: ?*anyopaque,
+};
+var private_global_lifecycles_lock: std.atomic.Mutex = .unlocked;
+var private_global_lifecycles: std.AutoHashMapUnmanaged(usize, PrivateGlobalLifecycle) = .empty;
 var private_serialized_script_lock: std.atomic.Mutex = .unlocked;
 var private_serialized_script_handles: std.AutoHashMapUnmanaged(usize, PrivateSerializedScriptOwned) = .empty;
 var private_serialized_script_next_handle: usize = 1;
@@ -481,6 +492,35 @@ fn lockPrivateScriptExecutionContexts() void {
     }
 }
 
+fn lockPrivateGlobalLifecycles() void {
+    var spins: usize = 0;
+    while (!private_global_lifecycles_lock.tryLock()) : (spins += 1) {
+        if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+    }
+}
+
+fn registerPrivateGlobalLifecycle(record: PrivateGlobalLifecycle) error{OutOfMemory}!void {
+    lockPrivateGlobalLifecycles();
+    defer private_global_lifecycles_lock.unlock();
+    try private_global_lifecycles.putNoClobber(gpa, @intFromPtr(record.context), record);
+}
+
+fn privateGlobalLifecycle(context: JSContextRef) ?PrivateGlobalLifecycle {
+    const address = @intFromPtr(context orelse return null);
+    lockPrivateGlobalLifecycles();
+    defer private_global_lifecycles_lock.unlock();
+    return private_global_lifecycles.get(address);
+}
+
+fn takePrivateGlobalLifecycle(context: JSContextRef) ?PrivateGlobalLifecycle {
+    const address = @intFromPtr(context orelse return null);
+    lockPrivateGlobalLifecycles();
+    defer private_global_lifecycles_lock.unlock();
+    const record = private_global_lifecycles.get(address) orelse return null;
+    if (!record.context.isOwnerThread()) return null;
+    return private_global_lifecycles.fetchRemove(address).?.value;
+}
+
 fn unregisterPrivateScriptExecutionContext(context: *Context) void {
     const identifier = context.c_api_script_execution_context_id.load(.acquire);
     if (identifier == 0) return;
@@ -504,6 +544,47 @@ fn privateScriptExecutionContextIdentifier(context: *Context) u32 {
     context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
     context.c_api_script_execution_context_id.store(current, .release);
     return current;
+}
+
+fn privateAssignScriptExecutionContextIdentifier(context: *Context, identifier: u32) bool {
+    if (identifier == 0) return false;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    if (context.c_api_script_execution_context_id.load(.acquire) != 0 or
+        private_script_execution_contexts.contains(identifier)) return false;
+    private_script_execution_contexts.putNoClobber(gpa, identifier, context) catch return false;
+    const next = next_private_script_execution_context_id.load(.monotonic);
+    if (next <= identifier and identifier != std.math.maxInt(u32))
+        next_private_script_execution_context_id.store(identifier + 1, .monotonic);
+    context.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
+    context.c_api_script_execution_context_id.store(identifier, .release);
+    return true;
+}
+
+fn privateTransferScriptExecutionContextIdentifier(old: *Context, new: *Context) bool {
+    const inherited = old.c_api_script_execution_context_id.load(.acquire);
+    if (inherited == 0) return false;
+    lockPrivateScriptExecutionContexts();
+    defer private_script_execution_contexts_lock.unlock();
+    if (new.c_api_script_execution_context_id.load(.acquire) != 0) return false;
+    if (private_script_execution_contexts.get(inherited)) |owner|
+        if (owner != old) return false;
+    private_script_execution_contexts.ensureUnusedCapacity(gpa, 1) catch return false;
+    if (private_script_execution_contexts.get(inherited) == old)
+        _ = private_script_execution_contexts.remove(inherited);
+    private_script_execution_contexts.putAssumeCapacity(inherited, new);
+
+    const replacement = next_private_script_execution_context_id.load(.monotonic);
+    if (replacement == 0 or replacement == std.math.maxInt(u32)) {
+        _ = private_script_execution_contexts.remove(inherited);
+        private_script_execution_contexts.putAssumeCapacity(inherited, old);
+        return false;
+    }
+    next_private_script_execution_context_id.store(replacement + 1, .monotonic);
+    old.c_api_script_execution_context_id.store(replacement, .release);
+    new.c_api_script_execution_context_unregister = unregisterPrivateScriptExecutionContext;
+    new.c_api_script_execution_context_id.store(inherited, .release);
+    return true;
 }
 
 /// Boxed interpreter value handed across the C boundary as a `JSValueRef`.
@@ -16324,6 +16405,96 @@ export fn JSContextGetGlobalContext(ctx: JSContextRef) callconv(.c) JSContextRef
     return ctx;
 }
 
+/// Create Bun's process-global realm as one private-owned VM plus one exposed
+/// Context. Small/large heap selection remains observable on the group record;
+/// the other embedder fields are retained verbatim for test-isolation transfer.
+export fn Zig__GlobalObject__create(
+    console: ?*anyopaque,
+    execution_context_id: i32,
+    mini_mode: bool,
+    eval_mode: bool,
+    worker: ?*anyopaque,
+) callconv(.c) JSContextRef {
+    const group_ref = privateCreateVMWithAllocator(gpa, if (mini_mode) 0 else 1) orelse return null;
+    const group: *CContextGroup = @ptrCast(@alignCast(group_ref));
+    const context = JSGlobalContextCreateInGroup(@ptrCast(group), null) orelse {
+        if (group.private_vm_owner_released.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+            if (group.release()) group.destroy();
+        return null;
+    };
+    const typed_context = ctxForLifecycle(context).?;
+    if (execution_context_id > 1 and
+        !privateAssignScriptExecutionContextIdentifier(typed_context, @intCast(execution_context_id)))
+    {
+        JSC__VM__deinit(group_ref, context);
+        JSGlobalContextRelease(context);
+        return null;
+    }
+    registerPrivateGlobalLifecycle(.{
+        .context = typed_context,
+        .group = group,
+        .console = console,
+        .execution_context_id = execution_context_id,
+        .mini_mode = mini_mode,
+        .eval_mode = eval_mode,
+        .worker = worker,
+    }) catch {
+        JSC__VM__deinit(group_ref, context);
+        JSGlobalContextRelease(context);
+        return null;
+    };
+    return context;
+}
+
+/// Replace a private global with a clean realm on the same VM. The inherited
+/// process identifier resolves only to the replacement; the old context gets a
+/// non-published fresh identity and loses the private creator reference.
+export fn Zig__GlobalObject__createForTestIsolation(
+    old_global: JSContextRef,
+    console: ?*anyopaque,
+) callconv(.c) JSContextRef {
+    const old_record = privateGlobalLifecycle(old_global) orelse return null;
+    if (!old_record.context.isOwnerThread()) return null;
+    _ = privateScriptExecutionContextIdentifier(old_record.context);
+    const new_global = JSGlobalContextCreateInGroup(@ptrCast(old_record.group), null) orelse return null;
+    const new_context = ctxForLifecycle(new_global).?;
+    registerPrivateGlobalLifecycle(.{
+        .context = new_context,
+        .group = old_record.group,
+        .console = console,
+        .execution_context_id = old_record.execution_context_id,
+        .mini_mode = old_record.mini_mode,
+        .eval_mode = old_record.eval_mode,
+        .worker = old_record.worker,
+    }) catch {
+        JSGlobalContextRelease(new_global);
+        return null;
+    };
+    if (!privateTransferScriptExecutionContextIdentifier(old_record.context, new_context)) {
+        lockPrivateGlobalLifecycles();
+        _ = private_global_lifecycles.remove(@intFromPtr(new_context));
+        private_global_lifecycles_lock.unlock();
+        JSGlobalContextRelease(new_global);
+        return null;
+    }
+    lockPrivateGlobalLifecycles();
+    _ = private_global_lifecycles.remove(@intFromPtr(old_record.context));
+    private_global_lifecycles_lock.unlock();
+    old_record.context.requestTermination();
+    JSGlobalContextRelease(old_global);
+    return new_global;
+}
+
+/// Consume the private creator and VM-owner references once. Explicit public
+/// retains remain balanced by JSGlobalContextRelease, but the realm is already
+/// terminated and no longer accepted by the private lifecycle boundary.
+export fn Zig__GlobalObject__destructOnExit(global: JSContextRef) callconv(.c) void {
+    const record = takePrivateGlobalLifecycle(global) orelse return;
+    record.context.requestTermination();
+    JSC__VM__deinit(@ptrCast(record.group), global);
+    JSGlobalContextRelease(global);
+}
+
 /// JSC's module-loader registry stopped being a JavaScript Map, so pinned Bun
 /// retains this symbol only as a dead compatibility shim with no callers.
 export fn Zig__GlobalObject__getModuleRegistryMap(global: JSContextRef) callconv(.c) ?*anyopaque {
@@ -21921,6 +22092,61 @@ test "private script execution context identifiers are stable and process unique
         try std.testing.expect(result.live_before_release and result.retired_after_release);
         for (results[0..index]) |prior| try std.testing.expect(id != prior.id);
     }
+}
+
+test "private global lifecycle creates isolates and consumes exact ownership" {
+    var first_console: usize = 1;
+    var second_console: usize = 2;
+    var worker: usize = 3;
+    const first = Zig__GlobalObject__create(&first_console, 4242, true, true, &worker) orelse
+        return error.ContextCreateFailed;
+    const first_context = ctxForLifecycle(first) orelse return error.ContextCreateFailed;
+    const first_group: *CContextGroup = @ptrCast(@alignCast(first_context.c_api_group.?));
+    try std.testing.expectEqual(@as(u8, 0), first_group.heap_type);
+    const first_record = privateGlobalLifecycle(first) orelse return error.MissingLifecycle;
+    try std.testing.expectEqual(@as(?*anyopaque, &first_console), first_record.console);
+    try std.testing.expectEqual(@as(i32, 4242), first_record.execution_context_id);
+    try std.testing.expect(first_record.mini_mode and first_record.eval_mode);
+    try std.testing.expectEqual(@as(?*anyopaque, &worker), first_record.worker);
+    try std.testing.expectEqual(@as(u32, 4242), ScriptExecutionContextIdentifier__forGlobalObject(first));
+    try std.testing.expectEqual(first, ScriptExecutionContextIdentifier__getGlobalObject(4242));
+    const marker = try first_context.evaluate("globalThis.__privateIsolationMarker = 42");
+    try std.testing.expect(marker.isNumber() and marker.asNum() == 42);
+
+    const retained = JSGlobalContextRetain(first) orelse return error.RetainFailed;
+    const isolated = Zig__GlobalObject__createForTestIsolation(first, &second_console) orelse
+        return error.IsolationCreateFailed;
+    const isolated_context = ctxForLifecycle(isolated) orelse return error.ContextCreateFailed;
+    const isolated_record = privateGlobalLifecycle(isolated) orelse return error.MissingLifecycle;
+    try std.testing.expectEqual(first_group, isolated_record.group);
+    try std.testing.expectEqual(@as(?*anyopaque, &second_console), isolated_record.console);
+    try std.testing.expectEqual(@as(i32, 4242), isolated_record.execution_context_id);
+    try std.testing.expect(isolated_record.mini_mode and isolated_record.eval_mode);
+    try std.testing.expectEqual(@as(?*anyopaque, &worker), isolated_record.worker);
+    try std.testing.expectEqual(@as(u32, 4242), ScriptExecutionContextIdentifier__forGlobalObject(isolated));
+    try std.testing.expectEqual(isolated, ScriptExecutionContextIdentifier__getGlobalObject(4242));
+    try std.testing.expect(ScriptExecutionContextIdentifier__forGlobalObject(retained) != 4242);
+    const isolated_marker = try isolated_context.evaluate("typeof globalThis.__privateIsolationMarker");
+    try std.testing.expect(isolated_marker.isString());
+    try std.testing.expectEqualStrings("undefined", isolated_marker.asStr());
+    try std.testing.expect(privateGlobalLifecycle(first) == null);
+    JSGlobalContextRelease(retained);
+
+    Zig__GlobalObject__destructOnExit(isolated);
+    Zig__GlobalObject__destructOnExit(isolated);
+    Zig__GlobalObject__destructOnExit(null);
+    Zig__GlobalObject__destructOnExit(@ptrFromInt(1));
+    try std.testing.expectEqual(@as(JSContextRef, null), ScriptExecutionContextIdentifier__getGlobalObject(4242));
+
+    const large = Zig__GlobalObject__create(null, -1, false, false, null) orelse
+        return error.ContextCreateFailed;
+    const large_record = privateGlobalLifecycle(large) orelse return error.MissingLifecycle;
+    try std.testing.expectEqual(@as(u8, 1), large_record.group.heap_type);
+    try std.testing.expect(!large_record.mini_mode and !large_record.eval_mode);
+    try std.testing.expect(ScriptExecutionContextIdentifier__forGlobalObject(large) != 0);
+    try std.testing.expect(Zig__GlobalObject__createForTestIsolation(null, null) == null);
+    try std.testing.expect(Zig__GlobalObject__createForTestIsolation(@ptrFromInt(1), null) == null);
+    Zig__GlobalObject__destructOnExit(large);
 }
 
 test "private retired module registry snapshot shims are exact and inert" {
