@@ -86,6 +86,13 @@ def apply_status(entries: list[dict[str, object]]) -> None:
                 entry["status"] = "external"
             entry.pop("issue", None)
             entry.pop("implementation", None)
+            if str(entry["name"]) in scanner.CONSUMER_PROVIDER_SOURCES:
+                entry["provider"] = {
+                    "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                    "source": scanner.CONSUMER_PROVIDER_SOURCES[str(entry["name"])],
+                }
+            else:
+                entry.pop("provider", None)
             continue
         if entry["name"] in exports:
             entry["status"] = "implemented"
@@ -95,6 +102,7 @@ def apply_status(entries: list[dict[str, object]]) -> None:
             entry["status"] = "pending"
             entry["issue"] = 164
             entry.pop("implementation", None)
+        entry.pop("provider", None)
 
 
 def refresh_implementation_status(data: dict[str, object]) -> None:
@@ -208,6 +216,14 @@ def validate(data: dict[str, object]) -> None:
         classification = expected_classification(name, public_names)
         if entry.get("classification") != classification:
             fail(f"classification drift for {name}")
+        expected_provider = None
+        if name in scanner.CONSUMER_PROVIDER_SOURCES:
+            expected_provider = {
+                "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                "source": scanner.CONSUMER_PROVIDER_SOURCES[name],
+            }
+        if entry.get("provider") != expected_provider:
+            fail(f"consumer-provider provenance drift for {name}")
         if entry.get("calling_convention") not in data["calling_conventions"]:
             fail(f"calling-convention drift for {name}")
         if classification == "private_jsc":
@@ -809,6 +825,9 @@ def main() -> None:
         bun_root=args.bun_root.resolve() if args.bun_root else None
     )
     scanner.validate_process_initialization_contract(
+        bun_root=args.bun_root.resolve() if args.bun_root else None
+    )
+    scanner.validate_consumer_provider_contract(
         bun_root=args.bun_root.resolve() if args.bun_root else None
     )
     totals = stored["totals"]

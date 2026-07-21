@@ -95,6 +95,27 @@ class DeclarationScannerTests(unittest.TestCase):
             entries[0]["alternate_declarations"][0]["declaration"],
         )
 
+    def test_consumer_provider_classification_retains_provenance(self) -> None:
+        entries = self.scan(
+            """
+            extern fn Bun__EventLoopTaskNoContext__performTask() void;
+            extern fn JSFunctionCall() void;
+            """
+        )
+
+        self.assertEqual(
+            ["consumer_provided", "consumer_provided"],
+            [entry["classification"] for entry in entries],
+        )
+        self.assertEqual(
+            {
+                "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                "source": "src/jsc/bindings/EventLoopTaskNoContext.cpp",
+            },
+            entries[0]["provider"],
+        )
+        self.assertNotIn("provider", entries[1])
+
 
 if __name__ == "__main__":
     unittest.main()

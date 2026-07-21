@@ -82,14 +82,13 @@
     "symbols": 484,
     "source_files": 59,
     "by_classification": {
-      "consumer_provided": 1,
-      "private_jsc": 461,
+      "consumer_provided": 25,
+      "private_jsc": 437,
       "public_c_api": 22
     },
     "by_status": {
-      "external": 1,
-      "implemented": 459,
-      "pending": 24
+      "external": 25,
+      "implemented": 459
     }
   },
   "home_comparison": {
@@ -227,22 +226,28 @@
       "source": "VirtualMachine.zig",
       "line": 1493,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn BakeCreateProdGlobal(console_ptr: *anyopaque) *jsc.JSGlobalObject;",
       "declaration_sha256": "6560379ca797ceec69f9fa45cfcf238493ae2b322b70d861897813724bcad8eb",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/runtime/bake/BakeGlobalObject.cpp"
+      }
     },
     {
       "name": "Bake__getAsyncLocalStorage",
       "source": "VirtualMachine.zig",
       "line": 232,
       "calling_convention": "jsc.conv",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"C\" fn Bake__getAsyncLocalStorage(globalObject: *JSGlobalObject) callconv(jsc.conv) jsc.JSValue;",
       "declaration_sha256": "3bc77a0b8bda5f64cb830fe554fade3f0a647df86b4e59474baee2ac1463abb7",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BakeAdditionsToGlobalObject.cpp"
+      }
     },
     {
       "name": "BunDebugger__willHotReload",
@@ -403,22 +408,28 @@
       "source": "CppTask.zig",
       "line": 18,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__EventLoopTaskNoContext__createdInBunVm(task: *const EventLoopTaskNoContext) ?*VirtualMachine;",
       "declaration_sha256": "026bc87ff46dcd910bbd48e1ec8ea9134bb3d7b466decc5c98832b9694ec459e",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/EventLoopTaskNoContext.cpp"
+      }
     },
     {
       "name": "Bun__EventLoopTaskNoContext__performTask",
       "source": "CppTask.zig",
       "line": 17,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__EventLoopTaskNoContext__performTask(task: *EventLoopTaskNoContext) void;",
       "declaration_sha256": "d8a86cb9d086662efc8b3b1c6259eb1a02d2c52db4552bac18270ab8a96972f2",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/EventLoopTaskNoContext.cpp"
+      }
     },
     {
       "name": "Bun__FFIFunction_getDataPtr",
@@ -766,33 +777,42 @@
       "source": "JSSecrets.zig",
       "line": 14,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "pub extern fn Bun__SecretsJobOptions__deinit(ctx: *SecretsJobOptions) void;",
       "declaration_sha256": "aa7513dd1b28bf913e5437d03ec2864524cadf00973adf2b142a700b429bc5eb",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/JSSecrets.cpp"
+      }
     },
     {
       "name": "Bun__SecretsJobOptions__runFromJS",
       "source": "JSSecrets.zig",
       "line": 13,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "pub extern fn Bun__SecretsJobOptions__runFromJS(ctx: *SecretsJobOptions, global: *jsc.JSGlobalObject, promise: jsc.JSValue) void;",
       "declaration_sha256": "fe0ac939a4d08eb8870f0029c49dc06bbb39f5f47da6345f5a2c1971d9ea6bbf",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/JSSecrets.cpp"
+      }
     },
     {
       "name": "Bun__SecretsJobOptions__runTask",
       "source": "JSSecrets.zig",
       "line": 12,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "pub extern fn Bun__SecretsJobOptions__runTask(ctx: *SecretsJobOptions, global: *jsc.JSGlobalObject) void;",
       "declaration_sha256": "1d14ec4fca281761e0ef02bf3b5efd3f48c9ed8a96cc7d9d91b039594b812e41",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/JSSecrets.cpp"
+      }
     },
     {
       "name": "Bun__SerializedScriptSlice__free",
@@ -942,11 +962,14 @@
       "source": "VirtualMachine.zig",
       "line": 4079,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__WebView__closeAllForTermination() void;",
       "declaration_sha256": "c77ed17fe31d873f1629c96006f0691a3817a7acf15f130fb375e228ba70e3d8",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/runtime/webview/JSWebView.cpp"
+      }
     },
     {
       "name": "Bun__allocArrayBufferForCopy",
@@ -986,11 +1009,14 @@
       "source": "VirtualMachine.zig",
       "line": 4078,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__closeAllSQLiteDatabasesForTermination() void;",
       "declaration_sha256": "c9c2abecac0fea18bc408568f000058d1c92b3f25ff82bd741acd0f88d59868b",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/sqlite/JSSQLStatement.cpp"
+      }
     },
     {
       "name": "Bun__createArrayBufferForCopy",
@@ -1008,11 +1034,14 @@
       "source": "Debugger.zig",
       "line": 26,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"c\" fn Bun__createJSDebugger(*JSGlobalObject) u32;",
       "declaration_sha256": "ca3598c446bfd773a5b3b5d1d9f16d433c46b368441352189e07e51602c292da",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BunDebugger.cpp"
+      }
     },
     {
       "name": "Bun__createTextCodec",
@@ -1082,11 +1111,14 @@
       "source": "Debugger.zig",
       "line": 27,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"c\" fn Bun__ensureDebugger(u32, bool) void;",
       "declaration_sha256": "a5b6df554defac5fefae49cd2173780fdd5e9ed7a261488a4c66d046cc437fba",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BunDebugger.cpp"
+      }
     },
     {
       "name": "Bun__generateHeapProfile",
@@ -1159,11 +1191,14 @@
       "source": "VirtualMachine.zig",
       "line": 2293,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__loadHTMLEntryPoint(global: *JSGlobalObject) *JSInternalPromise;",
       "declaration_sha256": "c5d5eedfa88b656d3b4d2c4447439cf2c5aef40d6fe933738f6b79d546892073",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/HTMLEntryPoint.cpp"
+      }
     },
     {
       "name": "Bun__makeArrayBufferWithBytesNoCopy",
@@ -1203,11 +1238,14 @@
       "source": "AsyncModule.zig",
       "line": 747,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"c\" fn Bun__onFulfillAsyncModule( globalObject: *JSGlobalObject, promiseValue: JSValue, res: *jsc.ErrorableResolvedSource, specifier: *bun.String, referrer: *bun.String, ) void;",
       "declaration_sha256": "f9535ed99d7285588b00999312eed0d1615632c886838504b0931a882b51f68a",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/ModuleLoader.cpp"
+      }
     },
     {
       "name": "Bun__onSignalForJS",
@@ -1247,33 +1285,42 @@
       "source": "JSCScheduler.zig",
       "line": 4,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__runDeferredWork(task: *JSCScheduler.JSCDeferredWorkTask) void;",
       "declaration_sha256": "0f65233448036f1b2fdbf2c2a659c9cf85724b4513fb2c2d2334563934144bf3",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/JSCTaskScheduler.cpp"
+      }
     },
     {
       "name": "Bun__runOnLoadPlugins",
       "source": "JSGlobalObject.zig",
       "line": 270,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__runOnLoadPlugins(*jsc.JSGlobalObject, ?*const bun.String, *const bun.String, BunPluginTarget) JSValue;",
       "declaration_sha256": "03736b8b23d06621936293a23f520a75c915229228c633d5ccb35f10c2b17329",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BunPlugin.cpp"
+      }
     },
     {
       "name": "Bun__runOnResolvePlugins",
       "source": "JSGlobalObject.zig",
       "line": 271,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn Bun__runOnResolvePlugins(*jsc.JSGlobalObject, ?*const bun.String, *const bun.String, *const String, BunPluginTarget) JSValue;",
       "declaration_sha256": "79f84d7cd174d4ddea5d95fd4d1a0bc4b1f8c898ccc333aa16c33c753f1880a8",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BunPlugin.cpp"
+      }
     },
     {
       "name": "Bun__serializeJSValue",
@@ -1313,11 +1360,14 @@
       "source": "Debugger.zig",
       "line": 28,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"c\" fn Bun__startJSDebuggerThread(*JSGlobalObject, u32, *bun.String, c_int, bool) void;",
       "declaration_sha256": "29019ff706672a0f55ba62606d36655204041411ba498ba4d0ec1e7b808800ab",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/BunDebugger.cpp"
+      }
     },
     {
       "name": "Bun__stopCPUProfiler",
@@ -1526,7 +1576,6 @@
       "status": "implemented",
       "declaration": "extern \"c\" fn JSCInitialize(env: [*]const [*:0]u8, count: usize, cb: *const fn ([*]const u8, len: usize) callconv(.c) void, eval_mode: bool, one_shot_startup: bool) void;",
       "declaration_sha256": "bba2eba196b960aa93b3e1f2653ecea4275f3f28e1ec2babd82113d0e82a8091",
-      "issue": 417,
       "implementation": "src/c_api.zig"
     },
     {
@@ -3188,7 +3237,6 @@
       "status": "implemented",
       "declaration": "extern fn JSC__VM__notifyNeedShellTimeoutCheck(vm: *VM) void;",
       "declaration_sha256": "58cfa2335d198f0cf5df6f087a68cfb870becde178213d848815deffd604c7de",
-      "issue": 417,
       "implementation": "src/c_api.zig"
     },
     {
@@ -3365,8 +3413,7 @@
       "status": "implemented",
       "declaration": "extern fn JSC__createStructure(global: *jsc.JSGlobalObject, owner: *jsc.JSCell, length: u32, names: [*]ExternColumnIdentifier) jsc.JSValue;",
       "declaration_sha256": "7d04b12b53cd14c5b52bfbeb9622cf5a8623ee5a99a59d2bc99bc5cbd3799a76",
-      "implementation": "src/c_api.zig",
-      "issue": 411
+      "implementation": "src/c_api.zig"
     },
     {
       "name": "JSC__createTypeError",
@@ -3922,11 +3969,14 @@
       "source": "VirtualMachine.zig",
       "line": 2357,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern \"C\" fn NodeModuleModule__callOverriddenRunMain(global: *JSGlobalObject, argv1: JSValue) JSValue;",
       "declaration_sha256": "081e59381eea871cf8770bad29ed7c408218ba2e5b23f1a485fcfb55aa408f9f",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/modules/NodeModuleModule.cpp"
+      }
     },
     {
       "name": "Process__dispatchOnBeforeExit",
@@ -5088,55 +5138,70 @@
       "source": "web_worker.zig",
       "line": 142,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn WebWorker__dispatchError(*jsc.JSGlobalObject, *anyopaque, bun.String, JSValue) void;",
       "declaration_sha256": "64faddbaedba67d1cc2a702d1b592f34b33d412ffcd1d2451beaf7ade2c32461",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/webcore/Worker.cpp"
+      }
     },
     {
       "name": "WebWorker__dispatchExit",
       "source": "web_worker.zig",
       "line": 139,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn WebWorker__dispatchExit(*anyopaque, i32) void;",
       "declaration_sha256": "4be8803eb4ccf92cbc8fe7b3cb490e9adfb2100ce5d41c537d4cd5141c3daab7",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/webcore/Worker.cpp"
+      }
     },
     {
       "name": "WebWorker__dispatchOnline",
       "source": "web_worker.zig",
       "line": 140,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn WebWorker__dispatchOnline(cpp_worker: *anyopaque, *jsc.JSGlobalObject) void;",
       "declaration_sha256": "52e35b4a7a762092910269c740d3575ff5ebf7b9f02d2ece43de0e520ed9afc0",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/webcore/Worker.cpp"
+      }
     },
     {
       "name": "WebWorker__fireEarlyMessages",
       "source": "web_worker.zig",
       "line": 141,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn WebWorker__fireEarlyMessages(cpp_worker: *anyopaque, *jsc.JSGlobalObject) void;",
       "declaration_sha256": "c704dbce663eb63e55b06b4fb94b08675c5c7cd76a28b4044544931cd9c7a9e8",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/webcore/Worker.cpp"
+      }
     },
     {
       "name": "WebWorker__teardownJSCVM",
       "source": "web_worker.zig",
       "line": 138,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn WebWorker__teardownJSCVM(*jsc.JSGlobalObject) void;",
       "declaration_sha256": "79e6998ad5abbc58199ff791e2fe31ebc86b36f1b93f65ffae167ba7c87ca1f2",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/webcore/Worker.cpp"
+      }
     },
     {
       "name": "Yarr__RegularExpression__deinit",
@@ -5231,11 +5296,14 @@
       "source": "JSGlobalObject.zig",
       "line": 699,
       "calling_convention": "C",
-      "classification": "private_jsc",
-      "status": "pending",
+      "classification": "consumer_provided",
+      "status": "external",
       "declaration": "extern fn ZigGlobalObject__makeNapiEnvForFFI(*JSGlobalObject) *napi.NapiEnv;",
       "declaration_sha256": "bf02e2b27a6c3863c3a73e0192b7d89bf79054628287c88b863df9e70e1a6e82",
-      "issue": 164
+      "provider": {
+        "contract": "docs/abi/consumer-provided-private-exports-422.json",
+        "source": "src/jsc/bindings/ZigGlobalObject.cpp"
+      }
     },
     {
       "name": "ZigGlobalObject__readableStreamToArrayBuffer",
@@ -5444,7 +5512,6 @@
       "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__create(*anyopaque, i32, bool, bool, ?*anyopaque) *JSGlobalObject;",
       "declaration_sha256": "b6d42a49738f10fbf075f7b94684d8f788e85afb3f47e348424c11ca45736e5f",
-      "issue": 412,
       "implementation": "src/c_api.zig"
     },
     {
@@ -5456,7 +5523,6 @@
       "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__createForTestIsolation(old_global: *JSGlobalObject, console: *anyopaque) *JSGlobalObject;",
       "declaration_sha256": "9952f60baef68f698632fef102db7ed7ec8786e6bd6fd8dabbf89a2c9ae864f5",
-      "issue": 412,
       "implementation": "src/c_api.zig"
     },
     {
@@ -5468,7 +5534,6 @@
       "status": "implemented",
       "declaration": "extern fn Zig__GlobalObject__destructOnExit(*JSGlobalObject) void;",
       "declaration_sha256": "1f21b303cd9aea83ebbe4815d1662c0a2f526ec0e64772f45d0101ab12c4df8f",
-      "issue": 412,
       "implementation": "src/c_api.zig"
     },
     {

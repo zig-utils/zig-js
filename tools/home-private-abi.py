@@ -24,6 +24,7 @@ WASM_STREAMING_RESPONSE_FEED_CONTRACT = ROOT / "docs/abi/wasm-streaming-response
 SQL_OBJECT_STRUCTURE_CONTRACT = ROOT / "docs/abi/sql-object-structure-411.json"
 GLOBAL_OBJECT_LIFECYCLE_CONTRACT = ROOT / "docs/abi/global-object-lifecycle-412.json"
 PROCESS_INITIALIZATION_CONTRACT = ROOT / "docs/abi/process-initialization-shell-timeout-417.json"
+CONSUMER_PROVIDER_CONTRACT = ROOT / "docs/abi/consumer-provided-private-exports-422.json"
 WASM_WEB_API_SOURCE = ROOT / "wasm-spec-wg3/document/web-api/index.bs"
 PUBLIC_INVENTORY = ROOT / "docs/c-api/jsc-public-api-macos-27.0.json"
 EXPORT_SOURCE = ROOT / "src/c_api.zig"
@@ -53,7 +54,33 @@ PLATFORM_IMPORTS = {
 # Symbols declared in the pinned Zig sources but defined by the consumer rather
 # than imported from JavaScriptCore. Keep them in the revision-pinned inventory
 # for provenance, but never require zig-js to export a duplicate definition.
-CONSUMER_PROVIDED = {"JSFunctionCall"}
+CONSUMER_PROVIDER_SOURCES = {
+    "BakeCreateProdGlobal": "src/runtime/bake/BakeGlobalObject.cpp",
+    "Bake__getAsyncLocalStorage": "src/jsc/bindings/BakeAdditionsToGlobalObject.cpp",
+    "Bun__EventLoopTaskNoContext__createdInBunVm": "src/jsc/bindings/EventLoopTaskNoContext.cpp",
+    "Bun__EventLoopTaskNoContext__performTask": "src/jsc/bindings/EventLoopTaskNoContext.cpp",
+    "Bun__SecretsJobOptions__deinit": "src/jsc/bindings/JSSecrets.cpp",
+    "Bun__SecretsJobOptions__runFromJS": "src/jsc/bindings/JSSecrets.cpp",
+    "Bun__SecretsJobOptions__runTask": "src/jsc/bindings/JSSecrets.cpp",
+    "Bun__WebView__closeAllForTermination": "src/runtime/webview/JSWebView.cpp",
+    "Bun__closeAllSQLiteDatabasesForTermination": "src/jsc/bindings/sqlite/JSSQLStatement.cpp",
+    "Bun__createJSDebugger": "src/jsc/bindings/BunDebugger.cpp",
+    "Bun__ensureDebugger": "src/jsc/bindings/BunDebugger.cpp",
+    "Bun__loadHTMLEntryPoint": "src/jsc/bindings/HTMLEntryPoint.cpp",
+    "Bun__onFulfillAsyncModule": "src/jsc/bindings/ModuleLoader.cpp",
+    "Bun__runDeferredWork": "src/jsc/bindings/JSCTaskScheduler.cpp",
+    "Bun__runOnLoadPlugins": "src/jsc/bindings/BunPlugin.cpp",
+    "Bun__runOnResolvePlugins": "src/jsc/bindings/BunPlugin.cpp",
+    "Bun__startJSDebuggerThread": "src/jsc/bindings/BunDebugger.cpp",
+    "NodeModuleModule__callOverriddenRunMain": "src/jsc/modules/NodeModuleModule.cpp",
+    "WebWorker__dispatchError": "src/jsc/bindings/webcore/Worker.cpp",
+    "WebWorker__dispatchExit": "src/jsc/bindings/webcore/Worker.cpp",
+    "WebWorker__dispatchOnline": "src/jsc/bindings/webcore/Worker.cpp",
+    "WebWorker__fireEarlyMessages": "src/jsc/bindings/webcore/Worker.cpp",
+    "WebWorker__teardownJSCVM": "src/jsc/bindings/webcore/Worker.cpp",
+    "ZigGlobalObject__makeNapiEnvForFFI": "src/jsc/bindings/ZigGlobalObject.cpp",
+}
+CONSUMER_PROVIDED = {"JSFunctionCall", *CONSUMER_PROVIDER_SOURCES}
 EXPORT_RE = re.compile(r"^export fn ([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.M)
 
 
@@ -267,6 +294,11 @@ def declarations(path: Path, source_root: Path, public_names: set[str]) -> list[
             "declaration": declaration,
             "declaration_sha256": sha256_bytes(declaration.encode()),
         }
+        if name in CONSUMER_PROVIDER_SOURCES:
+            entry["provider"] = {
+                "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                "source": CONSUMER_PROVIDER_SOURCES[name],
+            }
         if issue is not None:
             entry["issue"] = issue
         result.append(entry)
@@ -342,6 +374,13 @@ def refresh_implementation_status(data: dict[str, object]) -> None:
                 entry["status"] = "external"
             entry.pop("issue", None)
             entry.pop("implementation", None)
+            if str(entry["name"]) in CONSUMER_PROVIDER_SOURCES:
+                entry["provider"] = {
+                    "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                    "source": CONSUMER_PROVIDER_SOURCES[str(entry["name"])],
+                }
+            else:
+                entry.pop("provider", None)
             continue
         if entry["name"] in zig_js_exports:
             entry["status"] = "implemented"
@@ -351,6 +390,7 @@ def refresh_implementation_status(data: dict[str, object]) -> None:
             entry["status"] = "pending"
             entry["issue"] = 163
             entry.pop("implementation", None)
+        entry.pop("provider", None)
     statuses = Counter(str(entry["status"]) for entry in data["declarations"])
     classifications = Counter(str(entry["classification"]) for entry in data["declarations"])
     data["totals"]["by_status"] = dict(sorted(statuses.items()))
@@ -460,6 +500,14 @@ def validate_stored(data: dict[str, object]) -> None:
         expected = expected_classification(name, public_names)
         if classification != expected:
             fail(f"{name} classification drift: {classification} != {expected}")
+        expected_provider = None
+        if name in CONSUMER_PROVIDER_SOURCES:
+            expected_provider = {
+                "contract": "docs/abi/consumer-provided-private-exports-422.json",
+                "source": CONSUMER_PROVIDER_SOURCES[name],
+            }
+        if entry.get("provider") != expected_provider:
+            fail(f"{name} consumer-provider provenance drift")
         names.append(name)
         counts[str(classification)] += 1
     if len(names) != len(set(names)):
@@ -1014,6 +1062,112 @@ def validate_process_initialization_contract(
         fail("process initialization semantic inventory is incomplete or duplicated")
 
 
+def validate_consumer_provider_contract(
+    home_root: Path | None = None,
+    bun_root: Path | None = None,
+) -> None:
+    if not CONSUMER_PROVIDER_CONTRACT.is_file():
+        fail(f"missing checked-in consumer-provider contract {CONSUMER_PROVIDER_CONTRACT}")
+    contract = json.loads(CONSUMER_PROVIDER_CONTRACT.read_text())
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract") != "consumer-provided-private-exports"
+        or contract.get("issue") != 422
+        or contract.get("parent_issues") != [140, 163, 164]
+        or contract.get("revisions") != {
+            "home": REVISION,
+            "bun": "4982b91e3702094330f3be3883354c52b8c01323",
+        }
+        or contract.get("source_prefixes") != {
+            "home": "packages/runtime/upstream",
+            "bun": "",
+        }
+    ):
+        fail("consumer-provider contract schema, revisions, or issue lineage drift")
+
+    providers = contract.get("providers")
+    if not isinstance(providers, list) or len(providers) != 14:
+        fail("consumer-provider source inventory drift")
+    symbols: list[str] = []
+    paths: set[str] = set()
+    observed_sources: dict[str, str] = {}
+    for provider in providers:
+        if not isinstance(provider, dict) or set(provider) != {
+            "path",
+            "home_sha256",
+            "bun_sha256",
+            "symbols",
+        }:
+            fail("malformed consumer-provider source entry")
+        path = provider["path"]
+        provided = provider["symbols"]
+        if (
+            not isinstance(path, str)
+            or path in paths
+            or not isinstance(provided, list)
+            or not provided
+            or any(not isinstance(symbol, str) for symbol in provided)
+        ):
+            fail("invalid or duplicate consumer-provider path/symbol entry")
+        paths.add(path)
+        for digest_key in ("home_sha256", "bun_sha256"):
+            digest = provider[digest_key]
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                fail(f"invalid consumer-provider digest for {path}")
+        symbols.extend(provided)
+        observed_sources.update({symbol: path for symbol in provided})
+
+    expected_symbols = set(CONSUMER_PROVIDER_SOURCES)
+    if (
+        len(symbols) != len(set(symbols))
+        or set(symbols) != expected_symbols
+        or observed_sources != CONSUMER_PROVIDER_SOURCES
+        or contract.get("forbidden_zig_js_exports") != sorted(expected_symbols)
+    ):
+        fail("consumer-provider symbol inventory drift")
+    exports = set(EXPORT_RE.findall(EXPORT_SOURCE.read_text()))
+    duplicate_exports = expected_symbols & exports
+    if duplicate_exports:
+        fail(f"consumer-provided symbols exported by zig-js: {sorted(duplicate_exports)}")
+    if (
+        contract.get("fixtures") != ["tests/abi/private_consumer_providers.cpp"]
+        or contract.get("ci_step") != "test-private-consumer-providers"
+        or not (ROOT / "tests/abi/private_consumer_providers.cpp").is_file()
+    ):
+        fail("consumer-provider fixture inventory drift")
+    fixture_source = (ROOT / "tests/abi/private_consumer_providers.cpp").read_text()
+    missing_fixture_symbols = {
+        symbol
+        for symbol in expected_symbols
+        if re.search(rf'\b{re.escape(symbol)}\s*\([^;{{}}]*\)\s*\{{', fixture_source) is None
+    }
+    if missing_fixture_symbols:
+        fail(f"consumer-provider fixture definitions missing: {sorted(missing_fixture_symbols)}")
+
+    for profile, root in (("home", home_root), ("bun", bun_root)):
+        if root is None:
+            continue
+        prefix = contract["source_prefixes"][profile]
+        digest_key = f"{profile}_sha256"
+        for provider in providers:
+            relative = Path(prefix) / provider["path"] if prefix else Path(provider["path"])
+            path = root / relative
+            if not path.is_file() or sha256(path) != provider[digest_key]:
+                fail(f"consumer-provider source drift for {relative.as_posix()}")
+            source = path.read_text(errors="replace")
+            for symbol in provider["symbols"]:
+                definition = re.compile(
+                    rf"\b{re.escape(symbol)}\s*\([^;{{}}]*\)\s*\{{",
+                    re.DOTALL,
+                )
+                if definition.search(source) is None:
+                    fail(f"consumer-provider definition missing for {symbol}")
+
+    semantics = contract.get("semantics")
+    if not isinstance(semantics, list) or len(semantics) < 8 or len(semantics) != len(set(semantics)):
+        fail("consumer-provider semantic inventory is incomplete or duplicated")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", choices=(PROFILE_ID, *ALIAS_PROFILES), default=PROFILE_ID)
@@ -1052,6 +1206,7 @@ def main() -> None:
     validate_sql_object_structure_contract(args.home_root.resolve() if args.home_root else None)
     validate_global_object_lifecycle_contract(args.home_root.resolve() if args.home_root else None)
     validate_process_initialization_contract(args.home_root.resolve() if args.home_root else None)
+    validate_consumer_provider_contract(home_root=args.home_root.resolve() if args.home_root else None)
     if args.home_root and args.profile in ALIAS_PROFILES:
         verify_alias(args.home_root.resolve(), stored, args.profile)
     totals = stored["totals"]

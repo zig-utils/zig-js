@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "contract": "consumer-provided-private-exports",
+  "issue": 422,
+  "parent_issues": [140, 163, 164],
+  "revisions": {
+    "home": "7ed99c02e50034f869d0db6d487115bb44332fe4",
+    "bun": "4982b91e3702094330f3be3883354c52b8c01323"
+  },
+  "source_prefixes": {
+    "home": "packages/runtime/upstream",
+    "bun": ""
+  },
+  "providers": [
+    {
+      "path": "src/runtime/bake/BakeGlobalObject.cpp",
+      "home_sha256": "a89341eacf60dfb24e1ff4aa431d229cd6ba6d141080baa4abc514862bbc14ab",
+      "bun_sha256": "1de7147aaf46ba8eaa507d6cf90d6e811b911415a5e192ecc0015041e1fd1f0d",
+      "symbols": ["BakeCreateProdGlobal"]
+    },
+    {
+      "path": "src/jsc/bindings/BakeAdditionsToGlobalObject.cpp",
+      "home_sha256": "b97fc71a0747a6667a75e64e00138ed135ef9cf49f2a242413b824dcde4b0a1f",
+      "bun_sha256": "b97fc71a0747a6667a75e64e00138ed135ef9cf49f2a242413b824dcde4b0a1f",
+      "symbols": ["Bake__getAsyncLocalStorage"]
+    },
+    {
+      "path": "src/jsc/bindings/EventLoopTaskNoContext.cpp",
+      "home_sha256": "0d61511937b83d4fc6c5412b6a569cec5141a2238b15380fe80ba1dd693e96d4",
+      "bun_sha256": "0d61511937b83d4fc6c5412b6a569cec5141a2238b15380fe80ba1dd693e96d4",
+      "symbols": [
+        "Bun__EventLoopTaskNoContext__createdInBunVm",
+        "Bun__EventLoopTaskNoContext__performTask"
+      ]
+    },
+    {
+      "path": "src/jsc/bindings/JSSecrets.cpp",
+      "home_sha256": "cd498a3daebbc67a6611af788e512bb3a8499033cefb7fca95ada98f0fb453a0",
+      "bun_sha256": "5fdcbda31fc5e563c335edf6a9482228bb890e7021c1b7ab58448fd44d23fd7d",
+      "symbols": [
+        "Bun__SecretsJobOptions__deinit",
+        "Bun__SecretsJobOptions__runFromJS",
+        "Bun__SecretsJobOptions__runTask"
+      ]
+    },
+    {
+      "path": "src/runtime/webview/JSWebView.cpp",
+      "home_sha256": "1eb814d13d12b0084486f649644aa41b6143db486c27e703573b17a579da2d62",
+      "bun_sha256": "2162d6affbaca96dc4e2457ee6b9d972e3af26cda62936df033840a026f2f79d",
+      "symbols": ["Bun__WebView__closeAllForTermination"]
+    },
+    {
+      "path": "src/jsc/bindings/sqlite/JSSQLStatement.cpp",
+      "home_sha256": "34da7cf679641925af888afd4f52023762d908de085cfa06da038a70351dd268",
+      "bun_sha256": "e89f8551be61a075508aa2d9b5f175c0ae55162a27964572b772885fee278998",
+      "symbols": ["Bun__closeAllSQLiteDatabasesForTermination"]
+    },
+    {
+      "path": "src/jsc/bindings/BunDebugger.cpp",
+      "home_sha256": "892c3c25cae20d3fd3931a71037742636f20b834f216471992c7af8d8e1a2778",
+      "bun_sha256": "2d59cddfb83274966f0bd4b9450579e9a14e1572206ca57c0ee2fefedecfd137",
+      "symbols": [
+        "Bun__createJSDebugger",
+        "Bun__ensureDebugger",
+        "Bun__startJSDebuggerThread"
+      ]
+    },
+    {
+      "path": "src/jsc/bindings/HTMLEntryPoint.cpp",
+      "home_sha256": "20acf50b0a50320359a2e6a7e2ed27edb086ff903543872d2650435cd0819c45",
+      "bun_sha256": "20acf50b0a50320359a2e6a7e2ed27edb086ff903543872d2650435cd0819c45",
+      "symbols": ["Bun__loadHTMLEntryPoint"]
+    },
+    {
+      "path": "src/jsc/bindings/ModuleLoader.cpp",
+      "home_sha256": "d4a97b2c88d4d96cb8900f2b0f256335b1492bb092b2bcbb0d1c58d432741fae",
+      "bun_sha256": "5bb3bea8b28edfc57ef385e582074cc1303d399b9c6f12ca55e8f8bae3b506e5",
+      "symbols": ["Bun__onFulfillAsyncModule"]
+    },
+    {
+      "path": "src/jsc/bindings/JSCTaskScheduler.cpp",
+      "home_sha256": "788fffcf43507fd177ce54946b3f2eb1242a782c213ace710abe86358d76fc85",
+      "bun_sha256": "788fffcf43507fd177ce54946b3f2eb1242a782c213ace710abe86358d76fc85",
+      "symbols": ["Bun__runDeferredWork"]
+    },
+    {
+      "path": "src/jsc/bindings/BunPlugin.cpp",
+      "home_sha256": "c0a68070fff321b6aea2b57a6b9a957d273f93c751d2040784f4d6463671f5c1",
+      "bun_sha256": "cedb21a472de38c74bad89832d3e49bf99c3046fbf0b65b6696bb967fdabc5b3",
+      "symbols": [
+        "Bun__runOnLoadPlugins",
+        "Bun__runOnResolvePlugins"
+      ]
+    },
+    {
+      "path": "src/jsc/modules/NodeModuleModule.cpp",
+      "home_sha256": "6aee896cf7d994115eb59ddff24873ae94c3f279891edafd4c81cf8cdbccbe8b",
+      "bun_sha256": "aae87111e056ad7a54d4dd5772ee2f22b8b5df29f67a6ac263490c26a8e29408",
+      "symbols": ["NodeModuleModule__callOverriddenRunMain"]
+    },
+    {
+      "path": "src/jsc/bindings/webcore/Worker.cpp",
+      "home_sha256": "4ece2800cc6d33a5b49064cbbb2d0c0d7e1f8f3b29d7eb859c47e0fe6094a9bb",
+      "bun_sha256": "7e5acb74afb0e08c27a4e6bb97b4a661658bb0d560682c0649f77e97d15c5fda",
+      "symbols": [
+        "WebWorker__dispatchError",
+        "WebWorker__dispatchExit",
+        "WebWorker__dispatchOnline",
+        "WebWorker__fireEarlyMessages",
+        "WebWorker__teardownJSCVM"
+      ]
+    },
+    {
+      "path": "src/jsc/bindings/ZigGlobalObject.cpp",
+      "home_sha256": "72f4a089c9e75ad919be6ebe8d47e846db74b1872aecdad7f9b217e3c696cf9d",
+      "bun_sha256": "a5ea3dbdf95537cac3db611b0b0f4a9aee30e7205211401a324afb73f2b16a04",
+      "symbols": ["ZigGlobalObject__makeNapiEnvForFFI"]
+    }
+  ],
+  "forbidden_zig_js_exports": [
+    "BakeCreateProdGlobal",
+    "Bake__getAsyncLocalStorage",
+    "Bun__EventLoopTaskNoContext__createdInBunVm",
+    "Bun__EventLoopTaskNoContext__performTask",
+    "Bun__SecretsJobOptions__deinit",
+    "Bun__SecretsJobOptions__runFromJS",
+    "Bun__SecretsJobOptions__runTask",
+    "Bun__WebView__closeAllForTermination",
+    "Bun__closeAllSQLiteDatabasesForTermination",
+    "Bun__createJSDebugger",
+    "Bun__ensureDebugger",
+    "Bun__loadHTMLEntryPoint",
+    "Bun__onFulfillAsyncModule",
+    "Bun__runDeferredWork",
+    "Bun__runOnLoadPlugins",
+    "Bun__runOnResolvePlugins",
+    "Bun__startJSDebuggerThread",
+    "NodeModuleModule__callOverriddenRunMain",
+    "WebWorker__dispatchError",
+    "WebWorker__dispatchExit",
+    "WebWorker__dispatchOnline",
+    "WebWorker__fireEarlyMessages",
+    "WebWorker__teardownJSCVM",
+    "ZigGlobalObject__makeNapiEnvForFFI"
+  ],
+  "fixtures": ["tests/abi/private_consumer_providers.cpp"],
+  "ci_step": "test-private-consumer-providers",
+  "semantics": [
+    "Consumer-provided symbols remain inventoried with exact declaration provenance but are external rather than pending private-JSC work.",
+    "zig-js must not define a duplicate symbol that collides when the pinned consumer supplies its host-runtime provider objects.",
+    "EventLoopTaskNoContext creator lookup is non-consuming; task performance invokes the callback and then self-deletes the task.",
+    "Termination providers close consumer-owned WebView and SQLite state before their backing runtime is dismantled.",
+    "Debugger providers retain the consumer's script-context identity and thread-start ordering.",
+    "Loader, plugin, scheduler, and worker providers keep consumer-owned host state and callback types outside the JavaScriptCore shim.",
+    "Home and Bun may pin different provider-file bytes while sharing the same imported Zig declarations.",
+    "After this classification Bun has no pending private imports; Home retains only JSC__SourceProvider__deref."
+  ]
+}
