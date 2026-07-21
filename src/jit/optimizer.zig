@@ -89,6 +89,12 @@ pub const BranchValue = struct {
 
 pub const FrameStateKind = enum { block_entry, branch, return_ };
 
+pub const HandlerState = struct {
+    catch_ip: u32,
+    finally_ip: u32,
+    stack_depth: u32,
+};
+
 /// Immutable interpreter reconstruction state at an optimizer entry or exit.
 /// Values are SSA ids in locals-then-operand-stack order. Keeping the boundary
 /// explicit prevents a future side exit from guessing at dead values or
@@ -100,6 +106,8 @@ pub const FrameState = struct {
     first_value: u32,
     local_count: u32,
     stack_count: u32,
+    first_handler: u32,
+    handler_count: u32,
 };
 
 /// Exact state supplied by one predecessor edge. Unlike a block-entry state,
@@ -111,6 +119,8 @@ pub const EdgeState = struct {
     first_value: u32,
     local_count: u32,
     stack_count: u32,
+    first_handler: u32,
+    handler_count: u32,
 };
 
 pub const ValueGraph = struct {
@@ -122,6 +132,7 @@ pub const ValueGraph = struct {
     branches: []BranchValue,
     frame_states: []FrameState,
     frame_state_values: []ValueId,
+    handler_states: []HandlerState,
     edge_states: []EdgeState,
 
     pub fn deinit(self: *ValueGraph) void {
@@ -132,6 +143,7 @@ pub const ValueGraph = struct {
         self.allocator.free(self.branches);
         self.allocator.free(self.frame_states);
         self.allocator.free(self.frame_state_values);
+        self.allocator.free(self.handler_states);
         self.allocator.free(self.edge_states);
         self.* = undefined;
     }
@@ -223,12 +235,13 @@ pub const Plan = struct {
             branch.true_block,
         });
         for (self.graph.frame_states) |state| {
-            try out.print(allocator, "state {s} b{d} @{d} locals={d} stack={d} (", .{
+            try out.print(allocator, "state {s} b{d} @{d} locals={d} stack={d} handlers={d} (", .{
                 @tagName(state.kind),
                 state.block,
                 state.origin,
                 state.local_count,
                 state.stack_count,
+                state.handler_count,
             });
             const first: usize = state.first_value;
             const count: usize = state.local_count + state.stack_count;
@@ -240,9 +253,9 @@ pub const Plan = struct {
         }
         for (self.graph.edge_states) |state| {
             if (state.from == Block.none) {
-                try out.print(allocator, "state edge entry -> b{d} @{d} (", .{ state.to, state.origin });
+                try out.print(allocator, "state edge entry -> b{d} @{d} handlers={d} (", .{ state.to, state.origin, state.handler_count });
             } else {
-                try out.print(allocator, "state edge b{d} -> b{d} @{d} (", .{ state.from, state.to, state.origin });
+                try out.print(allocator, "state edge b{d} -> b{d} @{d} handlers={d} (", .{ state.from, state.to, state.origin, state.handler_count });
             }
             const first: usize = state.first_value;
             const count: usize = state.local_count + state.stack_count;
@@ -365,6 +378,7 @@ const GraphBuilder = struct {
     branches: std.ArrayListUnmanaged(BranchValue) = .empty,
     frame_states: std.ArrayListUnmanaged(FrameState) = .empty,
     frame_state_values: std.ArrayListUnmanaged(ValueId) = .empty,
+    handler_states: std.ArrayListUnmanaged(HandlerState) = .empty,
 
     fn deinit(self: *GraphBuilder) void {
         self.nodes.deinit(self.allocator);
@@ -375,6 +389,7 @@ const GraphBuilder = struct {
         self.branches.deinit(self.allocator);
         self.frame_states.deinit(self.allocator);
         self.frame_state_values.deinit(self.allocator);
+        self.handler_states.deinit(self.allocator);
     }
 
     fn appendNode(self: *GraphBuilder, node: ValueNode) std.mem.Allocator.Error!ValueId {
@@ -426,10 +441,13 @@ const GraphBuilder = struct {
         origin: u32,
         locals: []const ValueId,
         stack: []const ValueId,
+        handlers: []const HandlerState,
     ) std.mem.Allocator.Error!void {
         const first_value: u32 = @intCast(self.frame_state_values.items.len);
+        const first_handler: u32 = @intCast(self.handler_states.items.len);
         try self.frame_state_values.appendSlice(self.allocator, locals);
         try self.frame_state_values.appendSlice(self.allocator, stack);
+        try self.handler_states.appendSlice(self.allocator, handlers);
         try self.roots.appendSlice(self.allocator, locals);
         try self.roots.appendSlice(self.allocator, stack);
         try self.frame_states.append(self.allocator, .{
@@ -439,6 +457,8 @@ const GraphBuilder = struct {
             .first_value = first_value,
             .local_count = @intCast(locals.len),
             .stack_count = @intCast(stack.len),
+            .first_handler = first_handler,
+            .handler_count = @intCast(handlers.len),
         });
     }
 };
@@ -572,7 +592,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
         @memcpy(locals, entry[0..local_count]);
         @memcpy(stack[0..entry_depth], entry[local_count..]);
         var depth: usize = entry_depth;
-        try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth]);
+        try builder.appendFrameState(.block_entry, @intCast(block_id), block.start, locals, stack[0..depth], &.{});
 
         for (chunk.code.items[block.start..block.end], block.start..) |inst, origin| switch (inst.op) {
             .load_const => {
@@ -621,7 +641,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .jump => {},
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
-                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
+                try builder.appendFrameState(.branch, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 if (block.successor_count != 2) return error.InvalidControlFlow;
@@ -635,7 +655,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .ret => {
                 if (depth == 0) return error.InvalidControlFlow;
-                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
                 depth -= 1;
                 try builder.roots.append(allocator, stack[depth]);
                 try builder.returns.append(allocator, .{
@@ -645,7 +665,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 });
             },
             .ret_undef => {
-                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth]);
+                try builder.appendFrameState(.return_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], &.{});
                 const result = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
                 try builder.roots.append(allocator, result);
                 try builder.returns.append(allocator, .{
@@ -769,6 +789,8 @@ fn compactValueGraph(
     const frame_state_values = try allocator.alloc(ValueId, builder.frame_state_values.items.len);
     errdefer allocator.free(frame_state_values);
     for (builder.frame_state_values.items, frame_state_values) |old, *value| value.* = remap[old];
+    const handler_states = try allocator.dupe(HandlerState, builder.handler_states.items);
+    errdefer allocator.free(handler_states);
     const edge_states = try allocator.alloc(EdgeState, owned_edges.len);
     errdefer allocator.free(edge_states);
     for (owned_edges, edge_states) |edge, *state| {
@@ -786,6 +808,8 @@ fn compactValueGraph(
             .first_value = edge.first_argument,
             .local_count = target.local_count,
             .stack_count = target.stack_count,
+            .first_handler = target.first_handler,
+            .handler_count = target.handler_count,
         };
     }
     return .{
@@ -797,6 +821,7 @@ fn compactValueGraph(
         .branches = branches,
         .frame_states = frame_states,
         .frame_state_values = frame_state_values,
+        .handler_states = handler_states,
         .edge_states = edge_states,
     };
 }

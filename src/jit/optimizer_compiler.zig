@@ -80,6 +80,7 @@ pub const Program = struct {
     bytecode_steps: u32,
     deopt_points: []jit.DeoptPoint,
     deopt_values: []jit.RecoveryValue,
+    deopt_handlers: []jit.RecoveryHandler,
     stack_maps: []jit.StackMap,
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
@@ -90,6 +91,7 @@ pub const Program = struct {
         self.allocator.free(self.operations);
         self.allocator.free(self.deopt_points);
         self.allocator.free(self.deopt_values);
+        self.allocator.free(self.deopt_handlers);
         self.allocator.free(self.stack_maps);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
@@ -321,6 +323,10 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             const resolved = try resolveAlias(value, aliases);
             try deopt_values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(resolved) });
         }
+        const first_handler: usize = state.first_handler;
+        const handler_count: usize = state.handler_count;
+        if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
+            return error.UnsupportedChunk;
         try deopt_points.append(allocator, .{
             .kind = switch (state.kind) {
                 .block_entry => .block_entry,
@@ -331,6 +337,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             .first_value = first_value,
             .local_count = @intCast(state.local_count),
             .stack_count = @intCast(state.stack_count),
+            .first_handler = state.first_handler,
+            .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
             .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
         });
     }
@@ -340,6 +348,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     errdefer allocator.free(owned_deopt_points);
     const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
     errdefer allocator.free(owned_deopt_values);
+    const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
+    errdefer allocator.free(owned_deopt_handlers);
     const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
     errdefer allocator.free(stack_maps);
     return .{
@@ -354,6 +364,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .bytecode_steps = bytecode_steps,
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
+        .deopt_handlers = owned_deopt_handlers,
         .stack_maps = stack_maps,
     };
 }
@@ -472,6 +483,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(owned_deopt_points);
     const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
     errdefer allocator.free(owned_deopt_values);
+    const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
+    errdefer allocator.free(owned_deopt_handlers);
     const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
     errdefer allocator.free(stack_maps);
     const local_mask: u64 = if (chunk.local_count == 64)
@@ -501,6 +514,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .bytecode_steps = true_steps,
         .deopt_points = owned_deopt_points,
         .deopt_values = owned_deopt_values,
+        .deopt_handlers = owned_deopt_handlers,
         .stack_maps = stack_maps,
         .osr = osr,
         .execution_block = header,
@@ -526,6 +540,17 @@ fn primitiveStackMaps(allocator: std.mem.Allocator, deopt_count: usize) ![]jit.S
         },
     };
     return maps;
+}
+
+fn ownRecoveryHandlers(allocator: std.mem.Allocator, handlers: []const optimizer.HandlerState) ![]jit.RecoveryHandler {
+    const owned = try allocator.alloc(jit.RecoveryHandler, handlers.len);
+    errdefer allocator.free(owned);
+    for (handlers, owned) |handler, *recovery| recovery.* = .{
+        .catch_ip = handler.catch_ip,
+        .finally_ip = handler.finally_ip,
+        .stack_depth = std.math.cast(u16, handler.stack_depth) orelse return error.UnsupportedChunk,
+    };
+    return owned;
 }
 
 fn appendPrimitiveLeaves(
@@ -746,6 +771,10 @@ fn appendEdgeDeopt(
     const first: usize = state.first_value;
     const count: usize = state.local_count + state.stack_count;
     if (first > graph.edge_arguments.len or count > graph.edge_arguments.len - first) return error.UnsupportedChunk;
+    const first_handler: usize = state.first_handler;
+    const handler_count: usize = state.handler_count;
+    if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
+        return error.UnsupportedChunk;
     for (graph.edge_arguments[first .. first + count]) |value| {
         if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
         try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
@@ -756,6 +785,8 @@ fn appendEdgeDeopt(
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
         .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+        .first_handler = state.first_handler,
+        .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
         .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
     });
     return index;
@@ -776,6 +807,10 @@ fn appendBlockEntryDeopt(
     const count: usize = state.local_count + state.stack_count;
     if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
         return error.UnsupportedChunk;
+    const first_handler: usize = state.first_handler;
+    const handler_count: usize = state.handler_count;
+    if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
+        return error.UnsupportedChunk;
     for (graph.frame_state_values[first .. first + count]) |value| {
         if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
         try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
@@ -786,6 +821,8 @@ fn appendBlockEntryDeopt(
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
         .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+        .first_handler = state.first_handler,
+        .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
         .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
     });
     return index;
@@ -927,7 +964,12 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.ret();
     }
     try memory.publish(assembler.bytes().len);
-    const deopt = try jit.DeoptMetadata.create(std.heap.page_allocator, program.deopt_points, program.deopt_values, &.{});
+    const deopt = try jit.DeoptMetadata.create(
+        std.heap.page_allocator,
+        program.deopt_points,
+        program.deopt_values,
+        program.deopt_handlers,
+    );
     errdefer deopt.destroy();
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();
@@ -1158,6 +1200,37 @@ test "optimizer lowerer produces portable guarded numeric operations" {
     try std.testing.expectEqual(jit.DeoptPointKind.block_entry, program.deopt_points[0].kind);
     try std.testing.expectEqual(jit.DeoptPointKind.return_, program.deopt_points[1].kind);
     try std.testing.expectEqual(OperationKind.mul, program.operations[program.operations.len - 1].kind);
+}
+
+test "optimizer lowering publishes frame-state handlers" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const value = try chunk.addConst(Value.num(7));
+    _ = try chunk.emit(.load_const, value);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    std.testing.allocator.free(plan.graph.handler_states);
+    plan.graph.handler_states = try std.testing.allocator.dupe(optimizer.HandlerState, &.{.{
+        .catch_ip = 1,
+        .finally_ip = jit.RecoveryHandler.none,
+        .stack_depth = 0,
+    }});
+    for (plan.graph.frame_states) |*state| {
+        state.first_handler = 0;
+        state.handler_count = 1;
+    }
+
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    try std.testing.expectEqual(@as(usize, 1), program.deopt_handlers.len);
+    try std.testing.expectEqual(@as(u32, 1), program.deopt_handlers[0].catch_ip);
+    try std.testing.expectEqual(jit.RecoveryHandler.none, program.deopt_handlers[0].finally_ip);
+    for (program.deopt_points) |point| {
+        try std.testing.expectEqual(@as(u32, 0), point.first_handler);
+        try std.testing.expectEqual(@as(u16, 1), point.handler_count);
+    }
 }
 
 test "optimizer compiler executes guarded parameter SSA" {
