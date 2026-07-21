@@ -46567,6 +46567,32 @@ pub fn symbolForKey(self: *Interpreter, key: []const u8) EvalError!Value {
     defer if (self.gil) |g| g.unlockSymbolRegistry();
     const reg = (try symbolRegistryLocked(self)) orelse return self.throwError("TypeError", "Symbol registry unavailable");
     if (reg.getOwn(key)) |existing| return existing;
+    if (gc_mod.sharedHeapOwnerContext(self.gc)) |owner| {
+        const active_is_owner = if (self.gc_realm_context) |raw|
+            @intFromPtr(raw) == @intFromPtr(owner)
+        else
+            false;
+        if (!active_is_owner) {
+            const saved = gc_mod.setActiveContext(owner);
+            defer gc_mod.restoreActiveContext(saved);
+            var owner_machine = owner.interpreter();
+            const sym = try makeSymbolObj(
+                owner_machine.arena,
+                owner_machine.root_shape,
+                key,
+                symbolProto(&owner_machine),
+            );
+            _ = owner_machine.registerSymbol(sym.asObj());
+            try sym.asObj().setOwn(
+                owner_machine.arena,
+                owner_machine.root_shape,
+                "\x00forKey",
+                try Value.strAlloc(owner_machine.arena, key),
+            );
+            try reg.setOwn(owner_machine.arena, owner_machine.root_shape, key, sym);
+            return sym;
+        }
+    }
     const sym = try makeSymbolObj(self.arena, self.root_shape, key, symbolProto(self));
     _ = self.registerSymbol(sym.asObj());
     try sym.asObj().setOwn(self.arena, self.root_shape, "\x00forKey", try Value.strAlloc(self.arena, key));

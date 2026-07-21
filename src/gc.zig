@@ -3835,6 +3835,15 @@ pub fn currentRealmId() ContextMod.GcCellBacking.RealmId {
     return active_realm_id;
 }
 
+/// Resolve the hidden owner realm for a precise heap. VM-scoped facilities
+/// such as the GlobalSymbolRegistry allocate their persistent cells there so
+/// replacing an exposed sibling does not pin that sibling's entire realm.
+pub fn sharedHeapOwnerContext(heap_erased: ?*anyopaque) ?*ContextMod.Context {
+    const raw = heap_erased orelse return null;
+    const heap: *Heap = @ptrCast(@alignCast(raw));
+    return heap.ctx.context;
+}
+
 /// Install the realm-local side-storage/accounting target while retaining the
 /// active shared heap. Sibling entry points restore this independently from the
 /// heap so nested calls preserve both allocation dimensions.
