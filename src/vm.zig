@@ -5172,6 +5172,13 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
 }
 
 fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk) ?*const jit.CompiledCode {
+    // A managed baseline artifact already owns the whole loop, including exact
+    // checkpoint accounting. The generic optimizer region currently expands
+    // the same loop into finer-grained guarded operations and can be much
+    // slower; do not replace a proven whole-loop tier merely because the later
+    // profiling threshold was crossed. Effect/property chunks that baseline
+    // cannot compile still reach the optimizer normally.
+    if (chunk.tier.loadCode()) |baseline| if (baseline.manages_steps) return null;
     var artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
     if (artifact == null) if (owner.claimOptimizerCompilation(
         &chunk.optimizer_tier,
@@ -11773,6 +11780,12 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     }
     try std.testing.expectEqual(jit.TierState.ready, sum_chunk.tier.loadState());
     try std.testing.expect(sum_chunk.tier.loadCode().?.manages_steps);
+    for (0..12) |_| {
+        sum_slots = .{ Value.num(10), Value.undef(), Value.undef() };
+        try std.testing.expectEqual(@as(f64, 45), (try run(&machine, sum_chunk, &sum_frame)).asNum());
+    }
+    try std.testing.expectEqual(@as(u64, 0), sum_chunk.optimizer_tier.compileCount());
+    try std.testing.expect(sum_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
 
     const add_chunk = root.fns.items[1].chunk.?;
     var add_slots = [_]Value{Value.num(0)};
