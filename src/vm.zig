@@ -8275,6 +8275,55 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     try std.testing.expectEqual(@as(f64, 2), (try run(&machine, function_chunk, &frame)).asNum());
 }
 
+test "vm: optimizer unequal nested branch paths converge" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function longTrue(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) { if (i < 2) { sum = sum + 10; sum = sum + 0; } else { sum = sum + 1; } i = i + 1; }
+        \\  return sum;
+        \\}
+        \\function longFalse(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) { if (i < 2) { sum = sum + 10; } else { sum = sum + 1; sum = sum + 0; } i = i + 1; }
+        \\  return sum;
+        \\}
+        \\longTrue(4); longTrue(4); longTrue(4); longTrue(4); longTrue(4);
+        \\longTrue(4); longTrue(4); longTrue(4); longTrue(4); longTrue(4);
+        \\longFalse(4); longFalse(4); longFalse(4); longFalse(4); longFalse(4);
+        \\longFalse(4); longFalse(4); longFalse(4); longFalse(4); longFalse(4);
+        \\longTrue(4) + longFalse(4)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 44), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    for (root.fns.items[0..2]) |function| {
+        const artifact = function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(!artifact.entry_enabled);
+        try std.testing.expect(artifact.osr != null);
+        try std.testing.expect(artifact.has_side_exits);
+    }
+
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 44), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+}
+
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

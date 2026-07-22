@@ -71,6 +71,8 @@ pub const NestedLoopBranch = struct {
     false_block: u32,
     true_block: u32,
     merge_block: u32,
+    false_steps: u12,
+    true_steps: u12,
 };
 
 pub const Program = struct {
@@ -456,15 +458,16 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             return error.UnsupportedChunk;
         const false_steps = try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block, merge });
         const nested_true_steps = try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block, merge });
-        if (false_steps != nested_true_steps) return error.UnsupportedChunk;
         latch = merge;
-        true_steps = false_steps;
+        true_steps = @max(false_steps, nested_true_steps);
         nested_loop = .{
             .entry_block = nested.block,
             .condition = @intCast(nested.condition),
             .false_block = nested.false_block,
             .true_block = nested.true_block,
             .merge_block = merge,
+            .false_steps = std.math.cast(u12, false_steps) orelse return error.UnsupportedChunk,
+            .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
         };
     } else {
         const straight_body = branch.true_block;
@@ -969,20 +972,32 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try assembler.compareRegister64(9, 10);
             const nested_false_jump = try assembler.branchConditionPlaceholder(.eq);
             try emitBlockOperations(&assembler, program, nested.true_block);
-            const nested_done = try assembler.branchPlaceholder();
+            try emitBlockOperations(&assembler, program, nested.merge_block);
+            try emitStepIncrement(&assembler, nested.true_steps);
+            try assembler.subtractImmediate64(15, 15, nested.true_steps);
+            try assembler.subtractImmediate64(16, 16, nested.true_steps);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const true_backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(true_backedge, loop_top);
+
             try assembler.patchConditionBranch(nested_false_jump, assembler.position());
             try emitBlockOperations(&assembler, program, nested.false_block);
-            try assembler.patchBranch(nested_done, assembler.position());
             try emitBlockOperations(&assembler, program, nested.merge_block);
+            try emitStepIncrement(&assembler, nested.false_steps);
+            try assembler.subtractImmediate64(15, 15, nested.false_steps);
+            try assembler.subtractImmediate64(16, 16, nested.false_steps);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const false_backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(false_backedge, loop_top);
         } else {
             try emitBlockOperations(&assembler, program, branch.true_block.?);
+            try emitStepIncrement(&assembler, branch.true_steps);
+            try assembler.subtractImmediate64(15, 15, branch.true_steps);
+            try assembler.subtractImmediate64(16, 16, branch.true_steps);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(backedge, loop_top);
         }
-        try emitStepIncrement(&assembler, branch.true_steps);
-        try assembler.subtractImmediate64(15, 15, branch.true_steps);
-        try assembler.subtractImmediate64(16, 16, branch.true_steps);
-        if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-        const backedge = try assembler.branchPlaceholder();
-        try assembler.patchBranch(backedge, loop_top);
 
         try assembler.patchConditionBranch(false_jump, assembler.position());
         try emitStepIncrement(&assembler, branch.false_steps);
@@ -2253,5 +2268,138 @@ test "optimizer loop OSR executes an equal-cost nested branch" {
         const recovered = compiled.deopt.?.values[checkpoint.first_value + local].materialize(&slots, &scratch) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(value, Value.fromRawBits(recovered).asNum());
+    }
+}
+
+fn makeUnequalNestedLoopChunk(allocator: std.mem.Allocator, pad_true: bool) !bc.Chunk {
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 3;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    const two = try chunk.addConst(Value.num(2));
+    const ten = try chunk.addConst(Value.num(10));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    const enter_loop = try chunk.emit(.jump, 0);
+
+    const header: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[enter_loop].a = header;
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    const leave_loop = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, two);
+    _ = try chunk.emit(.lt, 0);
+    const take_false = try chunk.emit(.jump_if_false, 0);
+
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, ten);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    if (pad_true) {
+        _ = try chunk.emit(.load_const, zero);
+        _ = try chunk.emit(.pop, 0);
+    }
+    const true_to_merge = try chunk.emit(.jump, 0);
+
+    const false_start: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[take_false].a = false_start;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    if (!pad_true) {
+        _ = try chunk.emit(.load_const, zero);
+        _ = try chunk.emit(.pop, 0);
+    }
+    const false_to_merge = try chunk.emit(.jump, 0);
+
+    const merge: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[true_to_merge].a = merge;
+    chunk.code.items[false_to_merge].a = merge;
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[leave_loop].a = exit;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.ret, 0);
+    return chunk;
+}
+
+test "optimizer loop OSR accounts unequal nested branch paths" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    for ([_]bool{ true, false }) |pad_true| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = try makeUnequalNestedLoopChunk(arena.allocator(), pad_true);
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        try std.testing.expectEqual(@as(u32, 22), compiled.bytecode_steps);
+        const osr = compiled.osr orelse return error.TestUnexpectedResult;
+        const entry_index = osr.findEntry(7, 3, 0, 0, Value.undef().rawBits()) orelse
+            return error.TestUnexpectedResult;
+        var slots = [_]u64{
+            Value.num(4).rawBits(),
+            Value.num(0).rawBits(),
+            Value.num(0).rawBits(),
+        };
+        var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+        try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+        var steps: u64 = 0;
+        var frame = jit.NativeFrame{
+            .slots = &slots,
+            .scratch = &scratch,
+            .steps = &steps,
+            .steps_until_checkpoint = 1024,
+            .steps_until_budget = 1024,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+        try std.testing.expectEqual(@as(u64, 88), steps);
+        const complete_exit = compiled.deopt.?.points[frame.deopt_index];
+        try std.testing.expectEqual(@as(f64, 22), Value.fromRawBits(
+            compiled.deopt.?.values[complete_exit.first_value + 2].materialize(&slots, &scratch) orelse
+                return error.TestUnexpectedResult,
+        ).asNum());
+
+        slots = .{ Value.num(4).rawBits(), Value.num(0).rawBits(), Value.num(0).rawBits() };
+        try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+        frame.steps_until_checkpoint = 43;
+        steps = 0;
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+        const true_checkpoint = compiled.deopt.?.points[frame.deopt_index];
+        const expected_true_steps: u64 = if (pad_true) 22 else 40;
+        const expected_true_i: f64 = if (pad_true) 1 else 2;
+        try std.testing.expectEqual(expected_true_steps, steps);
+        try std.testing.expectEqual(expected_true_i, Value.fromRawBits(
+            compiled.deopt.?.values[true_checkpoint.first_value + 1].materialize(&slots, &scratch) orelse
+                return error.TestUnexpectedResult,
+        ).asNum());
+
+        slots = .{ Value.num(4).rawBits(), Value.num(2).rawBits(), Value.num(20).rawBits() };
+        try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+        frame.steps_until_checkpoint = 43;
+        steps = 0;
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+        const false_checkpoint = compiled.deopt.?.points[frame.deopt_index];
+        const expected_false_steps: u64 = if (pad_true) 40 else 22;
+        const expected_false_i: f64 = if (pad_true) 4 else 3;
+        try std.testing.expectEqual(expected_false_steps, steps);
+        try std.testing.expectEqual(expected_false_i, Value.fromRawBits(
+            compiled.deopt.?.values[false_checkpoint.first_value + 1].materialize(&slots, &scratch) orelse
+                return error.TestUnexpectedResult,
+        ).asNum());
     }
 }
