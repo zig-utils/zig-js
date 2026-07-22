@@ -1110,6 +1110,10 @@ pub const Owner = struct {
         };
     }
 
+    pub fn hasPublishedArtifacts(self: *const Owner) bool {
+        return self.live_artifacts.load(.acquire) != 0;
+    }
+
     fn acquireLock(self: *Owner) void {
         while (!self.lock.tryLock()) std.atomic.spinLoopHint();
     }

@@ -6287,6 +6287,7 @@ fn runChunk(
                     // slow path ([[Set]] honors setters + non-writable).
                     if (obj.isObject()) {
                         const o = obj.asObj();
+                        vm.invalidateJitHeapFacts();
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
                         if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
@@ -8489,6 +8490,22 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
 }
 
 pub fn runFunction(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []const Value, this_val: Value, new_target: Value) EvalError!Value {
+    const outer_execution = vm.jit_execution_depth == 0;
+    var execution: ?jit.Owner.Execution = null;
+    if (outer_execution) {
+        execution = if (vm.jit_owner) |owner| owner.enterExecution() else null;
+        vm.jit_execution_allowed = execution != null;
+        vm.jit_execution_epoch = if (execution) |*lease| lease.token() else 0;
+    }
+    vm.jit_execution_depth += 1;
+    defer {
+        vm.jit_execution_depth -= 1;
+        if (outer_execution) {
+            vm.jit_execution_allowed = false;
+            vm.jit_execution_epoch = 0;
+            if (execution) |*lease| lease.release();
+        }
+    }
     try vm.stackGuard();
     vm.depth += 1;
     defer vm.depth -= 1;

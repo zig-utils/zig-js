@@ -4072,6 +4072,8 @@ pub const Context = struct {
             .arena = self.arena(),
             .env = &self.env,
             .jit_owner = if (self.enable_jit and self.debug_statement_hook == null and self.host_statement_hook == null and self.profile_statement_hook == null) (self.shared_jit_owner orelse &self.jit_owner) else null,
+            .jit_invalidation_ctx = if (self.parallel_js and self.enable_jit) self else null,
+            .jit_invalidation_fn = if (self.parallel_js and self.enable_jit) clearJitCodeFromInterpreter else null,
             .debug_statement_ctx = self.debug_statement_ctx,
             .debug_statement_hook = self.debug_statement_hook,
             .host_statement_ctx = self.host_statement_ctx,
@@ -5582,6 +5584,29 @@ pub const Context = struct {
         }
     }
 
+    /// A mutator waiting to fire Class-A invalidation must remain a GC
+    /// safepoint participant. Otherwise a collector holding the conductor can
+    /// wait for this same mutator forever.
+    fn enterJitGcConductorFromInterpreter(self: *Context, machine: *interp.Interpreter) void {
+        var waited: u64 = 0;
+        while (!self.tryEnterJitGcConductor()) : (waited += 1) {
+            if (self.gc_cooperative_enabled and self.gc_par_request.load(.acquire) != 0) {
+                self.joinCooperativeGcRequest(machine);
+            } else if (self.gc_par_collector.load(.acquire) != null) {
+                self.publishParallelRoots(machine);
+            } else if ((waited & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+        if (waited != 0) {
+            const conductor = self.jitGcConductor();
+            _ = conductor.wait_iterations.fetchAdd(waited, .monotonic);
+            self.recordParallelGcMax(&conductor.wait_iterations_max, waited);
+        }
+    }
+
     fn leaveJitGcConductor(self: *Context) void {
         self.jitGcConductor().lock.unlock();
     }
@@ -5591,6 +5616,14 @@ pub const Context = struct {
     /// native entry or a later collection publication window.
     pub fn clearJitCode(self: *Context) void {
         self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+        (self.shared_jit_owner orelse &self.jit_owner).clear();
+        _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
+    }
+
+    fn clearJitCodeFromInterpreter(raw_context: *anyopaque, machine: *interp.Interpreter) void {
+        const self: *Context = @ptrCast(@alignCast(raw_context));
+        self.enterJitGcConductorFromInterpreter(machine);
         defer self.leaveJitGcConductor();
         (self.shared_jit_owner orelse &self.jit_owner).clear();
         _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
@@ -15656,6 +15689,34 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
     try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
     try std.testing.expect(ctx.jitGcConductor().wait_iterations.load(.acquire) != 0);
+}
+
+test "parallel_js named property mutation fires Class-A invalidation" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.classAObject = { y: 1 };
+        \\function classARead(o) { return o.y; }
+        \\for (let warm = 0; warm < 64; warm = warm + 1) classARead(classAObject);
+    );
+    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+    try std.testing.expect(owner.hasPublishedArtifacts());
+    const generation_before = owner.invalidation_generation.load(.acquire);
+
+    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    _ = try ctx.evaluate("classAObject.y = 4");
+
+    try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
 test "optimizer live safepoint relocates a recovery-only object local" {

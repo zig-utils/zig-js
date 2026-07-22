@@ -1093,6 +1093,10 @@ pub const Interpreter = struct {
     /// pointer is loaded and entered only while this remains the owner's
     /// current epoch; an invalidated outer execution stays bytecode-only.
     jit_execution_epoch: usize = 0,
+    /// Parallel-realm heap mutations conservatively fire the Context's Class-A
+    /// invalidation bridge once native code has published heap assumptions.
+    jit_invalidation_ctx: ?*anyopaque = null,
+    jit_invalidation_fn: ?*const fn (*anyopaque, *Interpreter) void = null,
     /// Prefer a whole-activation baseline artifact over compiling the same
     /// managed loop into a slower generic optimizer region. Unit-test
     /// interpreters default this off so optimizer-specific tests exercise that
@@ -1618,7 +1622,17 @@ pub const Interpreter = struct {
     // ---- exception helpers ------------------------------------------------
 
     /// Set a named property on an object via its shape (see `Object.setOwn`).
+    pub fn invalidateJitHeapFacts(self: *Interpreter) void {
+        if (self.jit_owner) |owner| {
+            if (owner.hasPublishedArtifacts()) {
+                if (self.jit_invalidation_fn) |invalidate|
+                    invalidate(self.jit_invalidation_ctx.?, self);
+            }
+        }
+    }
+
     pub fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
+        self.invalidateJitHeapFacts();
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
@@ -4864,20 +4878,18 @@ pub const Interpreter = struct {
     }
 
     /// Whether a plain function should compile to a bytecode chunk and run on the
-    /// VM instead of the tree-walker. The VM path is taken narrowly — where it
-    /// changes behaviour the tree-walker can't match, not for a general speedup
-    /// (the two are close in throughput): strict functions that may contain a
-    /// tail call (proper-tail-call semantics via the VM's call trampoline), and
-    /// non-strict functions that recurse by their own name (deep recursion, where
-    /// the VM's heap activation stack outlasts the native stack) and don't observe
-    /// the legacy call frame. Methods, generators, async, and `arguments`-using
-    /// functions always stay on the tree-walker (they have their own chunk kinds
-    /// or unsupported semantics).
+    /// VM instead of the tree-walker. Besides tail calls and recursion, named
+    /// property functions enter the VM so their observed shapes can reach the
+    /// optimizing tier. Unsupported bodies still fall back during compilation.
+    /// Methods, generators, async, and `arguments`-using functions retain their
+    /// dedicated paths.
     fn plainFunctionMayUseBytecode(fnode: *const ast.FunctionNode) bool {
         if (fnode.is_method or fnode.is_generator or fnode.is_async or fnode.uses_arguments) return false;
-        if (fnode.is_strict) return sourceMayHaveTailCall(fnode.source);
+        if (fnode.is_strict)
+            return sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null;
         return !sourceMayObserveLegacyCallFrame(fnode.source) and
-            sourceHasNamedSelfCall(fnode.source, fnode.name);
+            (sourceHasNamedSelfCall(fnode.source, fnode.name) or
+                std.mem.indexOfScalar(u8, fnode.source, '.') != null);
     }
 
     pub fn funcOf(v: Value) ?*Function {
