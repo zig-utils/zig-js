@@ -909,6 +909,8 @@ var quick_literal_transition_hits: std.atomic.Value(u64) = .init(0);
 var quick_native_direct_call_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_attempts: std.atomic.Value(u64) = .init(0);
 var optimizer_native_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_native_property_read_cache_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_native_property_write_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -3640,8 +3642,63 @@ fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
     return vm.getProperty(object, try propKey(vm, key));
 }
 
-fn nativeSetProperty(vm: *Interpreter, object: Value, name: []const u8, value_word: Value) EvalError!Value {
-    try vm.setMember(object, name, value_word);
+fn nativePropertyCacheSlot(cache: ?*const jit.NativePropertyCache, object: *const value.Object) ?usize {
+    const shape = object.shape orelse return null;
+    const cached = (cache orelse return null).lookup(@intFromPtr(shape)) orelse return null;
+    const slot = std.math.cast(usize, cached) orelse return null;
+    if (slot >= object.slotsItems().len) return null;
+    return slot;
+}
+
+fn nativeGetProperty(
+    vm: *Interpreter,
+    cache: ?*const jit.NativePropertyCache,
+    object_value: Value,
+    name: []const u8,
+) EvalError!Value {
+    if (object_value.isObject()) {
+        const object = object_value.asObj();
+        const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+        if (parallel) object.lockProperties();
+        defer if (parallel) object.unlockProperties();
+        if (!object.is_array and !object.is_arguments and !object.is_symbol and !object.is_bigint and
+            object.proxyHandler() == null and !object.proxy_revoked and object.accessorsMap() == null and
+            object.attrsMap() == null)
+        {
+            if (nativePropertyCacheSlot(cache, object)) |slot| {
+                if (builtin.is_test) _ = optimizer_native_property_read_cache_hits.fetchAdd(1, .monotonic);
+                return object.slotsItems()[slot];
+            }
+        }
+    }
+    return vm.getProperty(object_value, name);
+}
+
+fn nativeSetProperty(
+    vm: *Interpreter,
+    cache: ?*const jit.NativePropertyCache,
+    object_value: Value,
+    name: []const u8,
+    value_word: Value,
+) EvalError!Value {
+    if (object_value.isObject()) {
+        const object = object_value.asObj();
+        const parallel = bc.ic_seqlock_enabled.load(.monotonic);
+        if (parallel) object.lockProperties();
+        defer if (parallel) object.unlockProperties();
+        if (!object.is_array and !object.is_arguments and !object.is_symbol and !object.is_bigint and
+            object.proxyHandler() == null and !object.proxy_revoked and object.accessorsMap() == null and
+            object.attrsMap() == null)
+        {
+            if (nativePropertyCacheSlot(cache, object)) |slot| {
+                gc_mod.barrierValueFrom(object, value_word);
+                object.slotsItems()[slot] = value_word;
+                if (builtin.is_test) _ = optimizer_native_property_write_cache_hits.fetchAdd(1, .monotonic);
+                return value_word;
+            }
+        }
+    }
+    try vm.setMember(object_value, name, value_word);
     return value_word;
 }
 
@@ -3865,7 +3922,12 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop) and inputs.len == 1) {
         const name = metadata.nameFor(operation_id) orelse
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
-        return finishNativeOperation(frame, vm, operation_id, vm.getProperty(Value.fromRawBits(inputs[0]), name));
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeGetProperty(vm, metadata.propertyCacheFor(operation_id), Value.fromRawBits(inputs[0]), name),
+        );
     }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_index) and inputs.len == 2)
         return finishNativeOperation(
@@ -3881,7 +3943,13 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             frame,
             vm,
             operation_id,
-            nativeSetProperty(vm, Value.fromRawBits(inputs[0]), name, Value.fromRawBits(inputs[1])),
+            nativeSetProperty(
+                vm,
+                metadata.propertyCacheFor(operation_id),
+                Value.fromRawBits(inputs[0]),
+                name,
+                Value.fromRawBits(inputs[1]),
+            ),
         );
     }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_index) and inputs.len == 3)
@@ -9268,6 +9336,7 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const attempts_before = optimizer_native_attempts.load(.monotonic);
+    const cache_hits_before = optimizer_native_property_read_cache_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -9288,6 +9357,9 @@ test "vm: optimizer native named read composes with a caught downstream call" {
         if (descriptor.step_delta == 0) continue;
         if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop)) {
             try std.testing.expectEqualStrings("value", operations.nameFor(operation_id).?);
+            const property_cache = operations.propertyCacheFor(operation_id) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expect(property_cache.shape_tokens[0] != 0);
             saw_read = true;
         }
         if (descriptor.bytecode_op == @intFromEnum(bc.Op.call)) saw_call = true;
@@ -9298,6 +9370,79 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_native_property_read_cache_hits.load(.monotonic) > cache_hits_before);
+}
+
+test "vm: optimizer native property cache guards polymorphic shapes and malformed slots" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+
+    var objects: [4]Value = undefined;
+    for (&objects, 0..) |*object_value, index| {
+        object_value.* = try machine.newObject();
+        for (0..index) |prefix| {
+            const prefix_name = try std.fmt.allocPrint(allocator, "prefix{d}", .{prefix});
+            try machine.setProp(object_value.asObj(), prefix_name, Value.num(@floatFromInt(prefix)));
+        }
+        try machine.setProp(object_value.asObj(), "value", Value.num(@floatFromInt(index + 10)));
+        const shape = object_value.asObj().shape orelse return error.TestUnexpectedResult;
+        const slot = shape.lookup("value") orelse return error.TestUnexpectedResult;
+        chunk.ics[1].recordMode(shape, slot, false);
+    }
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    const property_cache = operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult;
+    for (objects, property_cache.shape_tokens) |object_value, token|
+        try std.testing.expectEqual(@intFromPtr(object_value.asObj().shape.?), token);
+
+    const hits_before = optimizer_native_property_read_cache_hits.load(.monotonic);
+    for (objects, 0..) |object_value, index| {
+        var slots = [_]Value{object_value};
+        const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+        const result = switch (outcome) {
+            .complete => |value_word| value_word,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(f64, @floatFromInt(index + 10)), result.asNum());
+    }
+    try std.testing.expectEqual(hits_before + 4, optimizer_native_property_read_cache_hits.load(.monotonic));
+
+    const original_slot = operations.property_caches[0].slots[0];
+    operations.property_caches[0].slots[0] = std.math.maxInt(u32);
+    var malformed_slots = [_]Value{objects[0]};
+    const before_malformed = optimizer_native_property_read_cache_hits.load(.monotonic);
+    const malformed_outcome = try tryRunManagedNative(&machine, &compiled, &malformed_slots, null);
+    const malformed_result = switch (malformed_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 10), malformed_result.asNum());
+    try std.testing.expectEqual(before_malformed, optimizer_native_property_read_cache_hits.load(.monotonic));
+    operations.property_caches[0].slots[0] = original_slot;
+
+    try machine.setProp(objects[0].asObj(), "later", Value.num(1));
+    const before_transition = optimizer_native_property_read_cache_hits.load(.monotonic);
+    const transitioned_outcome = try tryRunManagedNative(&machine, &compiled, &malformed_slots, null);
+    const transitioned_result = switch (transitioned_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 10), transitioned_result.asNum());
+    try std.testing.expectEqual(before_transition, optimizer_native_property_read_cache_hits.load(.monotonic));
 }
 
 test "vm: optimizer native named getter resumes an exact catch once" {
@@ -9518,6 +9663,7 @@ test "vm: optimizer native named write returns and stores its value" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const hits_before = optimizer_native_hits.load(.monotonic);
+    const cache_hits_before = optimizer_native_property_write_cache_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 18), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[0].chunk.?;
@@ -9528,7 +9674,105 @@ test "vm: optimizer native named write returns and stores its value" {
     const operation = operations.descriptors[0];
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_prop)), operation.bytecode_op);
     try std.testing.expectEqualStrings("value", operations.nameFor(0).?);
+    try std.testing.expect((operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult).shape_tokens[0] != 0);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+    try std.testing.expectEqual(@as(f64, 18), (try run(&machine, root, null)).asNum());
+    try std.testing.expect(optimizer_native_property_write_cache_hits.load(.monotonic) > cache_hits_before);
+}
+
+test "vm: optimizer native property cache uses the shared write protocol" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "value", Value.num(1));
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.set_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+    const shape = target.asObj().shape orelse return error.TestUnexpectedResult;
+    chunk.ics[2].recordMode(shape, shape.lookup("value") orelse return error.TestUnexpectedResult, true);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    var slots = [_]Value{ target, Value.num(9) };
+    const hits_before = optimizer_native_property_write_cache_hits.load(.monotonic);
+    const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const result = switch (outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 9), result.asNum());
+    try std.testing.expectEqual(@as(f64, 9), (try machine.getProperty(target, "value")).asNum());
+    try std.testing.expectEqual(hits_before + 1, optimizer_native_property_write_cache_hits.load(.monotonic));
+}
+
+test "vm: native property cache serializes concurrent existing-slot reads and writes" {
+    const old_parallel = bc.ic_seqlock_enabled.load(.monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const target = try machine.newObject();
+    try machine.setProp(target.asObj(), "value", Value.num(0));
+    const shape = target.asObj().shape orelse return error.TestUnexpectedResult;
+    var cache = jit.NativePropertyCache{};
+    cache.shape_tokens[0] = @intFromPtr(shape);
+    cache.slots[0] = shape.lookup("value") orelse return error.TestUnexpectedResult;
+
+    const Shared = struct {
+        machine: *Interpreter,
+        target: Value,
+        cache: *const jit.NativePropertyCache,
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn writer(shared: *@This(), number: f64) void {
+            for (0..2_000) |_| {
+                const result = nativeSetProperty(shared.machine, shared.cache, shared.target, "value", Value.num(number)) catch {
+                    shared.failed.store(true, .release);
+                    return;
+                };
+                if (result.asNum() != number) shared.failed.store(true, .release);
+            }
+        }
+
+        fn reader(shared: *@This()) void {
+            for (0..2_000) |_| {
+                const result = nativeGetProperty(shared.machine, shared.cache, shared.target, "value") catch {
+                    shared.failed.store(true, .release);
+                    return;
+                };
+                const number = result.asNum();
+                if (number != 0 and number != 1 and number != 2) shared.failed.store(true, .release);
+            }
+        }
+    };
+    var shared = Shared{ .machine = &machine, .target = target, .cache = &cache };
+    const first = try std.Thread.spawn(.{}, Shared.writer, .{ &shared, 1 });
+    const second = try std.Thread.spawn(.{}, Shared.writer, .{ &shared, 2 });
+    const reader = try std.Thread.spawn(.{}, Shared.reader, .{&shared});
+    first.join();
+    second.join();
+    reader.join();
+    try std.testing.expect(!shared.failed.load(.acquire));
+    const final = (try nativeGetProperty(&machine, &cache, target, "value")).asNum();
+    try std.testing.expect(final == 1 or final == 2);
 }
 
 test "vm: optimizer native named setter resumes an exact catch once" {

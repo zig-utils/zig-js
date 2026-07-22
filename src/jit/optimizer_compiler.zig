@@ -12,6 +12,7 @@ const jit = @import("../jit.zig");
 const optimizer = @import("optimizer.zig");
 const aarch64 = @import("aarch64.zig");
 const Value = @import("../value.zig").Value;
+const Shape = @import("../shape.zig").Shape;
 const moving_safepoint_backedge_interval: u32 = 32;
 
 pub const OperationKind = enum {
@@ -158,6 +159,7 @@ pub const Program = struct {
     native_operations: []jit.NativeOperationDescriptor = &.{},
     native_exceptional_targets: []jit.NativeExceptionalTarget = &.{},
     native_operation_names: []?[]const u8 = &.{},
+    native_property_caches: []jit.NativePropertyCache = &.{},
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
@@ -173,6 +175,7 @@ pub const Program = struct {
         if (self.native_operations.len != 0) self.allocator.free(self.native_operations);
         if (self.native_exceptional_targets.len != 0) self.allocator.free(self.native_exceptional_targets);
         if (self.native_operation_names.len != 0) self.allocator.free(self.native_operation_names);
+        if (self.native_property_caches.len != 0) self.allocator.free(self.native_property_caches);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
@@ -912,6 +915,21 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             break :name chunk.names.items[inst.a];
         } else null;
     }
+    const native_property_caches = try allocator.alloc(jit.NativePropertyCache, native_operations.len);
+    errdefer if (native_property_caches.len != 0) allocator.free(native_property_caches);
+    @memset(native_property_caches, .{});
+    const parallel_inline_caches = bc.ic_seqlock_enabled.load(.monotonic);
+    for (native_operations, native_property_caches) |descriptor, *property_cache| {
+        if (descriptor.origin >= chunk.code.items.len or descriptor.origin >= chunk.ics.len) continue;
+        const op = chunk.code.items[descriptor.origin].op;
+        if (op != .get_prop and op != .set_prop) continue;
+        const snapshot = chunk.ics[descriptor.origin].snapshotMode(parallel_inline_caches) orelse continue;
+        for (snapshot.shapes, snapshot.slots, 0..) |maybe_shape, slot, cache_index| {
+            const shape = maybe_shape orelse continue;
+            property_cache.shape_tokens[cache_index] = @intFromPtr(shape);
+            property_cache.slots[cache_index] = slot;
+        }
+    }
     const native_exceptional_targets = try lowerNativeExceptionalTargets(plan, allocator);
     errdefer if (native_exceptional_targets.len != 0) allocator.free(native_exceptional_targets);
     const owned_operations = try operations.toOwnedSlice(allocator);
@@ -963,6 +981,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .native_operations = native_operations,
         .native_exceptional_targets = native_exceptional_targets,
         .native_operation_names = native_operation_names,
+        .native_property_caches = native_property_caches,
         .deterministic_path = deterministic_path,
     };
 }
@@ -2603,11 +2622,12 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();
     const native_operations = if (program.native_operations.len != 0)
-        try jit.NativeOperationMetadata.createWithNames(
+        try jit.NativeOperationMetadata.createWithNamesAndPropertyCaches(
             std.heap.page_allocator,
             program.native_operations,
             program.native_exceptional_targets,
             program.native_operation_names,
+            program.native_property_caches,
         )
     else
         null;
@@ -3627,6 +3647,9 @@ test "optimizer lowering publishes an executable named property read" {
     _ = try chunk.emit(.load_local, 0);
     _ = try chunk.emit(.get_prop, name);
     _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+    var observed_shape: Shape = undefined;
+    chunk.ics[1].recordMode(&observed_shape, 7, false);
     var plan = try optimizer.build(&chunk, std.testing.allocator);
     defer plan.deinit();
     var program = try lower(&chunk, &plan, std.testing.allocator);
@@ -3635,6 +3658,9 @@ test "optimizer lowering publishes an executable named property read" {
     try std.testing.expect(program.side_exit == null);
     try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
     try std.testing.expectEqual(@as(usize, 1), program.native_operation_names.len);
+    try std.testing.expectEqual(@as(usize, 1), program.native_property_caches.len);
+    try std.testing.expectEqual(@intFromPtr(&observed_shape), program.native_property_caches[0].shape_tokens[0]);
+    try std.testing.expectEqual(@as(u32, 7), program.native_property_caches[0].slots[0]);
     const operation = program.native_operations[0];
     try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 1), operation.input_count);
@@ -3652,8 +3678,12 @@ test "optimizer lowering publishes an executable named property read" {
         defer compiled.deinit();
         const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
         const owned_name = metadata.nameFor(0) orelse return error.TestUnexpectedResult;
+        const owned_cache = metadata.propertyCacheFor(0) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("value", owned_name);
         try std.testing.expect(owned_name.ptr != chunk.names.items[name].ptr);
+        try std.testing.expectEqual(@intFromPtr(&observed_shape), owned_cache.shape_tokens[0]);
+        try std.testing.expectEqual(@as(u32, 7), owned_cache.slots[0]);
+        try std.testing.expect(owned_cache != &program.native_property_caches[0]);
     }
 }
 

@@ -300,6 +300,22 @@ pub const NativeOperationDescriptor = extern struct {
     pub const none = std.math.maxInt(u16);
 };
 
+/// Immutable advisory shape/slot pairs copied from one warmed bytecode inline
+/// cache. Shape identities are arena-stable non-GC tokens; every use must still
+/// guard the receiver's live shape and slot range before touching storage.
+pub const NativePropertyCache = extern struct {
+    shape_tokens: [4]usize = @splat(0),
+    slots: [4]u32 = @splat(0),
+
+    pub fn lookup(self: *const NativePropertyCache, shape_token: usize) ?u32 {
+        if (shape_token == 0) return null;
+        for (self.shape_tokens, self.slots) |candidate, slot| {
+            if (candidate == shape_token) return slot;
+        }
+        return null;
+    }
+};
+
 pub const NativeExceptionalTargetKind = enum(u8) { catch_, finally_ };
 
 /// Exact bytecode continuation after a runtime operation has already raised.
@@ -319,6 +335,7 @@ pub const NativeOperationMetadata = struct {
     descriptors: []NativeOperationDescriptor,
     exceptional_targets: []NativeExceptionalTarget,
     operation_names: []?[]const u8,
+    property_caches: []NativePropertyCache,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -334,13 +351,32 @@ pub const NativeOperationMetadata = struct {
         exceptional_targets: []const NativeExceptionalTarget,
         operation_names: []const ?[]const u8,
     ) std.mem.Allocator.Error!*NativeOperationMetadata {
+        return createWithNamesAndPropertyCaches(
+            allocator,
+            descriptors,
+            exceptional_targets,
+            operation_names,
+            &.{},
+        );
+    }
+
+    pub fn createWithNamesAndPropertyCaches(
+        allocator: std.mem.Allocator,
+        descriptors: []const NativeOperationDescriptor,
+        exceptional_targets: []const NativeExceptionalTarget,
+        operation_names: []const ?[]const u8,
+        property_caches: []const NativePropertyCache,
+    ) std.mem.Allocator.Error!*NativeOperationMetadata {
         std.debug.assert(operation_names.len == 0 or operation_names.len == descriptors.len);
+        std.debug.assert(property_caches.len == 0 or property_caches.len == descriptors.len);
         const metadata = try allocator.create(NativeOperationMetadata);
         errdefer allocator.destroy(metadata);
         const owned_descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors);
         errdefer allocator.free(owned_descriptors);
         const owned_targets = try allocator.dupe(NativeExceptionalTarget, exceptional_targets);
         errdefer allocator.free(owned_targets);
+        const owned_property_caches = try allocator.dupe(NativePropertyCache, property_caches);
+        errdefer allocator.free(owned_property_caches);
         const owned_names = try allocator.alloc(?[]const u8, operation_names.len);
         var owned_name_count: usize = 0;
         errdefer {
@@ -356,6 +392,7 @@ pub const NativeOperationMetadata = struct {
             .descriptors = owned_descriptors,
             .exceptional_targets = owned_targets,
             .operation_names = owned_names,
+            .property_caches = owned_property_caches,
         };
         return metadata;
     }
@@ -366,10 +403,17 @@ pub const NativeOperationMetadata = struct {
         return self.operation_names[operation_id];
     }
 
+    pub fn propertyCacheFor(self: *const NativeOperationMetadata, operation_id: usize) ?*const NativePropertyCache {
+        if (self.property_caches.len != self.descriptors.len or operation_id >= self.property_caches.len)
+            return null;
+        return &self.property_caches[operation_id];
+    }
+
     pub fn destroy(self: *NativeOperationMetadata) void {
         const allocator = self.allocator;
         allocator.free(self.descriptors);
         allocator.free(self.exceptional_targets);
+        if (self.property_caches.len != 0) allocator.free(self.property_caches);
         for (self.operation_names) |name| if (name) |bytes| allocator.free(bytes);
         if (self.operation_names.len != 0) allocator.free(self.operation_names);
         allocator.destroy(self);

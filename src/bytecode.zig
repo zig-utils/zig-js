@@ -39,6 +39,11 @@ pub const InlineCache = struct {
         slot: u32,
     };
 
+    pub const Snapshot = struct {
+        shapes: [4]?*Shape = @splat(null),
+        slots: [4]u32 = @splat(0),
+    };
+
     shape: ?*Shape = null,
     slot: u32 = 0,
     secondary_shapes: [3]?*Shape = .{ null, null, null },
@@ -65,6 +70,18 @@ pub const InlineCache = struct {
         inline for (0..ic.secondary_shapes.len) |index|
             if (obj_shape != null and obj_shape == ic.secondary_shapes[index]) return ic.secondary_slots[index];
         return null;
+    }
+
+    /// Copy a stable four-entry shape/slot view for immutable optimized-code
+    /// metadata. Parallel readers use the same version bracket as live cache
+    /// lookups; contention returns null so compilation can safely omit the
+    /// advisory snapshot instead of ever owning a torn pair.
+    pub fn snapshotMode(ic: *const InlineCache, parallel: bool) ?Snapshot {
+        if (parallel) return ic.loadSnapshot();
+        return .{
+            .shapes = .{ ic.shape, ic.secondary_shapes[0], ic.secondary_shapes[1], ic.secondary_shapes[2] },
+            .slots = .{ ic.slot, ic.secondary_slots[0], ic.secondary_slots[1], ic.secondary_slots[2] },
+        };
     }
 
     /// `init_prop` stores the immutable child shape instead of the predecessor:
@@ -144,6 +161,20 @@ pub const InlineCache = struct {
         }
         if (ic.version.load(.seq_cst) != v1) return null;
         return hit;
+    }
+
+    fn loadSnapshot(ic: *const InlineCache) ?Snapshot {
+        const v1 = ic.version.load(.seq_cst);
+        if (v1 & 1 != 0) return null;
+        var snapshot = Snapshot{};
+        snapshot.shapes[0] = @atomicLoad(?*Shape, &ic.shape, .seq_cst);
+        snapshot.slots[0] = @atomicLoad(u32, &ic.slot, .seq_cst);
+        inline for (0..ic.secondary_shapes.len) |index| {
+            snapshot.shapes[index + 1] = @atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst);
+            snapshot.slots[index + 1] = @atomicLoad(u32, &ic.secondary_slots[index], .seq_cst);
+        }
+        if (ic.version.load(.seq_cst) != v1) return null;
+        return snapshot;
     }
 
     fn store(ic: *InlineCache, sh: *Shape, slot: u32) void {
@@ -711,6 +742,25 @@ test "InlineCache retains four polymorphic shape-slot pairs" {
     try std.testing.expectEqual(@as(usize, 2), retained_secondary);
 }
 
+test "InlineCache snapshots stable polymorphic pairs and rejects an active writer" {
+    var shapes: [4]Shape = undefined;
+    var cache = InlineCache{};
+    for (&shapes, 0..) |*shape, index| cache.recordMode(shape, @intCast(index + 7), false);
+
+    const isolated = cache.snapshotMode(false).?;
+    const parallel = cache.snapshotMode(true).?;
+    for (&shapes, 0..) |*shape, index| {
+        try std.testing.expectEqual(shape, isolated.shapes[index].?);
+        try std.testing.expectEqual(@as(u32, @intCast(index + 7)), isolated.slots[index]);
+        try std.testing.expectEqual(shape, parallel.shapes[index].?);
+        try std.testing.expectEqual(@as(u32, @intCast(index + 7)), parallel.slots[index]);
+    }
+
+    cache.version.store(1, .seq_cst);
+    try std.testing.expect(cache.snapshotMode(true) == null);
+    cache.version.store(2, .seq_cst);
+}
+
 test "optimizer binary profiles remain instruction-local and preserve numeric sites" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -798,6 +848,12 @@ test "InlineCache seqlock: concurrent writers never tear shape-slot pairs" {
                 }
                 if (s.ic.lookupSlot(s.s1)) |sl| {
                     if (sl != 1) s.torn.store(true, .release);
+                }
+                if (s.ic.snapshotMode(true)) |snapshot| {
+                    for (snapshot.shapes, snapshot.slots) |maybe_shape, sl| {
+                        if (maybe_shape == s.s0 and sl != 0) s.torn.store(true, .release);
+                        if (maybe_shape == s.s1 and sl != 1) s.torn.store(true, .release);
+                    }
                 }
             }
         }
