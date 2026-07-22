@@ -385,6 +385,13 @@ pub const DebugScriptRegistration = struct {
     start_line: usize,
 };
 
+const debug_location_cache_size = 64;
+
+const DebugLocationCacheEntry = struct {
+    node: ?*const Node = null,
+    location: DebugStatementLocation = undefined,
+};
+
 /// Reentrant lock for the Context-owned debugger registry. Inspector callbacks
 /// may synchronously evaluate more source on the runtime thread, so a plain
 /// mutex would deadlock while publishing the nested script. The owner/depth
@@ -1097,6 +1104,13 @@ pub const Interpreter = struct {
     /// boundaries, so those map operations need a lock independent of object
     /// and GC locks. Single-threaded/GIL contexts keep the null fast path.
     debug_registry_lock: ?*DebugRegistryLock = null,
+    /// Registered locations never change for an AST node. Copy them into this
+    /// interpreter-local direct-mapped cache after one synchronized registry
+    /// lookup so hot loops in a shared realm do not contend on the registry at
+    /// every ordinary statement boundary.
+    debug_location_cache: [debug_location_cache_size]DebugLocationCacheEntry = @splat(.{}),
+    debug_location_cache_hits: usize = 0,
+    debug_location_cache_misses: usize = 0,
     debug_script_ctx: ?*anyopaque = null,
     debug_script_hook: ?DebugScriptHook = null,
     debug_dynamic_url_override: ?[]const u8 = null,
@@ -3526,32 +3540,44 @@ pub const Interpreter = struct {
         if (self.debug_registry_lock) |registry| registry.unlock();
     }
 
+    pub fn debugStatementLocation(self: *Interpreter, node: *const Node) ?DebugStatementLocation {
+        const cache_index = (@intFromPtr(node) / @alignOf(Node)) % debug_location_cache_size;
+        const cached = &self.debug_location_cache[cache_index];
+        if (cached.node == node) {
+            if (builtin.is_test) self.debug_location_cache_hits += 1;
+            return cached.location;
+        }
+
+        const locations = self.debug_statement_locations orelse return null;
+        const location = blk: {
+            self.lockDebugRegistry();
+            defer self.unlockDebugRegistry();
+            break :blk locations.get(node) orelse return null;
+        };
+        cached.* = .{ .node = node, .location = location };
+        if (builtin.is_test) self.debug_location_cache_misses += 1;
+        return location;
+    }
+
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
-        if (self.debug_statement_locations) |locations| {
-            const maybe_location = blk: {
-                self.lockDebugRegistry();
-                defer self.unlockDebugRegistry();
-                break :blk locations.get(node);
-            };
-            if (maybe_location) |location| {
-                self.debug_current_location = location;
-                if (self.stack_trace_call_frame) |frame| frame.location = location;
-                if (self.debug_statement_hook) |hook| {
-                    if (self.debug_call_frame) |frame| {
-                        if (!frame.environment_is_vm_activation) frame.environment = self.env;
-                        frame.this_value = self.this_value;
-                        frame.location = location;
-                    } else {
-                        self.debug_top_level_location = location;
-                        self.debug_top_level_environment = self.env;
-                        self.debug_top_level_strict = self.strict;
-                    }
-                    try hook(self.debug_statement_ctx.?, self, location);
+        if (self.debugStatementLocation(node)) |location| {
+            self.debug_current_location = location;
+            if (self.stack_trace_call_frame) |frame| frame.location = location;
+            if (self.debug_statement_hook) |hook| {
+                if (self.debug_call_frame) |frame| {
+                    if (!frame.environment_is_vm_activation) frame.environment = self.env;
+                    frame.this_value = self.this_value;
+                    frame.location = location;
+                } else {
+                    self.debug_top_level_location = location;
+                    self.debug_top_level_environment = self.env;
+                    self.debug_top_level_strict = self.strict;
                 }
-                if (self.profile_statement_hook) |hook|
-                    hook(self.profile_statement_ctx.?, self, location);
+                try hook(self.debug_statement_ctx.?, self, location);
             }
+            if (self.profile_statement_hook) |hook|
+                hook(self.profile_statement_ctx.?, self, location);
         }
     }
 
@@ -49395,4 +49421,32 @@ test "interpreter break / continue" {
         \\for (let i = 0; i < 10; i++) { if (i % 2 === 0) { continue; } sum += i; }
         \\sum
     )).asNum());
+}
+
+test "interpreter caches immutable debug locations after one registry lookup" {
+    var locations: std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = .empty;
+    defer locations.deinit(std.testing.allocator);
+    var node: Node = undefined;
+    const expected = DebugStatementLocation{
+        .script_id = 17,
+        .location = .{ .byte_offset = 23, .line = 4, .column = 9 },
+        .source_url = "cached.js",
+    };
+    try locations.put(std.testing.allocator, &node, expected);
+
+    var registry_lock = DebugRegistryLock{};
+    var machine = Interpreter{
+        .arena = std.testing.allocator,
+        .env = undefined,
+        .root_shape = undefined,
+        .debug_statement_locations = &locations,
+        .debug_registry_lock = &registry_lock,
+    };
+    const first = machine.debugStatementLocation(&node).?;
+    const second = machine.debugStatementLocation(&node).?;
+    try std.testing.expectEqual(expected.script_id, first.script_id);
+    try std.testing.expectEqual(expected.location, second.location);
+    try std.testing.expectEqualStrings(expected.source_url, second.source_url);
+    try std.testing.expectEqual(@as(usize, 1), machine.debug_location_cache_misses);
+    try std.testing.expectEqual(@as(usize, 1), machine.debug_location_cache_hits);
 }
