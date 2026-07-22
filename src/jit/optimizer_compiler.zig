@@ -492,9 +492,35 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         graph.branches.len == 0)
         return error.UnsupportedChunk;
 
-    const osr = try buildOsrMetadata(plan, allocator);
+    const available_osr = try buildOsrMetadata(plan, allocator);
+    defer available_osr.destroy();
+    if (available_osr.entries.len == 0) return error.UnsupportedChunk;
+
+    // One artifact owns one native loop region. Prefer the last bytecode loop
+    // header, which is the innermost header for ordinary structured nesting,
+    // and publish only that exact entry. Other backedges miss the table and
+    // remain in bytecode instead of entering a region compiled for a different
+    // header.
+    const selected = available_osr.entries[available_osr.entries.len - 1];
+    const selected_first: usize = selected.first_import;
+    const selected_count: usize = selected.local_count + selected.stack_count;
+    if (selected_first > available_osr.imports.len or
+        selected_count > available_osr.imports.len - selected_first)
+        return error.UnsupportedChunk;
+    const selected_entry = jit.OsrEntry{
+        .entry_ip = selected.entry_ip,
+        .first_import = 0,
+        .local_count = selected.local_count,
+        .stack_count = selected.stack_count,
+        .handler_count = selected.handler_count,
+        .accumulator_bits = selected.accumulator_bits,
+    };
+    const osr = try jit.OsrMetadata.create(
+        allocator,
+        &.{selected_entry},
+        available_osr.imports[selected_first .. selected_first + selected_count],
+    );
     errdefer osr.destroy();
-    if (osr.entries.len != 1) return error.UnsupportedChunk;
     const entry = osr.entries[0];
     if (entry.stack_count != 0) return error.UnsupportedChunk;
     var header_block: ?u32 = null;
