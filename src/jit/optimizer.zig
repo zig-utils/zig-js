@@ -53,6 +53,8 @@ pub const ValueKind = enum {
     neq_strict,
     to_numeric,
     call,
+    call_with_this,
+    construct,
 };
 
 pub const ValueNode = struct {
@@ -104,8 +106,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .call_method,
         .call_spread,
         .call_method_spread,
-        .call_with_this,
-        .new_call,
         .new_spread,
         .tail_call,
         .tail_call_eval,
@@ -551,7 +551,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 }
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
-    if (inst.op == .to_numeric or inst.op == .call) return depthEffect(inst).required;
+    if (inst.op == .to_numeric or inst.op == .call or inst.op == .call_with_this or inst.op == .new_call)
+        return depthEffect(inst).required;
     const kind = terminalFrameStateKind(inst.op) orelse return null;
     if (kind != .call and kind != .effect) return null;
     return depthEffect(inst).required;
@@ -958,7 +959,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
-            .call => {
+            .call, .call_with_this, .new_call => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
                 try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
@@ -968,7 +969,12 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .id = undefined,
                     .block = @intCast(block_id),
                     .origin = @intCast(origin),
-                    .kind = .call,
+                    .kind = switch (inst.op) {
+                        .call => .call,
+                        .call_with_this => .call_with_this,
+                        .new_call => .construct,
+                        else => unreachable,
+                    },
                     .immediate = inst.a,
                     .may_have_effect = true,
                 });
@@ -1299,6 +1305,8 @@ fn supports(op: bc.Op) bool {
         .push_completion,
         .to_numeric,
         .call,
+        .call_with_this,
+        .new_call,
         => true,
         else => false,
     };
@@ -1600,6 +1608,7 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
     const Case = struct { op: bc.Op, inputs: u32, a: u32 = 0, b: u32 = 0 };
     const cases = [_]Case{
         .{ .op = .call, .inputs = 2, .a = 1 },
+        .{ .op = .call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .new_call, .inputs = 2, .a = 1 },
         .{ .op = .get_prop, .inputs = 1 },
         .{ .op = .to_numeric, .inputs = 1 },

@@ -298,8 +298,9 @@ fn stageNativeOperationDescriptors(
                 if (source != operation.lhs) return error.UnsupportedChunk;
                 break :runtime source;
             }
-            if (inst.op == .call) {
-                const expected = std.math.add(u32, inst.a, 1) catch return error.UnsupportedChunk;
+            if (inst.op == .call or inst.op == .call_with_this or inst.op == .new_call) {
+                const receiver_words: u32 = if (inst.op == .call_with_this) 2 else 1;
+                const expected = std.math.add(u32, inst.a, receiver_words) catch return error.UnsupportedChunk;
                 if (input_count == expected) break :runtime operation.lhs;
             }
             return error.UnsupportedChunk;
@@ -412,7 +413,8 @@ fn deterministicPathSteps(
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
-    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .call) and node.block == state.block and
+    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .call or
+        node.kind == .call_with_this or node.kind == .construct) and node.block == state.block and
         node.origin == state.origin)
     {
         return true;
@@ -549,7 +551,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
-        .call => {
+        .call, .call_with_this, .construct => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .call and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -559,7 +561,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             };
             const call_state = state orelse return error.UnsupportedChunk;
             const argument_count = std.math.cast(u32, node.immediate) orelse return error.UnsupportedChunk;
-            const input_count = std.math.add(u32, argument_count, 1) catch return error.UnsupportedChunk;
+            const receiver_words: u32 = if (node.kind == .call_with_this) 2 else 1;
+            const input_count = std.math.add(u32, argument_count, receiver_words) catch return error.UnsupportedChunk;
             if (input_count > call_state.stack_count or
                 scratch_slots + input_count > jit.numeric_scratch_capacity)
                 return error.UnsupportedChunk;
@@ -3280,7 +3283,7 @@ test "optimizer lowering publishes an exact pre-property-effect side exit" {
     try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
 }
 
-test "optimizer lowering publishes an exact pre-construction side exit" {
+test "optimizer lowering publishes an executable construction" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -3295,12 +3298,43 @@ test "optimizer lowering publishes an exact pre-construction side exit" {
     var program = try lower(&chunk, &plan, std.testing.allocator);
     defer program.deinit();
 
-    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    try std.testing.expect(program.side_exit == null);
     try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
-    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.new_call)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    const point = program.deopt_points[operation.deopt_index];
     try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
+}
+
+test "optimizer lowering publishes an executable explicit-this call" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 3;
+    chunk.local_count = 3;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.call_with_this, 1);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call_with_this)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 3), operation.input_count);
+    const map = program.stack_maps[operation.deopt_index];
+    const roots = (@as(u64, 1) << @intCast(operation.first_input)) |
+        (@as(u64, 1) << @intCast(operation.first_input + 1)) |
+        (@as(u64, 1) << @intCast(operation.first_input + 2));
+    try std.testing.expectEqual(roots, map.scratch_pointer_slots & roots);
 }
 
 test "optimizer lowering publishes rooted interpreter-owned side exits" {
@@ -3316,7 +3350,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .call_method, .b = 1, .inputs = 2, .kind = .call },
         .{ .op = .call_spread, .inputs = 2, .kind = .call },
         .{ .op = .call_method_spread, .inputs = 2, .kind = .call },
-        .{ .op = .call_with_this, .a = 1, .inputs = 3, .kind = .call },
         .{ .op = .new_spread, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_eval, .a = 1, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_method, .b = 1, .inputs = 2, .kind = .call },
