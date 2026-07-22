@@ -19,6 +19,7 @@ const workload_source = @embedFile("comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
 const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
+const warmup_calls = 10;
 // Every measured context uses the same process-wide production allocator.
 // libc malloc keeps reusable slabs between contexts instead of translating
 // arena/GC backing allocations into page-level mmap/munmap churn, is safe for
@@ -181,7 +182,7 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !
 fn warm(ctx: *js.Context, warm_jobs: usize, jobs: usize, lane: usize) !void {
     const warm_config = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ warm_jobs, lane });
     _ = try ctx.evaluate(warm_config);
-    for (0..3) |_| _ = try ctx.evaluate(invocation);
+    for (0..warmup_calls) |_| _ = try ctx.evaluate(invocation);
     const restore = try std.fmt.allocPrint(ctx.arena(), "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ jobs, lane });
     _ = try ctx.evaluate(restore);
 }

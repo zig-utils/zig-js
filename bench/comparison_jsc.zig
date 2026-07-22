@@ -34,6 +34,7 @@ const workload_source: [:0]const u8 = @embedFile("comparison.js");
 const wasm_simd_workload_source: [:0]const u8 = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source: [:0]const u8 = @embedFile("wasm_threads_comparison.js");
 const invocation: [:0]const u8 = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
+const warmup_calls = 10;
 
 const Mode = enum { single, independent_steady, independent_cold };
 
@@ -111,7 +112,7 @@ fn warm(
     const warm_config = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ warm_jobs, lane }, 0);
     defer allocator.free(warm_config);
     _ = try evaluate(ctx, warm_config);
-    for (0..3) |_| _ = try evaluate(ctx, invocation);
+    for (0..warmup_calls) |_| _ = try evaluate(ctx, invocation);
     const restore = try std.fmt.allocPrintSentinel(allocator, "globalThis.__benchmarkJobs = {d}; globalThis.__benchmarkLane = {d};", .{ jobs, lane }, 0);
     defer allocator.free(restore);
     _ = try evaluate(ctx, restore);
