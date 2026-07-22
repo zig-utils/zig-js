@@ -15523,7 +15523,7 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void
     try std.testing.expectEqual(@as(u16, 1), held_import.source_index);
     const entry_map = artifact.stack_maps.?.forDeopt(0) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), entry_map.frame_pointer_slots);
-    try std.testing.expectEqual(@as(u64, 1) << @intCast(held_import.destination), entry_map.scratch_pointer_slots);
+    try std.testing.expectEqual(@as(u128, 1) << @intCast(held_import.destination), entry_map.scratch_pointer_slots);
 
     const handle = try ctx.protectValue(ctx.global_object.getOwn("optimizerCompactWitness").?);
     defer std.debug.assert(ctx.unprotectValue(handle));
@@ -15568,20 +15568,32 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         \\globalThis.optimizerPropertyDiscard = [];
         \\for (var dead = 0; dead < 4096; dead = dead + 1)
         \\  optimizerPropertyDiscard.push({ dead, child: { value: dead + 1 } });
-        \\function optimizerPropertyCheckpoint(n, held) {
-        \\  var cursor = 0;
-        \\  while (cursor < n) cursor = cursor + 1;
-        \\  return held;
-        \\}
         \\function optimizerPropertyMove(n, target, held) {
-        \\  target.value = held;
-        \\  held = optimizerPropertyCheckpoint(n, target.value);
-        \\  target.value = held;
+        \\  var cursor = 0;
+        \\  while (cursor < n) {
+        \\    target.value = held;
+        \\    held = target.value;
+        \\    cursor = cursor + 1;
+        \\  }
         \\  return target.value.marker + held.marker;
         \\}
         \\function optimizerPropertyPoly(object, held) {
         \\  object.value = held;
         \\  return object.value.marker;
+        \\}
+        \\function optimizerPropertyArithmetic(jobs, lane) {
+        \\  var total = 0;
+        \\  for (var job = 0; job < jobs; job = job + 1) {
+        \\    var object = { a: lane + job, b: 1, c: 2, d: 3 };
+        \\    for (var index = 0; index < 25000; index = index + 1) {
+        \\      object.a = (object.a + index) % 1000003;
+        \\      object.b = object.b + 1;
+        \\      object.c = object.a + object.b;
+        \\      object.d = object.c - object.b;
+        \\    }
+        \\    total = total + object.a + object.b + object.c + object.d;
+        \\  }
+        \\  return total;
         \\}
         \\globalThis.optimizerPropertyHeld = { marker: 3 };
         \\globalThis.optimizerPropertyTarget = { value: optimizerPropertyHeld };
@@ -15597,6 +15609,7 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         \\  optimizerPropertyPoly(optimizerPropertyObjects[1], optimizerPropertyHeld);
         \\  optimizerPropertyPoly(optimizerPropertyObjects[2], optimizerPropertyHeld);
         \\  optimizerPropertyPoly(optimizerPropertyObjects[3], optimizerPropertyHeld);
+        \\  optimizerPropertyArithmetic(1, warm);
         \\}
         \\optimizerPropertyDiscard = null;
     ;
@@ -15620,12 +15633,23 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
-    try std.testing.expect(artifact.entry_enabled and artifact.native_operations != null);
-    const checkpoint_object = native_ctx.global_object.getOwn("optimizerPropertyCheckpoint").?.asObj();
-    const checkpoint_function: *interp.Function = @ptrCast(@alignCast(checkpoint_object.jsFunction().?));
-    const checkpoint_artifact = checkpoint_function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+    try std.testing.expect(artifact.osr != null and artifact.has_side_exits and artifact.native_operations != null);
+    const arithmetic_object = native_ctx.global_object.getOwn("optimizerPropertyArithmetic").?.asObj();
+    const arithmetic_function: *interp.Function = @ptrCast(@alignCast(arithmetic_object.jsFunction().?));
+    const arithmetic_chunk = arithmetic_function.chunk.?;
+    const arithmetic_artifact = arithmetic_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
-    try std.testing.expect(checkpoint_artifact.osr != null and checkpoint_artifact.has_side_exits);
+    try std.testing.expect(arithmetic_artifact.osr != null and arithmetic_artifact.native_operations != null);
+    var rooted_high_input = false;
+    for (arithmetic_artifact.native_operations.?.descriptors) |descriptor| {
+        if (descriptor.first_input < 64) continue;
+        const map = arithmetic_artifact.stack_maps.?.forDeopt(descriptor.deopt_index) orelse
+            return error.TestUnexpectedResult;
+        for (descriptor.first_input..descriptor.first_input + descriptor.input_count) |slot|
+            try std.testing.expect(map.scratch_pointer_slots & (@as(u128, 1) << @intCast(slot)) != 0);
+        rooted_high_input = true;
+    }
+    try std.testing.expect(rooted_high_input);
 
     native_ctx.collectGarbage();
     bytecode_ctx.collectGarbage();
@@ -15660,6 +15684,12 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
     );
     try std.testing.expectEqual(bytecode_polymorphic.rawBits(), native_polymorphic.rawBits());
     try std.testing.expectEqual(@as(f64, 12), native_polymorphic.asNum());
+
+    const osr_before_arithmetic = vm.optimizerOsrEntriesForTesting();
+    const native_arithmetic = try native_ctx.evaluate("optimizerPropertyArithmetic(2, 7)");
+    const bytecode_arithmetic = try bytecode_ctx.evaluate("optimizerPropertyArithmetic(2, 7)");
+    try std.testing.expectEqual(bytecode_arithmetic.rawBits(), native_arithmetic.rawBits());
+    try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before_arithmetic);
     try std.testing.expectEqual(property_stats_before, vm.optimizerNativePropertyStatsForTesting());
 }
 

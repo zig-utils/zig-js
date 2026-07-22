@@ -24,6 +24,7 @@ pub const OperationKind = enum {
     sub,
     mul,
     div,
+    mod,
     lt,
     le,
     gt,
@@ -123,6 +124,7 @@ pub const LoopRegionBlock = struct {
     condition: u8 = 0,
     successor_count: u8,
     steps: u12,
+    runtime_steps: u12 = 0,
     entry_deopt_index: u16 = 0,
     successors: [2]LoopRegionTarget = @splat(.{ .kind = .block, .block = optimizer.Block.none }),
 };
@@ -271,6 +273,8 @@ fn selectLoopOsrMetadata(
 
 const ValueType = enum { number, boolean, other };
 
+const NativeOperationStepMode = enum { deterministic, block_local };
+
 fn stageNativeOperationDescriptors(
     chunk: *const bc.Chunk,
     plan: *const optimizer.Plan,
@@ -279,10 +283,19 @@ fn stageNativeOperationDescriptors(
     allocator: std.mem.Allocator,
     operations: *std.ArrayListUnmanaged(Operation),
     scratch_slots: *usize,
+    step_mode: NativeOperationStepMode,
+    state_deopt_indexes: ?[]const u16,
+    numeric_results: ?[]const bool,
 ) ![]jit.NativeOperationDescriptor {
     var descriptors: std.ArrayListUnmanaged(jit.NativeOperationDescriptor) = .empty;
     errdefer descriptors.deinit(allocator);
     var previous_runtime_steps: u32 = 0;
+    var previous_block_steps: []u32 = if (step_mode == .block_local)
+        try allocator.alloc(u32, plan.blocks.len)
+    else
+        &.{};
+    defer if (previous_block_steps.len != 0) allocator.free(previous_block_steps);
+    @memset(previous_block_steps, 0);
     for (graph.frame_states, 0..) |state, state_index| {
         if (state.kind != .call and state.kind != .effect) continue;
         if (state.origin >= chunk.code.items.len) return error.UnsupportedChunk;
@@ -305,6 +318,7 @@ fn stageNativeOperationDescriptors(
             if (runtime_operation != null) return error.UnsupportedChunk;
             runtime_operation = operation;
         }
+        if (step_mode == .block_local and runtime_operation == null) continue;
         const first_input: usize = if (runtime_operation) |operation| runtime: {
             if (inst.op == .to_numeric or inst.op == .neg or inst.op == .pos or inst.op == .not or
                 inst.op == .typeof_op or inst.op == .inc or inst.op == .dec or inst.op == .bit_not or
@@ -356,15 +370,21 @@ fn stageNativeOperationDescriptors(
         var step_delta: u16 = 0;
         if (runtime_operation != null) {
             const block = plan.blocks[state.block];
-            const absolute_steps = try deterministicPrefixSteps(
-                plan,
-                state.block,
-                state.origin - block.start + 1,
-            );
-            if (absolute_steps <= previous_runtime_steps) return error.UnsupportedChunk;
-            step_delta = std.math.cast(u16, absolute_steps - previous_runtime_steps) orelse
-                return error.UnsupportedChunk;
-            previous_runtime_steps = absolute_steps;
+            if (state.origin < block.start) return error.UnsupportedChunk;
+            const absolute_steps = if (step_mode == .block_local)
+                std.math.add(u32, state.origin - block.start, 1) catch return error.UnsupportedChunk
+            else
+                try deterministicPrefixSteps(plan, state.block, state.origin - block.start + 1);
+            const previous = if (step_mode == .block_local)
+                previous_block_steps[state.block]
+            else
+                previous_runtime_steps;
+            if (absolute_steps <= previous) return error.UnsupportedChunk;
+            step_delta = std.math.cast(u16, absolute_steps - previous) orelse return error.UnsupportedChunk;
+            if (step_mode == .block_local)
+                previous_block_steps[state.block] = absolute_steps
+            else
+                previous_runtime_steps = absolute_steps;
         }
         const descriptor_index = std.math.cast(u32, descriptors.items.len) orelse return error.UnsupportedChunk;
         try descriptors.append(allocator, .{
@@ -372,8 +392,22 @@ fn stageNativeOperationDescriptors(
             .first_input = @intCast(first_input),
             .input_count = @intCast(input_count),
             .exceptional_target = exceptional_target,
-            .deopt_index = std.math.cast(u16, state_index) orelse return error.UnsupportedChunk,
+            .deopt_index = if (state_deopt_indexes) |indexes| deopt: {
+                if (state_index >= indexes.len or indexes[state_index] == std.math.maxInt(u16))
+                    return error.UnsupportedChunk;
+                break :deopt indexes[state_index];
+            } else std.math.cast(u16, state_index) orelse return error.UnsupportedChunk,
             .step_delta = step_delta,
+            .flags = if (numeric_results) |required|
+                if (runtime_operation) |operation|
+                    if (operation.destination < required.len and required[operation.destination])
+                        jit.NativeOperationDescriptor.numeric_result
+                    else
+                        0
+                else
+                    0
+            else
+                0,
             .origin = state.origin,
         });
         if (runtime_operation) |operation| operation.immediate = descriptor_index;
@@ -901,6 +935,9 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         allocator,
         &operations,
         &scratch_slots,
+        .deterministic,
+        null,
+        null,
     );
     errdefer if (native_operations.len != 0) allocator.free(native_operations);
     const native_operation_names = try allocator.alloc(?[]const u8, native_operations.len);
@@ -956,16 +993,16 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         if (first > owned_deopt_values.len or count > owned_deopt_values.len - first)
             return error.UnsupportedChunk;
         for (owned_deopt_values[first .. first + count]) |recovery| if (recovery.source == .scratch_slot) {
-            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u64, 1) <<
-                (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk);
+            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u128, 1) <<
+                (std.math.cast(u7, recovery.index) orelse return error.UnsupportedChunk);
         };
         if (point.accumulator.source == .scratch_slot)
-            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u64, 1) <<
-                (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
+            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u128, 1) <<
+                (std.math.cast(u7, point.accumulator.index) orelse return error.UnsupportedChunk);
         const end = @as(usize, descriptor.first_input) + descriptor.input_count;
         if (end > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
         for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
-            @as(u64, 1) << (std.math.cast(u6, slot) orelse return error.UnsupportedChunk);
+            @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
     }
     return .{
         .allocator = allocator,
@@ -1263,26 +1300,26 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
-    try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric);
+    try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric, null);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
     var path_from: ?u32 = header;
     for (exit_guards.items) |guard| {
         try appendEdgeCopies(graph, path_from.?, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
         if (guard.exit_from != guard.entry_block) {
             try appendEdgeCopies(graph, guard.entry_block, guard.exit_block, guard.exit_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+            try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         }
         path_from = guard.entry_block;
     }
     for (latch_guards.items) |guard| {
         try appendEdgeCopies(graph, path_from.?, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
         try appendEdgeCopies(graph, guard.entry_block, guard.latch_block, guard.operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         if (guard.latch_from != guard.entry_block) {
-            try appendBlockOperations(graph, guard.latch_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+            try appendBlockOperations(graph, guard.latch_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
             try appendEdgeCopies(graph, guard.latch_block, header, guard.operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         }
         path_from = guard.entry_block;
@@ -1290,22 +1327,22 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     for (loop_branches.items) |segment| {
         if (path_from) |from|
             try appendEdgeCopies(graph, from, segment.entry_block, segment.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, segment.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, segment.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         if (types[segment.condition] != .boolean) return error.UnsupportedChunk;
 
         const true_target = segment.merge_block orelse header;
         try appendEdgeCopies(graph, segment.entry_block, segment.true_block, segment.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, segment.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, segment.true_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         try appendEdgeCopies(graph, segment.true_block, true_target, segment.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
         const false_target = segment.merge_block orelse header;
         try appendEdgeCopies(graph, segment.entry_block, segment.false_block, segment.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, segment.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, segment.false_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         try appendEdgeCopies(graph, segment.false_block, false_target, segment.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
         if (segment.merge_block) |merge_block| {
             if (segment.emit_merge) {
-                try appendBlockOperations(graph, merge_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+                try appendBlockOperations(graph, merge_block, false, allocator, &operations, &types, &initialized, &required_numeric, null);
                 if (segment.terminal) {
                     try appendEdgeCopies(graph, merge_block, header, merge_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
                     path_from = null;
@@ -1322,7 +1359,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     if (loop_branches.items.len == 0) {
         const straight_body = body.?;
         try appendEdgeCopies(graph, path_from.?, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric, null);
         try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
     }
 
@@ -1627,12 +1664,13 @@ fn lowerRegionOsr(
     var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
+    var runtime_lowering = RegionRuntimeLowering{ .scratch_slots = &scratch_slots };
     var edge_operations: std.ArrayListUnmanaged(RegionEdgeOperations) = .empty;
     defer edge_operations.deinit(allocator);
     var next_synthetic_block = std.math.cast(u32, plan.blocks.len) orelse return error.UnsupportedChunk;
 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
-    try appendBlockOperations(graph, header_block, true, allocator, &operations, &types, &initialized, &required_numeric);
+    try appendBlockOperations(graph, header_block, true, allocator, &operations, &types, &initialized, &required_numeric, &runtime_lowering);
     if (types[outer.condition] != .boolean) return error.UnsupportedChunk;
 
     const entry_operations_block = next_synthetic_block;
@@ -1659,7 +1697,7 @@ fn lowerRegionOsr(
             });
             try appendEdgeCopies(graph, edge.from, edge.to, operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         }
-        try appendBlockOperations(graph, block_id, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendBlockOperations(graph, block_id, false, allocator, &operations, &types, &initialized, &required_numeric, &runtime_lowering);
         if (plan.blocks[block_id].successor_count == 2) {
             const conditional = branchForBlock(graph.branches, block_id) orelse return error.UnsupportedChunk;
             if (types[conditional.condition] != .boolean) return error.UnsupportedChunk;
@@ -1696,6 +1734,27 @@ fn lowerRegionOsr(
     defer exit_deopts.deinit(allocator);
     var block_deopts: std.ArrayListUnmanaged(RegionBlockDeopt) = .empty;
     defer block_deopts.deinit(allocator);
+    const state_deopt_indexes = try allocator.alloc(u16, graph.frame_states.len);
+    defer allocator.free(state_deopt_indexes);
+    @memset(state_deopt_indexes, std.math.maxInt(u16));
+    for (graph.frame_states, 0..) |state, state_index| {
+        var has_runtime_operation = false;
+        for (operations.items) |operation| if (operation.kind == .runtime_operation and
+            operation.block == state.block and operation.immediate == state.origin)
+        {
+            if (has_runtime_operation) return error.UnsupportedChunk;
+            has_runtime_operation = true;
+        };
+        if (has_runtime_operation)
+            state_deopt_indexes[state_index] = try appendFrameStateDeopt(
+                graph,
+                &initialized,
+                state,
+                allocator,
+                &deopt_points,
+                &deopt_values,
+            );
+    }
     const entry_index = try appendBlockEntryDeopt(graph, &initialized, header_block, allocator, &deopt_points, &deopt_values);
     const false_index = try appendEdgeDeopt(graph, &initialized, header_block, outer_exit, allocator, &deopt_points, &deopt_values);
     const true_index = try appendEdgeDeopt(graph, &initialized, recovery_backedge, header_block, allocator, &deopt_points, &deopt_values);
@@ -1722,14 +1781,70 @@ fn lowerRegionOsr(
         };
     }
 
+    const identity_aliases: [jit.numeric_scratch_capacity]optimizer.ValueId = @splat(optimizer.ValueNode.none);
+    const native_operations = try stageNativeOperationDescriptors(
+        chunk,
+        plan,
+        graph,
+        identity_aliases,
+        allocator,
+        &operations,
+        &scratch_slots,
+        .block_local,
+        state_deopt_indexes,
+        &required_numeric,
+    );
+    errdefer if (native_operations.len != 0) allocator.free(native_operations);
+    const native_operation_names = try allocator.alloc(?[]const u8, native_operations.len);
+    errdefer if (native_operation_names.len != 0) allocator.free(native_operation_names);
+    for (native_operations, 0..) |descriptor, index| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        const inst = chunk.code.items[descriptor.origin];
+        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop) name: {
+            if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
+            break :name chunk.names.items[inst.a];
+        } else null;
+    }
+    const native_property_caches = try allocator.alloc(jit.NativePropertyCache, native_operations.len);
+    errdefer if (native_property_caches.len != 0) allocator.free(native_property_caches);
+    @memset(native_property_caches, .{});
+    const parallel_inline_caches = bc.ic_seqlock_enabled.load(.monotonic);
+    for (native_operations, native_property_caches) |descriptor, *property_cache| {
+        if (descriptor.origin >= chunk.code.items.len or descriptor.origin >= chunk.ics.len) continue;
+        const instruction = chunk.code.items[descriptor.origin];
+        if (instruction.op != .get_prop and instruction.op != .set_prop) continue;
+        if (instruction.a >= chunk.names.items.len) return error.UnsupportedChunk;
+        const name = chunk.names.items[instruction.a];
+        const snapshot = chunk.ics[descriptor.origin].snapshotMode(parallel_inline_caches) orelse continue;
+        for (snapshot.shapes, snapshot.slots, 0..) |maybe_shape, slot, cache_index| {
+            const shape = maybe_shape orelse continue;
+            if (shape.lookup(name) != slot) continue;
+            property_cache.shape_tokens[cache_index] = @intFromPtr(shape);
+            property_cache.slots[cache_index] = slot;
+        }
+    }
+    const native_exceptional_targets = try lowerNativeExceptionalTargets(plan, allocator);
+    errdefer if (native_exceptional_targets.len != 0) allocator.free(native_exceptional_targets);
+
     var region_blocks: std.ArrayListUnmanaged(LoopRegionBlock) = .empty;
     defer region_blocks.deinit(allocator);
     for (topo.items) |block_id| {
         const block = plan.blocks[block_id];
+        var block_runtime_steps: u32 = 0;
+        for (operations.items) |operation| if (operation.kind == .runtime_operation and operation.block == block_id) {
+            if (operation.immediate >= native_operations.len) return error.UnsupportedChunk;
+            block_runtime_steps = std.math.add(
+                u32,
+                block_runtime_steps,
+                native_operations[operation.immediate].step_delta,
+            ) catch return error.UnsupportedChunk;
+        };
+        if (block_runtime_steps > block.instruction_count) return error.UnsupportedChunk;
         var lowered = LoopRegionBlock{
             .block = block_id,
             .successor_count = block.successor_count,
             .steps = std.math.cast(u12, block.instruction_count) orelse return error.UnsupportedChunk,
+            .runtime_steps = std.math.cast(u12, block_runtime_steps) orelse return error.UnsupportedChunk,
             .entry_deopt_index = if (mode == .fused)
                 regionBlockDeopt(block_deopts.items, block_id) orelse return error.UnsupportedChunk
             else
@@ -1789,6 +1904,13 @@ fn lowerRegionOsr(
     errdefer allocator.free(stack_maps);
     const owned_region_blocks = try region_blocks.toOwnedSlice(allocator);
     errdefer allocator.free(owned_region_blocks);
+    for (native_operations) |descriptor| {
+        if (descriptor.deopt_index >= stack_maps.len) return error.UnsupportedChunk;
+        const end = @as(usize, descriptor.first_input) + descriptor.input_count;
+        if (end > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+        for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
+            @as(u128, 1) << (std.math.cast(u7, slot) orelse return error.UnsupportedChunk);
+    }
 
     var local_mask: u64 = 0;
     for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
@@ -1826,6 +1948,10 @@ fn lowerRegionOsr(
         .deopt_values = owned_deopt_values,
         .deopt_handlers = owned_deopt_handlers,
         .stack_maps = stack_maps,
+        .native_operations = native_operations,
+        .native_exceptional_targets = native_exceptional_targets,
+        .native_operation_names = native_operation_names,
+        .native_property_caches = native_property_caches,
         .osr = osr,
         .execution_block = header_block,
         .entry_enabled = false,
@@ -1900,8 +2026,8 @@ fn typedRecoveryStackMaps(
                 (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk),
             .scratch_slot => {
                 if (recovery.index >= types.len) return error.UnsupportedChunk;
-                if (types[recovery.index] == .other) map.scratch_pointer_slots |= @as(u64, 1) <<
-                    (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk);
+                if (types[recovery.index] == .other) map.scratch_pointer_slots |= @as(u128, 1) <<
+                    (std.math.cast(u7, recovery.index) orelse return error.UnsupportedChunk);
             },
             .constant => {},
         };
@@ -1910,8 +2036,8 @@ fn typedRecoveryStackMaps(
                 (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk),
             .scratch_slot => {
                 if (point.accumulator.index >= types.len) return error.UnsupportedChunk;
-                if (types[point.accumulator.index] == .other) map.scratch_pointer_slots |= @as(u64, 1) <<
-                    (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
+                if (types[point.accumulator.index] == .other) map.scratch_pointer_slots |= @as(u128, 1) <<
+                    (std.math.cast(u7, point.accumulator.index) orelse return error.UnsupportedChunk);
             },
             .constant => {},
         }
@@ -1966,7 +2092,7 @@ fn appendPrimitiveLeaves(
 fn numericRequirements(graph: *const optimizer.ValueGraph) error{UnsupportedChunk}![jit.numeric_scratch_capacity]bool {
     var required: [jit.numeric_scratch_capacity]bool = @splat(false);
     for (graph.nodes) |node| switch (node.kind) {
-        .add, .sub, .mul, .div, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+        .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
             if (node.lhs >= required.len or node.rhs >= required.len) return error.UnsupportedChunk;
             required[node.lhs] = true;
             required[node.rhs] = true;
@@ -2121,6 +2247,31 @@ fn appendParallelCopies(
     }
 }
 
+const RegionRuntimeLowering = struct {
+    scratch_slots: *usize,
+    binary_inputs: ?u8 = null,
+
+    fn stageBinaryInputs(
+        self: *RegionRuntimeLowering,
+        allocator: std.mem.Allocator,
+        operations: *std.ArrayListUnmanaged(Operation),
+        block: u32,
+        lhs: u8,
+        rhs: u8,
+    ) !u8 {
+        const first = self.binary_inputs orelse first: {
+            if (self.scratch_slots.* + 2 > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+            const slot = std.math.cast(u8, self.scratch_slots.*) orelse return error.UnsupportedChunk;
+            self.scratch_slots.* += 2;
+            self.binary_inputs = slot;
+            break :first slot;
+        };
+        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = lhs });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = rhs });
+        return first;
+    }
+};
+
 fn appendBlockOperations(
     graph: *const optimizer.ValueGraph,
     block: u32,
@@ -2130,6 +2281,7 @@ fn appendBlockOperations(
     types: *[jit.numeric_scratch_capacity]ValueType,
     initialized: *[jit.numeric_scratch_capacity]bool,
     required_numeric: *const [jit.numeric_scratch_capacity]bool,
+    runtime_lowering: ?*RegionRuntimeLowering,
 ) !void {
     for (graph.nodes) |node| {
         if (node.block != block) continue;
@@ -2143,7 +2295,7 @@ fn appendBlockOperations(
                 initialized[node.id] = true;
             },
             .constant, .true, .false => {}, // emitted once before control flow
-            .add, .sub, .mul, .div, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
                 if (node.lhs >= graph.nodes.len or node.rhs >= graph.nodes.len or
                     types[node.lhs] != .number or types[node.rhs] != .number)
                     return error.UnsupportedChunk;
@@ -2152,6 +2304,7 @@ fn appendBlockOperations(
                     .sub => .sub,
                     .mul => .mul,
                     .div => .div,
+                    .mod => .mod,
                     .lt => .lt,
                     .le => .le,
                     .gt => .gt,
@@ -2170,6 +2323,41 @@ fn appendBlockOperations(
                     .block = block,
                     .lhs = @intCast(node.lhs),
                     .rhs = @intCast(node.rhs),
+                });
+                initialized[node.id] = true;
+            },
+            .get_prop => {
+                if (runtime_lowering == null or node.lhs >= initialized.len or !initialized[node.lhs])
+                    return error.UnsupportedChunk;
+                types[node.id] = if (required_numeric[node.id]) .number else .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = @intCast(node.lhs),
+                    .immediate = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .set_prop => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                if (node.lhs >= initialized.len or node.rhs >= initialized.len or
+                    !initialized[node.lhs] or !initialized[node.rhs])
+                    return error.UnsupportedChunk;
+                const first_input = try runtime.stageBinaryInputs(
+                    allocator,
+                    operations,
+                    block,
+                    @intCast(node.lhs),
+                    @intCast(node.rhs),
+                );
+                types[node.id] = .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
                 });
                 initialized[node.id] = true;
             },
@@ -2208,6 +2396,51 @@ fn appendEdgeDeopt(
     }
     try points.append(allocator, .{
         .kind = .edge,
+        .exit_ip = state.origin,
+        .first_value = first_value,
+        .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
+        .stack_count = std.math.cast(u16, state.stack_count) orelse return error.UnsupportedChunk,
+        .first_handler = state.first_handler,
+        .handler_count = std.math.cast(u16, state.handler_count) orelse return error.UnsupportedChunk,
+        .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
+    });
+    return index;
+}
+
+fn appendFrameStateDeopt(
+    graph: *const optimizer.ValueGraph,
+    initialized: []const bool,
+    state: optimizer.FrameState,
+    allocator: std.mem.Allocator,
+    points: *std.ArrayListUnmanaged(jit.DeoptPoint),
+    values: *std.ArrayListUnmanaged(jit.RecoveryValue),
+) !u16 {
+    const index = std.math.cast(u16, points.items.len) orelse return error.UnsupportedChunk;
+    const first_value: u32 = @intCast(values.items.len);
+    const first: usize = state.first_value;
+    const count: usize = state.local_count + state.stack_count;
+    if (first > graph.frame_state_values.len or count > graph.frame_state_values.len - first)
+        return error.UnsupportedChunk;
+    const first_handler: usize = state.first_handler;
+    const handler_count: usize = state.handler_count;
+    if (first_handler > graph.handler_states.len or handler_count > graph.handler_states.len - first_handler)
+        return error.UnsupportedChunk;
+    for (graph.frame_state_values[first .. first + count]) |value| {
+        if (value >= initialized.len or !initialized[value]) return error.UnsupportedChunk;
+        try values.append(allocator, .{ .source = .scratch_slot, .index = @intCast(value) });
+    }
+    try points.append(allocator, .{
+        .kind = switch (state.kind) {
+            .block_entry => .block_entry,
+            .branch => .branch,
+            .return_ => .return_,
+            .throw_ => .throw_,
+            .finally_dispatch => .finally_dispatch,
+            .abrupt_return => .abrupt_return,
+            .abrupt_jump => .abrupt_jump,
+            .call => .call,
+            .effect => .effect,
+        },
         .exit_ip = state.origin,
         .first_value = first_value,
         .local_count = std.math.cast(u16, state.local_count) orelse return error.UnsupportedChunk,
@@ -2423,8 +2656,12 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
                     region_budget = try assembler.branchConditionPlaceholder(.lo);
                 }
                 try emitBlockOperations(&assembler, program, region.block);
+                if (region.runtime_steps > region.steps) return error.UnsupportedChunk;
+                const remaining_steps = region.steps - region.runtime_steps;
+                if (remaining_steps != 0) {
+                    try emitStepIncrement(&assembler, remaining_steps);
+                }
                 if (region.steps != 0) {
-                    try emitStepIncrement(&assembler, region.steps);
                     try assembler.subtractImmediate64(15, 15, region.steps);
                     try assembler.subtractImmediate64(16, 16, region.steps);
                 }
@@ -2713,6 +2950,28 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
             try emitCanonicalNumber(assembler, 9, 0);
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
+        .mod => {
+            try loadNumericOperands(assembler, operation);
+            try assembler.load64(17, 12, frameOffset("remainder"));
+            try assembler.compareImmediate64(17, 0);
+            const absent = try assembler.branchConditionPlaceholder(.eq);
+            try assembler.pushPair(8, 12);
+            try assembler.pushPair(13, 14);
+            try assembler.pushPair(15, 16);
+            try assembler.pushPair(17, 30);
+            try assembler.branchLinkRegister(17);
+            try assembler.popPair(17, 30);
+            try assembler.popPair(15, 16);
+            try assembler.popPair(13, 14);
+            try assembler.popPair(8, 12);
+            try emitCanonicalNumber(assembler, 9, 0);
+            try assembler.store64(9, 14, try slotOffset(operation.destination));
+            const done = try assembler.branchPlaceholder();
+            try assembler.patchConditionBranch(absent, assembler.position());
+            try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
+            try assembler.ret();
+            try assembler.patchBranch(done, assembler.position());
+        },
         .lt, .le, .gt, .ge, .eq, .neq => {
             try loadNumericOperands(assembler, operation);
             try assembler.compareFloat64(0, 1);
@@ -2911,6 +3170,28 @@ fn emitRuntimeOperation(
     try assembler.store64(9, 12, frameOffset("deopt_index"));
     try assembler.movImmediate64(9, operation.immediate);
     try assembler.store64(9, 12, frameOffset("operation_detail"));
+    const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
+    if (numeric_result) {
+        var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+            return error.UnsupportedChunk;
+        try direct.patchCompletions(assembler, assembler.position());
+        try assembler.load64(9, 14, try slotOffset(operation.destination));
+        try assembler.movImmediate64(10, Value.number_box_mask);
+        try assembler.andRegister64(9, 9, 10);
+        try assembler.compareRegister64(9, 10);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+        try emitStepIncrement(
+            assembler,
+            std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
+        );
+        const completed = try assembler.branchPlaceholder();
+        const fallback = assembler.position();
+        try direct.patchFallbacks(assembler, fallback);
+        try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.side_exit));
+        try assembler.ret();
+        try assembler.patchBranch(completed, assembler.position());
+        return;
+    }
     try emitStepIncrement(
         assembler,
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
@@ -3199,7 +3480,7 @@ test "optimizer lowerer produces portable guarded numeric operations" {
     try std.testing.expectEqual(program.deopt_points.len, program.stack_maps.len);
     for (program.stack_maps) |map| {
         try std.testing.expectEqual(@as(u64, 0), map.frame_pointer_slots);
-        try std.testing.expectEqual(@as(u64, 0), map.scratch_pointer_slots);
+        try std.testing.expectEqual(@as(u128, 0), map.scratch_pointer_slots);
     }
     try std.testing.expectEqual(jit.DeoptPointKind.block_entry, program.deopt_points[0].kind);
     try std.testing.expectEqual(jit.DeoptPointKind.return_, program.deopt_points[1].kind);
@@ -3551,8 +3832,8 @@ test "optimizer lowering publishes an executable ordinary call" {
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
     const map = program.stack_maps[operation.deopt_index];
     try std.testing.expectEqual(@as(u64, 0b11), map.frame_pointer_slots);
-    const input_roots = (@as(u64, 1) << @intCast(operation.first_input)) |
-        (@as(u64, 1) << @intCast(operation.first_input + 1));
+    const input_roots = (@as(u128, 1) << @intCast(operation.first_input)) |
+        (@as(u128, 1) << @intCast(operation.first_input + 1));
     try std.testing.expectEqual(input_roots, map.scratch_pointer_slots & input_roots);
     for (program.deopt_values[point.first_value .. point.first_value + point.local_count + point.stack_count]) |recovery|
         try std.testing.expectEqual(jit.RecoverySource.frame_slot, recovery.source);
@@ -3615,7 +3896,7 @@ test "optimizer executes to_numeric through the native operation ABI" {
     try std.testing.expectEqual(@as(u16, 2), descriptor.step_delta);
     try std.testing.expectEqual(jit.NativeOperationDescriptor.none, descriptor.exceptional_target);
     const map = program.stack_maps[descriptor.deopt_index];
-    try std.testing.expect(map.scratch_pointer_slots & (@as(u64, 1) << @intCast(descriptor.first_input)) != 0);
+    try std.testing.expect(map.scratch_pointer_slots & (@as(u128, 1) << @intCast(descriptor.first_input)) != 0);
     var runtime_operation: ?Operation = null;
     for (program.operations) |operation| if (operation.kind == .runtime_operation) {
         runtime_operation = operation;
@@ -4288,7 +4569,7 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
         const expected_roots = (@as(u64, 1) << @intCast(case.inputs)) - 1;
         try std.testing.expectEqual(expected_roots, program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
-        try std.testing.expectEqual(@as(u64, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
+        try std.testing.expectEqual(@as(u128, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
     }
 }
 
@@ -4335,7 +4616,7 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
         try std.testing.expectEqual(@as(u16, 0), point.stack_count);
         try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
-        try std.testing.expectEqual(@as(u64, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
+        try std.testing.expectEqual(@as(u128, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
     }
 }
 
@@ -4665,7 +4946,7 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
     try std.testing.expectEqual(@as(f64, 9), Value.fromRawBits(recovered_i).asNum());
     const stack_map = compiled.stack_maps.?.forDeopt(frame.deopt_index) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), stack_map.frame_pointer_slots);
-    try std.testing.expectEqual(@as(u64, 0), stack_map.scratch_pointer_slots);
+    try std.testing.expectEqual(@as(u128, 0), stack_map.scratch_pointer_slots);
 
     var invalidation_generation: std.atomic.Value(u64) = .init(1);
     frame.invalidation_generation = &invalidation_generation;
@@ -4835,7 +5116,7 @@ test "optimizer loop moving safepoint publishes and rewrites recovery-only local
     const live_map = compiled.stack_maps.?.forDeopt(callback.seen_deopt) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), live_map.frame_pointer_slots);
-    try std.testing.expectEqual(@as(u64, 1) << @intCast(held_import.destination), live_map.scratch_pointer_slots);
+    try std.testing.expectEqual(@as(u128, 1) << @intCast(held_import.destination), live_map.scratch_pointer_slots);
     const exit = compiled.deopt.?.points[frame.deopt_index];
     const held = compiled.deopt.?.values[exit.first_value + 1].materialize(&slots, &scratch) orelse
         return error.TestUnexpectedResult;

@@ -933,6 +933,11 @@ pub fn optimizerNativePropertyStatsForTesting() OptimizerNativePropertyStats {
     };
 }
 
+pub fn optimizerOsrEntriesForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return optimizer_osr_entries.load(.monotonic);
+}
+
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);

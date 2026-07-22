@@ -295,9 +295,11 @@ pub const NativeOperationDescriptor = extern struct {
     exceptional_target: u16 = none,
     deopt_index: u16,
     step_delta: u16,
+    flags: u16 = 0,
     origin: u32,
 
     pub const none = std.math.maxInt(u16);
+    pub const numeric_result: u16 = 1 << 0;
 };
 
 /// Immutable advisory shape/slot pairs copied from one warmed bytecode inline
@@ -420,7 +422,7 @@ pub const NativeOperationMetadata = struct {
     }
 };
 
-pub const numeric_scratch_capacity = 64;
+pub const numeric_scratch_capacity = 128;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
 /// More fields are appended as lowering grows; generated code only addresses
@@ -568,7 +570,7 @@ pub const DeoptMetadata = struct {
 pub const StackMap = struct {
     deopt_index: u16,
     frame_pointer_slots: u64 = 0,
-    scratch_pointer_slots: u64 = 0,
+    scratch_pointer_slots: u128 = 0,
 };
 
 pub const StackMapMetadata = struct {
@@ -605,10 +607,10 @@ pub const ActiveNativeRoots = struct {
     scratch_slot_count: u8,
 
     pub fn currentMap(self: ActiveNativeRoots) ?StackMap {
-        if (self.frame_slot_count > 64 or self.scratch_slot_count > 64) return null;
+        if (self.frame_slot_count > 64 or self.scratch_slot_count > numeric_scratch_capacity) return null;
         const map = self.stack_maps.forDeopt(self.frame.deopt_index) orelse return null;
-        if (map.frame_pointer_slots & ~slotMask(self.frame_slot_count) != 0 or
-            map.scratch_pointer_slots & ~slotMask(self.scratch_slot_count) != 0)
+        if (map.frame_pointer_slots & ~frameSlotMask(self.frame_slot_count) != 0 or
+            map.scratch_pointer_slots & ~scratchSlotMask(self.scratch_slot_count) != 0)
             return null;
         if ((map.frame_pointer_slots != 0 and self.frame.slots == null) or
             (map.scratch_pointer_slots != 0 and self.frame.scratch == null))
@@ -616,8 +618,12 @@ pub const ActiveNativeRoots = struct {
         return map;
     }
 
-    fn slotMask(count: u8) u64 {
+    fn frameSlotMask(count: u8) u64 {
         return if (count == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(count)) - 1;
+    }
+
+    fn scratchSlotMask(count: u8) u128 {
+        return if (count == 128) std.math.maxInt(u128) else (@as(u128, 1) << @intCast(count)) - 1;
     }
 };
 

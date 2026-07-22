@@ -4375,6 +4375,7 @@ pub const Value = struct {
     const tag_null: u3 = 5;
 
     pub const boxed_kind_mask: u64 = box_mask | (@as(u64, 0b111) << tag_shift);
+    pub const number_box_mask: u64 = box_mask;
     pub const object_kind_bits: u64 = box_mask | (@as(u64, tag_object) << tag_shift);
     pub const boxed_payload_mask: u64 = payload_mask;
 

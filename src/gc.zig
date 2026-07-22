@@ -2149,7 +2149,7 @@ fn traceActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
     if (active.frame.scratch) |scratch| {
         var candidates = map.scratch_pointer_slots;
         while (candidates != 0) {
-            const slot: u6 = @intCast(@ctz(candidates));
+            const slot: u7 = @intCast(@ctz(candidates));
             markValue(v, Value.fromRawBits(scratch[slot]));
             candidates &= candidates - 1;
         }
@@ -2171,7 +2171,7 @@ fn relocateActiveNativeRoots(machine: *interp.Interpreter, v: anytype) void {
     if (active.frame.scratch) |scratch| {
         var candidates = map.scratch_pointer_slots;
         while (candidates != 0) {
-            const slot: u6 = @intCast(@ctz(candidates));
+            const slot: u7 = @intCast(@ctz(candidates));
             const value_slot: *Value = @ptrCast(@alignCast(&scratch[slot]));
             gc_relocation.rewriteValueSlot(v, value_slot);
             candidates &= candidates - 1;
@@ -2405,10 +2405,9 @@ test "realm root relocation rewrites active interpreter containers" {
     machine.debug_top_level_environment = &old_environment;
 
     var native_frame_slots = [_]Value{ Value.obj(&old_objects[21]), Value.obj(&old_objects[22]) };
-    var native_scratch = [_]u64{
-        Value.obj(&old_objects[23]).rawBits(),
-        Value.obj(&old_objects[24]).rawBits(),
-    };
+    var native_scratch: [70]u64 = @splat(Value.undef().rawBits());
+    native_scratch[0] = Value.obj(&old_objects[23]).rawBits();
+    native_scratch[69] = Value.obj(&old_objects[24]).rawBits();
     var native_frame = jit.NativeFrame{
         .slots = @ptrCast(native_frame_slots[0..].ptr),
         .scratch = native_scratch[0..].ptr,
@@ -2417,7 +2416,7 @@ test "realm root relocation rewrites active interpreter containers" {
     const native_maps = try jit.StackMapMetadata.create(std.testing.allocator, &.{.{
         .deopt_index = 0,
         .frame_pointer_slots = 0b01,
-        .scratch_pointer_slots = 0b10,
+        .scratch_pointer_slots = @as(u128, 1) << 69,
     }});
     defer native_maps.destroy();
     machine.gc_native_roots = .{
@@ -2477,7 +2476,7 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[21], native_frame_slots[0].asObj());
     try std.testing.expectEqual(&old_objects[22], native_frame_slots[1].asObj());
     try std.testing.expectEqual(&old_objects[23], Value.fromRawBits(native_scratch[0]).asObj());
-    try std.testing.expectEqual(&new_objects[24], Value.fromRawBits(native_scratch[1]).asObj());
+    try std.testing.expectEqual(&new_objects[24], Value.fromRawBits(native_scratch[69]).asObj());
 }
 
 test "realm root relocation rewrites Context registries and embedder handles" {
