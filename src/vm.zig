@@ -11319,17 +11319,27 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
         \\  } catch (error) { return error + i; }
         \\  return -1;
         \\}
+        \\function construct(Ctor, n) {
+        \\  let i = 0; let total = 0;
+        \\  while (i < n) {
+        \\    if (i >= 0) { const box = new Ctor(); total = total + i; }
+        \\    i = i + 1;
+        \\  }
+        \\  return total;
+        \\}
         \\grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0);
         \\grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0);
         \\build(4); build(4); build(4); build(4); build(4);
         \\build(4); build(4); build(4); build(4); build(4);
         \\growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4);
         \\growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4);
+        \\construct(Object, 4); construct(Object, 4); construct(Object, 4); construct(Object, 4); construct(Object, 4);
+        \\construct(Object, 4); construct(Object, 4); construct(Object, 4); construct(Object, 4); construct(Object, 4);
         \\let calls = 0; const custom = [];
         \\custom.push = function (value) { calls = calls + value; };
         \\const throwing = [];
         \\throwing.push = function (value) { if (value === 2) throw 90; };
-        \\growCaught(throwing, 4) * 1000 + grow(custom, 3, 1) * 100 + calls + build(4)
+        \\growCaught(throwing, 4) * 1000 + grow(custom, 3, 1) * 100 + calls + build(4) + construct(Object, 4)
     ;
     var parser = try Parser.init(allocator, source);
     const program = try parser.parseProgram();
@@ -11341,7 +11351,7 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
 
-    try std.testing.expectEqual(@as(f64, 92016), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 92022), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
     const grow_chunk = root.fns.items[0].chunk.?;
     const grow_artifact = grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
@@ -11377,6 +11387,14 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
             saw_exceptional_push = true;
     }
     try std.testing.expect(saw_exceptional_push);
+
+    const construct_chunk = root.fns.items[3].chunk.?;
+    const construct_artifact = construct_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_construct = false;
+    for (construct_artifact.native_operations.?.descriptors) |operation|
+        saw_construct = saw_construct or operation.bytecode_op == @intFromEnum(bc.Op.new_call);
+    try std.testing.expect(construct_artifact.osr != null and saw_construct);
 
     const steps_before_oom = machine.steps;
     const execution_allowed_before_oom = machine.jit_execution_allowed;
@@ -11426,7 +11444,7 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
 
     const osr_before = optimizer_osr_entries.load(.monotonic);
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 92016), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 92022), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
