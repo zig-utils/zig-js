@@ -3822,8 +3822,9 @@ pub const Interpreter = struct {
         while (cur) |o| {
             // A String wrapper's own enumerable character indices "0".."len-1".
             if (o.boxedPrimitive()) |p| if (p.isString()) {
+                const plen = utf16LenOfValue(p);
                 var i: usize = 0;
-                while (i < utf16LenOfString(p.asStr())) : (i += 1) {
+                while (i < plen) : (i += 1) {
                     const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
                     if (visited.contains(key)) continue;
                     try visited.put(self.arena, key, {});
@@ -5830,7 +5831,7 @@ pub const Interpreter = struct {
                     return Value.boolVal(false);
                 }
                 const key = try self.memberKey(m.property, m.computed);
-                if (arrayIndex(key)) |i| if (i < utf16LenOfString(obj.asStr())) {
+                if (arrayIndex(key)) |i| if (i < utf16LenOfValue(obj)) {
                     if (self.strict) return self.throwError("TypeError", "Cannot delete property");
                     return Value.boolVal(false);
                 };
@@ -8622,6 +8623,17 @@ pub const Interpreter = struct {
         return units;
     }
 
+    /// UTF-16 length of a string `Value`, representation-aware and allocation
+    /// free: a flat-latin1 cell stores 1 byte per code unit, so its length is
+    /// `bytes.len` in O(1); any other cell is WTF-8 and is walked. Use this for
+    /// string `.length` and index-bound checks — including allocation-free
+    /// contexts (`hasProperty`, `objectHasOwn`) where `asWtf8` is unavailable.
+    /// Caller has checked `isString()`.
+    pub fn utf16LenOfValue(v: Value) usize {
+        if (v.strIsFlatLatin1()) return v.asStr().len;
+        return utf16LenOfString(v.asStr());
+    }
+
     pub fn stringIncludesUtf16(haystack: []const u8, needle: []const u8) bool {
         const haystack_len = utf16LenOfString(haystack);
         const needle_len = utf16LenOfString(needle);
@@ -10617,7 +10629,7 @@ pub const Interpreter = struct {
                 // other string keys in insertion order, then symbols.
                 var indices: std.ArrayListUnmanaged([]const u8) = .empty;
                 var seen: std.AutoHashMapUnmanaged(usize, void) = .empty;
-                for (0..utf16LenOfString(p.asStr())) |i| {
+                for (0..utf16LenOfValue(p)) |i| {
                     try indices.append(self.arena, try std.fmt.allocPrint(self.arena, "{d}", .{i}));
                     try seen.put(self.arena, i, {});
                 }
@@ -11081,9 +11093,9 @@ pub const Interpreter = struct {
                 // `[0] === "a"`).
                 if (o.boxedPrimitive()) |p| {
                     if (p.isString()) {
-                        if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
+                        if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(p)));
                         if (arrayIndex(key)) |i| {
-                            if (try self.stringIndexValue(p.asStr(), i)) |v| return v;
+                            if (try self.stringIndexValue(try p.asWtf8(self.arena), i)) |v| return v;
                         }
                     }
                 }
@@ -11134,9 +11146,9 @@ pub const Interpreter = struct {
                     }
                     if (c.boxedPrimitive()) |p| {
                         if (p.isString()) {
-                            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(p.asStr())));
+                            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(p)));
                             if (arrayIndex(key)) |i| {
-                                if (try self.stringIndexValue(p.asStr(), i)) |v| return v;
+                                if (try self.stringIndexValue(try p.asWtf8(self.arena), i)) |v| return v;
                             }
                         }
                     }
@@ -11175,10 +11187,9 @@ pub const Interpreter = struct {
     /// primitive as the receiver passed to inherited accessors/proxy traps.
     fn getPrimitiveMember(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         if (recv.isString()) {
-            const s = recv.asStr();
-            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfString(s)));
+            if (std.mem.eql(u8, key, "length")) return Value.num(@floatFromInt(utf16LenOfValue(recv)));
             if (arrayIndex(key)) |i| {
-                if (try self.stringIndexValue(s, i)) |v| return v;
+                if (try self.stringIndexValue(try recv.asWtf8(self.arena), i)) |v| return v;
                 return Value.undef();
             }
         }
@@ -11861,7 +11872,7 @@ pub const Interpreter = struct {
         if (o.boxedPrimitive()) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfValue(p)) return false;
             }
         }
         if (o.is_arguments) {
@@ -12108,7 +12119,7 @@ pub const Interpreter = struct {
         if (o.boxedPrimitive()) |p| {
             if (p.isString()) {
                 if (std.mem.eql(u8, key, "length")) return false;
-                if (arrayIndex(key)) |i| if (i < utf16LenOfString(p.asStr())) return false;
+                if (arrayIndex(key)) |i| if (i < utf16LenOfValue(p)) return false;
             }
         }
         if (o.hostClassHooks()) |hooks| if (hooks.delete) |delete| {
@@ -47054,7 +47065,7 @@ pub fn hasProperty(o: *value.Object, name: []const u8) bool {
         if (value.canonicalIndex(name)) |idx| {
             if (c.is_array and c.denseElementPresent(idx)) return true;
             if (c.typedArray()) |ta| if (idx < (ta.currentLength() orelse 0)) return true;
-            if (c.boxedPrimitive()) |p| if (p.isString() and idx < Interpreter.utf16LenOfString(p.asStr())) return true;
+            if (c.boxedPrimitive()) |p| if (p.isString() and idx < Interpreter.utf16LenOfValue(p)) return true;
         }
         cur = c.protoAtomic();
     }
@@ -47136,7 +47147,7 @@ pub fn objectHasOwn(o: *value.Object, name: []const u8) bool {
     if (o.boxedPrimitive()) |p| {
         if (p.isString()) {
             if (std.mem.eql(u8, name, "length")) return true;
-            if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfString(p.asStr());
+            if (Interpreter.arrayIndex(name)) |i| return i < Interpreter.utf16LenOfValue(p);
         }
     }
     if (o.is_array) {

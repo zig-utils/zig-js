@@ -4485,6 +4485,13 @@ pub const Value = struct {
         if (strcell.isFlatLatin1(cell.hash)) return strcell.latin1FlatToWtf8(arena, cell.bytes);
         return cell.bytes;
     }
+    /// True when this string is *stored* as a flat latin1 image (1 byte/unit).
+    /// Lets a reader take a representation-native shortcut (e.g. UTF-16 length ==
+    /// byte length) instead of re-encoding to WTF-8. Caller has checked
+    /// `isString()`.
+    pub inline fn strIsFlatLatin1(self: Value) bool {
+        return strcell.isFlatLatin1(self.asStringCell().hash);
+    }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);
     }
