@@ -19,7 +19,7 @@ pub const Condition = enum(u4) {
     le = 13,
 
     fn inverted(self: Condition) Condition {
-        return @enumFromInt(@intFromEnum(self) ^ 1);
+        return @fromBackingInt(@intCast(@backingInt(self) ^ 1));
     }
 };
 
@@ -77,6 +77,10 @@ pub const Assembler = struct {
         try self.emit32(0xcb00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
 
+    pub fn andRegister64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
+        try self.emit32(0x8a00_0000 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
+    }
+
     pub fn multiply64(self: *Assembler, rd: u5, rn: u5, rm: u5) error{NoSpace}!void {
         try self.emit32(0x9b00_7c00 | (@as(u32, rm) << 16) | (@as(u32, rn) << 5) | rd);
     }
@@ -127,6 +131,17 @@ pub const Assembler = struct {
         const scaled = byte_offset / 8;
         if (scaled > 0xfff) return error.InvalidOffset;
         try self.emit32(0xf900_0000 | (@as(u32, scaled) << 10) | (@as(u32, xn) << 5) | xt);
+    }
+
+    /// `ldrb wt, [xn, #byte_offset]`.
+    pub fn load8(self: *Assembler, wt: u5, xn: u5, byte_offset: u12) error{NoSpace}!void {
+        try self.emit32(0x3940_0000 | (@as(u32, byte_offset) << 10) | (@as(u32, xn) << 5) | wt);
+    }
+
+    /// `ldrh wt, [xn, #byte_offset]`, using AArch64's unsigned scaled form.
+    pub fn load16(self: *Assembler, wt: u5, xn: u5, byte_offset: u12) error{ NoSpace, InvalidOffset }!void {
+        if ((byte_offset & 1) != 0) return error.InvalidOffset;
+        try self.emit32(0x7940_0000 | (@as(u32, byte_offset / 2) << 10) | (@as(u32, xn) << 5) | wt);
     }
 
     /// `stlr xt, [xn]`, publishing a 64-bit value with release ordering.
@@ -193,7 +208,7 @@ pub const Assembler = struct {
     }
 
     pub fn conditionalSet32(self: *Assembler, rd: u5, condition: Condition) error{NoSpace}!void {
-        try self.emit32(0x1a9f_07e0 | (@as(u32, @intFromEnum(condition.inverted())) << 12) | rd);
+        try self.emit32(0x1a9f_07e0 | (@as(u32, @backingInt(condition.inverted())) << 12) | rd);
     }
 
     pub fn branchLinkRegister(self: *Assembler, rn: u5) error{NoSpace}!void {
@@ -208,7 +223,7 @@ pub const Assembler = struct {
 
     pub fn branchConditionPlaceholder(self: *Assembler, condition: Condition) error{NoSpace}!usize {
         const at = self.offset;
-        try self.emit32(0x5400_0000 | @as(u32, @intFromEnum(condition)));
+        try self.emit32(0x5400_0000 | @as(u32, @backingInt(condition)));
         return at;
     }
 
@@ -307,6 +322,18 @@ test "AArch64 immediate and return encodings" {
     for (expected, 0..) |instruction, index| {
         try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
     }
+}
+
+test "AArch64 property guard encodings" {
+    var storage: [12]u8 = undefined;
+    var assembler = Assembler.init(&storage);
+    try assembler.andRegister64(9, 10, 11);
+    try assembler.load8(9, 10, 3);
+    try assembler.load16(9, 10, 4);
+
+    const expected = [_]u32{ 0x8a0b_0149, 0x3940_0d49, 0x7940_0949 };
+    for (expected, 0..) |instruction, index|
+        try std.testing.expectEqual(instruction, std.mem.readInt(u32, assembler.bytes()[index * 4 ..][0..4], .little));
 }
 
 test "AArch64 numeric tier instruction encodings" {

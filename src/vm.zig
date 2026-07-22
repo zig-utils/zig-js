@@ -911,6 +911,7 @@ var optimizer_native_attempts: std.atomic.Value(u64) = .init(0);
 var optimizer_native_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_read_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_cache_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_native_property_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -3920,6 +3921,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         );
     }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop) and inputs.len == 1) {
+        if (builtin.is_test) _ = optimizer_native_property_read_callbacks.fetchAdd(1, .monotonic);
         const name = metadata.nameFor(operation_id) orelse
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
@@ -9336,7 +9338,7 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const attempts_before = optimizer_native_attempts.load(.monotonic);
-    const cache_hits_before = optimizer_native_property_read_cache_hits.load(.monotonic);
+    const property_callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -9370,7 +9372,10 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
-    try std.testing.expect(optimizer_native_property_read_cache_hits.load(.monotonic) > cache_hits_before);
+    try std.testing.expectEqual(
+        property_callbacks_before,
+        optimizer_native_property_read_callbacks.load(.monotonic),
+    );
 }
 
 test "vm: optimizer native property cache guards polymorphic shapes and malformed slots" {
@@ -9410,6 +9415,7 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
         try std.testing.expectEqual(@intFromPtr(object_value.asObj().shape.?), token);
 
     const hits_before = optimizer_native_property_read_cache_hits.load(.monotonic);
+    const callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
     for (objects, 0..) |object_value, index| {
         var slots = [_]Value{object_value};
         const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
@@ -9419,30 +9425,92 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
         };
         try std.testing.expectEqual(@as(f64, @floatFromInt(index + 10)), result.asNum());
     }
-    try std.testing.expectEqual(hits_before + 4, optimizer_native_property_read_cache_hits.load(.monotonic));
+    try std.testing.expectEqual(hits_before, optimizer_native_property_read_cache_hits.load(.monotonic));
+    try std.testing.expectEqual(callbacks_before, optimizer_native_property_read_callbacks.load(.monotonic));
 
-    const original_slot = operations.property_caches[0].slots[0];
-    operations.property_caches[0].slots[0] = std.math.maxInt(u32);
+    const nested_value = try machine.newObject();
+    try machine.setProp(objects[0].asObj(), "value", nested_value);
+    var object_value_slots = [_]Value{objects[0]};
+    const before_object_value = optimizer_native_property_read_callbacks.load(.monotonic);
+    const object_value_outcome = try tryRunManagedNative(&machine, &compiled, &object_value_slots, null);
+    const object_value_result = switch (object_value_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(nested_value.rawBits(), object_value_result.rawBits());
+    try std.testing.expectEqual(before_object_value, optimizer_native_property_read_callbacks.load(.monotonic));
+    try machine.setProp(objects[0].asObj(), "value", Value.num(10));
+
+    const old_parallel = bc.ic_seqlock_enabled.swap(true, .monotonic);
+    defer bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const before_parallel_callback = optimizer_native_property_read_callbacks.load(.monotonic);
+    var parallel_slots = [_]Value{objects[1]};
+    const parallel_outcome = try tryRunManagedNative(&machine, &compiled, &parallel_slots, null);
+    bc.ic_seqlock_enabled.store(old_parallel, .monotonic);
+    const parallel_result = switch (parallel_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 11), parallel_result.asNum());
+    try std.testing.expectEqual(
+        before_parallel_callback + 1,
+        optimizer_native_property_read_callbacks.load(.monotonic),
+    );
+
+    const array = try machine.newArray();
+    try machine.setProp(array.asObj(), "value", Value.num(21));
+    try std.testing.expectEqual(objects[0].asObj().shape, array.asObj().shape);
+    var array_slots = [_]Value{array};
+    const before_array_callback = optimizer_native_property_read_callbacks.load(.monotonic);
+    const array_outcome = try tryRunManagedNative(&machine, &compiled, &array_slots, null);
+    const array_result = switch (array_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 21), array_result.asNum());
+    try std.testing.expectEqual(
+        before_array_callback + 1,
+        optimizer_native_property_read_callbacks.load(.monotonic),
+    );
+
+    var malformed_chunk = bc.Chunk.init(allocator);
+    malformed_chunk.param_count = 1;
+    malformed_chunk.local_count = 1;
+    const malformed_name = try malformed_chunk.addName("value");
+    _ = try malformed_chunk.emit(.load_local, 0);
+    _ = try malformed_chunk.emit(.get_prop, malformed_name);
+    _ = try malformed_chunk.emit(.ret, 0);
+    try malformed_chunk.finalize();
+    malformed_chunk.ics[1].recordMode(objects[0].asObj().shape.?, std.math.maxInt(u32), false);
+    var malformed = try optimizer_compiler.compile(&malformed_chunk);
+    defer malformed.deinit();
+    const malformed_operations = malformed.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (malformed_operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult).shape_tokens[0],
+    );
     var malformed_slots = [_]Value{objects[0]};
-    const before_malformed = optimizer_native_property_read_cache_hits.load(.monotonic);
-    const malformed_outcome = try tryRunManagedNative(&machine, &compiled, &malformed_slots, null);
+    const before_malformed_callbacks = optimizer_native_property_read_callbacks.load(.monotonic);
+    const malformed_outcome = try tryRunManagedNative(&machine, &malformed, &malformed_slots, null);
     const malformed_result = switch (malformed_outcome) {
         .complete => |value_word| value_word,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(@as(f64, 10), malformed_result.asNum());
-    try std.testing.expectEqual(before_malformed, optimizer_native_property_read_cache_hits.load(.monotonic));
-    operations.property_caches[0].slots[0] = original_slot;
+    try std.testing.expectEqual(
+        before_malformed_callbacks + 1,
+        optimizer_native_property_read_callbacks.load(.monotonic),
+    );
 
     try machine.setProp(objects[0].asObj(), "later", Value.num(1));
-    const before_transition = optimizer_native_property_read_cache_hits.load(.monotonic);
+    const before_transition = optimizer_native_property_read_callbacks.load(.monotonic);
     const transitioned_outcome = try tryRunManagedNative(&machine, &compiled, &malformed_slots, null);
     const transitioned_result = switch (transitioned_outcome) {
         .complete => |value_word| value_word,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(@as(f64, 10), transitioned_result.asNum());
-    try std.testing.expectEqual(before_transition, optimizer_native_property_read_cache_hits.load(.monotonic));
+    try std.testing.expectEqual(before_transition + 1, optimizer_native_property_read_callbacks.load(.monotonic));
 }
 
 test "vm: optimizer native named getter resumes an exact catch once" {

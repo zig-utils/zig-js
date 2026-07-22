@@ -13,6 +13,7 @@ const optimizer = @import("optimizer.zig");
 const aarch64 = @import("aarch64.zig");
 const Value = @import("../value.zig").Value;
 const Shape = @import("../shape.zig").Shape;
+const Object = @import("../value.zig").Object;
 const moving_safepoint_backedge_interval: u32 = 32;
 
 pub const OperationKind = enum {
@@ -921,11 +922,15 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     const parallel_inline_caches = bc.ic_seqlock_enabled.load(.monotonic);
     for (native_operations, native_property_caches) |descriptor, *property_cache| {
         if (descriptor.origin >= chunk.code.items.len or descriptor.origin >= chunk.ics.len) continue;
-        const op = chunk.code.items[descriptor.origin].op;
+        const instruction = chunk.code.items[descriptor.origin];
+        const op = instruction.op;
         if (op != .get_prop and op != .set_prop) continue;
+        if (instruction.a >= chunk.names.items.len) return error.UnsupportedChunk;
+        const name = chunk.names.items[instruction.a];
         const snapshot = chunk.ics[descriptor.origin].snapshotMode(parallel_inline_caches) orelse continue;
         for (snapshot.shapes, snapshot.slots, 0..) |maybe_shape, slot, cache_index| {
             const shape = maybe_shape orelse continue;
+            if (shape.lookup(name) != slot) continue;
             property_cache.shape_tokens[cache_index] = @intFromPtr(shape);
             property_cache.slots[cache_index] = slot;
         }
@@ -2348,7 +2353,7 @@ fn emitLoopRegionTarget(
 fn compileAarch64(program: *const Program) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
     var memory = try jit.CodeMemory.init(
-        @as(usize, program.operations.len) * 64 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
+        @as(usize, program.operations.len) * 192 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
     );
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
@@ -2720,6 +2725,114 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
     }
 }
 
+const DirectPropertyRead = struct {
+    const Fallback = struct { branch: usize, compare: bool };
+
+    fallbacks: [12]Fallback = undefined,
+    fallback_count: usize = 0,
+    completions: [4]usize = undefined,
+    completion_count: usize = 0,
+
+    fn addFallback(self: *DirectPropertyRead, branch: usize, compare: bool) !void {
+        if (self.fallback_count >= self.fallbacks.len) return error.UnsupportedChunk;
+        self.fallbacks[self.fallback_count] = .{ .branch = branch, .compare = compare };
+        self.fallback_count += 1;
+    }
+
+    fn patchFallbacks(self: DirectPropertyRead, assembler: *aarch64.Assembler, callback: usize) !void {
+        for (self.fallbacks[0..self.fallback_count]) |fallback| {
+            if (fallback.compare)
+                try assembler.patchCompareBranch(fallback.branch, callback)
+            else
+                try assembler.patchConditionBranch(fallback.branch, callback);
+        }
+    }
+
+    fn addCompletion(self: *DirectPropertyRead, branch: usize) !void {
+        if (self.completion_count >= self.completions.len) return error.UnsupportedChunk;
+        self.completions[self.completion_count] = branch;
+        self.completion_count += 1;
+    }
+
+    fn patchCompletions(self: DirectPropertyRead, assembler: *aarch64.Assembler, completion: usize) !void {
+        for (self.completions[0..self.completion_count]) |branch|
+            try assembler.patchBranch(branch, completion);
+    }
+};
+
+fn objectByteOffset(comptime field: []const u8) !u12 {
+    return std.math.cast(u12, @offsetOf(Object, field)) orelse error.UnsupportedChunk;
+}
+
+fn emitZeroByteGuard(
+    assembler: *aarch64.Assembler,
+    direct: *DirectPropertyRead,
+    comptime field: []const u8,
+) !void {
+    try assembler.load8(10, 9, try objectByteOffset(field));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+}
+
+fn emitDirectNamedPropertyRead(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectPropertyRead {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop) or descriptor.input_count != 1 or
+        program.native_property_caches.len != program.native_operations.len)
+        return null;
+    const cache = program.native_property_caches[operation.immediate];
+    var usable_entries: usize = 0;
+    for (cache.shape_tokens, cache.slots) |shape_token, slot|
+        if (shape_token != 0 and slot < @as(u32, Object.inline_slot_capacity)) {
+            usable_entries += 1;
+        };
+    if (usable_entries == 0) return null;
+
+    var direct = DirectPropertyRead{};
+    try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
+    try assembler.load8(10, 10, 0);
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+
+    try assembler.load64(9, 14, try slotOffset(descriptor.first_input));
+    try assembler.movImmediate64(10, Value.boxed_kind_mask);
+    try assembler.andRegister64(11, 9, 10);
+    try assembler.movImmediate64(10, Value.object_kind_bits);
+    try assembler.compareRegister64(11, 10);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.movImmediate64(10, Value.boxed_payload_mask);
+    try assembler.andRegister64(9, 9, 10);
+
+    try assembler.load64(10, 9, try objectByteOffset("storage"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.load16(10, 9, try objectByteOffset("behavior"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+    try emitZeroByteGuard(assembler, &direct, "is_symbol");
+    try emitZeroByteGuard(assembler, &direct, "is_bigint");
+    try emitZeroByteGuard(assembler, &direct, "is_array");
+    try emitZeroByteGuard(assembler, &direct, "is_arguments");
+    try emitZeroByteGuard(assembler, &direct, "proxy_revoked");
+    try assembler.load64(10, 9, try objectByteOffset("private_data"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+
+    try assembler.load64(11, 9, try objectByteOffset("shape"));
+    for (cache.shape_tokens, cache.slots) |shape_token, slot| {
+        if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
+        try assembler.movImmediate64(10, shape_token);
+        try assembler.compareRegister64(11, 10);
+        const next_shape = try assembler.branchConditionPlaceholder(.ne);
+        const value_offset = @offsetOf(Object, "inline_slots") + @as(usize, @intCast(slot)) * @sizeOf(Value);
+        try assembler.load64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
+        try assembler.store64(10, 14, try slotOffset(operation.destination));
+        try direct.addCompletion(try assembler.branchPlaceholder());
+        try assembler.patchConditionBranch(next_shape, assembler.position());
+    }
+    return direct;
+}
+
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
     program: *const Program,
@@ -2742,6 +2855,10 @@ fn emitRuntimeOperation(
         assembler,
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
     );
+
+    const direct_property_read = try emitDirectNamedPropertyRead(assembler, program, operation, descriptor);
+    const callback_position = assembler.position();
+    if (direct_property_read) |direct| try direct.patchFallbacks(assembler, callback_position);
 
     try assembler.load64(17, 12, frameOffset("operation"));
     try assembler.compareImmediate64(17, 0);
@@ -2792,7 +2909,9 @@ fn emitRuntimeOperation(
     try assembler.patchConditionBranch(operation_trap, trap_position);
     try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
     try assembler.ret();
-    try assembler.patchBranch(done, assembler.position());
+    const completion_position = assembler.position();
+    try assembler.patchBranch(done, completion_position);
+    if (direct_property_read) |direct| try direct.patchCompletions(assembler, completion_position);
 }
 
 fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {
@@ -3648,8 +3767,9 @@ test "optimizer lowering publishes an executable named property read" {
     _ = try chunk.emit(.get_prop, name);
     _ = try chunk.emit(.ret, 0);
     try chunk.finalize();
-    var observed_shape: Shape = undefined;
-    chunk.ics[1].recordMode(&observed_shape, 7, false);
+    const root_shape = try Shape.createRoot(arena.allocator());
+    const observed_shape = try root_shape.transition("value");
+    chunk.ics[1].recordMode(observed_shape, observed_shape.slot, false);
     var plan = try optimizer.build(&chunk, std.testing.allocator);
     defer plan.deinit();
     var program = try lower(&chunk, &plan, std.testing.allocator);
@@ -3659,8 +3779,8 @@ test "optimizer lowering publishes an executable named property read" {
     try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
     try std.testing.expectEqual(@as(usize, 1), program.native_operation_names.len);
     try std.testing.expectEqual(@as(usize, 1), program.native_property_caches.len);
-    try std.testing.expectEqual(@intFromPtr(&observed_shape), program.native_property_caches[0].shape_tokens[0]);
-    try std.testing.expectEqual(@as(u32, 7), program.native_property_caches[0].slots[0]);
+    try std.testing.expectEqual(@intFromPtr(observed_shape), program.native_property_caches[0].shape_tokens[0]);
+    try std.testing.expectEqual(observed_shape.slot, program.native_property_caches[0].slots[0]);
     const operation = program.native_operations[0];
     try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 1), operation.input_count);
@@ -3681,8 +3801,8 @@ test "optimizer lowering publishes an executable named property read" {
         const owned_cache = metadata.propertyCacheFor(0) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings("value", owned_name);
         try std.testing.expect(owned_name.ptr != chunk.names.items[name].ptr);
-        try std.testing.expectEqual(@intFromPtr(&observed_shape), owned_cache.shape_tokens[0]);
-        try std.testing.expectEqual(@as(u32, 7), owned_cache.slots[0]);
+        try std.testing.expectEqual(@intFromPtr(observed_shape), owned_cache.shape_tokens[0]);
+        try std.testing.expectEqual(observed_shape.slot, owned_cache.slots[0]);
         try std.testing.expect(owned_cache != &program.native_property_caches[0]);
     }
 }
