@@ -52,6 +52,7 @@ pub const ValueKind = enum {
     eq_strict,
     neq_strict,
     to_numeric,
+    call,
 };
 
 pub const ValueNode = struct {
@@ -99,7 +100,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .end_finally => .finally_dispatch,
         .abrupt_return => .abrupt_return,
         .abrupt_break, .abrupt_continue => .abrupt_jump,
-        .call,
         .call_eval,
         .call_method,
         .call_spread,
@@ -551,7 +551,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 }
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
-    if (inst.op == .to_numeric) return depthEffect(inst).required;
+    if (inst.op == .to_numeric or inst.op == .call) return depthEffect(inst).required;
     const kind = terminalFrameStateKind(inst.op) orelse return null;
     if (kind != .call and kind != .effect) return null;
     return depthEffect(inst).required;
@@ -958,6 +958,24 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
+            .call => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                depth -= effect.removed;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .call,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth] = result;
+                depth += effect.added;
+            },
             .jump => {},
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1280,6 +1298,7 @@ fn supports(op: bc.Op) bool {
         .pop_handler,
         .push_completion,
         .to_numeric,
+        .call,
         => true,
         else => false,
     };
@@ -1525,7 +1544,7 @@ test "optimizer models abrupt return as a resumable terminal frame" {
     try std.testing.expectEqual(@as(u32, 4), plan.graph.handler_states[state.first_handler].finally_ip);
 }
 
-test "optimizer models a call as a pre-effect terminal frame" {
+test "optimizer models a call as an effectful value with normal flow" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -1545,7 +1564,11 @@ test "optimizer models a call as a pre-effect terminal frame" {
     const state = call_state orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 2), state.origin);
     try std.testing.expectEqual(@as(u32, 2), state.stack_count);
-    try std.testing.expectEqual(@as(usize, 0), plan.graph.returns.len);
+    try std.testing.expectEqual(@as(usize, 1), plan.graph.returns.len);
+    const result = plan.graph.returns[0].value;
+    try std.testing.expectEqual(ValueKind.call, plan.graph.nodes[result].kind);
+    try std.testing.expectEqual(@as(u64, 1), plan.graph.nodes[result].immediate);
+    try std.testing.expect(plan.graph.nodes[result].may_have_effect);
 }
 
 test "optimizer models to_numeric as an effectful value with normal flow" {

@@ -292,11 +292,17 @@ fn stageNativeOperationDescriptors(
             runtime_operation = operation;
         }
         const first_input: usize = if (runtime_operation) |operation| runtime: {
-            if (inst.op != .to_numeric or input_count != 1)
-                return error.UnsupportedChunk;
-            const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
-            if (source != operation.lhs) return error.UnsupportedChunk;
-            break :runtime source;
+            if (inst.op == .to_numeric) {
+                if (input_count != 1) return error.UnsupportedChunk;
+                const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
+                if (source != operation.lhs) return error.UnsupportedChunk;
+                break :runtime source;
+            }
+            if (inst.op == .call) {
+                const expected = std.math.add(u32, inst.a, 1) catch return error.UnsupportedChunk;
+                if (input_count == expected) break :runtime operation.lhs;
+            }
+            return error.UnsupportedChunk;
         } else staged: {
             if (scratch_slots.* + input_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
             const first = scratch_slots.*;
@@ -405,8 +411,8 @@ fn deterministicPathSteps(
 }
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
-    if (state.kind != .effect) return false;
-    for (graph.nodes) |node| if (node.kind == .to_numeric and node.block == state.block and
+    if (state.kind != .effect and state.kind != .call) return false;
+    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .call) and node.block == state.block and
         node.origin == state.origin)
     {
         return true;
@@ -540,6 +546,42 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .lhs = @intCast(input),
+                .immediate = node.origin,
+            });
+        },
+        .call => {
+            var state: ?optimizer.FrameState = null;
+            for (graph.frame_states) |candidate| if (candidate.kind == .call and
+                candidate.block == node.block and candidate.origin == node.origin)
+            {
+                if (state != null) return error.UnsupportedChunk;
+                state = candidate;
+            };
+            const call_state = state orelse return error.UnsupportedChunk;
+            const argument_count = std.math.cast(u32, node.immediate) orelse return error.UnsupportedChunk;
+            const input_count = std.math.add(u32, argument_count, 1) catch return error.UnsupportedChunk;
+            if (input_count > call_state.stack_count or
+                scratch_slots + input_count > jit.numeric_scratch_capacity)
+                return error.UnsupportedChunk;
+            const first_input = scratch_slots;
+            const stack_start: usize = call_state.first_value + call_state.local_count;
+            const source_start = stack_start + call_state.stack_count - input_count;
+            for (0..input_count) |input| {
+                const source = try resolveAlias(graph.frame_state_values[source_start + input], aliases);
+                try operations.append(allocator, .{
+                    .kind = .copy,
+                    .destination = @intCast(scratch_slots),
+                    .block = node.block,
+                    .lhs = @intCast(source),
+                });
+                scratch_slots += 1;
+            }
+            types[node.id] = .other;
+            try operations.append(allocator, .{
+                .kind = .runtime_operation,
+                .destination = @intCast(node.id),
+                .block = node.block,
+                .lhs = @intCast(first_input),
                 .immediate = node.origin,
             });
         },
@@ -2462,7 +2504,7 @@ fn emitRuntimeOperation(
 ) !void {
     if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
     const descriptor = program.native_operations[operation.immediate];
-    if (descriptor.first_input != operation.lhs or descriptor.input_count != 1 or
+    if (descriptor.first_input != operation.lhs or descriptor.input_count == 0 or
         descriptor.step_delta == 0 or (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
         descriptor.exceptional_target >= program.native_exceptional_targets.len))
         return error.UnsupportedChunk;
@@ -2996,7 +3038,7 @@ test "optimizer lowering publishes exact abrupt loop-jump side exits" {
     }
 }
 
-test "optimizer lowering publishes an exact pre-call side exit" {
+test "optimizer lowering publishes an executable ordinary call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -3011,23 +3053,26 @@ test "optimizer lowering publishes an exact pre-call side exit" {
     var program = try lower(&chunk, &plan, std.testing.allocator);
     defer program.deinit();
 
-    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u12, 2), side_exit.steps);
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(u32, 4), program.bytecode_steps);
     try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
-    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    const point = program.deopt_points[operation.deopt_index];
     try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
     try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
-    const map = program.stack_maps[side_exit.deopt_index];
+    const map = program.stack_maps[operation.deopt_index];
     try std.testing.expectEqual(@as(u64, 0b11), map.frame_pointer_slots);
-    try std.testing.expectEqual(@as(u64, 0), map.scratch_pointer_slots);
+    const input_roots = (@as(u64, 1) << @intCast(operation.first_input)) |
+        (@as(u64, 1) << @intCast(operation.first_input + 1));
+    try std.testing.expectEqual(input_roots, map.scratch_pointer_slots & input_roots);
     for (program.deopt_values[point.first_value .. point.first_value + point.local_count + point.stack_count]) |recovery|
         try std.testing.expectEqual(jit.RecoverySource.frame_slot, recovery.source);
-    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
-    const operation = program.native_operations[0];
     try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expectEqual(jit.NativeOperationDescriptor.none, operation.exceptional_target);
+    try std.testing.expectEqual(@as(u16, 3), operation.step_delta);
     try std.testing.expectEqual(@as(u32, 2), operation.origin);
     try std.testing.expectEqual(plan.graph.nodes.len + 2, @as(usize, program.scratch_slots));
 

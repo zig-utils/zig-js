@@ -3644,6 +3644,20 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         frame.operation_detail = operation_id;
         return @intFromEnum(jit.NativeOperationStatus.value);
     }
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and inputs.len >= 1) {
+        const values: []const Value = @ptrCast(inputs);
+        const result = callValue(vm, values[0], values[1..], Value.undef()) catch |err| return switch (err) {
+            error.Throw => thrown: {
+                frame.operation_value_bits = vm.exception.rawBits();
+                break :thrown @intFromEnum(jit.NativeOperationStatus.catchable_exception);
+            },
+            error.OutOfMemory => @intFromEnum(jit.NativeOperationStatus.out_of_memory),
+            error.OptShortCircuit => @intFromEnum(jit.NativeOperationStatus.host_trap),
+        };
+        frame.operation_value_bits = result.rawBits();
+        frame.operation_detail = operation_id;
+        return @intFromEnum(jit.NativeOperationStatus.value);
+    }
     return @intFromEnum(jit.NativeOperationStatus.host_trap);
 }
 
@@ -3955,6 +3969,13 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.to_numeric);
     metadata.descriptors[0].exceptional_target = 0;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].exceptional_target = jit.NativeOperationDescriptor.none;
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call);
+    metadata.descriptors[0].input_count = 0;
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
@@ -7974,14 +7995,14 @@ test "vm: optimizer abrupt break side exit preserves finally completion" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer pre-call side exit resumes a function-valued parameter" {
+test "vm: optimizer native call resumes a function-valued parameter" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const source =
         \\function plus(x) { return x + 5; }
-        \\function invoke(f, x) { const y = f(x); return y + 1; }
+        \\function invoke(f, x) { const y = f(x); return y; }
         \\invoke(plus, 0); invoke(plus, 1); invoke(plus, 2); invoke(plus, 3); invoke(plus, 4);
         \\invoke(plus, 5); invoke(plus, 6); invoke(plus, 7); invoke(plus, 8); invoke(plus, 9)
     ;
@@ -7994,8 +8015,9 @@ test "vm: optimizer pre-call side exit resumes a function-valued parameter" {
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
 
-    try std.testing.expectEqual(@as(f64, 15), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
     const invoke_chunk = root.fns.items[1].chunk.?;
     const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
@@ -8006,9 +8028,13 @@ test "vm: optimizer pre-call side exit resumes a function-valued parameter" {
     }
     const point = call_point orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 15), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
@@ -8049,15 +8075,18 @@ test "vm: optimizer pre-tail-call side exit resumes a function-valued parameter"
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer pre-call side exit preserves caught call exceptions" {
+test "vm: optimizer native call resumes an exact caught exception" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const source =
-        \\function invoke(f) { try { const y = f(); return y; } catch { return 99; } }
-        \\invoke(0); invoke(1); invoke(2); invoke(3); invoke(4);
-        \\invoke(5); invoke(6); invoke(7); invoke(8); invoke(9)
+        \\let calls = 0;
+        \\function good() { return 7; }
+        \\function bad() { calls = calls + 1; throw 91; }
+        \\function invoke(f) { try { const y = f(); return y; } catch (e) { return e + calls; } }
+        \\invoke(good); invoke(good); invoke(good); invoke(good); invoke(good);
+        \\invoke(good); invoke(good); invoke(good); invoke(good); invoke(bad)
     ;
     var parser = try Parser.init(allocator, source);
     const program = try parser.parseProgram();
@@ -8069,9 +8098,9 @@ test "vm: optimizer pre-call side exit preserves caught call exceptions" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
 
-    try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
-    const invoke_chunk = root.fns.items[0].chunk.?;
+    const invoke_chunk = root.fns.items[2].chunk.?;
     const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
     var call_point: ?jit.DeoptPoint = null;
     for (artifact.deopt.?.points) |point| {
@@ -8080,10 +8109,59 @@ test "vm: optimizer pre-call side exit preserves caught call exceptions" {
     const point = call_point orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 1), point.handler_count);
     try std.testing.expect(artifact.deopt.?.handlers[point.first_handler].catch_ip != jit.RecoveryHandler.none);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operation.bytecode_op);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expectEqual(
+        jit.NativeExceptionalTargetKind.catch_,
+        operations.exceptional_targets[operation.exceptional_target].kind,
+    );
 
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 99), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer native call resumes finally and rethrows once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let marker = 0;
+        \\let calls = 0;
+        \\function good() { return 7; }
+        \\function bad() { calls = calls + 1; throw 91; }
+        \\function invoke(f) { try { const y = f(); return y; } finally { marker = 41; } }
+        \\invoke(good); invoke(good); invoke(good); invoke(good); invoke(good);
+        \\invoke(good); invoke(good); invoke(good); invoke(good); invoke(good);
+        \\try { invoke(bad); } catch (e) { marker = marker + e; }
+        \\marker + calls
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 133), (try run(&machine, root, null)).asNum());
+    const invoke_chunk = root.fns.items[2].chunk.?;
+    const artifact = invoke_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operation.bytecode_op);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    const target = operations.exceptional_targets[operation.exceptional_target];
+    try std.testing.expectEqual(jit.NativeExceptionalTargetKind.finally_, target.kind);
+    try std.testing.expectEqual(target.unwind_stack_depth + 2, target.target_stack_depth);
 }
 
 test "vm: optimizer pre-construction side exit resumes a constructor parameter" {
