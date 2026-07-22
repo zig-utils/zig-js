@@ -8385,6 +8385,64 @@ test "vm: optimizer independent loop latches converge" {
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
 
+test "vm: optimizer conditional loop exit converges" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function conditionalBreak(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) {
+        \\    if (i === 2) break;
+        \\    sum = sum + 1; i = i + 1;
+        \\  }
+        \\  return sum;
+        \\}
+        \\conditionalBreak(5); conditionalBreak(5); conditionalBreak(5); conditionalBreak(5);
+        \\conditionalBreak(5); conditionalBreak(5); conditionalBreak(5); conditionalBreak(5);
+        \\conditionalBreak(5); conditionalBreak(5)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 2), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 2), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+
+    // A pending host termination remains owned by the exact interpreter
+    // checkpoint. Optimizer OSR reconstructs the current header before the
+    // boundary, then bytecode consumes the trap at precisely step 1,024.
+    var shell_timeout: std.atomic.Value(bool) = .init(true);
+    var termination_requested: std.atomic.Value(bool) = .init(false);
+    machine.shell_timeout_check_flag = &shell_timeout;
+    machine.termination_request_flag = &termination_requested;
+    machine.steps = 970;
+    var trap_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
+    var trap_frame = Frame{ .slots = &trap_slots, .parent = null };
+    const trap_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectError(error.Throw, run(&machine, function_chunk, &trap_frame));
+    try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+    try std.testing.expect(!shell_timeout.load(.acquire));
+    try std.testing.expect(termination_requested.load(.acquire));
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+}
+
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
