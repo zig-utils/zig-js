@@ -14957,7 +14957,7 @@ export fn JSC__VM__deleteAllCode(vm_ref: ?*anyopaque, global: JSContextRef) call
     if (context.c_api_group != vm_ref) return;
     privateVMDrainMicrotasks(group);
     context.clearModuleRegistry();
-    group.primary.jit_owner.clear();
+    group.primary.clearJitCode();
     group.primary.requestGarbageCollection();
 }
 

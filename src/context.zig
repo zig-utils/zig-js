@@ -3035,6 +3035,11 @@ pub const Context = struct {
     gc_cooperative_rendezvous_ns_max: std.atomic.Value(u64) = .init(0),
     gc_cooperative_bytes_reset_total: std.atomic.Value(usize) = .init(0),
     gc_cooperative_bytes_at_profile_start: std.atomic.Value(usize) = .init(0),
+    /// Shared conductor for heap collection publication and Class-A optimizer
+    /// invalidation. A collector holds it from election through completion;
+    /// invalidation takes it before bumping the JIT generation, so no stop can
+    /// appear behind a peer waiting for that collection.
+    local_jit_gc_conductor: JitGcConductor = .{},
     gc_cooperative_tranche_bytes: usize = 1024 * 1024 * 1024,
     gc_phase_profile_enabled: std.atomic.Value(bool) = .init(false),
     gc_phase_started_ns: std.atomic.Value(u64) = .init(0),
@@ -3560,6 +3565,13 @@ pub const Context = struct {
         }
     };
 
+    pub const JitGcConductor = struct {
+        lock: std.atomic.Mutex = .unlocked,
+        class_a_stops: std.atomic.Value(u64) = .init(0),
+        wait_iterations: std.atomic.Value(u64) = .init(0),
+        wait_iterations_max: std.atomic.Value(u64) = .init(0),
+    };
+
     /// Heap, root binding, realm registry, and cell backing are allocated together so
     /// GC-enabled context creation/destruction pays one GPA allocation instead
     /// of three while keeping each subobject's address stable.
@@ -3568,6 +3580,7 @@ pub const Context = struct {
         heap: GcHeap,
         backing: GcCellBacking,
         realms: GcRealmRegistry,
+        conductor: JitGcConductor,
     };
     pub const CooperativeGcProfile = struct {
         attempts: u64,
@@ -3888,6 +3901,7 @@ pub const Context = struct {
             self.gc_realm_id = GcCellBacking.owner_realm;
             gc_state.binding = .{ .context = self };
             gc_state.realms = .{ .owner = self };
+            gc_state.conductor = .{};
             // GC cells are individually collectable, but their allocation shape
             // is regular: one 16-byte-aligned slab per cell. Use the reusable
             // size-class backing for every GC mode. Keep the heap/backing in
@@ -5548,6 +5562,40 @@ pub const Context = struct {
         }
     }
 
+    fn jitGcConductor(self: *Context) *JitGcConductor {
+        return if (self.gc_state) |state| &state.conductor else &self.local_jit_gc_conductor;
+    }
+
+    fn tryEnterJitGcConductor(self: *Context) bool {
+        return self.jitGcConductor().lock.tryLock();
+    }
+
+    fn enterJitGcConductor(self: *Context) void {
+        var waited: u64 = 0;
+        while (!self.tryEnterJitGcConductor()) : (waited += 1) {
+            if ((waited & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        if (waited != 0) {
+            const conductor = self.jitGcConductor();
+            _ = conductor.wait_iterations.fetchAdd(waited, .monotonic);
+            self.recordParallelGcMax(&conductor.wait_iterations_max, waited);
+        }
+    }
+
+    fn leaveJitGcConductor(self: *Context) void {
+        self.jitGcConductor().lock.unlock();
+    }
+
+    /// Class-A invalidation shares the collection conductor. The owner bumps
+    /// its generation and jettisons tiers before this scope reopens either
+    /// native entry or a later collection publication window.
+    pub fn clearJitCode(self: *Context) void {
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+        (self.shared_jit_owner orelse &self.jit_owner).clear();
+        _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
+    }
+
     /// Run a precise mark-sweep over the GC heap (Phase 7). Single-threaded, this
     /// is precise: persistent Context roots plus registered active Interpreter
     /// state. With spawned threads it is sound only when this thread holds the
@@ -5569,6 +5617,9 @@ pub const Context = struct {
         if (self.gc_par_collector.load(.acquire) != null) {
             return;
         }
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+        if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
         self.finishConcurrentGCIfActive(); // close or abort any in-flight mark first
         h.collect();
         wasm_api.collectWasmGarbage(self);
@@ -5604,6 +5655,11 @@ pub const Context = struct {
         }
         if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
             return .{ .status = .unsupported };
+        if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
+            return .{ .status = .unsupported };
+
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
             return .{ .status = .unsupported };
 
@@ -5645,6 +5701,9 @@ pub const Context = struct {
         const h = self.gc orelse return;
         if (self.hasRunningJsThreads()) return;
         if (self.gc_par_collector.load(.acquire) != null) return;
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+        if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
         self.finishConcurrentGCIfActive();
         if (h.shouldCollectOld()) {
             h.collect();
@@ -5681,6 +5740,9 @@ pub const Context = struct {
         } else if (self.hasRunningJsThreads()) {
             return false;
         }
+        self.enterJitGcConductor();
+        defer self.leaveJitGcConductor();
+        if (self.gc_par_collector.load(.acquire) != null) return false;
         self.finishConcurrentGCIfActive();
         self.gc_scan_native_stack = true;
         defer self.gc_scan_native_stack = false;
@@ -5695,6 +5757,8 @@ pub const Context = struct {
         if (!h.parallel) return false;
         if (gc_runtime.inTraceSensitiveLock()) return false;
         if (self.shouldDeferParallelGcRetry()) return false;
+        if (!self.tryEnterJitGcConductor()) return false;
+        defer self.leaveJitGcConductor();
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) return false;
         _ = self.gc_par_attempts.fetchAdd(1, .monotonic);
         defer self.gc_par_collector.store(null, .release);
@@ -5874,6 +5938,12 @@ pub const Context = struct {
             _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
             return;
         }
+        if (!self.tryEnterJitGcConductor()) {
+            if (self.gc_par_request.load(.acquire) != 0) self.joinCooperativeGcRequest(machine);
+            return;
+        }
+        defer self.leaveJitGcConductor();
+        if (self.gc_par_collector.load(.acquire) != null) return;
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
             if (self.gc_par_request.load(.acquire) != 0) self.joinCooperativeGcRequest(machine);
             return;
@@ -6024,6 +6094,12 @@ pub const Context = struct {
         // quiescent full collection remains the reclaim fallback.
         if (self.shouldDeferParallelGcRetry()) return;
         if (!h.shouldCollect()) return;
+        if (!self.tryEnterJitGcConductor()) return;
+        defer self.leaveJitGcConductor();
+        if (self.gc_par_collector.load(.acquire)) |collector| {
+            if (collector != machine) self.publishParallelRoots(machine);
+            return;
+        }
         // Elect a single collector; losers publish and resume.
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
             self.publishParallelRoots(machine);
@@ -15542,6 +15618,44 @@ fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void
     try std.testing.expectEqual(@as(f64, 362), handle.get().asObj().getOwn("marker").?.asNum());
     try std.testing.expectEqual(artifact, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
     try std.testing.expect(ctx.gc_cell_backing.?.stats().chunks < backing_before.chunks);
+}
+
+test "JIT Class-A invalidation waits for the shared GC conductor" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+    });
+    defer ctx.destroy();
+    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+    const generation_before = owner.invalidation_generation.load(.acquire);
+    const Shared = struct {
+        context: *Context,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn invalidate(shared: *@This()) void {
+            shared.started.store(true, .release);
+            shared.context.clearJitCode();
+            shared.finished.store(true, .release);
+        }
+    };
+
+    ctx.enterJitGcConductor();
+    var shared = Shared{ .context = ctx };
+    var invalidator = try std.Thread.spawn(.{}, Shared.invalidate, .{&shared});
+    while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
+    for (0..256) |_| std.Thread.yield() catch {};
+    try std.testing.expect(!shared.finished.load(.acquire));
+    try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
+    ctx.leaveJitGcConductor();
+    invalidator.join();
+
+    try std.testing.expect(shared.finished.load(.acquire));
+    try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
+    try std.testing.expect(ctx.jitGcConductor().wait_iterations.load(.acquire) != 0);
 }
 
 test "optimizer live safepoint relocates a recovery-only object local" {
