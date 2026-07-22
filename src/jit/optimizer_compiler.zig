@@ -2725,7 +2725,7 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
     }
 }
 
-const DirectPropertyRead = struct {
+const DirectPropertyAccess = struct {
     const Fallback = struct { branch: usize, compare: bool };
 
     fallbacks: [12]Fallback = undefined,
@@ -2733,13 +2733,13 @@ const DirectPropertyRead = struct {
     completions: [4]usize = undefined,
     completion_count: usize = 0,
 
-    fn addFallback(self: *DirectPropertyRead, branch: usize, compare: bool) !void {
+    fn addFallback(self: *DirectPropertyAccess, branch: usize, compare: bool) !void {
         if (self.fallback_count >= self.fallbacks.len) return error.UnsupportedChunk;
         self.fallbacks[self.fallback_count] = .{ .branch = branch, .compare = compare };
         self.fallback_count += 1;
     }
 
-    fn patchFallbacks(self: DirectPropertyRead, assembler: *aarch64.Assembler, callback: usize) !void {
+    fn patchFallbacks(self: DirectPropertyAccess, assembler: *aarch64.Assembler, callback: usize) !void {
         for (self.fallbacks[0..self.fallback_count]) |fallback| {
             if (fallback.compare)
                 try assembler.patchCompareBranch(fallback.branch, callback)
@@ -2748,13 +2748,13 @@ const DirectPropertyRead = struct {
         }
     }
 
-    fn addCompletion(self: *DirectPropertyRead, branch: usize) !void {
+    fn addCompletion(self: *DirectPropertyAccess, branch: usize) !void {
         if (self.completion_count >= self.completions.len) return error.UnsupportedChunk;
         self.completions[self.completion_count] = branch;
         self.completion_count += 1;
     }
 
-    fn patchCompletions(self: DirectPropertyRead, assembler: *aarch64.Assembler, completion: usize) !void {
+    fn patchCompletions(self: DirectPropertyAccess, assembler: *aarch64.Assembler, completion: usize) !void {
         for (self.completions[0..self.completion_count]) |branch|
             try assembler.patchBranch(branch, completion);
     }
@@ -2766,31 +2766,18 @@ fn objectByteOffset(comptime field: []const u8) !u12 {
 
 fn emitZeroByteGuard(
     assembler: *aarch64.Assembler,
-    direct: *DirectPropertyRead,
+    direct: *DirectPropertyAccess,
     comptime field: []const u8,
 ) !void {
     try assembler.load8(10, 9, try objectByteOffset(field));
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
 }
 
-fn emitDirectNamedPropertyRead(
+fn emitDirectPropertyGuards(
     assembler: *aarch64.Assembler,
-    program: *const Program,
-    operation: Operation,
+    direct: *DirectPropertyAccess,
     descriptor: jit.NativeOperationDescriptor,
-) !?DirectPropertyRead {
-    if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop) or descriptor.input_count != 1 or
-        program.native_property_caches.len != program.native_operations.len)
-        return null;
-    const cache = program.native_property_caches[operation.immediate];
-    var usable_entries: usize = 0;
-    for (cache.shape_tokens, cache.slots) |shape_token, slot|
-        if (shape_token != 0 and slot < @as(u32, Object.inline_slot_capacity)) {
-            usable_entries += 1;
-        };
-    if (usable_entries == 0) return null;
-
-    var direct = DirectPropertyRead{};
+) !void {
     try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
     try assembler.load8(10, 10, 0);
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
@@ -2809,16 +2796,36 @@ fn emitDirectNamedPropertyRead(
     try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
     try assembler.load16(10, 9, try objectByteOffset("behavior"));
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
-    try emitZeroByteGuard(assembler, &direct, "is_symbol");
-    try emitZeroByteGuard(assembler, &direct, "is_bigint");
-    try emitZeroByteGuard(assembler, &direct, "is_array");
-    try emitZeroByteGuard(assembler, &direct, "is_arguments");
-    try emitZeroByteGuard(assembler, &direct, "proxy_revoked");
+    try emitZeroByteGuard(assembler, direct, "is_symbol");
+    try emitZeroByteGuard(assembler, direct, "is_bigint");
+    try emitZeroByteGuard(assembler, direct, "is_array");
+    try emitZeroByteGuard(assembler, direct, "is_arguments");
+    try emitZeroByteGuard(assembler, direct, "proxy_revoked");
     try assembler.load64(10, 9, try objectByteOffset("private_data"));
     try assembler.compareImmediate64(10, 0);
     try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
-
     try assembler.load64(11, 9, try objectByteOffset("shape"));
+}
+
+fn emitDirectNamedPropertyRead(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectPropertyAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop) or descriptor.input_count != 1 or
+        program.native_property_caches.len != program.native_operations.len)
+        return null;
+    const cache = program.native_property_caches[operation.immediate];
+    var usable_entries: usize = 0;
+    for (cache.shape_tokens, cache.slots) |shape_token, slot|
+        if (shape_token != 0 and slot < @as(u32, Object.inline_slot_capacity)) {
+            usable_entries += 1;
+        };
+    if (usable_entries == 0) return null;
+
+    var direct = DirectPropertyAccess{};
+    try emitDirectPropertyGuards(assembler, &direct, descriptor);
     for (cache.shape_tokens, cache.slots) |shape_token, slot| {
         if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
         try assembler.movImmediate64(10, shape_token);
@@ -2826,6 +2833,59 @@ fn emitDirectNamedPropertyRead(
         const next_shape = try assembler.branchConditionPlaceholder(.ne);
         const value_offset = @offsetOf(Object, "inline_slots") + @as(usize, @intCast(slot)) * @sizeOf(Value);
         try assembler.load64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
+        try assembler.store64(10, 14, try slotOffset(operation.destination));
+        try direct.addCompletion(try assembler.branchPlaceholder());
+        try assembler.patchConditionBranch(next_shape, assembler.position());
+    }
+    return direct;
+}
+
+fn emitDirectNamedPropertyWrite(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectPropertyAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.set_prop) or descriptor.input_count != 2 or
+        program.native_property_caches.len != program.native_operations.len)
+        return null;
+    const cache = program.native_property_caches[operation.immediate];
+    var usable_entries: usize = 0;
+    for (cache.shape_tokens, cache.slots) |shape_token, slot|
+        if (shape_token != 0 and slot < @as(u32, Object.inline_slot_capacity)) {
+            usable_entries += 1;
+        };
+    if (usable_entries == 0) return null;
+
+    var direct = DirectPropertyAccess{};
+    try emitDirectPropertyGuards(assembler, &direct, descriptor);
+    for (cache.shape_tokens, cache.slots) |shape_token, slot| {
+        if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
+        try assembler.movImmediate64(10, shape_token);
+        try assembler.compareRegister64(11, 10);
+        const next_shape = try assembler.branchConditionPlaceholder(.ne);
+        try assembler.load64(17, 12, frameOffset("property_write_barrier"));
+        try assembler.compareImmediate64(17, 0);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+
+        try assembler.pushPair(8, 12);
+        try assembler.pushPair(13, 14);
+        try assembler.pushPair(15, 16);
+        try assembler.pushPair(17, 30);
+        try assembler.load64(0, 14, try slotOffset(descriptor.first_input));
+        try assembler.load64(1, 14, try slotOffset(descriptor.first_input + 1));
+        try assembler.branchLinkRegister(17);
+        try assembler.popPair(17, 30);
+        try assembler.popPair(15, 16);
+        try assembler.popPair(13, 14);
+        try assembler.popPair(8, 12);
+
+        try assembler.load64(9, 14, try slotOffset(descriptor.first_input));
+        try assembler.movImmediate64(10, Value.boxed_payload_mask);
+        try assembler.andRegister64(9, 9, 10);
+        try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 1));
+        const value_offset = @offsetOf(Object, "inline_slots") + @as(usize, @intCast(slot)) * @sizeOf(Value);
+        try assembler.store64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
         try assembler.store64(10, 14, try slotOffset(operation.destination));
         try direct.addCompletion(try assembler.branchPlaceholder());
         try assembler.patchConditionBranch(next_shape, assembler.position());
@@ -2856,9 +2916,10 @@ fn emitRuntimeOperation(
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
     );
 
-    const direct_property_read = try emitDirectNamedPropertyRead(assembler, program, operation, descriptor);
+    const direct_property_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+        try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor);
     const callback_position = assembler.position();
-    if (direct_property_read) |direct| try direct.patchFallbacks(assembler, callback_position);
+    if (direct_property_access) |direct| try direct.patchFallbacks(assembler, callback_position);
 
     try assembler.load64(17, 12, frameOffset("operation"));
     try assembler.compareImmediate64(17, 0);
@@ -2911,7 +2972,7 @@ fn emitRuntimeOperation(
     try assembler.ret();
     const completion_position = assembler.position();
     try assembler.patchBranch(done, completion_position);
-    if (direct_property_read) |direct| try direct.patchCompletions(assembler, completion_position);
+    if (direct_property_access) |direct| try direct.patchCompletions(assembler, completion_position);
 }
 
 fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {

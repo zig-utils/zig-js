@@ -912,6 +912,7 @@ var optimizer_native_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_read_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_read_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_property_write_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -3561,6 +3562,10 @@ fn nativeRemainder(a: f64, b: f64) callconv(.c) f64 {
     return numberRemainder(a, b);
 }
 
+fn nativePropertyWriteBarrier(object_bits: u64, value_bits: u64) callconv(.c) void {
+    gc_mod.barrierValueFrom(Value.fromRawBits(object_bits).asObj(), Value.fromRawBits(value_bits));
+}
+
 fn isExactUnsigned32(value_: Value) bool {
     if (!value_.isNumber()) return false;
     const number = value_.asNum();
@@ -3939,6 +3944,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeGetIndex(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_prop) and inputs.len == 2) {
+        if (builtin.is_test) _ = optimizer_native_property_write_callbacks.fetchAdd(1, .monotonic);
         const name = metadata.nameFor(operation_id) orelse
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
@@ -4986,6 +4992,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .checkpoint = nativeCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
+        .property_write_barrier = nativePropertyWriteBarrier,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -5058,6 +5065,7 @@ fn tryRunOsrNative(
         .checkpoint = nativeCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
+        .property_write_barrier = nativePropertyWriteBarrier,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -9731,7 +9739,6 @@ test "vm: optimizer native named write returns and stores its value" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const hits_before = optimizer_native_hits.load(.monotonic);
-    const cache_hits_before = optimizer_native_property_write_cache_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 18), (try run(&machine, root, null)).asNum());
     const write_chunk = root.fns.items[0].chunk.?;
@@ -9744,8 +9751,12 @@ test "vm: optimizer native named write returns and stores its value" {
     try std.testing.expectEqualStrings("value", operations.nameFor(0).?);
     try std.testing.expect((operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult).shape_tokens[0] != 0);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+    const property_callbacks_before = optimizer_native_property_write_callbacks.load(.monotonic);
     try std.testing.expectEqual(@as(f64, 18), (try run(&machine, root, null)).asNum());
-    try std.testing.expect(optimizer_native_property_write_cache_hits.load(.monotonic) > cache_hits_before);
+    try std.testing.expectEqual(
+        property_callbacks_before + 1,
+        optimizer_native_property_write_callbacks.load(.monotonic),
+    );
 }
 
 test "vm: optimizer native property cache uses the shared write protocol" {
@@ -9777,6 +9788,7 @@ test "vm: optimizer native property cache uses the shared write protocol" {
     defer compiled.deinit();
     var slots = [_]Value{ target, Value.num(9) };
     const hits_before = optimizer_native_property_write_cache_hits.load(.monotonic);
+    const callbacks_before = optimizer_native_property_write_callbacks.load(.monotonic);
     const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
     const result = switch (outcome) {
         .complete => |value_word| value_word,
@@ -9785,6 +9797,35 @@ test "vm: optimizer native property cache uses the shared write protocol" {
     try std.testing.expectEqual(@as(f64, 9), result.asNum());
     try std.testing.expectEqual(@as(f64, 9), (try machine.getProperty(target, "value")).asNum());
     try std.testing.expectEqual(hits_before + 1, optimizer_native_property_write_cache_hits.load(.monotonic));
+    try std.testing.expectEqual(callbacks_before + 1, optimizer_native_property_write_callbacks.load(.monotonic));
+
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    const nested_value = try machine.newObject();
+    slots[1] = nested_value;
+    const before_direct = optimizer_native_property_write_callbacks.load(.monotonic);
+    const direct_outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const direct_result = switch (direct_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(nested_value.rawBits(), direct_result.rawBits());
+    try std.testing.expectEqual(nested_value.rawBits(), (try machine.getProperty(target, "value")).rawBits());
+    try std.testing.expectEqual(before_direct, optimizer_native_property_write_callbacks.load(.monotonic));
+
+    try machine.setProp(target.asObj(), "later", Value.num(1));
+    slots[1] = Value.num(12);
+    const before_transition = optimizer_native_property_write_callbacks.load(.monotonic);
+    const transition_outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const transition_result = switch (transition_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 12), transition_result.asNum());
+    try std.testing.expectEqual(@as(f64, 12), (try machine.getProperty(target, "value")).asNum());
+    try std.testing.expectEqual(
+        before_transition + 1,
+        optimizer_native_property_write_callbacks.load(.monotonic),
+    );
 }
 
 test "vm: native property cache serializes concurrent existing-slot reads and writes" {

@@ -473,6 +473,10 @@ pub const NativeFrame = extern struct {
     /// reason. Generated code must not interpret it unless the descriptor's
     /// operation kind defines that status.
     operation_detail: u64 = 0,
+    /// Narrow, non-allocating write barrier used after generated property
+    /// guards prove an existing inline data slot. The raw object/value words
+    /// remain rooted in optimizer scratch for the entire callback.
+    property_write_barrier: ?*const fn (object_bits: u64, value_bits: u64) callconv(.c) void = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
