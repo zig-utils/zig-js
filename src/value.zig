@@ -4471,6 +4471,20 @@ pub const Value = struct {
     pub inline fn strIsLatin1(self: Value) bool {
         return self.asStringCell().isLatin1();
     }
+    /// The string's bytes as canonical **WTF-8**, regardless of how the cell
+    /// physically stores them. Today (WTF-8 storage) this always borrows
+    /// `.bytes` with no allocation; once flat-latin1 storage is active it
+    /// re-encodes a flat cell's 1-byte-per-unit image into `arena`. Every reader
+    /// that interprets the bytes as WTF-8 — decoders, code-unit iteration, UTF-8
+    /// egress, or copying into a WTF-8-expecting string constructor (incl.
+    /// slice/substring re-wrap) — must obtain its bytes through this rather than
+    /// `asStr()`. Byte-canonical readers (equality via the content hash, length,
+    /// hashing) keep using `asStr()`. Caller has checked `isString()`.
+    pub fn asWtf8(self: Value, arena: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        const cell = self.asStringCell();
+        if (strcell.isFlatLatin1(cell.hash)) return strcell.latin1FlatToWtf8(arena, cell.bytes);
+        return cell.bytes;
+    }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);
     }

@@ -6958,6 +6958,25 @@ pub const Interpreter = struct {
         return v.toString(self.arena);
     }
 
+    /// Like `toStringV`, but a string result is returned as canonical WTF-8 via
+    /// `Value.asWtf8` (re-encoding a flat-latin1 cell). Use this — not
+    /// `toStringV` — at every site that feeds the coerced string into WTF-8
+    /// decoding/slicing logic, so a flat-stored receiver is seen as WTF-8. A
+    /// number/boolean/etc. renders to ASCII, for which `asWtf8`/`toString` agree.
+    pub fn toStringWtf8(self: *Interpreter, v: Value) EvalError![]const u8 {
+        if (v.isObject() and v.asObj().is_symbol)
+            return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+        if (v.isObject()) {
+            const prim = try self.toPrimitive(v, .string);
+            if (prim.isObject() and prim.asObj().is_symbol)
+                return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
+            if (prim.isString()) return prim.asWtf8(self.arena);
+            return prim.toString(self.arena);
+        }
+        if (v.isString()) return v.asWtf8(self.arena);
+        return v.toString(self.arena);
+    }
+
     /// ToNumber(v): runs `[Symbol.toPrimitive]`/`valueOf`/`toString` for an
     /// object (propagating throws), and a TypeError for a Symbol.
     pub fn toNumberV(self: *Interpreter, v: Value) EvalError!f64 {
@@ -13197,7 +13216,7 @@ pub const Interpreter = struct {
                 // names both share (slice/indexOf/lastIndexOf/includes/concat/at).
                 if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString() and o.getOwn(name) == null) {
                     const bp = o.boxedPrimitive().?;
-                    if (try self.stringMethod(bp.asStr(), name, args, true, bp.strIsAscii())) |r| return r;
+                    if (try self.stringMethod(try bp.asWtf8(self.arena), name, args, true, bp.strIsAscii())) |r| return r;
                 }
                 if (o.is_array and o.getOwn(name) == null) return try self.arrayMethod(o, name, args);
                 // Generic Array.prototype methods on an array-like `this`
@@ -13208,7 +13227,7 @@ pub const Interpreter = struct {
                 // Generic String.prototype methods coerce `this` to string
                 // (`String.prototype.split.call(obj)`).
                 if (o.getOwn(name) == null and isStringGeneric(name)) {
-                    return try self.stringMethod(try self.toStringV(recv), name, args, true, false);
+                    return try self.stringMethod(try self.toStringWtf8(recv), name, args, true, false);
                 }
                 // `Object.prototype.valueOf` for an ordinary object returns the
                 // object itself (ToObject(this)). Reached only after the kind
@@ -13224,7 +13243,7 @@ pub const Interpreter = struct {
                     }
                 }
             },
-            .string => return try self.stringMethod(recv.asStr(), name, args, true, recv.strIsAscii()),
+            .string => return try self.stringMethod(try recv.asWtf8(self.arena), name, args, true, recv.strIsAscii()),
             .number => {
                 if (try self.numberMethod(recv.asNum(), name, args)) |r| return r;
                 if (isStringGeneric(name)) return try self.stringMethod(try recv.toString(self.arena), name, args, true, false);
@@ -31200,7 +31219,7 @@ fn stringProtoMethod(comptime name: []const u8) value.NativeFn {
             if (comptime std.mem.eql(u8, name, "replaceAll"))
                 if (try self.replaceAllProtocolDispatch(this, args)) |r| return r;
             if (try self.stringProtocolDispatch(name, this, args)) |r| return r;
-            const s = try self.toStringV(this);
+            const s = try self.toStringWtf8(this);
             return (try self.stringMethod(s, name, args, false, this.isString() and this.strIsAscii())) orelse Value.undef();
         }
     }.call;
@@ -31660,7 +31679,7 @@ fn regexpSymbolMethod(comptime op: []const u8) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!this.isObject()) return self.throwError("TypeError", "RegExp.prototype[Symbol." ++ op ++ "] called on a non-object");
             const str_src = if (args.len > 0) args[0] else Value.undef();
-            const str = try self.toStringV(str_src);
+            const str = try self.toStringWtf8(str_src);
             if (comptime std.mem.eql(u8, op, "match")) {
                 return try self.regexpMatch(this, str);
             }

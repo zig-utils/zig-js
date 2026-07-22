@@ -60,6 +60,28 @@ pub const latin1_flag: u64 = @as(u64, 1) << 62;
 /// a cell's hash against a raw `hashBytes`.
 pub const content_hash_mask: u64 = ~(ascii_flag | latin1_flag);
 
+/// Master switch for the flat-latin1 storage representation (the flat-string
+/// model). While **false** every cell stores canonical WTF-8, `isFlatLatin1` is
+/// never observed as "stored flat", and `Value.asWtf8` borrows `.bytes` — so the
+/// reader-migration (routing every WTF-8-interpreting reader through `asWtf8`)
+/// is a pure no-op that can land and be verified byte-identical first. Flipping
+/// it to **true** (a later, single change) makes the constructors store a
+/// latin1-but-not-ASCII string as its flat 1-byte-per-unit image, makes
+/// `asWtf8` re-encode those cells on demand, and switches the debug WTF-8
+/// tripwire to a representation-aware check — all at once, so storage and
+/// readers never disagree. Keeping it a comptime const means the disabled path
+/// compiles to exactly today's behavior.
+pub const flat_storage_active: bool = false;
+
+/// True when the cell whose content hash is `h` is *stored* as flat latin1
+/// (1 raw byte per code unit) rather than WTF-8. Latin1-but-not-ASCII content is
+/// the flat case; but only when `flat_storage_active`, since that is the only
+/// time the constructors actually lay it out flat. Readers use this to decide
+/// whether `.bytes` must be re-encoded to WTF-8 (see `Value.asWtf8`).
+pub fn isFlatLatin1(h: u64) bool {
+    return flat_storage_active and h & latin1_flag != 0 and h & ascii_flag == 0;
+}
+
 /// FNV-1a content hash with the ASCII and latin1 classification folded into the
 /// top two bits, computed in a single pass: `high` accumulates the OR of every
 /// byte (no bit 0x80 ⇒ ASCII); `wide` accumulates whether any byte ≥ 0xC4 (none
@@ -229,6 +251,30 @@ pub fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) s
         }
     }
     return out.toOwnedSlice(allocator);
+}
+
+/// Transcode a **flat-latin1** byte image (1 raw byte per code unit, values
+/// 0x00–0xFF) into canonical WTF-8, returning an owned copy. Bytes < 0x80 copy
+/// unchanged; each 0x80–0xFF byte becomes the 2-byte UTF-8 encoding of
+/// U+0080–U+00FF (a 0xC2/0xC3 lead + one 0x80–0xBF continuation). This is the
+/// re-encode `Value.asWtf8` performs for a flat cell whose consumer needs WTF-8.
+/// Always allocates (a caller that wants to borrow-when-ASCII checks first).
+pub fn latin1FlatToWtf8(allocator: std.mem.Allocator, flat: []const u8) std.mem.Allocator.Error![]u8 {
+    var extra: usize = 0;
+    for (flat) |b| extra += @intFromBool(b >= 0x80);
+    const out = try allocator.alloc(u8, flat.len + extra);
+    var j: usize = 0;
+    for (flat) |b| {
+        if (b < 0x80) {
+            out[j] = b;
+            j += 1;
+        } else {
+            out[j] = 0xC0 | (b >> 6); // 0xC2 or 0xC3
+            out[j + 1] = 0x80 | (b & 0x3F);
+            j += 2;
+        }
+    }
+    return out;
 }
 
 /// Debug-only tripwire: a StringCell's stored image must be well-formed WTF-8
