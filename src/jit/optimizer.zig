@@ -90,11 +90,12 @@ pub const BranchValue = struct {
     true_block: u32,
 };
 
-pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, abrupt_jump, call, effect };
+pub const FrameStateKind = enum { block_entry, branch, return_, throw_, finally_dispatch, abrupt_return, abrupt_jump, call, effect };
 
 fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
     return switch (op) {
         .throw_op => .throw_,
+        .end_finally => .finally_dispatch,
         .abrupt_return => .abrupt_return,
         .abrupt_break, .abrupt_continue => .abrupt_jump,
         .call,
@@ -489,10 +490,12 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .template_object,
         => .{ .required = 0, .removed = 0, .added = 1 },
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
+        .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
         .store_var, .store_local, .store_upval, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
         .def_var, .def_lex, .bind_pattern, .enter_with, .register_disposable, .iter_close => .{ .required = 1, .removed = 1, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue, .enter_block, .exit_block, .exit_with => .{ .required = 0, .removed = 0, .added = 0 },
+        .push_completion => .{ .required = 0, .removed = 0, .added = 2 },
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
@@ -719,20 +722,20 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     const handler = active_handlers.items[active_handlers.items.len - 1];
                     if (handler.stack_depth > depth - 1) return error.InvalidControlFlow;
                     const catches = handler.catch_ip != std.math.maxInt(u32);
-                    if (catches) {
-                        const target = blockAtIp(blocks, handler.catch_ip) orelse return error.InvalidControlFlow;
-                        const target_depth = std.math.add(u32, handler.stack_depth, 1) catch
-                            return error.InvalidControlFlow;
-                        try propagateEntryState(
-                            allocator,
-                            entry_depths,
-                            entry_handlers,
-                            &queue,
-                            target,
-                            target_depth,
-                            active_handlers.items[0 .. active_handlers.items.len - 1],
-                        );
-                    }
+                    const target_ip = if (catches) handler.catch_ip else handler.finally_ip;
+                    if (target_ip == std.math.maxInt(u32)) return error.InvalidControlFlow;
+                    const target = blockAtIp(blocks, target_ip) orelse return error.InvalidControlFlow;
+                    const target_depth = std.math.add(u32, handler.stack_depth, if (catches) 1 else 2) catch
+                        return error.InvalidControlFlow;
+                    try propagateEntryState(
+                        allocator,
+                        entry_depths,
+                        entry_handlers,
+                        &queue,
+                        target,
+                        target_depth,
+                        active_handlers.items[0 .. active_handlers.items.len - 1],
+                    );
                 },
                 else => {},
             }
@@ -914,21 +917,52 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     const handler = handlers.items[handlers.items.len - 1];
                     if (handler.stack_depth > depth) return error.InvalidControlFlow;
                     const catches = handler.catch_ip != std.math.maxInt(u32);
-                    if (catches) {
-                        const target = blockAtIp(blocks, handler.catch_ip) orelse return error.InvalidControlFlow;
-                        const first_argument: u32 = @intCast(builder.edge_arguments.items.len);
-                        try builder.edge_arguments.appendSlice(allocator, locals);
-                        try builder.edge_arguments.appendSlice(allocator, stack[0..handler.stack_depth]);
-                        try builder.edge_arguments.append(allocator, stack[depth]);
-                        try builder.edges.append(allocator, .{
-                            .from = @intCast(block_id),
-                            .to = target,
-                            .first_argument = first_argument,
-                            .argument_count = @intCast(builder.edge_arguments.items.len - first_argument),
-                            .kind = .catch_,
-                        });
+                    const target_ip = if (catches) handler.catch_ip else handler.finally_ip;
+                    if (target_ip == std.math.maxInt(u32)) return error.InvalidControlFlow;
+                    const target = blockAtIp(blocks, target_ip) orelse return error.InvalidControlFlow;
+                    const first_argument: u32 = @intCast(builder.edge_arguments.items.len);
+                    try builder.edge_arguments.appendSlice(allocator, locals);
+                    try builder.edge_arguments.appendSlice(allocator, stack[0..handler.stack_depth]);
+                    try builder.edge_arguments.append(allocator, stack[depth]);
+                    if (!catches) {
+                        const completion = try builder.internLeaf(
+                            @intCast(block_id),
+                            @intCast(origin),
+                            .constant,
+                            RuntimeValue.num(1).rawBits(),
+                        );
+                        try builder.edge_arguments.append(allocator, completion);
                     }
+                    try builder.edges.append(allocator, .{
+                        .from = @intCast(block_id),
+                        .to = target,
+                        .first_argument = first_argument,
+                        .argument_count = @intCast(builder.edge_arguments.items.len - first_argument),
+                        .kind = if (catches) .catch_ else .finally_,
+                    });
                 }
+            },
+            .push_completion => {
+                stack[depth] = try builder.internLeaf(@intCast(block_id), @intCast(origin), .undefined, 0);
+                stack[depth + 1] = try builder.internLeaf(
+                    @intCast(block_id),
+                    @intCast(origin),
+                    .constant,
+                    RuntimeValue.num(@floatFromInt(inst.a)).rawBits(),
+                );
+                depth += 2;
+            },
+            .end_finally => {
+                if (depth < 2) return error.InvalidControlFlow;
+                try builder.appendFrameState(
+                    .finally_dispatch,
+                    @intCast(block_id),
+                    @intCast(origin),
+                    locals,
+                    stack[0..depth],
+                    handlers.items,
+                );
+                depth -= 2;
             },
             .abrupt_return => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1149,6 +1183,7 @@ fn supports(op: bc.Op) bool {
         .ret_undef,
         .push_handler,
         .pop_handler,
+        .push_completion,
         => true,
         else => false,
     };
@@ -1311,7 +1346,6 @@ test "optimizer models throw as a resumable terminal frame" {
     _ = try chunk.emit(.load_const, seven);
     _ = try chunk.emit(.throw_op, 0);
     _ = try chunk.emit(.ret_undef, 0);
-    _ = try chunk.emit(.push_completion, 0);
     _ = try chunk.emit(.end_finally, 0);
 
     var plan = try build(&chunk, std.testing.allocator);
@@ -1330,6 +1364,18 @@ test "optimizer models throw as a resumable terminal frame" {
     try std.testing.expectEqual(std.math.maxInt(u32), handler.catch_ip);
     try std.testing.expectEqual(@as(u32, 4), handler.finally_ip);
     try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
+    try std.testing.expectEqual(@as(usize, 2), plan.graph.edges.len);
+    try std.testing.expectEqual(EdgeKind.finally_, plan.graph.edges[1].kind);
+    try std.testing.expectEqual(@as(u32, 2), plan.graph.edges[1].argument_count);
+    const edge_state = plan.graph.edge_states[1];
+    try std.testing.expectEqual(@as(u32, 2), edge_state.stack_count);
+    try std.testing.expectEqual(@as(u32, 0), edge_state.handler_count);
+    var dispatch_state: ?FrameState = null;
+    for (plan.graph.frame_states) |candidate| if (candidate.kind == .finally_dispatch) {
+        dispatch_state = candidate;
+    };
+    try std.testing.expectEqual(@as(u32, 4), dispatch_state.?.origin);
+    try std.testing.expectEqual(@as(u32, 2), dispatch_state.?.stack_count);
 }
 
 test "optimizer publishes an exact catch edge after handler unwind" {

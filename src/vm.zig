@@ -7673,7 +7673,7 @@ test "vm: optimizer throw side exit propagates to a caller handler" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer throw side exit preserves nested finally unwinding" {
+test "vm: optimizer native finally body preserves nested unwinding" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7698,8 +7698,10 @@ test "vm: optimizer throw side exit preserves nested finally unwinding" {
     const toss_chunk = root.fns.items[0].chunk.?;
     const artifact = toss_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
     var throw_point: ?jit.DeoptPoint = null;
+    var dispatch_point: ?jit.DeoptPoint = null;
     for (artifact.deopt.?.points) |point| {
         if (point.kind == .throw_) throw_point = point;
+        if (point.kind == .finally_dispatch) dispatch_point = point;
     }
     const point = throw_point orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u16, 2), point.handler_count);
@@ -7708,6 +7710,11 @@ test "vm: optimizer throw side exit preserves nested finally unwinding" {
     try std.testing.expectEqual(jit.RecoveryHandler.none, handlers[0].finally_ip);
     try std.testing.expectEqual(jit.RecoveryHandler.none, handlers[1].catch_ip);
     try std.testing.expect(handlers[1].finally_ip != jit.RecoveryHandler.none);
+    const dispatch = dispatch_point orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 2), dispatch.stack_count);
+    try std.testing.expectEqual(@as(u16, 1), dispatch.handler_count);
+    try std.testing.expect(artifact.has_side_exits);
+    try std.testing.expect(artifact.manages_steps);
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 11), (try run(&machine, root, null)).asNum());

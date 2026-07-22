@@ -252,32 +252,34 @@ fn selectLoopOsrMetadata(
 
 const ValueType = enum { number, boolean, other };
 
-fn deterministicReturnSteps(
+fn deterministicPathSteps(
     plan: *const optimizer.Plan,
-    return_block: u32,
+    target_block: u32,
+    target_steps: u32,
 ) error{UnsupportedChunk}!u32 {
     const graph = &plan.graph;
     var entry_count: usize = 0;
     for (graph.edges) |edge| if (edge.from == optimizer.Block.none and edge.to == 0) {
         entry_count += 1;
     };
-    if (entry_count != 1 or return_block >= plan.blocks.len) return error.UnsupportedChunk;
+    if (entry_count != 1 or target_block >= plan.blocks.len or target_steps > plan.blocks[target_block].instruction_count)
+        return error.UnsupportedChunk;
 
     var current: u32 = 0;
     var traversed: usize = 0;
     var steps: u32 = 0;
     while (traversed <= plan.blocks.len) : (traversed += 1) {
-        steps = std.math.add(u32, steps, plan.blocks[current].instruction_count) catch
-            return error.UnsupportedChunk;
         var outgoing: ?optimizer.Edge = null;
         for (graph.edges) |edge| if (edge.from == current) {
-            if (outgoing != null or edge.kind == .finally_) return error.UnsupportedChunk;
+            if (outgoing != null) return error.UnsupportedChunk;
             outgoing = edge;
         };
-        if (current == return_block) {
+        if (current == target_block) {
             if (outgoing != null or traversed + 1 != graph.edges.len) return error.UnsupportedChunk;
-            return steps;
+            return std.math.add(u32, steps, target_steps) catch error.UnsupportedChunk;
         }
+        steps = std.math.add(u32, steps, plan.blocks[current].instruction_count) catch
+            return error.UnsupportedChunk;
         const edge = outgoing orelse return error.UnsupportedChunk;
         if (edge.to >= plan.blocks.len) return error.UnsupportedChunk;
         current = edge.to;
@@ -414,21 +416,34 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     if (graph.branches.len == 0) {
         if (graph.returns.len == 1) {
             result = try resolveAlias(graph.returns[0].value, aliases);
-            bytecode_steps = try deterministicReturnSteps(plan, graph.returns[0].block);
+            const return_block = plan.blocks[graph.returns[0].block];
+            bytecode_steps = try deterministicPathSteps(
+                plan,
+                graph.returns[0].block,
+                graph.returns[0].origin - return_block.start + 1,
+            );
             deterministic_path = true;
         } else if (graph.returns.len == 0) {
-            if (graph.edges.len != 1 or graph.edges[0].from != optimizer.Block.none or graph.edges[0].to != 0)
-                return error.UnsupportedChunk;
             var throw_index: ?u16 = null;
             for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .abrupt_jump or state.kind == .call or state.kind == .effect) {
-                if (throw_index != null or state.block != 0) return error.UnsupportedChunk;
+                const block = plan.blocks[state.block];
+                const steps = deterministicPathSteps(plan, state.block, state.origin - block.start) catch continue;
+                if (throw_index != null) return error.UnsupportedChunk;
                 throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
-                bytecode_steps = state.origin;
+                bytecode_steps = steps;
+            };
+            for (graph.frame_states, 0..) |state, index| if (state.kind == .finally_dispatch) {
+                const block = plan.blocks[state.block];
+                const steps = deterministicPathSteps(plan, state.block, state.origin - block.start) catch continue;
+                if (throw_index != null) return error.UnsupportedChunk;
+                throw_index = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
+                bytecode_steps = steps;
             };
             side_exit = .{
                 .deopt_index = throw_index orelse return error.UnsupportedChunk,
                 .steps = std.math.cast(u12, bytecode_steps) orelse return error.UnsupportedChunk,
             };
+            deterministic_path = graph.edges.len > 1;
         } else return error.UnsupportedChunk;
     } else {
         const branch = graph.branches[0];
@@ -498,6 +513,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .branch => .branch,
                 .return_ => .return_,
                 .throw_ => .throw_,
+                .finally_dispatch => .finally_dispatch,
                 .abrupt_return => .abrupt_return,
                 .abrupt_jump => .abrupt_jump,
                 .call => .call,
@@ -1915,7 +1931,8 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     for (program.operations) |operation| if (operation.block == optimizer.Block.none)
         try emitOperation(&assembler, operation);
     if (program.side_exit) |side_exit| {
-        for (program.operations) |operation| if (operation.block == program.execution_block)
+        for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
+            (!program.deterministic_path and operation.block == program.execution_block))
             try emitOperation(&assembler, operation);
         try emitStepIncrement(&assembler, side_exit.steps);
         try emitSideExit(&assembler, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
@@ -2533,6 +2550,84 @@ test "optimizer lowering executes nested catch edges natively" {
         var frame = jit.NativeFrame{ .scratch = &scratch };
         try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
         try std.testing.expectEqual(Value.num(12).rawBits(), frame.result_bits);
+    }
+}
+
+test "optimizer lowering executes a finally body before exact dispatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.local_count = 1;
+    const seven = try chunk.addConst(Value.num(7));
+    const one = try chunk.addConst(Value.num(1));
+    const two = try chunk.addConst(Value.num(2));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 4);
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.throw_op, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.load_const, two);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.end_finally, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+    try std.testing.expect(program.deterministic_path);
+    try std.testing.expectEqual(@as(u12, 8), side_exit.steps);
+    try std.testing.expectEqual(jit.DeoptPointKind.finally_dispatch, program.deopt_points[side_exit.deopt_index].kind);
+    try std.testing.expectEqual(@as(u16, 2), program.deopt_points[side_exit.deopt_index].stack_count);
+    var saw_finally_add = false;
+    for (program.operations) |operation| if (operation.block != 0 and operation.kind == .add) {
+        saw_finally_add = true;
+    };
+    try std.testing.expect(saw_finally_add);
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var steps: u64 = 0;
+        var frame = jit.NativeFrame{ .scratch = &scratch, .steps = &steps };
+        try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+        try std.testing.expectEqual(@as(u64, 8), steps);
+        try std.testing.expectEqual(jit.DeoptPointKind.finally_dispatch, compiled.deopt.?.points[frame.deopt_index].kind);
+    }
+}
+
+test "optimizer lowering lets a native finally return override a throw" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(Value.num(7));
+    const nine = try chunk.addConst(Value.num(9));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 4);
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.throw_op, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.load_const, nine);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.end_finally, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    try std.testing.expect(program.deterministic_path);
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(u32, 5), program.bytecode_steps);
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var frame = jit.NativeFrame{ .scratch = &scratch };
+        try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+        try std.testing.expectEqual(Value.num(9).rawBits(), frame.result_bits);
     }
 }
 
