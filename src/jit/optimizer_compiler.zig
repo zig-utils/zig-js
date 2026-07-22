@@ -304,7 +304,9 @@ fn stageNativeOperationDescriptors(
                 if (source != operation.lhs) return error.UnsupportedChunk;
                 break :runtime source;
             }
-            if ((inst.op == .get_index or inst.op == .set_prop or inst.op == .in_op or
+            if ((inst.op == .get_index or inst.op == .set_prop or inst.op == .pow or
+                inst.op == .bit_and or inst.op == .bit_or or inst.op == .bit_xor or
+                inst.op == .shl or inst.op == .shr or inst.op == .ushr or inst.op == .in_op or
                 inst.op == .instance_of) and input_count == 2) break :runtime operation.lhs;
             if (inst.op == .set_index and input_count == 3) break :runtime operation.lhs;
             if (inst.op == .call or inst.op == .call_with_this or inst.op == .new_call) {
@@ -447,7 +449,9 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
     for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
         node.kind == .not or node.kind == .typeof_op or node.kind == .inc or node.kind == .dec or
         node.kind == .bit_not or node.kind == .to_string or node.kind == .to_property_key or
-        node.kind == .get_prop or node.kind == .get_index or
+        node.kind == .get_prop or node.kind == .get_index or node.kind == .pow or
+        node.kind == .bit_and or node.kind == .bit_or or node.kind == .bit_xor or
+        node.kind == .shl or node.kind == .shr or node.kind == .ushr or
         node.kind == .set_prop or node.kind == .set_index or node.kind == .in_op or
         node.kind == .instance_of or node.kind == .private_in or node.kind == .call or
         node.kind == .call_with_this or node.kind == .construct) and node.block == state.block and
@@ -592,7 +596,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
-        .get_index, .set_prop, .set_index, .in_op, .instance_of => {
+        .get_index, .set_prop, .set_index, .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr, .in_op, .instance_of => {
             const input_count: usize = if (node.kind == .set_index) 3 else 2;
             if (scratch_slots + input_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
             const first_input = scratch_slots;
@@ -3575,6 +3579,35 @@ test "optimizer lowering publishes executable membership operations" {
     }
 }
 
+test "optimizer lowering publishes executable binary coercions" {
+    const cases = [_]bc.Op{ .pow, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr };
+
+    for (cases) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 2;
+        chunk.local_count = 2;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.load_local, 1);
+        _ = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const operation = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(op)), operation.bytecode_op);
+        try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+        const roots = (@as(u64, 1) << @intCast(operation.first_input)) |
+            (@as(u64, 1) << @intCast(operation.first_input + 1));
+        try std.testing.expectEqual(roots, program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots);
+    }
+}
+
 test "optimizer lowering publishes an executable construction" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3651,13 +3684,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .def_lex, .inputs = 1, .kind = .effect },
         .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
         .{ .op = .store_upval, .inputs = 1, .kind = .effect },
-        .{ .op = .pow, .inputs = 2, .kind = .effect },
-        .{ .op = .bit_and, .inputs = 2, .kind = .effect },
-        .{ .op = .bit_or, .inputs = 2, .kind = .effect },
-        .{ .op = .bit_xor, .inputs = 2, .kind = .effect },
-        .{ .op = .shl, .inputs = 2, .kind = .effect },
-        .{ .op = .shr, .inputs = 2, .kind = .effect },
-        .{ .op = .ushr, .inputs = 2, .kind = .effect },
         .{ .op = .name_anon, .inputs = 1, .kind = .effect },
         .{ .op = .init_prop, .inputs = 2, .kind = .effect },
         .{ .op = .init_proto, .inputs = 2, .kind = .effect },
