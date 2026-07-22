@@ -94,66 +94,18 @@ were produced with pinned WABT 1.0.39 and have SHA-256
 
 ## Latest JavaScriptCore comparison
 
-The latest saved run is the [July 17, 2026 structured-stack report](.data/benchmark-comparison-2026-07-17-structured-stacks.md), with all [1,540 raw timing samples](.data/benchmark-comparison-2026-07-17-structured-stacks.tsv). It ran clean zig-js commit `01fcf42c9f6ca2b4e75a7cde13de748f9c037e04`, zig-gc commit `c67e344dd42e5246079a1c7835b9df3af42ff5e7`, and zig-regex commit `86159c5b9e0996ce6942b99d4ea76ed6c80a9a24` on an 11-core Apple M3 Pro using Zig `0.17.0-dev.956+2dca73595` and the macOS 27.0 system JavaScriptCore framework `22625.1.20.11.3`. The harness recorded AC power at 100% and charged. Work counts are identical for both engines, every full-run median exceeds the 50 ms timing floor, and runner order alternates. These controls make the within-run engine ratios comparable; read the saved min/max and RSD before interpreting small differences, and do not treat cross-session differences as causal.
+The [July 22, 2026 property-OSR report](.data/benchmark-comparison-2026-07-22-property-osr.md) preserves all [1,540 raw samples](.data/benchmark-comparison-2026-07-22-property-osr.tsv). It was collected on AC power from clean zig-js commit `0c9b329aaa61b1ddb8f0018a82ed69173ded7f8d`, zig-gc `88ea25433d1841483a57567c80557df04146a53d`, and zig-regex `b8ca89df644976801e0b6444419444b708eeaa25` using Zig `0.17.0-dev.1441+d5181a9c9` and system JavaScriptCore `22625.1.20.11.3`.
 
 | mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| direct warmed context | 1 | 10 / 10 | **2.43x** | — | — |
-| independent steady contexts | 8 | 10 / 10 | **2.71x** | **4.67x** | 4.13x |
-| independent cold lifecycles | 8 | 9 / 10 | **2.53x** | **4.40x** | 4.07x |
-| shared realm, no GIL | 8 | no public-JSC equivalent | — | **3.84x** | — |
+| direct warmed context | 1 | 10 / 10 | **2.16x** | — | — |
+| independent steady contexts | 8 | 9 / 10 | **1.79x** | **3.86x** | 4.73x |
+| independent cold lifecycles | 8 | 9 / 10 | **1.95x** | **4.04x** | 4.75x |
+| shared realm, no GIL | 8 | no public-JSC equivalent | — | **3.85x** | — |
 
-The saved single-thread medians are:
+The property rows favor zig-js directly by 1.63x (monomorphic) and 2.22x (four-shape polymorphic), and at eight warmed contexts by 1.64x and 2.18x. The [exact CPU profile](.data/optimizer-property-profile-2026-07-21.md) attributes 46.2% of property leaves to generated code. Ten reduced-size warm calls happen outside scored steady-state timers for both engines; cold lifecycle remains intentionally unwarmed. Equal checksums, alternating runner order, seven samples, and the 50 ms timing floor are enforced. Read per-row RSD in the report before interpreting small differences.
 
-| workload | jobs | zig-js (ms) | JSC (ms) | zig-js / JSC throughput |
-| --- | ---: | ---: | ---: | ---: |
-| arithmetic | 240 | 85.429 | 358.819 | 4.20x |
-| properties | 300 | 100.759 | 294.505 | 2.92x |
-| polymorphic properties | 400 | 97.913 | 209.625 | 2.14x |
-| object churn | 100 | 96.410 | 129.002 | 1.34x |
-| arrays | 550 | 100.417 | 166.654 | 1.66x |
-| direct calls | 600 | 81.097 | 122.462 | 1.51x |
-| method calls | 500 | 86.833 | 148.788 | 1.71x |
-| closure calls | 600 | 90.154 | 229.340 | 2.54x |
-| arguments calls | 600 | 96.357 | 326.770 | 3.39x |
-| Fibonacci | 125 | 90.338 | 489.696 | 5.42x |
-
-A ratio above 1.00x favors zig-js; below 1.00x favors JSC.
-
-The symmetric eight-lane steady-state rows are directly comparable:
-
-| workload | zig-js (ms) | JSC (ms) | zig-js / JSC throughput | zig-js scaling | JSC scaling |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| arithmetic | 106.607 | 593.386 | 5.57x | 6.29x | 4.80x |
-| properties | 154.267 | 508.480 | 3.30x | 5.67x | 4.57x |
-| polymorphic properties | 228.064 | 377.483 | 1.66x | 3.45x | 4.44x |
-| object churn | 222.502 | 229.380 | 1.03x | 3.49x | 4.42x |
-| arrays | 212.290 | 282.733 | 1.33x | 3.78x | 5.04x |
-| direct calls | 127.018 | 246.439 | 1.94x | 5.11x | 3.98x |
-| method calls | 141.173 | 279.008 | 1.98x | 4.92x | 4.29x |
-| closure calls | 149.675 | 629.159 | 4.20x | 4.82x | 2.60x |
-| arguments calls | 146.772 | 807.639 | 5.50x | 5.18x | 3.22x |
-| Fibonacci | 149.289 | 851.687 | 5.70x | 4.82x | 4.65x |
-
-The separate no-GIL shared-realm path has no direct public-JSC equivalent. Its one-to-eight-lane result is:
-
-| workload | one lane (ms) | eight lanes (ms) | throughput scaling |
-| --- | ---: | ---: | ---: |
-| arithmetic | 1,559.626 | 2,336.735 | 5.34x |
-| properties | 151.444 | 228.395 | 5.30x |
-| polymorphic properties | 710.665 | 1,261.642 | 4.51x |
-| object churn | 190.969 | 1,651.879 | 0.92x |
-| arrays | 105.259 | 340.577 | 2.47x |
-| direct calls | 92.705 | 141.091 | 5.26x |
-| method calls | 164.730 | 280.145 | 4.70x |
-| closure calls | 93.998 | 154.069 | 4.88x |
-| arguments calls | 95.443 | 175.343 | 4.35x |
-| Fibonacci | 305.889 | 538.814 | 4.54x |
-
-zig-js wins 10/10 direct rows, 10/10 eight-lane warmed-independent rows, and 9/10 eight-lane cold-lifecycle rows. Its geometric-mean throughput lead is 2.43x direct, 2.71x at eight warmed independent contexts, and 2.53x across eight cold lifecycles. Mode-local eight-lane scaling is 4.67x for zig-js versus 4.13x for JSC when warmed and 4.40x versus 4.07x when cold. Shared-realm scaling is 3.84x by geometric mean.
-
-Object instances occupy a 128-byte GC slab (`96` bytes of payload and `128` raw bytes including collector metadata). The accepted matrix reports object-churn medians of 96.410 versus 129.002 ms direct and 222.502 versus 229.380 ms across eight warmed contexts, both favoring zig-js. Its eight-lane cold-lifecycle result is the one symmetric-matrix loss: 243.603 versus 235.093 ms. Shared object churn is 1,651.879 ms at eight lanes with 0.92x scaling and 9.07% RSD. This is a visible scaling target, not something the geometric mean should obscure.
-
+Object churn is the one eight-lane loss: zig-js records 3,548.104 ms warmed and 3,438.036 ms cold versus JSC at 195.609 ms and 198.845 ms. [#445](https://github.com/zig-utils/zig-js/issues/445) tracks that current scaling bottleneck; the aggregate does not hide it. Cross-session changes are not causal evidence because the Zig, zig-gc, and zig-regex revisions differ from the July 17 run.
 The historical [exact-parent slab A/B](.data/object-churn-128-byte-slab-ab-2026-07-15.md) and [amortized-publication A/B](.data/object-churn-amortized-publication-ab-2026-07-16.md) remain causal evidence for accepted changes. Three later candidates were rejected: [owned enumeration](.data/object-churn-owned-enumeration-ab-2026-07-18.md) and [sharded enumeration](.data/object-churn-sharded-enumeration-ab-2026-07-18.md) failed the eight-lane gate, while [sharded pressure accounting](.data/object-churn-pressure-accounting-ab-2026-07-18.md) regressed every lane. These focused runs do not replace the current complete matrix. Read the per-workload rows first; geometric means summarize one exact matrix and do not predict an application.
 
 The opt-in #426 phase profiler keeps those exact workload bytes and checksums
