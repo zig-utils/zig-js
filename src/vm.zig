@@ -25,6 +25,7 @@ const agent = @import("agent.zig");
 const gc_runtime = @import("gc_runtime.zig");
 const jit = @import("jit.zig");
 const jit_compiler = @import("jit/compiler.zig");
+const optimizer = @import("jit/optimizer.zig");
 const optimizer_compiler = @import("jit/optimizer_compiler.zig");
 
 const Value = value.Value;
@@ -8458,7 +8459,7 @@ test "vm: optimizer conditional continue chain converges across three latches" {
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
 
-test "vm: optimizer selects an exact innermost region in nested loops" {
+test "vm: optimizer fused region enters an exact outer nested loop" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -8468,7 +8469,7 @@ test "vm: optimizer selects an exact innermost region in nested loops" {
         \\  let outer = 0; let sum = 0;
         \\  while (outer < n) {
         \\    let inner = 0;
-        \\    while (inner < 4) {
+        \\    while (inner < 100) {
         \\      if (inner === 0) { sum = sum + 100; inner = inner + 1; continue; }
         \\      if (inner === 1) { sum = sum + 10; inner = inner + 1; continue; }
         \\      sum = sum + 1; inner = inner + 1; continue;
@@ -8490,16 +8491,126 @@ test "vm: optimizer selects an exact innermost region in nested loops" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
 
-    try std.testing.expectEqual(@as(f64, 336), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 624), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
     const function_chunk = root.fns.items[0].chunk.?;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
     try std.testing.expectEqual(@as(usize, 1), artifact.osr.?.entries.len);
+    var fused_plan = try optimizer.build(function_chunk, std.testing.allocator);
+    defer fused_plan.deinit();
+    const available_osr = try optimizer_compiler.buildOsrMetadata(&fused_plan, std.testing.allocator);
+    defer available_osr.destroy();
+    try std.testing.expectEqual(@as(usize, 2), available_osr.entries.len);
+    try std.testing.expectEqual(available_osr.entries[0].entry_ip, artifact.osr.?.entries[0].entry_ip);
+    const FusedSafepointCounter = struct {
+        total: u64 = 0,
+        off_checkpoint: u64 = 0,
+
+        fn service(raw_counter: *anyopaque, raw_machine: *anyopaque) void {
+            const counter: *@This() = @ptrCast(@alignCast(raw_counter));
+            const active_machine: *Interpreter = @ptrCast(@alignCast(raw_machine));
+            if (!active_machine.gc_precise_safepoint or !active_machine.gc_moving_safepoint) return;
+            counter.total += 1;
+            if (active_machine.steps & 1023 != 0) counter.off_checkpoint += 1;
+        }
+    };
+    var moving_requested: std.atomic.Value(bool) = .init(true);
+    var safepoints = FusedSafepointCounter{};
     const osr_before = optimizer_osr_entries.load(.monotonic);
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 336), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 624), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+
+    machine.gc_moving_requested = &moving_requested;
+    machine.gc_safepoint_ctx = &safepoints;
+    machine.gc_safepoint_fn = FusedSafepointCounter.service;
+    machine.steps = 0;
+    var moving_slots = [_]Value{ Value.num(20), Value.undef(), Value.undef(), Value.undef() };
+    var moving_frame = Frame{ .slots = &moving_slots, .parent = null };
+    const moving_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectEqual(@as(f64, 4160), (try run(&machine, function_chunk, &moving_frame)).asNum());
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > moving_osr_before);
+    try std.testing.expect(safepoints.total > 0);
+    try std.testing.expect(safepoints.off_checkpoint > 0);
+
+    // Enter the outer region with only one step beyond its acyclic reservation.
+    // Repeated inner backedges must consume that slack, side-exit an exact
+    // internal block entry, and let bytecode service pending work at 1,024.
+    try std.testing.expect(artifact.bytecode_steps < 1023);
+    var stop_requested: std.atomic.Value(bool) = .init(true);
+    machine.stop_flag = &stop_requested;
+    machine.steps = 1023 - artifact.bytecode_steps;
+    machine.jit_execution_allowed = true;
+    var fused_slots = [_]Value{ Value.num(3), Value.num(1), Value.num(208), Value.num(100) };
+    var fused_frame = Frame{ .slots = &fused_slots, .parent = null };
+    var fused_exec = Exec{ .ip = artifact.osr.?.entries[0].entry_ip };
+    const fused_start = machine.steps;
+    try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
+        &machine,
+        &fused_exec,
+        function_chunk,
+        &fused_frame,
+        null,
+    ));
+    try std.testing.expect(machine.steps > fused_start and machine.steps < 1024);
+    try std.testing.expect(fused_exec.ip != artifact.osr.?.entries[0].entry_ip);
+    try std.testing.expectError(error.Throw, execLoop(&machine, &fused_exec, function_chunk, &fused_frame, null));
+    try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+    try std.testing.expect(stop_requested.load(.acquire));
+}
+
+test "vm: optimizer fused region converges across three loop headers" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function tripleLoop(n) {
+        \\  let outer = 0; let sum = 0;
+        \\  while (outer < n) {
+        \\    let middle = 0;
+        \\    while (middle < 2) {
+        \\      let inner = 0;
+        \\      while (inner < 2) {
+        \\        sum = sum + 1; inner = inner + 1;
+        \\      }
+        \\      middle = middle + 1;
+        \\    }
+        \\    outer = outer + 1;
+        \\  }
+        \\  return sum;
+        \\}
+        \\tripleLoop(3); tripleLoop(3); tripleLoop(3); tripleLoop(3); tripleLoop(3);
+        \\tripleLoop(3); tripleLoop(3); tripleLoop(3); tripleLoop(3); tripleLoop(3)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 12), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    var fused_plan = try optimizer.build(function_chunk, std.testing.allocator);
+    defer fused_plan.deinit();
+    const available_osr = try optimizer_compiler.buildOsrMetadata(&fused_plan, std.testing.allocator);
+    defer available_osr.destroy();
+    try std.testing.expectEqual(@as(usize, 3), available_osr.entries.len);
+    try std.testing.expectEqual(available_osr.entries[0].entry_ip, artifact.osr.?.entries[0].entry_ip);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 12), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
