@@ -5171,14 +5171,15 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     return execLoop(vm, &exec, chunk, frame, null);
 }
 
-fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk) ?*const jit.CompiledCode {
+fn loadOrCompileOptimizer(owner: *jit.Owner, chunk: *Chunk, prefer_managed_baseline: bool) ?*const jit.CompiledCode {
     // A managed baseline artifact already owns the whole loop, including exact
     // checkpoint accounting. The generic optimizer region currently expands
     // the same loop into finer-grained guarded operations and can be much
     // slower; do not replace a proven whole-loop tier merely because the later
     // profiling threshold was crossed. Effect/property chunks that baseline
     // cannot compile still reach the optimizer normally.
-    if (chunk.tier.loadCode()) |baseline| if (baseline.manages_steps) return null;
+    if (prefer_managed_baseline)
+        if (chunk.tier.loadCode()) |baseline| if (baseline.manages_steps) return null;
     var artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode);
     if (artifact == null) if (owner.claimOptimizerCompilation(
         &chunk.optimizer_tier,
@@ -5259,7 +5260,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     const owner = vm.jit_owner orelse return null;
 
     if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
-    if (loadOrCompileOptimizer(owner, chunk)) |artifact| {
+    if (loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline)) |artifact| {
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
             .complete => |result| return result,
@@ -5322,7 +5323,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     const copy_count = @min(args.len, parameter_count);
     @memcpy(slots[0..copy_count], args[0..copy_count]);
 
-    const optimizer_artifact = loadOrCompileOptimizer(owner, chunk);
+    const optimizer_artifact = loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline);
     const baseline_artifact = chunk.tier.loadCode();
     if (optimizer_artifact == null and baseline_artifact == null) return null;
     if (optimizer_artifact) |artifact| if (artifact.has_side_exits) return null;
@@ -11764,7 +11765,13 @@ test "vm: numeric baseline tier preserves steps and non-number fallback" {
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
-    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    var machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .prefer_managed_baseline = true,
+    };
 
     const sum_chunk = root.fns.items[0].chunk.?;
     var sum_slots = [_]Value{ Value.num(10), Value.undef(), Value.undef() };

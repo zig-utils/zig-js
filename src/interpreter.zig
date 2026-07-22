@@ -1089,6 +1089,11 @@ pub const Interpreter = struct {
     /// it so hot native calls do not pay an atomic pair per invocation.
     jit_execution_depth: usize = 0,
     jit_execution_allowed: bool = false,
+    /// Prefer a whole-activation baseline artifact over compiling the same
+    /// managed loop into a slower generic optimizer region. Unit-test
+    /// interpreters default this off so optimizer-specific tests exercise that
+    /// tier; the production-policy test opts in explicitly.
+    prefer_managed_baseline: bool = !builtin.is_test,
     /// Optional statement-boundary debugger hook. When installed by a Context,
     /// execution is deliberately kept on the tree walker so every tier observes
     /// the same source locations and pause semantics.
