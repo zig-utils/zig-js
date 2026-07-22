@@ -285,6 +285,30 @@ pub const NativeOperationDescriptor = extern struct {
     pub const none = std.math.maxInt(u16);
 };
 
+pub const NativeOperationMetadata = struct {
+    allocator: std.mem.Allocator,
+    descriptors: []NativeOperationDescriptor,
+
+    pub fn create(
+        allocator: std.mem.Allocator,
+        descriptors: []const NativeOperationDescriptor,
+    ) std.mem.Allocator.Error!*NativeOperationMetadata {
+        const metadata = try allocator.create(NativeOperationMetadata);
+        errdefer allocator.destroy(metadata);
+        metadata.* = .{
+            .allocator = allocator,
+            .descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors),
+        };
+        return metadata;
+    }
+
+    pub fn destroy(self: *NativeOperationMetadata) void {
+        const allocator = self.allocator;
+        allocator.free(self.descriptors);
+        allocator.destroy(self);
+    }
+};
+
 pub const numeric_scratch_capacity = 64;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
@@ -597,6 +621,7 @@ pub const CompiledCode = struct {
     deopt: ?*DeoptMetadata = null,
     stack_maps: ?*StackMapMetadata = null,
     osr: ?*OsrMetadata = null,
+    native_operations: ?*NativeOperationMetadata = null,
     /// False for an artifact that may only be entered through an exact OSR row.
     entry_enabled: bool = true,
     invalidation_generation: ?*const std.atomic.Value(u64) = null,
@@ -610,6 +635,7 @@ pub const CompiledCode = struct {
         if (self.deopt) |metadata| metadata.destroy();
         if (self.stack_maps) |metadata| metadata.destroy();
         if (self.osr) |metadata| metadata.destroy();
+        if (self.native_operations) |metadata| metadata.destroy();
         self.* = undefined;
     }
 
@@ -1095,6 +1121,13 @@ test "native operation ABI preserves value exception and trap outcomes" {
     try std.testing.expectEqual(@as(u16, 3), descriptor.input_count);
     try std.testing.expectEqual(NativeOperationDescriptor.none, descriptor.exceptional_target);
     try std.testing.expectEqual(@as(u32, 17), descriptor.origin);
+    const metadata = try NativeOperationMetadata.create(std.testing.allocator, &.{descriptor});
+    defer metadata.destroy();
+    try std.testing.expectEqualSlices(
+        NativeOperationDescriptor,
+        &.{descriptor},
+        metadata.descriptors,
+    );
     inline for (@typeInfo(NativeOperationStatus).@"enum".field_values, 0..) |value, ordinal| {
         try std.testing.expectEqual(ordinal, value);
     }

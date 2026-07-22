@@ -549,6 +549,12 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
     };
 }
 
+pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
+    const kind = terminalFrameStateKind(inst.op) orelse return null;
+    if (kind != .call and kind != .effect) return null;
+    return depthEffect(inst).required;
+}
+
 const GraphBuilder = struct {
     allocator: std.mem.Allocator,
     nodes: std.ArrayListUnmanaged(ValueNode) = .empty,

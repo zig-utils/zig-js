@@ -146,6 +146,7 @@ pub const Program = struct {
     deopt_values: []jit.RecoveryValue,
     deopt_handlers: []jit.RecoveryHandler,
     stack_maps: []jit.StackMap,
+    native_operations: []jit.NativeOperationDescriptor = &.{},
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
@@ -158,6 +159,7 @@ pub const Program = struct {
         self.allocator.free(self.deopt_values);
         self.allocator.free(self.deopt_handlers);
         self.allocator.free(self.stack_maps);
+        if (self.native_operations.len != 0) self.allocator.free(self.native_operations);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
@@ -252,6 +254,54 @@ fn selectLoopOsrMetadata(
 
 const ValueType = enum { number, boolean, other };
 
+fn stageNativeOperationDescriptors(
+    chunk: *const bc.Chunk,
+    graph: *const optimizer.ValueGraph,
+    aliases: [jit.numeric_scratch_capacity]optimizer.ValueId,
+    allocator: std.mem.Allocator,
+    operations: *std.ArrayListUnmanaged(Operation),
+    scratch_slots: *usize,
+) ![]jit.NativeOperationDescriptor {
+    var descriptors: std.ArrayListUnmanaged(jit.NativeOperationDescriptor) = .empty;
+    errdefer descriptors.deinit(allocator);
+    for (graph.frame_states) |state| {
+        if (state.kind != .call and state.kind != .effect) continue;
+        if (state.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        const inst = chunk.code.items[state.origin];
+        const input_count = optimizer.nativeOperationInputCount(inst) orelse return error.UnsupportedChunk;
+        if (input_count > state.stack_count or scratch_slots.* + input_count > jit.numeric_scratch_capacity)
+            return error.UnsupportedChunk;
+        const first_input = scratch_slots.*;
+        const stack_start: usize = state.first_value + state.local_count;
+        const source_start = stack_start + state.stack_count - input_count;
+        for (0..input_count) |input| {
+            const source = try resolveAlias(graph.frame_state_values[source_start + input], aliases);
+            try operations.append(allocator, .{
+                .kind = .copy,
+                .destination = @intCast(scratch_slots.*),
+                .block = state.block,
+                .lhs = @intCast(source),
+            });
+            scratch_slots.* += 1;
+        }
+        var exceptional_target: u16 = jit.NativeOperationDescriptor.none;
+        for (graph.exceptional_targets, 0..) |target, index| {
+            if (target.block == state.block and target.origin == state.origin) {
+                if (exceptional_target != jit.NativeOperationDescriptor.none) return error.UnsupportedChunk;
+                exceptional_target = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
+            }
+        }
+        try descriptors.append(allocator, .{
+            .bytecode_op = std.math.cast(u16, @backingInt(inst.op)) orelse return error.UnsupportedChunk,
+            .first_input = @intCast(first_input),
+            .input_count = @intCast(input_count),
+            .exceptional_target = exceptional_target,
+            .origin = state.origin,
+        });
+    }
+    return descriptors.toOwnedSlice(allocator);
+}
+
 fn deterministicPathSteps(
     plan: *const optimizer.Plan,
     target_block: u32,
@@ -292,6 +342,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
         graph.branches.len > 1)
         return error.UnsupportedChunk;
+    var scratch_slots = graph.nodes.len;
 
     var aliases: [jit.numeric_scratch_capacity]optimizer.ValueId = @splat(optimizer.ValueNode.none);
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
@@ -528,6 +579,15 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             .accumulator = .{ .source = .constant, .bits = Value.undef().rawBits() },
         });
     }
+    const native_operations = try stageNativeOperationDescriptors(
+        chunk,
+        graph,
+        aliases,
+        allocator,
+        &operations,
+        &scratch_slots,
+    );
+    errdefer if (native_operations.len != 0) allocator.free(native_operations);
     const owned_operations = try operations.toOwnedSlice(allocator);
     errdefer allocator.free(owned_operations);
     const owned_deopt_points = try deopt_points.toOwnedSlice(allocator);
@@ -545,7 +605,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .branch = branch_selection,
         .side_exit = side_exit,
         .side_exit_branch = side_exit_branch,
-        .scratch_slots = @intCast(graph.nodes.len),
+        .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = required_numeric_slots,
         .bytecode_steps = bytecode_steps,
@@ -553,6 +613,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .deopt_values = owned_deopt_values,
         .deopt_handlers = owned_deopt_handlers,
         .stack_maps = stack_maps,
+        .native_operations = native_operations,
         .deterministic_path = deterministic_path,
     };
 }
@@ -2174,6 +2235,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     errdefer deopt.destroy();
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();
+    const native_operations = if (program.native_operations.len != 0)
+        try jit.NativeOperationMetadata.create(std.heap.page_allocator, program.native_operations)
+    else
+        null;
+    errdefer if (native_operations) |metadata| metadata.destroy();
     const osr = if (program.osr) |metadata|
         try jit.OsrMetadata.create(std.heap.page_allocator, metadata.entries, metadata.imports)
     else
@@ -2190,6 +2256,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .max_stack_depth = program.scratch_slots,
         .deopt = deopt,
         .stack_maps = stack_maps,
+        .native_operations = native_operations,
         .osr = osr,
         .entry_enabled = program.entry_enabled,
         .manages_steps = program.side_exit != null or program.side_exit_branch != null,
@@ -2732,6 +2799,24 @@ test "optimizer lowering publishes an exact pre-call side exit" {
     try std.testing.expectEqual(@as(u64, 0), map.scratch_pointer_slots);
     for (program.deopt_values[point.first_value .. point.first_value + point.local_count + point.stack_count]) |recovery|
         try std.testing.expectEqual(jit.RecoverySource.frame_slot, recovery.source);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    try std.testing.expectEqual(jit.NativeOperationDescriptor.none, operation.exceptional_target);
+    try std.testing.expectEqual(@as(u32, 2), operation.origin);
+    try std.testing.expectEqual(plan.graph.nodes.len + 2, @as(usize, program.scratch_slots));
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualSlices(
+            jit.NativeOperationDescriptor,
+            program.native_operations,
+            metadata.descriptors,
+        );
+    }
 }
 
 test "optimizer lowering publishes an exact pre-tail-call side exit" {
