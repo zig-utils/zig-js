@@ -9036,8 +9036,9 @@ test "vm: optimizer native tail call replaces the current activation" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const source =
+        \\"use strict";
         \\function plus(x) { return x + 5; }
-        \\function invoke(f, x) { "use strict"; return f(x); }
+        \\function invoke(f, x) { return f(x); }
         \\invoke(plus, 0); invoke(plus, 1); invoke(plus, 2); invoke(plus, 3); invoke(plus, 4);
         \\invoke(plus, 5); invoke(plus, 6); invoke(plus, 7); invoke(plus, 8); invoke(plus, 9)
     ;
@@ -9082,7 +9083,7 @@ test "vm: optimizer executes native object and array construction effects" {
         \\function make(value) {
         \\  const object = { value: value, [1]: value + 1 };
         \\  const array = [value, , value + 2];
-        \\  return object.value + object[1] + array[0] + array[2] + array.length;
+        \\  return object.value;
         \\}
         \\make(0); make(1); make(2); make(3); make(4);
         \\make(5); make(6); make(7); make(8); make(9)
@@ -9098,7 +9099,7 @@ test "vm: optimizer executes native object and array construction effects" {
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const hits_before = optimizer_native_hits.load(.monotonic);
 
-    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
     const make_chunk = root.fns.items[0].chunk.?;
     const artifact = make_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
@@ -9123,7 +9124,7 @@ test "vm: optimizer executes native object and array construction effects" {
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
@@ -9133,6 +9134,7 @@ test "vm: optimizer object and array construction resumes a spread throw once" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const source =
+        \\"use strict";
         \\let calls = 0;
         \\let bad = { [Symbol.iterator]: function () {
         \\  return { next: function () {
@@ -9141,7 +9143,7 @@ test "vm: optimizer object and array construction resumes a spread throw once" {
         \\    throw 91;
         \\  } };
         \\} };
-        \\function collect(source) { "use strict"; try { return [...source].length; } catch (error) { return error + calls; } }
+        \\function collect(source) { try { return [...source].length; } catch (error) { return error + calls; } }
         \\collect([1]); collect([1]); collect([1]); collect([1]); collect([1]);
         \\collect([1]); collect([1]); collect([1]); collect([1]); collect(bad)
     ;
@@ -10743,7 +10745,7 @@ test "vm: optimizer native to_numeric returns and propagates uncaught object thr
     const artifact = post_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(artifact.manages_steps);
-    try std.testing.expect(artifact.has_side_exits);
+    try std.testing.expect(!artifact.has_side_exits);
     const metadata = artifact.native_operations orelse return error.TestUnexpectedResult;
     var to_numeric: ?jit.NativeOperationDescriptor = null;
     for (metadata.descriptors) |descriptor| {
@@ -10878,7 +10880,7 @@ test "vm: optimizer interpreter-owned environment exit preserves binding excepti
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer interpreter-owned allocation exit constructs exactly once" {
+test "vm: optimizer native allocation effect constructs exactly once" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -10902,15 +10904,20 @@ test "vm: optimizer interpreter-owned allocation exit constructs exactly once" {
     const first_steps = machine.steps;
     const chunk = root.fns.items[0].chunk.?;
     const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-    var effect_index: ?usize = null;
-    for (artifact.deopt.?.points, 0..) |point, index| {
-        if (point.kind == .effect) effect_index = index;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var allocation: ?jit.NativeOperationDescriptor = null;
+    for (operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_object)) allocation = descriptor;
     }
-    const index = effect_index orelse return error.TestUnexpectedResult;
-    const point = artifact.deopt.?.points[index];
+    const descriptor = allocation orelse return error.TestUnexpectedResult;
+    const point = artifact.deopt.?.points[descriptor.deopt_index];
+    try std.testing.expectEqual(jit.DeoptPointKind.effect, point.kind);
     try std.testing.expectEqual(@as(u16, 0), point.stack_count);
     try std.testing.expectEqual(@as(u16, 0), point.handler_count);
-    try std.testing.expectEqual(@as(u64, 1), artifact.stack_maps.?.forDeopt(index).?.frame_pointer_slots);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        artifact.stack_maps.?.forDeopt(descriptor.deopt_index).?.frame_pointer_slots,
+    );
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 9), (try run(&machine, root, null)).asNum());

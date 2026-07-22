@@ -2264,7 +2264,6 @@ pub const Compiler = struct {
                         continue;
                     }
                     if (e.* == .spread) {
-                        if (!self.in_generator) return error.Unsupported; // non-generator spread → tree-walk
                         try self.compileExpr(e.spread);
                         _ = try self.chunk.emit(.array_spread, 0);
                     } else {
