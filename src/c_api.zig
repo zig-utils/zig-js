@@ -11019,6 +11019,9 @@ export fn JSC__JSString__eql(
 
 export fn JSC__JSString__is8Bit(cell: ?*anyopaque) callconv(.c) bool {
     const boxed = privateStringBoxFromCell(cell) orelse return false;
+    // O(1) off the cached latin1 flag (== JSC is8Bit) for a real string cell;
+    // fall back to the byte walk only for the rare non-cell string value.
+    if (boxed.value.isString()) return boxed.value.strIsLatin1();
     return interp.Interpreter.jsStringIs8Bit(boxed.value.asStr());
 }
 

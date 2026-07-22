@@ -4460,6 +4460,13 @@ pub const Value = struct {
     pub inline fn strIsAscii(self: Value) bool {
         return self.asStringCell().isAscii();
     }
+    /// O(1) latin1 / is8Bit classification (every code unit ≤ 0xFF), cached on
+    /// the cell. Superset of `strIsAscii()`; this is the representation the
+    /// flat-string storage flip and the JSC `is8Bit` ABI predicate key on.
+    /// Caller has checked `isString()`.
+    pub inline fn strIsLatin1(self: Value) bool {
+        return self.asStringCell().isLatin1();
+    }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);
     }

@@ -41,19 +41,43 @@ pub fn hashBytes(bytes: []const u8) u64 {
 /// model (Phase 1); later phases widen to true latin1/UTF-16 flat storage.
 pub const ascii_flag: u64 = @as(u64, 1) << 63;
 
-/// FNV-1a content hash with the ASCII flag folded into the top bit, computed in
-/// a single pass (`high` accumulates the OR of every byte; no byte ≥ 0x80 ⇒
-/// ASCII). Every StringCell construction path uses this so `isAscii()` is O(1).
+/// Bit 62 of a StringCell's cached `hash` word flags a **latin1 / is8Bit**
+/// string: every UTF-16 code unit ≤ 0xFF. For well-formed WTF-8 this is exactly
+/// "every byte ≤ 0xC3" — a code unit > 0xFF is only ever encoded with a lead
+/// byte ≥ 0xC4 (2-byte C4–DF for U+0100–U+07FF, 3/4-byte E0–F4, or the
+/// lone-surrogate lead ED), while latin1 uses only ASCII bytes plus the leads
+/// C2/C3 and their 0x80–0xBF continuations. ASCII ⊂ latin1, so an ASCII cell
+/// carries BOTH flags. This is the representation discriminator the flat-string
+/// storage flip keys on (a flat-latin1 cell is exactly an is8Bit, non-ASCII
+/// cell) and it makes the ABI `is8Bit` predicate an O(1) cell read. Same
+/// safety argument as `ascii_flag`: latin1-ness is a deterministic function of
+/// content, so equal strings classify identically and share one `hash` word;
+/// the low bits (intern shard pick, `eql` fast-reject) are unaffected.
+pub const latin1_flag: u64 = @as(u64, 1) << 62;
+
+/// The bits of `hash` that are the actual FNV-1a content hash (the top two are
+/// the cached ASCII/latin1 classification flags). Compare masked when checking
+/// a cell's hash against a raw `hashBytes`.
+pub const content_hash_mask: u64 = ~(ascii_flag | latin1_flag);
+
+/// FNV-1a content hash with the ASCII and latin1 classification folded into the
+/// top two bits, computed in a single pass: `high` accumulates the OR of every
+/// byte (no bit 0x80 ⇒ ASCII); `wide` accumulates whether any byte ≥ 0xC4 (none
+/// ⇒ every code unit ≤ 0xFF ⇒ latin1). Every StringCell construction path uses
+/// this so `isAscii()` / `isLatin1()` are O(1).
 pub fn contentHash(bytes: []const u8) u64 {
     var h: u64 = 0xcbf29ce484222325;
     var high: u8 = 0;
+    var wide: u8 = 0;
     for (bytes) |b| {
         h ^= b;
         h *%= 0x100000001b3;
         high |= b;
+        wide |= @intFromBool(b >= 0xC4);
     }
-    h &= ~ascii_flag;
+    h &= content_hash_mask;
     if (high & 0x80 == 0) h |= ascii_flag;
+    if (wide == 0) h |= latin1_flag;
     return h;
 }
 
@@ -140,6 +164,13 @@ pub const StringCell = struct {
     /// `hash`'s top bit at construction — see `contentHash`.
     pub fn isAscii(self: *const StringCell) bool {
         return self.hash & ascii_flag != 0;
+    }
+
+    /// True when every UTF-16 code unit is ≤ 0xFF (latin1 / JSC `is8Bit`).
+    /// O(1): cached in `hash`'s bit 62 at construction — see `latin1_flag`.
+    /// ASCII ⇒ latin1, so this is a superset of `isAscii()`.
+    pub fn isLatin1(self: *const StringCell) bool {
+        return self.hash & latin1_flag != 0;
     }
 };
 
@@ -480,10 +511,37 @@ test "strcell: isAscii is cached and reflects content, hash low bits unchanged" 
     }
     try std.testing.expect(ascii.isAscii());
     try std.testing.expect(!latin1.isAscii());
-    // The ASCII flag lives in the top bit; the low 63 bits still match the pure
+    // ASCII ⊂ latin1: an ASCII cell is also is8Bit; "café" is latin1 but not ASCII.
+    try std.testing.expect(ascii.isLatin1());
+    try std.testing.expect(latin1.isLatin1());
+    // The flags live in the top two bits; the low 62 bits still match the pure
     // FNV content hash, so the shard pick (low bits) and hash agreement hold.
-    try std.testing.expectEqual(hashBytes("hello world") & ~ascii_flag, ascii.hash & ~ascii_flag);
-    try std.testing.expectEqual(hashBytes("caf\xc3\xa9") & ~ascii_flag, latin1.hash & ~ascii_flag);
+    try std.testing.expectEqual(hashBytes("hello world") & content_hash_mask, ascii.hash & content_hash_mask);
+    try std.testing.expectEqual(hashBytes("caf\xc3\xa9") & content_hash_mask, latin1.hash & content_hash_mask);
+}
+
+test "strcell: isLatin1 tracks the is8Bit boundary (≤ 0xFF) at construction" {
+    const a = std.testing.allocator;
+    const Case = struct { bytes: []const u8, ascii: bool, latin1: bool };
+    const cases = [_]Case{
+        .{ .bytes = "plain ascii", .ascii = true, .latin1 = true },
+        .{ .bytes = "", .ascii = true, .latin1 = true }, // empty is vacuously 8-bit
+        .{ .bytes = "caf\xc3\xa9", .ascii = false, .latin1 = true }, // é U+00E9
+        .{ .bytes = "\xc3\xbf", .ascii = false, .latin1 = true }, // ÿ U+00FF, the boundary
+        .{ .bytes = "\xc4\x80", .ascii = false, .latin1 = false }, // Ā U+0100, just past it
+        .{ .bytes = "\xce\xb1", .ascii = false, .latin1 = false }, // α U+03B1 (Greek)
+        .{ .bytes = "\xf0\x9f\x98\x80", .ascii = false, .latin1 = false }, // 😀 astral
+        .{ .bytes = "\xed\xa0\x80", .ascii = false, .latin1 = false }, // lone high surrogate
+    };
+    for (cases) |c| {
+        const cell = try createCell(a, c.bytes);
+        defer {
+            a.free(cell.bytes);
+            a.destroy(cell);
+        }
+        try std.testing.expectEqual(c.ascii, cell.isAscii());
+        try std.testing.expectEqual(c.latin1, cell.isLatin1());
+    }
 }
 
 test "strcell: intern dedups equal bytes to one cell, separates distinct" {
