@@ -2127,8 +2127,11 @@ pub const Compiler = struct {
                     const ni = try self.chunk.addName(m.property);
                     if (spread) {
                         try self.compileExpr(m.object);
+                        _ = try self.chunk.emit(.dup, 0);
+                        _ = try self.chunk.emit(.get_prop, ni);
+                        _ = try self.chunk.emit(.swap, 0);
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(.call_method_spread, ni);
+                        _ = try self.chunk.emit(.call_with_this_spread, 0);
                     } else {
                         // Fetch the method (RequireObjectCoercible on the receiver +
                         // any getter) BEFORE the arguments, per spec order, then call
@@ -2163,7 +2166,7 @@ pub const Compiler = struct {
                     try self.compileExpr(c.callee);
                     if (spread) {
                         try self.compileArgsArray(c.args);
-                        _ = try self.chunk.emit(.call_spread, 0);
+                        _ = try self.chunk.emit(if (is_eval) .call_eval_spread else .call_spread, 0);
                     } else {
                         for (c.args) |arg| try self.compileExpr(arg);
                         // A bare `eval(...)` in an env-mode body is a candidate direct

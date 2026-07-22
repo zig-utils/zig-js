@@ -3687,6 +3687,32 @@ fn applyBinaryEffect(vm: *Interpreter, op: bc.Op, lhs: Value, rhs: Value) EvalEr
     return vm.applyBinary(binOp(op), lhs, rhs);
 }
 
+fn spreadArguments(vm: *Interpreter, args_array: Value) EvalError![]const Value {
+    if (!args_array.isObject() or args_array.asObj().is_symbol or args_array.asObj().is_bigint or
+        !args_array.asObj().is_array)
+        return vm.throwError("TypeError", "internal spread argument list is not an array");
+    return args_array.asObj().internalElementsSnapshot(vm.arena);
+}
+
+fn callEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
+    const saved = vm.direct_eval_call;
+    vm.direct_eval_call = vm.isDirectEvalCallee(callee);
+    defer vm.direct_eval_call = saved;
+    return callValue(vm, callee, args, Value.undef());
+}
+
+fn callSpreadValue(vm: *Interpreter, callee: Value, args_array: Value, this_val: Value) EvalError!Value {
+    return callValue(vm, callee, try spreadArguments(vm, args_array), this_val);
+}
+
+fn callEvalSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) EvalError!Value {
+    return callEvalValue(vm, callee, try spreadArguments(vm, args_array));
+}
+
+fn constructSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) EvalError!Value {
+    return construct(vm, callee, try spreadArguments(vm, args_array));
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
@@ -3807,17 +3833,36 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativePrivateIn(vm, name, Value.fromRawBits(inputs[0])),
         );
     }
-    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.call) or
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.call_spread) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval_spread) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this_spread) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.new_call)) and inputs.len >= 1)
+        descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread))
     {
         const values: []const Value = @ptrCast(inputs);
-        const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call))
+        const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and values.len >= 1)
             callValue(vm, values[0], values[1..], Value.undef())
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) and values.len >= 1)
+            callEvalValue(vm, values[0], values[1..])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) and values.len >= 1)
+            invokeMethod(vm, values[0], metadata.nameFor(operation_id) orelse
+                return @intFromEnum(jit.NativeOperationStatus.host_trap), values[1..])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_spread) and values.len == 2)
+            callSpreadValue(vm, values[0], values[1], Value.undef())
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval_spread) and values.len == 2)
+            callEvalSpreadValue(vm, values[0], values[1])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this_spread) and values.len == 3)
+            callSpreadValue(vm, values[0], values[2], values[1])
         else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) and values.len >= 2)
             callValue(vm, values[0], values[2..], values[1])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_call))
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) and values.len >= 1)
             construct(vm, values[0], values[1..])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread) and values.len == 2)
+            constructSpreadValue(vm, values[0], values[1])
         else
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
@@ -4144,6 +4189,18 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call_method);
+    metadata.descriptors[0].input_count = 1;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call_spread);
+    metadata.descriptors[0].input_count = 1;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.get_prop);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
@@ -4232,6 +4289,114 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
         nativeOperationDispatch(&frame, 0),
     );
     try std.testing.expectEqual(Value.obj(&receiver).rawBits(), frame.operation_value_bits);
+}
+
+test "vm: native operation dispatcher executes non-tail invocation forms" {
+    const Native = struct {
+        fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
+            _ = ctx;
+            if (args.len == 1 and args[0].isNumber() and args[0].asNum() == 42)
+                return this_value;
+            if (args.len == 2 and args[0].isNumber() and args[1].isNumber())
+                return Value.num(args[0].asNum() + args[1].asNum());
+            return Value.undef();
+        }
+    };
+    const Dispatch = struct {
+        fn run(
+            machine: *Interpreter,
+            op: bc.Op,
+            inputs: []const Value,
+            name: ?[]const u8,
+        ) !Value {
+            const descriptor = jit.NativeOperationDescriptor{
+                .bytecode_op = @intFromEnum(op),
+                .first_input = 0,
+                .input_count = @intCast(inputs.len),
+                .deopt_index = 0,
+                .step_delta = 1,
+                .origin = 9,
+            };
+            const names = [_]?[]const u8{name};
+            const metadata = try jit.NativeOperationMetadata.createWithNames(
+                std.testing.allocator,
+                &.{descriptor},
+                &.{},
+                &names,
+            );
+            defer metadata.destroy();
+            var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+            for (inputs, 0..) |input, index| scratch[index] = input.rawBits();
+            var frame = jit.NativeFrame{
+                .scratch = &scratch,
+                .runtime_context = machine,
+                .operation_context = metadata,
+                .exit_ip = 9,
+                .deopt_index = 0,
+            };
+            try std.testing.expectEqual(
+                @intFromEnum(jit.NativeOperationStatus.value),
+                nativeOperationDispatch(&frame, 0),
+            );
+            return Value.fromRawBits(frame.operation_value_bits);
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var root = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&root, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &root, .root_shape = root_shape };
+    var callable = value.Object{ .native = Native.call };
+    var receiver = value.Object{};
+    try machine.setProp(&receiver, "method", Value.obj(&callable));
+
+    try std.testing.expectEqual(
+        Value.obj(&receiver).rawBits(),
+        (try Dispatch.run(&machine, .call_method, &.{ Value.obj(&receiver), Value.num(42) }, "method")).rawBits(),
+    );
+
+    var spread = value.Object{ .is_array = true };
+    try spread.appendInternalElement(allocator, Value.num(20));
+    try spread.appendInternalElement(allocator, Value.num(22));
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(&machine, .call_spread, &.{ Value.obj(&callable), Value.obj(&spread) }, null)).asNum(),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(
+            &machine,
+            .call_with_this_spread,
+            &.{ Value.obj(&callable), Value.obj(&receiver), Value.obj(&spread) },
+            null,
+        )).asNum(),
+    );
+
+    var parser = try Parser.init(allocator, "function Box(a, b) { this.sum = a + b; } Box");
+    const parsed = try parser.parseProgram();
+    const chunk = try Compiler.compileProgram(allocator, parsed);
+    const constructor = try run(&machine, chunk, null);
+    const constructed = try Dispatch.run(&machine, .new_spread, &.{ constructor, Value.obj(&spread) }, null);
+    try std.testing.expectEqual(@as(f64, 42), (try machine.getProperty(constructed, "sum")).asNum());
+
+    var local = Environment{ .arena = allocator, .parent = &root, .fn_scope = true };
+    try local.put("local", Value.num(42));
+    machine.env = &local;
+    const eval = root.get("eval") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(&machine, .call_eval, &.{ eval, Value.str("local") }, null)).asNum(),
+    );
+    var eval_spread = value.Object{ .is_array = true };
+    try eval_spread.appendInternalElement(allocator, Value.str("local"));
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(&machine, .call_eval_spread, &.{ eval, Value.obj(&eval_spread) }, null)).asNum(),
+    );
+    try std.testing.expect(!machine.direct_eval_call);
 }
 
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
@@ -5500,14 +5665,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                const saved = vm.direct_eval_call;
-                vm.direct_eval_call = vm.isDirectEvalCallee(callee);
-                const result = callValue(vm, callee, stack.items[base..], Value.undef()) catch |e| {
-                    vm.direct_eval_call = saved;
-                    return e;
-                };
-                vm.direct_eval_call = saved;
-                return result;
+                return try callEvalValue(vm, callee, stack.items[base..]);
             },
             .call_eval => {
                 // A bare `eval(args)` call: mark it a DIRECT eval so, if the callee
@@ -5516,13 +5674,7 @@ fn runChunk(
                 const argc = inst.a;
                 const base = stack.items.len - argc;
                 const callee = stack.items[base - 1];
-                const saved = vm.direct_eval_call;
-                vm.direct_eval_call = vm.isDirectEvalCallee(callee);
-                const result = callValue(vm, callee, stack.items[base..], Value.undef()) catch |e| {
-                    vm.direct_eval_call = saved;
-                    return e;
-                };
-                vm.direct_eval_call = saved;
+                const result = try callEvalValue(vm, callee, stack.items[base..]);
                 stack.shrinkRetainingCapacity(base - 1);
                 try stack.append(stack_alloc, result);
             },
@@ -5572,22 +5724,23 @@ fn runChunk(
             .call_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
-                try stack.append(stack_alloc, try callValue(vm, callee, args, Value.undef()));
+                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), Value.undef()));
             },
-            .call_method_spread => {
+            .call_eval_spread => {
                 const args_arr = stack.pop().?;
-                const recv = stack.pop().?;
-                const name = chunk.names.items[inst.a];
-                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
-                const result = try invokeMethod(vm, recv, name, args);
-                try stack.append(stack_alloc, result);
+                const callee = stack.pop().?;
+                try stack.append(stack_alloc, try callEvalValue(vm, callee, try spreadArguments(vm, args_arr)));
+            },
+            .call_with_this_spread => {
+                const args_arr = stack.pop().?;
+                const this_val = stack.pop().?;
+                const callee = stack.pop().?;
+                try stack.append(stack_alloc, try callValue(vm, callee, try spreadArguments(vm, args_arr), this_val));
             },
             .new_spread => {
                 const args_arr = stack.pop().?;
                 const callee = stack.pop().?;
-                const args = try args_arr.asObj().internalElementsSnapshot(vm.arena);
-                try stack.append(stack_alloc, try construct(vm, callee, args));
+                try stack.append(stack_alloc, try construct(vm, callee, try spreadArguments(vm, args_arr)));
             },
 
             .ret => {
@@ -7596,6 +7749,19 @@ fn vmRun(arena: std.mem.Allocator, src: []const u8) !Value {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = arena, .env = &env, .root_shape = root_shape };
     return run(&machine, chunk, null);
+}
+
+test "vm: non-tail invocation generator spread preserves direct eval and method evaluation order" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expect((try vmRun(arena.allocator(),
+        \\function* direct() { let local = 42; return eval(...["local"]); }
+        \\let log = "";
+        \\let receiver = { get method() { log = log + "g"; return function () { return log; }; } };
+        \\function mark() { log = log + "a"; return []; }
+        \\function* ordered() { return receiver.method(...mark()); }
+        \\direct().next().value === 42 && ordered().next().value === "ga" && log === "ga"
+    )).asBool());
 }
 
 test "vm: arithmetic, precedence, comparison, logical" {

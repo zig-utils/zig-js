@@ -69,8 +69,14 @@ pub const ValueKind = enum {
     to_string,
     to_property_key,
     call,
+    call_eval,
+    call_method,
+    call_spread,
+    call_eval_spread,
+    call_with_this_spread,
     call_with_this,
     construct,
+    construct_spread,
     get_prop,
     get_index,
     set_prop,
@@ -126,11 +132,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .end_finally => .finally_dispatch,
         .abrupt_return => .abrupt_return,
         .abrupt_break, .abrupt_continue => .abrupt_jump,
-        .call_eval,
-        .call_method,
-        .call_spread,
-        .call_method_spread,
-        .new_spread,
         .tail_call,
         .tail_call_eval,
         .tail_call_method,
@@ -531,7 +532,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
-        .call_spread, .call_method_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
+        .call_spread, .call_eval_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
+        .call_with_this_spread => .{ .required = 3, .removed = 3, .added = 1 },
         .get_prop, .super_get_index, .iter_of, .async_iter_of, .enum_keys => .{ .required = 1, .removed = 1, .added = 1 },
         .get_index, .set_prop, .instance_of, .import_call => .{ .required = 2, .removed = 2, .added = 1 },
         .set_index => .{ .required = 3, .removed = 3, .added = 1 },
@@ -592,8 +594,14 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .instance_of,
         .private_in,
         .call,
+        .call_eval,
+        .call_method,
+        .call_spread,
+        .call_eval_spread,
+        .call_with_this_spread,
         .call_with_this,
         .new_call,
+        .new_spread,
         => return depthEffect(inst).required,
         else => {},
     }
@@ -1168,7 +1176,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
-            .call, .call_with_this, .new_call => {
+            .call, .call_eval, .call_method, .call_spread, .call_eval_spread, .call_with_this_spread, .call_with_this, .new_call, .new_spread => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
                 try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
@@ -1180,11 +1188,17 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .origin = @intCast(origin),
                     .kind = switch (inst.op) {
                         .call => .call,
+                        .call_eval => .call_eval,
+                        .call_method => .call_method,
+                        .call_spread => .call_spread,
+                        .call_eval_spread => .call_eval_spread,
+                        .call_with_this_spread => .call_with_this_spread,
                         .call_with_this => .call_with_this,
                         .new_call => .construct,
+                        .new_spread => .construct_spread,
                         else => unreachable,
                     },
-                    .immediate = inst.a,
+                    .immediate = if (inst.op == .call_method) inst.b else inst.a,
                     .may_have_effect = true,
                 });
                 try builder.roots.append(allocator, result);
@@ -1541,8 +1555,14 @@ fn supports(op: bc.Op) bool {
         .instance_of,
         .private_in,
         .call,
+        .call_eval,
+        .call_method,
+        .call_spread,
+        .call_eval_spread,
+        .call_with_this_spread,
         .call_with_this,
         .new_call,
+        .new_spread,
         => true,
         else => false,
     };
@@ -1902,8 +1922,14 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .eq_strict, .inputs = 2 },
         .{ .op = .neq_strict, .inputs = 2 },
         .{ .op = .call, .inputs = 2, .a = 1 },
+        .{ .op = .call_eval, .inputs = 2, .a = 1 },
+        .{ .op = .call_method, .inputs = 2, .b = 1 },
+        .{ .op = .call_spread, .inputs = 2 },
+        .{ .op = .call_eval_spread, .inputs = 2 },
+        .{ .op = .call_with_this_spread, .inputs = 3 },
         .{ .op = .call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .new_call, .inputs = 2, .a = 1 },
+        .{ .op = .new_spread, .inputs = 2 },
         .{ .op = .get_prop, .inputs = 1 },
         .{ .op = .get_index, .inputs = 2 },
         .{ .op = .set_prop, .inputs = 2 },
@@ -1938,7 +1964,7 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         const catch_ip = case.inputs + 3;
         _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
         for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
-        const operand_a = if (case.op == .get_prop or case.op == .set_prop)
+        const operand_a = if (case.op == .get_prop or case.op == .set_prop or case.op == .call_method)
             try chunk.addName("value")
         else if (case.op == .private_in)
             try chunk.addName("#value")
