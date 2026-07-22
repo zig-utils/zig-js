@@ -75,7 +75,7 @@ Run `zig build --help` for the full command list.
 - remaining JSC framework/private and Bun/Home ABI surfaces;
 - 10 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
 - automatic/concurrent compaction and a moving nursery;
-- optimizer CFGs beyond one exact numeric loop region with ordered exit/continue guards, sequential shared joins, and shared or independent latches; native object effects; and additional backends. See [optimizer status](docs/optimizing-jit.md).
+- optimizer CFGs beyond one exact single-header numeric region, including cyclic/fused nested loops; native object effects; and additional backends. See [optimizer status](docs/optimizing-jit.md).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 
