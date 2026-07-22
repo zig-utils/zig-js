@@ -408,8 +408,17 @@ const OptimizerBinaryProfile = struct {
     rhs_kinds: std.atomic.Value(u8) = .init(0),
 
     fn observe(self: *OptimizerBinaryProfile, lhs: jit.ProfileValueKind, rhs: jit.ProfileValueKind) void {
-        _ = self.lhs_kinds.fetchOr(@as(u8, 1) << @backingInt(lhs), .monotonic);
-        _ = self.rhs_kinds.fetchOr(@as(u8, 1) << @backingInt(rhs), .monotonic);
+        observeKind(&self.lhs_kinds, lhs);
+        observeKind(&self.rhs_kinds, rhs);
+    }
+
+    fn observeKind(kinds: *std.atomic.Value(u8), kind: jit.ProfileValueKind) void {
+        const bit = @as(u8, 1) << @backingInt(kind);
+        // The profile is monotonic. Once a worker sees this bit, repeating the
+        // read-modify-write cannot add information and only makes every shared
+        // execution lane contend on the same byte. A stale load may perform one
+        // redundant OR, but atomic ORs still converge without losing a kind.
+        if (kinds.load(.monotonic) & bit == 0) _ = kinds.fetchOr(bit, .monotonic);
     }
 
     fn requiresRuntime(self: *const OptimizerBinaryProfile) bool {
@@ -778,6 +787,33 @@ test "optimizer binary profiles remain instruction-local and preserve numeric si
 }
 
 test "optimizer binary profile observations merge race-free" {
+    var profile = OptimizerBinaryProfile{};
+    const kinds = std.meta.tags(jit.ProfileValueKind);
+    const Shared = struct {
+        profile: *OptimizerBinaryProfile,
+        go: std.atomic.Value(bool) = .init(false),
+
+        fn observe(shared: *@This(), kind: jit.ProfileValueKind, inverse: jit.ProfileValueKind) void {
+            while (!shared.go.load(.acquire)) std.atomic.spinLoopHint();
+            for (0..2_000) |_| shared.profile.observe(kind, inverse);
+        }
+    };
+
+    var shared = Shared{ .profile = &profile };
+    var threads: [kinds.len]std.Thread = undefined;
+    for (&threads, kinds, 0..) |*thread, kind, index| {
+        const inverse = kinds[kinds.len - index - 1];
+        thread.* = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, kind, inverse });
+    }
+    shared.go.store(true, .release);
+    for (&threads) |thread| thread.join();
+
+    const all_kinds = (@as(u8, 1) << @intCast(kinds.len)) - 1;
+    try std.testing.expectEqual(all_kinds, profile.lhs_kinds.load(.acquire));
+    try std.testing.expectEqual(all_kinds, profile.rhs_kinds.load(.acquire));
+}
+
+test "InlineCache observations merge race-free" {
     const builtin = @import("builtin");
     if (builtin.single_threaded) return error.SkipZigTest;
 
