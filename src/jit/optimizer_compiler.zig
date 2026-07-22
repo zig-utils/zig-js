@@ -14,6 +14,8 @@ const aarch64 = @import("aarch64.zig");
 const Value = @import("../value.zig").Value;
 const Shape = @import("../shape.zig").Shape;
 const Object = @import("../value.zig").Object;
+const ObjectStorageState = @import("../value.zig").ObjectStorageState;
+const ObjectElementsState = @import("../value.zig").ObjectElementsState;
 const moving_safepoint_backedge_interval: u32 = 32;
 
 pub const OperationKind = enum {
@@ -2250,6 +2252,7 @@ fn appendParallelCopies(
 const RegionRuntimeLowering = struct {
     scratch_slots: *usize,
     binary_inputs: ?u8 = null,
+    ternary_inputs: ?u8 = null,
 
     fn stageBinaryInputs(
         self: *RegionRuntimeLowering,
@@ -2268,6 +2271,28 @@ const RegionRuntimeLowering = struct {
         };
         try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = lhs });
         try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = rhs });
+        return first;
+    }
+
+    fn stageTernaryInputs(
+        self: *RegionRuntimeLowering,
+        allocator: std.mem.Allocator,
+        operations: *std.ArrayListUnmanaged(Operation),
+        block: u32,
+        first_source: u8,
+        second_source: u8,
+        third_source: u8,
+    ) !u8 {
+        const first = self.ternary_inputs orelse first: {
+            if (self.scratch_slots.* + 3 > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+            const slot = std.math.cast(u8, self.scratch_slots.*) orelse return error.UnsupportedChunk;
+            self.scratch_slots.* += 3;
+            self.ternary_inputs = slot;
+            break :first slot;
+        };
+        try operations.append(allocator, .{ .kind = .copy, .destination = first, .block = block, .lhs = first_source });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 1, .block = block, .lhs = second_source });
+        try operations.append(allocator, .{ .kind = .copy, .destination = first + 2, .block = block, .lhs = third_source });
         return first;
     }
 };
@@ -2339,6 +2364,28 @@ fn appendBlockOperations(
                 });
                 initialized[node.id] = true;
             },
+            .get_index => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                if (node.lhs >= initialized.len or node.rhs >= initialized.len or
+                    !initialized[node.lhs] or !initialized[node.rhs])
+                    return error.UnsupportedChunk;
+                const first_input = try runtime.stageBinaryInputs(
+                    allocator,
+                    operations,
+                    block,
+                    @intCast(node.lhs),
+                    @intCast(node.rhs),
+                );
+                types[node.id] = if (required_numeric[node.id]) .number else .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                });
+                initialized[node.id] = true;
+            },
             .set_prop => {
                 const runtime = runtime_lowering orelse return error.UnsupportedChunk;
                 if (node.lhs >= initialized.len or node.rhs >= initialized.len or
@@ -2350,6 +2397,29 @@ fn appendBlockOperations(
                     block,
                     @intCast(node.lhs),
                     @intCast(node.rhs),
+                );
+                types[node.id] = .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .set_index => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                if (node.lhs >= initialized.len or node.rhs >= initialized.len or node.third >= initialized.len or
+                    !initialized[node.lhs] or !initialized[node.rhs] or !initialized[node.third])
+                    return error.UnsupportedChunk;
+                const first_input = try runtime.stageTernaryInputs(
+                    allocator,
+                    operations,
+                    block,
+                    @intCast(node.lhs),
+                    @intCast(node.rhs),
+                    @intCast(node.third),
                 );
                 types[node.id] = .other;
                 try operations.append(allocator, .{
@@ -2984,21 +3054,21 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
     }
 }
 
-const DirectPropertyAccess = struct {
+const DirectRuntimeAccess = struct {
     const Fallback = struct { branch: usize, compare: bool };
 
-    fallbacks: [12]Fallback = undefined,
+    fallbacks: [20]Fallback = undefined,
     fallback_count: usize = 0,
     completions: [4]usize = undefined,
     completion_count: usize = 0,
 
-    fn addFallback(self: *DirectPropertyAccess, branch: usize, compare: bool) !void {
+    fn addFallback(self: *DirectRuntimeAccess, branch: usize, compare: bool) !void {
         if (self.fallback_count >= self.fallbacks.len) return error.UnsupportedChunk;
         self.fallbacks[self.fallback_count] = .{ .branch = branch, .compare = compare };
         self.fallback_count += 1;
     }
 
-    fn patchFallbacks(self: DirectPropertyAccess, assembler: *aarch64.Assembler, callback: usize) !void {
+    fn patchFallbacks(self: DirectRuntimeAccess, assembler: *aarch64.Assembler, callback: usize) !void {
         for (self.fallbacks[0..self.fallback_count]) |fallback| {
             if (fallback.compare)
                 try assembler.patchCompareBranch(fallback.branch, callback)
@@ -3007,13 +3077,13 @@ const DirectPropertyAccess = struct {
         }
     }
 
-    fn addCompletion(self: *DirectPropertyAccess, branch: usize) !void {
+    fn addCompletion(self: *DirectRuntimeAccess, branch: usize) !void {
         if (self.completion_count >= self.completions.len) return error.UnsupportedChunk;
         self.completions[self.completion_count] = branch;
         self.completion_count += 1;
     }
 
-    fn patchCompletions(self: DirectPropertyAccess, assembler: *aarch64.Assembler, completion: usize) !void {
+    fn patchCompletions(self: DirectRuntimeAccess, assembler: *aarch64.Assembler, completion: usize) !void {
         for (self.completions[0..self.completion_count]) |branch|
             try assembler.patchBranch(branch, completion);
     }
@@ -3025,7 +3095,7 @@ fn objectByteOffset(comptime field: []const u8) !u12 {
 
 fn emitZeroByteGuard(
     assembler: *aarch64.Assembler,
-    direct: *DirectPropertyAccess,
+    direct: *DirectRuntimeAccess,
     comptime field: []const u8,
 ) !void {
     try assembler.load8(10, 9, try objectByteOffset(field));
@@ -3034,7 +3104,7 @@ fn emitZeroByteGuard(
 
 fn emitDirectPropertyGuards(
     assembler: *aarch64.Assembler,
-    direct: *DirectPropertyAccess,
+    direct: *DirectRuntimeAccess,
     descriptor: jit.NativeOperationDescriptor,
 ) !void {
     try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
@@ -3071,7 +3141,7 @@ fn emitDirectNamedPropertyRead(
     program: *const Program,
     operation: Operation,
     descriptor: jit.NativeOperationDescriptor,
-) !?DirectPropertyAccess {
+) !?DirectRuntimeAccess {
     if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop) or descriptor.input_count != 1 or
         program.native_property_caches.len != program.native_operations.len)
         return null;
@@ -3083,7 +3153,7 @@ fn emitDirectNamedPropertyRead(
         };
     if (usable_entries == 0) return null;
 
-    var direct = DirectPropertyAccess{};
+    var direct = DirectRuntimeAccess{};
     try emitDirectPropertyGuards(assembler, &direct, descriptor);
     for (cache.shape_tokens, cache.slots) |shape_token, slot| {
         if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
@@ -3104,7 +3174,7 @@ fn emitDirectNamedPropertyWrite(
     program: *const Program,
     operation: Operation,
     descriptor: jit.NativeOperationDescriptor,
-) !?DirectPropertyAccess {
+) !?DirectRuntimeAccess {
     if (descriptor.bytecode_op != @backingInt(bc.Op.set_prop) or descriptor.input_count != 2 or
         program.native_property_caches.len != program.native_operations.len)
         return null;
@@ -3116,7 +3186,7 @@ fn emitDirectNamedPropertyWrite(
         };
     if (usable_entries == 0) return null;
 
-    var direct = DirectPropertyAccess{};
+    var direct = DirectRuntimeAccess{};
     try emitDirectPropertyGuards(assembler, &direct, descriptor);
     for (cache.shape_tokens, cache.slots) |shape_token, slot| {
         if (shape_token == 0 or slot >= @as(u32, Object.inline_slot_capacity)) continue;
@@ -3152,6 +3222,147 @@ fn emitDirectNamedPropertyWrite(
     return direct;
 }
 
+const DenseListLayout = extern struct {
+    items: [*]Value,
+    len: usize,
+    capacity: usize,
+};
+
+fn objectStorageByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(u15, @offsetOf(ObjectStorageState, field)) orelse error.UnsupportedChunk;
+}
+
+fn objectElementsByteOffset(comptime field: []const u8) !u15 {
+    return std.math.cast(
+        u15,
+        @offsetOf(ObjectElementsState, "list") + @offsetOf(DenseListLayout, field),
+    ) orelse error.UnsupportedChunk;
+}
+
+fn emitDirectDenseArrayElementAddress(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+    descriptor: jit.NativeOperationDescriptor,
+) !void {
+    comptime {
+        std.debug.assert(@sizeOf(DenseListLayout) == @sizeOf(std.ArrayListUnmanaged(Value)));
+        std.debug.assert(@alignOf(DenseListLayout) == @alignOf(std.ArrayListUnmanaged(Value)));
+    }
+
+    // Shared-realm mutation requires the element lock. The same global gate
+    // that selects seqlock IC publication therefore keeps this unlocked native
+    // path isolated; shared arrays enter the canonical callback instead.
+    try assembler.movImmediate64(10, @intFromPtr(&bc.ic_seqlock_enabled));
+    try assembler.load8(10, 10, 0);
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+
+    // ToPropertyKey(Number) is an array index only for an exactly represented
+    // uint32 below 2^32-1. Round-trip the hardware conversion so fractional,
+    // negative, NaN, infinite, and overflowing keys all miss before mutation.
+    try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 1));
+    try assembler.movImmediate64(11, Value.number_box_mask);
+    try assembler.andRegister64(9, 10, 11);
+    try assembler.compareRegister64(9, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.moveFloatFromRegister64(0, 10);
+    try assembler.convertFloat64ToUnsigned32(0, 0);
+    try assembler.convertUnsigned32ToFloat64(1, 0);
+    try assembler.compareFloat64(0, 1);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.movImmediate64(11, std.math.maxInt(u32));
+    try assembler.compareRegister64(0, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+
+    try assembler.load64(9, 14, try slotOffset(descriptor.first_input));
+    try assembler.movImmediate64(10, Value.boxed_kind_mask);
+    try assembler.andRegister64(11, 9, 10);
+    try assembler.movImmediate64(10, Value.object_kind_bits);
+    try assembler.compareRegister64(11, 10);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.movImmediate64(10, Value.boxed_payload_mask);
+    try assembler.andRegister64(9, 9, 10);
+
+    try assembler.load8(10, 9, try objectByteOffset("is_array"));
+    try direct.addFallback(try assembler.branchZero32Placeholder(10), true);
+    try assembler.load16(10, 9, try objectByteOffset("behavior"));
+    try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+    try emitZeroByteGuard(assembler, direct, "is_symbol");
+    try emitZeroByteGuard(assembler, direct, "is_bigint");
+    try emitZeroByteGuard(assembler, direct, "is_arguments");
+    try emitZeroByteGuard(assembler, direct, "proxy_revoked");
+    try emitZeroByteGuard(assembler, direct, "has_indexed_property");
+    try assembler.load64(10, 9, try objectByteOffset("private_data"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+
+    try assembler.load64(10, 9, try objectByteOffset("storage"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.load64(11, 10, try objectStorageByteOffset("cold"));
+    try assembler.compareImmediate64(11, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.load64(10, 10, try objectStorageByteOffset("elements"));
+    try assembler.compareImmediate64(10, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+
+    try assembler.load64(11, 10, try objectElementsByteOffset("len"));
+    try assembler.compareRegister64(0, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+    try assembler.load64(11, 10, try objectElementsByteOffset("items"));
+    try assembler.movImmediate64(10, @sizeOf(Value));
+    try assembler.multiply64(10, 0, 10);
+    try assembler.addRegister64(11, 11, 10);
+}
+
+fn emitDirectDenseArrayRead(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.get_index) or descriptor.input_count != 2)
+        return null;
+    var direct = DirectRuntimeAccess{};
+    try emitDirectDenseArrayElementAddress(assembler, &direct, descriptor);
+    try assembler.load64(10, 11, 0);
+    try assembler.store64(10, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
+fn emitDirectDenseArrayWrite(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.set_index) or descriptor.input_count != 3)
+        return null;
+    var direct = DirectRuntimeAccess{};
+    try emitDirectDenseArrayElementAddress(assembler, &direct, descriptor);
+
+    try assembler.load64(17, 12, frameOffset("property_write_barrier"));
+    try assembler.compareImmediate64(17, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.pushPair(9, 11);
+    try assembler.load64(0, 14, try slotOffset(descriptor.first_input));
+    try assembler.load64(1, 14, try slotOffset(descriptor.first_input + 2));
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(9, 11);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+
+    try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 2));
+    try assembler.store64(10, 11, 0);
+    try assembler.store64(10, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
 fn emitRuntimeOperation(
     assembler: *aarch64.Assembler,
     program: *const Program,
@@ -3173,6 +3384,7 @@ fn emitRuntimeOperation(
     const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
     if (numeric_result) {
         var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+            (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
             return error.UnsupportedChunk;
         try direct.patchCompletions(assembler, assembler.position());
         try assembler.load64(9, 14, try slotOffset(operation.destination));
@@ -3197,10 +3409,12 @@ fn emitRuntimeOperation(
         std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
     );
 
-    const direct_property_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
-        try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor);
+    const direct_runtime_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+        (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
+        (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
+        try emitDirectDenseArrayWrite(assembler, operation, descriptor);
     const callback_position = assembler.position();
-    if (direct_property_access) |direct| try direct.patchFallbacks(assembler, callback_position);
+    if (direct_runtime_access) |direct| try direct.patchFallbacks(assembler, callback_position);
 
     try assembler.load64(17, 12, frameOffset("operation"));
     try assembler.compareImmediate64(17, 0);
@@ -3253,7 +3467,7 @@ fn emitRuntimeOperation(
     try assembler.ret();
     const completion_position = assembler.position();
     try assembler.patchBranch(done, completion_position);
-    if (direct_property_access) |direct| try direct.patchCompletions(assembler, completion_position);
+    if (direct_runtime_access) |direct| try direct.patchCompletions(assembler, completion_position);
 }
 
 fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {

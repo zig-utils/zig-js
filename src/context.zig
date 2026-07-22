@@ -221,7 +221,7 @@ pub const LockedArena = struct {
     inline fn canUseLocal(len: usize, alignment: std.mem.Alignment) bool {
         return len > 0 and
             len <= local_max_alloc and
-            @intFromEnum(alignment) <= @intFromEnum(local_chunk_alignment);
+            @backingInt(alignment) <= @backingInt(local_chunk_alignment);
     }
 
     inline fn resetLocalFor(self: *LockedArena) void {
@@ -15559,7 +15559,7 @@ test "parallel_js: optimizer live safepoint relocates a recovery-only object loc
     });
 }
 
-test "optimizer property regions match bytecode and survive a moving GC checkpoint" {
+test "optimizer packed index and property regions match bytecode and survive a moving GC checkpoint" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
     defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
@@ -15581,6 +15581,15 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         \\  object.value = held;
         \\  return object.value.marker;
         \\}
+        \\function optimizerIndexMove(n, target, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < n) {
+        \\    target[0] = held;
+        \\    held = target[0];
+        \\    cursor = cursor + 1;
+        \\  }
+        \\  return target[0].marker + held.marker;
+        \\}
         \\function optimizerPropertyArithmetic(jobs, lane) {
         \\  var total = 0;
         \\  for (var job = 0; job < jobs; job = job + 1) {
@@ -15597,6 +15606,7 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         \\}
         \\globalThis.optimizerPropertyHeld = { marker: 3 };
         \\globalThis.optimizerPropertyTarget = { value: optimizerPropertyHeld };
+        \\globalThis.optimizerIndexTarget = [optimizerPropertyHeld];
         \\globalThis.optimizerPropertyObjects = [
         \\  { value: optimizerPropertyHeld, a: 1 },
         \\  { b: 1, value: optimizerPropertyHeld },
@@ -15609,6 +15619,7 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         \\  optimizerPropertyPoly(optimizerPropertyObjects[1], optimizerPropertyHeld);
         \\  optimizerPropertyPoly(optimizerPropertyObjects[2], optimizerPropertyHeld);
         \\  optimizerPropertyPoly(optimizerPropertyObjects[3], optimizerPropertyHeld);
+        \\  optimizerIndexMove(8, optimizerIndexTarget, optimizerPropertyHeld);
         \\  optimizerPropertyArithmetic(1, warm);
         \\}
         \\optimizerPropertyDiscard = null;
@@ -15634,6 +15645,19 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
     try std.testing.expect(artifact.osr != null and artifact.has_side_exits and artifact.native_operations != null);
+    const index_object = native_ctx.global_object.getOwn("optimizerIndexMove").?.asObj();
+    const index_function: *interp.Function = @ptrCast(@alignCast(index_object.jsFunction().?));
+    const index_chunk = index_function.chunk.?;
+    const index_artifact = index_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(index_artifact.osr != null and index_artifact.native_operations != null);
+    var saw_index_read = false;
+    var saw_index_write = false;
+    for (index_artifact.native_operations.?.descriptors) |descriptor| {
+        saw_index_read = saw_index_read or descriptor.bytecode_op == @backingInt(bc.Op.get_index);
+        saw_index_write = saw_index_write or descriptor.bytecode_op == @backingInt(bc.Op.set_index);
+    }
+    try std.testing.expect(saw_index_read and saw_index_write);
     const arithmetic_object = native_ctx.global_object.getOwn("optimizerPropertyArithmetic").?.asObj();
     const arithmetic_function: *interp.Function = @ptrCast(@alignCast(arithmetic_object.jsFunction().?));
     const arithmetic_chunk = arithmetic_function.chunk.?;
@@ -15654,9 +15678,23 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
     native_ctx.collectGarbage();
     bytecode_ctx.collectGarbage();
     const target_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyTarget").?.asObj());
+    const index_target_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerIndexTarget").?.asObj());
     const held_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyHeld").?.asObj());
     const property_stats_before = vm.optimizerNativePropertyStatsForTesting();
+    const index_stats_before = vm.optimizerNativeIndexStatsForTesting();
     try std.testing.expect(native_ctx.requestGarbageCompaction());
+
+    const native_indexed = try native_ctx.evaluate(
+        "optimizerIndexMove(20000, optimizerIndexTarget, optimizerPropertyHeld)",
+    );
+    const bytecode_indexed = try bytecode_ctx.evaluate(
+        "optimizerIndexMove(20000, optimizerIndexTarget, optimizerPropertyHeld)",
+    );
+    try std.testing.expectEqual(bytecode_indexed.rawBits(), native_indexed.rawBits());
+    try std.testing.expectEqual(@as(f64, 6), native_indexed.asNum());
+    try std.testing.expect(!native_ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(index_target_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerIndexTarget").?.asObj()));
+    try std.testing.expect(held_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyHeld").?.asObj()));
 
     const native_monomorphic = try native_ctx.evaluate(
         "optimizerPropertyMove(20000, optimizerPropertyTarget, optimizerPropertyHeld)",
@@ -15666,9 +15704,7 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
     );
     try std.testing.expectEqual(bytecode_monomorphic.rawBits(), native_monomorphic.rawBits());
     try std.testing.expectEqual(@as(f64, 6), native_monomorphic.asNum());
-    try std.testing.expect(!native_ctx.gc_compaction_requested.load(.acquire));
     try std.testing.expect(target_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyTarget").?.asObj()));
-    try std.testing.expect(held_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyHeld").?.asObj()));
 
     const native_polymorphic = try native_ctx.evaluate(
         \\optimizerPropertyPoly(optimizerPropertyObjects[0], optimizerPropertyHeld) +
@@ -15691,6 +15727,7 @@ test "optimizer property regions match bytecode and survive a moving GC checkpoi
     try std.testing.expectEqual(bytecode_arithmetic.rawBits(), native_arithmetic.rawBits());
     try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before_arithmetic);
     try std.testing.expectEqual(property_stats_before, vm.optimizerNativePropertyStatsForTesting());
+    try std.testing.expectEqual(index_stats_before, vm.optimizerNativeIndexStatsForTesting());
 }
 
 test "GC compaction rewrites public Zig protected handles" {

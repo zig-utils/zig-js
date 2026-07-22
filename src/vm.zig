@@ -913,6 +913,8 @@ var optimizer_native_property_read_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_index_read_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_index_write_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -930,6 +932,19 @@ pub fn optimizerNativePropertyStatsForTesting() OptimizerNativePropertyStats {
     return .{
         .read_callbacks = optimizer_native_property_read_callbacks.load(.monotonic),
         .write_callbacks = optimizer_native_property_write_callbacks.load(.monotonic),
+    };
+}
+
+pub const OptimizerNativeIndexStats = struct {
+    read_callbacks: u64,
+    write_callbacks: u64,
+};
+
+pub fn optimizerNativeIndexStatsForTesting() OptimizerNativeIndexStats {
+    std.debug.assert(builtin.is_test);
+    return .{
+        .read_callbacks = optimizer_native_index_read_callbacks.load(.monotonic),
+        .write_callbacks = optimizer_native_index_write_callbacks.load(.monotonic),
     };
 }
 
@@ -3954,13 +3969,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeGetProperty(vm, metadata.propertyCacheFor(operation_id), Value.fromRawBits(inputs[0]), name),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_index) and inputs.len == 2)
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_index) and inputs.len == 2) {
+        if (builtin.is_test) _ = optimizer_native_index_read_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeGetIndex(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
+    }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_prop) and inputs.len == 2) {
         if (builtin.is_test) _ = optimizer_native_property_write_callbacks.fetchAdd(1, .monotonic);
         const name = metadata.nameFor(operation_id) orelse
@@ -3978,7 +3995,8 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             ),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_index) and inputs.len == 3)
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_index) and inputs.len == 3) {
+        if (builtin.is_test) _ = optimizer_native_index_write_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
             vm,
@@ -3990,6 +4008,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 Value.fromRawBits(inputs[2]),
             ),
         );
+    }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.in_op) and inputs.len == 2)
         return finishNativeOperation(
             frame,
@@ -9569,6 +9588,136 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
     );
 }
 
+test "vm: optimizer packed index guards direct existing-index reads and writes" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    var read_chunk = bc.Chunk.init(allocator);
+    read_chunk.param_count = 2;
+    read_chunk.local_count = 2;
+    _ = try read_chunk.emit(.load_local, 0);
+    _ = try read_chunk.emit(.load_local, 1);
+    _ = try read_chunk.emit(.get_index, 0);
+    _ = try read_chunk.emit(.ret, 0);
+    try read_chunk.finalize();
+    var read_compiled = try optimizer_compiler.compile(&read_chunk);
+    defer read_compiled.deinit();
+
+    const packed_array = try machine.newArray();
+    try packed_array.asObj().appendElement(allocator, Value.num(10));
+    try packed_array.asObj().appendElement(allocator, Value.num(20));
+    var read_slots = [_]Value{ packed_array, Value.num(1) };
+    const reads_before = optimizer_native_index_read_callbacks.load(.monotonic);
+    const packed_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
+    const packed_result = switch (packed_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 20), packed_result.asNum());
+    try std.testing.expectEqual(reads_before, optimizer_native_index_read_callbacks.load(.monotonic));
+
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    const shared_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    const shared_result = switch (shared_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 20), shared_result.asNum());
+    try std.testing.expectEqual(reads_before + 1, optimizer_native_index_read_callbacks.load(.monotonic));
+
+    read_slots[1] = Value.num(1.5);
+    const fractional_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
+    const fractional_result = switch (fractional_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(fractional_result.isUndefined());
+    try std.testing.expectEqual(reads_before + 2, optimizer_native_index_read_callbacks.load(.monotonic));
+
+    packed_array.asObj().has_indexed_property.store(true, .monotonic);
+    defer packed_array.asObj().has_indexed_property.store(false, .monotonic);
+    read_slots = .{ packed_array, Value.num(1) };
+    const indexed_hook_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
+    packed_array.asObj().has_indexed_property.store(false, .monotonic);
+    const indexed_hook_result = switch (indexed_hook_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 20), indexed_hook_result.asNum());
+    try std.testing.expectEqual(reads_before + 3, optimizer_native_index_read_callbacks.load(.monotonic));
+
+    const holey = try machine.newArray();
+    try holey.asObj().appendElement(allocator, Value.num(1));
+    try holey.asObj().appendArrayHole(allocator);
+    read_slots = .{ holey, Value.num(1) };
+    const hole_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
+    const hole_result = switch (hole_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(hole_result.isUndefined());
+    try std.testing.expectEqual(reads_before + 4, optimizer_native_index_read_callbacks.load(.monotonic));
+
+    var write_chunk = bc.Chunk.init(allocator);
+    write_chunk.param_count = 3;
+    write_chunk.local_count = 3;
+    _ = try write_chunk.emit(.load_local, 0);
+    _ = try write_chunk.emit(.load_local, 1);
+    _ = try write_chunk.emit(.load_local, 2);
+    _ = try write_chunk.emit(.set_index, 0);
+    _ = try write_chunk.emit(.ret, 0);
+    try write_chunk.finalize();
+    var write_compiled = try optimizer_compiler.compile(&write_chunk);
+    defer write_compiled.deinit();
+
+    const retained = try machine.newObject();
+    var write_slots = [_]Value{ packed_array, Value.num(0), retained };
+    const writes_before = optimizer_native_index_write_callbacks.load(.monotonic);
+    const direct_write_outcome = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    const direct_write_result = switch (direct_write_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(retained.rawBits(), direct_write_result.rawBits());
+    try std.testing.expectEqual(retained.rawBits(), packed_array.asObj().atomicDenseElementLoad(0).?.rawBits());
+    try std.testing.expectEqual(writes_before, optimizer_native_index_write_callbacks.load(.monotonic));
+
+    write_slots = .{ packed_array, Value.num(2), Value.num(30) };
+    const growth_outcome = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    const growth_result = switch (growth_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 30), growth_result.asNum());
+    try std.testing.expectEqual(@as(usize, 3), packed_array.asObj().arrayLength());
+    try std.testing.expectEqual(writes_before + 1, optimizer_native_index_write_callbacks.load(.monotonic));
+
+    var invalidation_generation: std.atomic.Value(u64) = .init(1);
+    write_compiled.invalidation_generation = &invalidation_generation;
+    write_compiled.expected_invalidation_generation = 0;
+    write_slots = .{ packed_array, Value.num(1), Value.num(99) };
+    const steps_before_invalidation = machine.steps;
+    const writes_before_invalidation = optimizer_native_index_write_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        NativeRunOutcome.miss,
+        try tryRunManagedNative(&machine, &write_compiled, &write_slots, null),
+    );
+    try std.testing.expectEqual(steps_before_invalidation, machine.steps);
+    try std.testing.expectEqual(@as(f64, 20), packed_array.asObj().atomicDenseElementLoad(1).?.asNum());
+    try std.testing.expectEqual(
+        writes_before_invalidation,
+        optimizer_native_index_write_callbacks.load(.monotonic),
+    );
+}
+
 test "vm: optimizer native named getter resumes an exact catch once" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -11077,6 +11226,65 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     var slots = [_]Value{ Value.num(2), Value.num(0) };
     var frame = Frame{ .slots = &slots, .parent = null };
     try std.testing.expectEqual(@as(f64, 2), (try run(&machine, function_chunk, &frame)).asNum());
+}
+
+test "vm: optimizer packed index loop executes existing-index reads and writes directly" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function update(values, n) {
+        \\  let i = 0; let total = 0;
+        \\  while (i < n) {
+        \\    const current = values[i];
+        \\    values[i] = current + 1;
+        \\    total = total + current;
+        \\    i = i + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\const values = [1, 2, 3, 4];
+        \\update(values, 4); update(values, 4); update(values, 4); update(values, 4); update(values, 4);
+        \\update(values, 4); update(values, 4); update(values, 4); update(values, 4); update(values, 4)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 46), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled);
+    try std.testing.expect(artifact.osr != null);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_index_read = false;
+    var saw_index_write = false;
+    for (operations.descriptors) |operation| {
+        saw_index_read = saw_index_read or operation.bytecode_op == @intFromEnum(bc.Op.get_index);
+        saw_index_write = saw_index_write or operation.bytecode_op == @intFromEnum(bc.Op.set_index);
+    }
+    try std.testing.expect(saw_index_read and saw_index_write);
+
+    const reads_before = optimizer_native_index_read_callbacks.load(.monotonic);
+    const writes_before = optimizer_native_index_write_callbacks.load(.monotonic);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 46), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+    try std.testing.expectEqual(reads_before, optimizer_native_index_read_callbacks.load(.monotonic));
+    try std.testing.expectEqual(writes_before, optimizer_native_index_write_callbacks.load(.monotonic));
 }
 
 test "vm: optimizer unequal nested branch paths converge" {
