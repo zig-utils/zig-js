@@ -8564,7 +8564,7 @@ test "vm: optimizer multiple conditional loop exits converge" {
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
 
-test "vm: optimizer conditional exit prefix and diamond tail converge" {
+test "vm: optimizer conditional exit prefix and sequential diamond tail converge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -8575,6 +8575,8 @@ test "vm: optimizer conditional exit prefix and diamond tail converge" {
         \\  while (i < n) {
         \\    if (i === 3) break;
         \\    if (i < 2) sum = sum + 10;
+        \\    else sum = sum + 1;
+        \\    if (i === 1) sum = sum + 100;
         \\    else sum = sum + 1;
         \\    i = i + 1;
         \\  }
@@ -8593,7 +8595,7 @@ test "vm: optimizer conditional exit prefix and diamond tail converge" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
 
-    try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 123), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
     const function_chunk = root.fns.items[0].chunk.?;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
@@ -8601,7 +8603,7 @@ test "vm: optimizer conditional exit prefix and diamond tail converge" {
     try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
     const osr_before = optimizer_osr_entries.load(.monotonic);
     const second_start = machine.steps;
-    try std.testing.expectEqual(@as(f64, 21), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(@as(f64, 123), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
