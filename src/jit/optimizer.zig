@@ -1394,7 +1394,7 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
-    _ = try chunk.emit(.new_object, 0);
+    _ = try chunk.emit(.dup, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
 
