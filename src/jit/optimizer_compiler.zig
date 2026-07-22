@@ -481,32 +481,33 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
+    const required_numeric = try numericRequirements(graph);
     var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
-    try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized);
+    try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
     if (nested_loop) |nested| {
-        try appendEdgeCopies(graph, header, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &scratch_slots);
-        try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized);
+        try appendEdgeCopies(graph, header, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
         if (types[nested.condition] != .boolean) return error.UnsupportedChunk;
 
-        try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &scratch_slots);
-        try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized);
-        try appendEdgeCopies(graph, nested.true_block, nested.merge_block, nested.true_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, nested.true_block, nested.merge_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
-        try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &scratch_slots);
-        try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized);
-        try appendEdgeCopies(graph, nested.false_block, nested.merge_block, nested.false_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, nested.false_block, nested.merge_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
-        try appendBlockOperations(graph, nested.merge_block, false, allocator, &operations, &types, &initialized);
-        try appendEdgeCopies(graph, nested.merge_block, header, nested.merge_block, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendBlockOperations(graph, nested.merge_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, nested.merge_block, header, nested.merge_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
     } else {
         const straight_body = body.?;
-        try appendEdgeCopies(graph, header, straight_body, straight_body, allocator, &operations, &types, &initialized, &scratch_slots);
-        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized);
-        try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &scratch_slots);
+        try appendEdgeCopies(graph, header, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
     }
 
     var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
@@ -525,12 +526,14 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(owned_deopt_values);
     const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
     errdefer allocator.free(owned_deopt_handlers);
-    const stack_maps = try primitiveStackMaps(allocator, owned_deopt_points.len);
+    const stack_maps = try typedRecoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values, &types);
     errdefer allocator.free(stack_maps);
-    const local_mask: u64 = if (chunk.local_count == 64)
-        std.math.maxInt(u64)
-    else
-        (@as(u64, 1) << @intCast(chunk.local_count)) - 1;
+    var local_mask: u64 = 0;
+    for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
+        if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
+            return error.UnsupportedChunk;
+        if (required_numeric[import.destination]) local_mask |= @as(u64, 1) << @intCast(import.source_index);
+    }
     const exit_steps = std.math.cast(u12, plan.blocks[header].instruction_count) orelse return error.UnsupportedChunk;
     const iteration_steps = std.math.cast(u12, true_steps) orelse return error.UnsupportedChunk;
     return .{
@@ -606,6 +609,42 @@ fn recoveryStackMaps(
     return maps;
 }
 
+fn typedRecoveryStackMaps(
+    allocator: std.mem.Allocator,
+    points: []const jit.DeoptPoint,
+    values: []const jit.RecoveryValue,
+    types: *const [jit.numeric_scratch_capacity]ValueType,
+) ![]jit.StackMap {
+    const maps = try primitiveStackMaps(allocator, points.len);
+    errdefer allocator.free(maps);
+    for (points, maps) |point, *map| {
+        const first: usize = point.first_value;
+        const count: usize = point.local_count + point.stack_count;
+        if (first > values.len or count > values.len - first) return error.UnsupportedChunk;
+        for (values[first .. first + count]) |recovery| switch (recovery.source) {
+            .frame_slot => map.frame_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk),
+            .scratch_slot => {
+                if (recovery.index >= types.len) return error.UnsupportedChunk;
+                if (types[recovery.index] == .other) map.scratch_pointer_slots |= @as(u64, 1) <<
+                    (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk);
+            },
+            .constant => {},
+        };
+        switch (point.accumulator.source) {
+            .frame_slot => map.frame_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk),
+            .scratch_slot => {
+                if (point.accumulator.index >= types.len) return error.UnsupportedChunk;
+                if (types[point.accumulator.index] == .other) map.scratch_pointer_slots |= @as(u64, 1) <<
+                    (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
+            },
+            .constant => {},
+        }
+    }
+    return maps;
+}
+
 fn ownRecoveryHandlers(allocator: std.mem.Allocator, handlers: []const optimizer.HandlerState) ![]jit.RecoveryHandler {
     const owned = try allocator.alloc(jit.RecoveryHandler, handlers.len);
     errdefer allocator.free(owned);
@@ -650,6 +689,43 @@ fn appendPrimitiveLeaves(
     };
 }
 
+fn numericRequirements(graph: *const optimizer.ValueGraph) error{UnsupportedChunk}![jit.numeric_scratch_capacity]bool {
+    var required: [jit.numeric_scratch_capacity]bool = @splat(false);
+    for (graph.nodes) |node| switch (node.kind) {
+        .add, .sub, .mul, .div, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            if (node.lhs >= required.len or node.rhs >= required.len) return error.UnsupportedChunk;
+            required[node.lhs] = true;
+            required[node.rhs] = true;
+        },
+        else => {},
+    };
+
+    // Numeric phi inputs require their matching source on every predecessor.
+    // Iterate to a fixed point so loop-carried chains reach the OSR import.
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (graph.nodes, 0..) |node, node_index| {
+            if (node.kind != .block_argument or !required[node.id]) continue;
+            var ordinal: usize = 0;
+            for (graph.nodes[0..node_index]) |previous|
+                if (previous.kind == .block_argument and previous.block == node.block) {
+                    ordinal += 1;
+                };
+            for (graph.edges) |edge| {
+                if (edge.to != node.block or ordinal >= edge.argument_count) continue;
+                const source = graph.edge_arguments[edge.first_argument + ordinal];
+                if (source >= required.len) return error.UnsupportedChunk;
+                if (!required[source]) {
+                    required[source] = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+    return required;
+}
+
 fn appendEdgeCopies(
     graph: *const optimizer.ValueGraph,
     from: u32,
@@ -659,6 +735,7 @@ fn appendEdgeCopies(
     operations: *std.ArrayListUnmanaged(Operation),
     types: *[jit.numeric_scratch_capacity]ValueType,
     initialized: *[jit.numeric_scratch_capacity]bool,
+    required_numeric: *const [jit.numeric_scratch_capacity]bool,
     scratch_slots: *usize,
 ) !void {
     var found: ?optimizer.Edge = null;
@@ -668,16 +745,18 @@ fn appendEdgeCopies(
     };
     const edge = found orelse return error.UnsupportedChunk;
     var copies: [jit.numeric_scratch_capacity]CopyPair = undefined;
+    var source_types: [jit.numeric_scratch_capacity]ValueType = undefined;
     var copy_count: usize = 0;
     for (graph.nodes) |node| if (node.kind == .block_argument and node.block == to) {
         if (copy_count >= edge.argument_count) return error.UnsupportedChunk;
         const source = graph.edge_arguments[edge.first_argument + copy_count];
-        if (source >= initialized.len or !initialized[source] or types[source] != .number)
-            return error.UnsupportedChunk;
+        if (source >= initialized.len or !initialized[source]) return error.UnsupportedChunk;
+        if (required_numeric[node.id] and types[source] != .number) return error.UnsupportedChunk;
         copies[copy_count] = .{
             .destination = @intCast(node.id),
             .source = @intCast(source),
         };
+        source_types[copy_count] = types[source];
         copy_count += 1;
     };
     if (copy_count != edge.argument_count) return error.UnsupportedChunk;
@@ -687,9 +766,15 @@ fn appendEdgeCopies(
     // One-slot-per-SSA lowering makes current graphs acyclic, while the cycle
     // breaker keeps this boundary correct when scratch slots are coalesced.
     try appendParallelCopies(allocator, operations, operation_block, copies[0..copy_count], scratch_slots);
-    for (copies[0..copy_count]) |copy| {
+    for (copies[0..copy_count], source_types[0..copy_count]) |copy, source_type| {
         const destination = copy.destination;
-        types[destination] = .number;
+        const incoming_type: ValueType = if (required_numeric[destination]) .number else source_type;
+        if (initialized[destination] and types[destination] != incoming_type) {
+            if (required_numeric[destination]) return error.UnsupportedChunk;
+            types[destination] = .other;
+        } else {
+            types[destination] = incoming_type;
+        }
         initialized[destination] = true;
     }
 }
@@ -770,13 +855,17 @@ fn appendBlockOperations(
     operations: *std.ArrayListUnmanaged(Operation),
     types: *[jit.numeric_scratch_capacity]ValueType,
     initialized: *[jit.numeric_scratch_capacity]bool,
+    required_numeric: *const [jit.numeric_scratch_capacity]bool,
 ) !void {
     for (graph.nodes) |node| {
         if (node.block != block) continue;
         switch (node.kind) {
             .block_argument => {
                 if (!initialized[node.id] and !imports_block_arguments) return error.UnsupportedChunk;
-                types[node.id] = .number;
+                const expected: ValueType = if (required_numeric[node.id]) .number else .other;
+                if (initialized[node.id] and required_numeric[node.id] and types[node.id] != .number)
+                    return error.UnsupportedChunk;
+                if (!initialized[node.id] or expected == .other) types[node.id] = expected;
                 initialized[node.id] = true;
             },
             .constant, .true, .false => {}, // emitted once before control flow
@@ -935,7 +1024,7 @@ pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
 
 fn compileAarch64(program: *const Program) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
-    var memory = try jit.CodeMemory.init(@as(usize, program.operations.len) * 64 + 512);
+    var memory = try jit.CodeMemory.init(@as(usize, program.operations.len) * 64 + 1024);
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     try assembler.moveRegister64(12, 0); // stable NativeFrame
@@ -953,6 +1042,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     } else if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
         try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
         try assembler.load64(16, 12, frameOffset("steps_until_budget"));
+        try assembler.movImmediate32(8, 64);
         const loop_top = assembler.position();
         const invalidated = try emitInvalidationSideExitPoll(&assembler);
         try assembler.compareImmediate64(15, branch.true_steps);
@@ -976,6 +1066,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try emitStepIncrement(&assembler, nested.true_steps);
             try assembler.subtractImmediate64(15, 15, nested.true_steps);
             try assembler.subtractImmediate64(16, 16, nested.true_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
             if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
             const true_backedge = try assembler.branchPlaceholder();
             try assembler.patchBranch(true_backedge, loop_top);
@@ -986,6 +1077,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try emitStepIncrement(&assembler, nested.false_steps);
             try assembler.subtractImmediate64(15, 15, nested.false_steps);
             try assembler.subtractImmediate64(16, 16, nested.false_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
             if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
             const false_backedge = try assembler.branchPlaceholder();
             try assembler.patchBranch(false_backedge, loop_top);
@@ -994,6 +1086,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try emitStepIncrement(&assembler, branch.true_steps);
             try assembler.subtractImmediate64(15, 15, branch.true_steps);
             try assembler.subtractImmediate64(16, 16, branch.true_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
             if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
             const backedge = try assembler.branchPlaceholder();
             try assembler.patchBranch(backedge, loop_top);
@@ -1150,6 +1243,37 @@ fn emitInvalidationSideExitPoll(assembler: *aarch64.Assembler) !usize {
     const invalidated = try assembler.branchConditionPlaceholder(.ne);
     try assembler.patchConditionBranch(no_owner, assembler.position());
     return invalidated;
+}
+
+fn emitMovingSafepointPoll(assembler: *aarch64.Assembler, deopt_index: u16, exit_ip: u32) !void {
+    try assembler.subtractImmediateSetFlags64(8, 8, 1);
+    const not_due = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.movImmediate32(8, 64);
+    try assembler.load64(17, 12, frameOffset("moving_safepoint"));
+    try assembler.compareImmediate64(17, 0);
+    const absent = try assembler.branchConditionPlaceholder(.eq);
+
+    // Publish the exact loop-header state before entering Zig. All generated
+    // temporaries are dead here; the callback may rewrite selected frame and
+    // scratch words in place, after which the next iteration reloads them.
+    try assembler.movImmediate64(9, exit_ip);
+    try assembler.store64(9, 12, frameOffset("exit_ip"));
+    try assembler.movImmediate64(9, deopt_index);
+    try assembler.store64(9, 12, frameOffset("deopt_index"));
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.moveRegister64(0, 12);
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+
+    const done = assembler.position();
+    try assembler.patchConditionBranch(absent, done);
+    try assembler.patchConditionBranch(not_due, done);
 }
 
 fn emitBackedgeObserver(assembler: *aarch64.Assembler) !void {
@@ -2077,6 +2201,81 @@ test "optimizer compiler executes multiple loop iterations through OSR" {
             Value.fromRawBits(race_i).asNum(),
         );
     }
+}
+
+test "optimizer loop moving safepoint publishes and rewrites recovery-only local" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 3;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 14);
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, 4);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.ret, 0);
+
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(u64, 0b101), compiled.required_numeric_slots);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const osr_entry = osr.findEntry(4, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    const entry = osr.entries[osr_entry];
+    const held_import = osr.imports[entry.first_import + 1];
+    try std.testing.expectEqual(jit.OsrImportSource.frame_slot, held_import.source);
+    try std.testing.expectEqual(@as(u16, 1), held_import.source_index);
+
+    const Callback = struct {
+        hits: u32 = 0,
+        seen_deopt: usize = std.math.maxInt(usize),
+        held_slot: u8,
+
+        fn run(frame: *jit.NativeFrame) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(frame.runtime_context.?));
+            self.hits += 1;
+            self.seen_deopt = frame.deopt_index;
+            frame.scratch.?[self.held_slot] = Value.boolVal(true).rawBits();
+        }
+    };
+    var callback = Callback{ .held_slot = held_import.destination };
+    var slots = [_]u64{ Value.num(70).rawBits(), Value.nul().rawBits(), Value.num(0).rawBits() };
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+    try std.testing.expect(osr.prepareScratch(osr_entry, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .runtime_context = &callback,
+        .moving_safepoint = Callback.run,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(u32, 1), callback.hits);
+    const live_map = compiled.stack_maps.?.forDeopt(callback.seen_deopt) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), live_map.frame_pointer_slots);
+    try std.testing.expectEqual(@as(u64, 1) << @intCast(held_import.destination), live_map.scratch_pointer_slots);
+    const exit = compiled.deopt.?.points[frame.deopt_index];
+    const held = compiled.deopt.?.values[exit.first_value + 1].materialize(&slots, &scratch) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(Value.fromRawBits(held).asBool());
 }
 
 test "optimizer loop OSR preserves parallel multi-local backedges" {

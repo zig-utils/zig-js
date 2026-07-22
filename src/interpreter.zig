@@ -1242,6 +1242,10 @@ pub const Interpreter = struct {
     /// helper. M1 collection is precise and quiescent-only, so the request is
     /// serviced by `Context` at the next safe entry point.
     gc_requested: ?*std.atomic.Value(bool) = null,
+    /// Context-owned moving-compaction request. Native optimizer safepoints
+    /// use this as their cheap runtime gate without conflating compaction with
+    /// the interpreter's exact 1024-step checkpoint semantics.
+    gc_moving_requested: ?*std.atomic.Value(bool) = null,
     /// Optional Context callback used by microtask checkpoints to service a
     /// pending shell GC request after a job has unwound but before the next job
     /// runs. The callback owns the full safety policy: no active thread stacks,
@@ -1268,10 +1272,10 @@ pub const Interpreter = struct {
     /// one private-mutator checkpoint; generic and parallel paths leave it false.
     gc_precise_safepoint: bool = false,
     /// Stronger than `gc_precise_safepoint`: true only when the suspended engine
-    /// path can resume after every managed cell moves. The current baseline-JIT
-    /// checkpoint island owns this declaration; specialized Zig quick paths may
-    /// be precise for marking while retaining raw helper pointers, so they must
-    /// leave it false.
+    /// path can resume after every managed cell moves. Baseline checkpoints and
+    /// optimizer loop safepoints own this declaration; specialized Zig quick
+    /// paths may be precise for marking while retaining raw helper pointers, so
+    /// they must leave it false.
     gc_moving_safepoint: bool = false,
     /// Root-publication generation this interpreter last published for, under the
     /// parallel mid-script collector (issue #1 M3). Written by this interpreter's

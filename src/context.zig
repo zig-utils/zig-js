@@ -4123,6 +4123,7 @@ pub const Context = struct {
             .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .gc_weak_work = if (self.gc != null) &self.gc_weak_work else null,
             .gc_requested = &self.gc_requested,
+            .gc_moving_requested = if (self.gc != null) &self.gc_compaction_requested else null,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
             .gc_recover_allocation_fn = recoverAllocationFailure,
@@ -15483,6 +15484,67 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
     try std.testing.expectEqual(native_before, function_after.chunk.?.tier.loadCode().?);
     try std.testing.expect(ctx.gc_cell_backing.?.stats().chunks < backing_before.chunks);
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
+}
+
+test "optimizer live safepoint relocates a recovery-only object local" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.optimizerCompactDiscard = [];
+        \\for (var i = 0; i < 4096; i = i + 1)
+        \\  optimizerCompactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\function optimizerCompactKeep(n, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < n) cursor = cursor + 1;
+        \\  return held.marker;
+        \\}
+        \\globalThis.optimizerCompactWitness = { marker: 362 };
+        \\for (var warm = 0; warm < 10; warm = warm + 1)
+        \\  optimizerCompactKeep(6, optimizerCompactWitness);
+        \\optimizerCompactDiscard = null;
+    );
+
+    const function_object = ctx.global_object.getOwn("optimizerCompactKeep").?.asObj();
+    const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
+    const chunk = function.chunk.?;
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+    try std.testing.expect(!artifact.entry_enabled and artifact.has_side_exits);
+    try std.testing.expectEqual(@as(u64, 0b101), artifact.required_numeric_slots);
+    const osr = artifact.osr orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), osr.entries.len);
+    const entry = osr.entries[0];
+    const held_import = osr.imports[entry.first_import + 1];
+    try std.testing.expectEqual(jit.OsrImportSource.frame_slot, held_import.source);
+    try std.testing.expectEqual(@as(u16, 1), held_import.source_index);
+    const entry_map = artifact.stack_maps.?.forDeopt(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), entry_map.frame_pointer_slots);
+    try std.testing.expectEqual(@as(u64, 1) << @intCast(held_import.destination), entry_map.scratch_pointer_slots);
+
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("optimizerCompactWitness").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    ctx.collectGarbage();
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    try std.testing.expect(backing_before.chunks > 1);
+    const witness_before = @intFromPtr(handle.get().asObj());
+    const compactions_before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
+
+    try std.testing.expect(ctx.requestGarbageCompaction());
+    const result = try ctx.evaluate("optimizerCompactKeep(20000, optimizerCompactWitness)");
+    try std.testing.expectEqual(@as(f64, 362), result.asNum());
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expectEqual(compactions_before + 1, ctx.gc_moving_safepoint_compactions.load(.monotonic));
+    try std.testing.expect(witness_before != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 362), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expectEqual(artifact, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+    try std.testing.expect(ctx.gc_cell_backing.?.stats().chunks < backing_before.chunks);
 }
 
 test "GC compaction rewrites public Zig protected handles" {

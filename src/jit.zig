@@ -292,6 +292,10 @@ pub const NativeFrame = extern struct {
     /// Optional release marker emitted only by instrumented optimizer tests
     /// after a complete native loop iteration reaches its backedge.
     loop_backedge_observer: ?*std.atomic.Value(u64) = null,
+    /// Optional moving-GC callback used by optimizer loop safepoints after
+    /// publishing an exact deoptimization index. Unlike `checkpoint`, this
+    /// does not own step-budget or termination semantics.
+    moving_safepoint: ?*const fn (*NativeFrame) callconv(.c) void = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;

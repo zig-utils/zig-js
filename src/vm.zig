@@ -3612,6 +3612,25 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     return 0;
 }
 
+fn nativeMovingSafepoint(frame: *jit.NativeFrame) callconv(.c) void {
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return));
+    const requested = vm.gc_moving_requested orelse return;
+    if (!requested.load(.acquire) or vm.gc_safepoint_fn == null) return;
+
+    // Generated optimizer code has completed its backedge copies, published
+    // the loop-header recovery index, and retains no managed pointer solely in
+    // registers. Frame and scratch words can therefore be rewritten in place.
+    const saved_precise = vm.gc_precise_safepoint;
+    const saved_moving = vm.gc_moving_safepoint;
+    vm.gc_precise_safepoint = true;
+    vm.gc_moving_safepoint = true;
+    defer {
+        vm.gc_moving_safepoint = saved_moving;
+        vm.gc_precise_safepoint = saved_precise;
+    }
+    vm.serviceGcSafepoint();
+}
+
 fn generatorStackAllocator(vm: *Interpreter, gen: ?*Generator) std.mem.Allocator {
     return if (gen) |g| g.stackAllocator(vm.arena) else vm.arena;
 }
@@ -3814,6 +3833,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .steps = &vm.steps,
         .runtime_context = vm,
         .checkpoint = nativeCheckpoint,
+        .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
@@ -3866,6 +3886,7 @@ fn tryRunOsrNative(
         .steps = &vm.steps,
         .runtime_context = vm,
         .checkpoint = nativeCheckpoint,
+        .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
