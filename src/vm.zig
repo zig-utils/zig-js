@@ -7592,7 +7592,7 @@ test "vm: optimizer side exit restores an active catch handler" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer throw side exit resumes canonical catch unwinding" {
+test "vm: optimizer executes a deterministic catch path natively" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -7617,8 +7617,8 @@ test "vm: optimizer throw side exit resumes canonical catch unwinding" {
     const first_steps = machine.steps;
     const function_chunk = root.fns.items[0].chunk.?;
     const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(artifact.has_side_exits);
-    try std.testing.expect(artifact.manages_steps);
+    try std.testing.expect(!artifact.has_side_exits);
+    try std.testing.expect(!artifact.manages_steps);
     var saw_throw = false;
     for (artifact.deopt.?.points) |point| if (point.kind == .throw_) {
         try std.testing.expectEqual(@as(u16, 1), point.handler_count);

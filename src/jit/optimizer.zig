@@ -66,11 +66,14 @@ pub const ValueNode = struct {
     pub const none = std.math.maxInt(ValueId);
 };
 
+pub const EdgeKind = enum { normal, catch_, finally_ };
+
 pub const Edge = struct {
     from: u32,
     to: u32,
     first_argument: u32,
     argument_count: u32,
+    kind: EdgeKind = .normal,
 };
 
 pub const ReturnValue = struct {
@@ -309,7 +312,7 @@ pub const Plan = struct {
             if (edge.from == Block.none) {
                 try out.print(allocator, "edge entry -> b{d} (", .{edge.to});
             } else {
-                try out.print(allocator, "edge b{d} -> b{d} (", .{ edge.from, edge.to });
+                try out.print(allocator, "edge {s} b{d} -> b{d} (", .{ @tagName(edge.kind), edge.from, edge.to });
             }
             const first: usize = edge.first_argument;
             for (self.graph.edge_arguments[first .. first + edge.argument_count], 0..) |argument, index| {
@@ -434,27 +437,6 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             else => if (terminalFrameStateKind(last.op) == null and index + 1 < blocks_list.items.len)
                 addSuccessor(block, @intCast(index + 1)),
         }
-    }
-
-    // Handler targets are block boundaries but not normal successors. Permit
-    // them to remain bytecode-only after a mandatory native exit such as an
-    // explicit throw; every instruction the optimizer can actually reach must
-    // still belong to the supported subset.
-    const reachable = try allocator.alloc(bool, blocks_list.items.len);
-    defer allocator.free(reachable);
-    @memset(reachable, false);
-    reachable[0] = true;
-    var reachable_queue: std.ArrayListUnmanaged(u32) = .empty;
-    defer reachable_queue.deinit(allocator);
-    try reachable_queue.append(allocator, 0);
-    var reachable_index: usize = 0;
-    while (reachable_index < reachable_queue.items.len) : (reachable_index += 1) {
-        const block = blocks_list.items[reachable_queue.items[reachable_index]];
-        for (code[block.start..block.end]) |inst| if (!supports(inst.op)) return error.UnsupportedChunk;
-        for (block.successors[0..block.successor_count]) |successor| if (!reachable[successor]) {
-            reachable[successor] = true;
-            try reachable_queue.append(allocator, successor);
-        };
     }
 
     const instructions = try allocator.alloc(Instruction, code.len);
@@ -666,6 +648,32 @@ fn handlerStatesEqual(lhs: []const HandlerState, rhs: []const HandlerState) bool
     return true;
 }
 
+fn blockAtIp(blocks: []const Block, ip: u32) ?u32 {
+    for (blocks) |block| if (block.start == ip) return block.id;
+    return null;
+}
+
+fn propagateEntryState(
+    allocator: std.mem.Allocator,
+    entry_depths: []?u32,
+    entry_handlers: []?[]HandlerState,
+    queue: *std.ArrayListUnmanaged(u32),
+    target: u32,
+    depth: u32,
+    handlers: []const HandlerState,
+) BuildError!void {
+    if (target >= entry_depths.len) return error.InvalidControlFlow;
+    if (entry_depths[target]) |known_depth| {
+        if (known_depth != depth) return error.InvalidControlFlow;
+        const known_handlers = entry_handlers[target] orelse return error.InvalidControlFlow;
+        if (!handlerStatesEqual(known_handlers, handlers)) return error.InvalidControlFlow;
+        return;
+    }
+    entry_depths[target] = depth;
+    entry_handlers[target] = try allocator.dupe(HandlerState, handlers);
+    try queue.append(allocator, target);
+}
+
 fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std.mem.Allocator) BuildError!ValueGraph {
     const local_count: usize = chunk.local_count;
     if (chunk.param_count > chunk.local_count) return error.UnsupportedChunk;
@@ -673,50 +681,28 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
     const entry_depths = try allocator.alloc(?u32, blocks.len);
     defer allocator.free(entry_depths);
     @memset(entry_depths, null);
-    entry_depths[0] = 0;
-    var queue: std.ArrayListUnmanaged(u32) = .empty;
-    defer queue.deinit(allocator);
-    try queue.append(allocator, 0);
-    var queue_index: usize = 0;
-    while (queue_index < queue.items.len) : (queue_index += 1) {
-        const block_id = queue.items[queue_index];
-        const block = blocks[block_id];
-        var depth = entry_depths[block_id].?;
-        for (chunk.code.items[block.start..block.end]) |inst| {
-            const effect = depthEffect(inst);
-            if (depth < effect.required) return error.InvalidControlFlow;
-            depth = depth - effect.removed + effect.added;
-        }
-        for (block.successors[0..block.successor_count]) |successor| {
-            if (entry_depths[successor]) |known_depth| {
-                if (known_depth != depth) return error.InvalidControlFlow;
-            } else {
-                entry_depths[successor] = depth;
-                try queue.append(allocator, successor);
-            }
-        }
-    }
-
     const entry_handlers = try allocator.alloc(?[]HandlerState, blocks.len);
     @memset(entry_handlers, null);
     defer {
         for (entry_handlers) |maybe_handlers| if (maybe_handlers) |handlers| allocator.free(handlers);
         allocator.free(entry_handlers);
     }
+    entry_depths[0] = 0;
     entry_handlers[0] = try allocator.alloc(HandlerState, 0);
-    var handler_queue: std.ArrayListUnmanaged(u32) = .empty;
-    defer handler_queue.deinit(allocator);
-    try handler_queue.append(allocator, 0);
-    var handler_queue_index: usize = 0;
+    var queue: std.ArrayListUnmanaged(u32) = .empty;
+    defer queue.deinit(allocator);
+    try queue.append(allocator, 0);
+    var queue_index: usize = 0;
     var active_handlers: std.ArrayListUnmanaged(HandlerState) = .empty;
     defer active_handlers.deinit(allocator);
-    while (handler_queue_index < handler_queue.items.len) : (handler_queue_index += 1) {
-        const block_id = handler_queue.items[handler_queue_index];
+    while (queue_index < queue.items.len) : (queue_index += 1) {
+        const block_id = queue.items[queue_index];
         const block = blocks[block_id];
         active_handlers.clearRetainingCapacity();
         try active_handlers.appendSlice(allocator, entry_handlers[block_id].?);
         var depth = entry_depths[block_id] orelse return error.InvalidControlFlow;
         for (chunk.code.items[block.start..block.end]) |inst| {
+            if (!supports(inst.op)) return error.UnsupportedChunk;
             switch (inst.op) {
                 .push_handler => {
                     if (inst.a == std.math.maxInt(u32) and inst.b == std.math.maxInt(u32))
@@ -728,6 +714,26 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     });
                 },
                 .pop_handler => if (active_handlers.pop() == null) return error.InvalidControlFlow,
+                .throw_op => if (active_handlers.items.len != 0) {
+                    if (depth == 0) return error.InvalidControlFlow;
+                    const handler = active_handlers.items[active_handlers.items.len - 1];
+                    if (handler.stack_depth > depth - 1) return error.InvalidControlFlow;
+                    const catches = handler.catch_ip != std.math.maxInt(u32);
+                    if (catches) {
+                        const target = blockAtIp(blocks, handler.catch_ip) orelse return error.InvalidControlFlow;
+                        const target_depth = std.math.add(u32, handler.stack_depth, 1) catch
+                            return error.InvalidControlFlow;
+                        try propagateEntryState(
+                            allocator,
+                            entry_depths,
+                            entry_handlers,
+                            &queue,
+                            target,
+                            target_depth,
+                            active_handlers.items[0 .. active_handlers.items.len - 1],
+                        );
+                    }
+                },
                 else => {},
             }
             const effect = depthEffect(inst);
@@ -735,12 +741,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             depth = depth - effect.removed + effect.added;
         }
         for (block.successors[0..block.successor_count]) |successor| {
-            if (entry_handlers[successor]) |known| {
-                if (!handlerStatesEqual(known, active_handlers.items)) return error.InvalidControlFlow;
-            } else {
-                entry_handlers[successor] = try allocator.dupe(HandlerState, active_handlers.items);
-                try handler_queue.append(allocator, successor);
-            }
+            try propagateEntryState(allocator, entry_depths, entry_handlers, &queue, successor, depth, active_handlers.items);
         }
     }
 
@@ -903,11 +904,31 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .throw_op => {
                 if (depth == 0) return error.InvalidControlFlow;
-                // Preserve the pre-instruction state. Native execution exits
-                // here, then the interpreter executes throw_op exactly once so
-                // debugger notification and handler unwinding stay canonical.
+                // Preserve the pre-instruction state for uncaught throws and
+                // any policy-driven side exit. With an active handler, also
+                // publish the exact exceptional SSA edge after unwinding the
+                // innermost record; guarded native lowering may follow it.
                 try builder.appendFrameState(.throw_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 depth -= 1;
+                if (handlers.items.len != 0) {
+                    const handler = handlers.items[handlers.items.len - 1];
+                    if (handler.stack_depth > depth) return error.InvalidControlFlow;
+                    const catches = handler.catch_ip != std.math.maxInt(u32);
+                    if (catches) {
+                        const target = blockAtIp(blocks, handler.catch_ip) orelse return error.InvalidControlFlow;
+                        const first_argument: u32 = @intCast(builder.edge_arguments.items.len);
+                        try builder.edge_arguments.appendSlice(allocator, locals);
+                        try builder.edge_arguments.appendSlice(allocator, stack[0..handler.stack_depth]);
+                        try builder.edge_arguments.append(allocator, stack[depth]);
+                        try builder.edges.append(allocator, .{
+                            .from = @intCast(block_id),
+                            .to = target,
+                            .first_argument = first_argument,
+                            .argument_count = @intCast(builder.edge_arguments.items.len - first_argument),
+                            .kind = .catch_,
+                        });
+                    }
+                }
             },
             .abrupt_return => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1025,6 +1046,7 @@ fn compactValueGraph(
             .to = old_edge.to,
             .first_argument = first_argument,
             .argument_count = @intCast(edge_arguments.items.len - first_argument),
+            .kind = old_edge.kind,
         });
     }
 
@@ -1308,6 +1330,32 @@ test "optimizer models throw as a resumable terminal frame" {
     try std.testing.expectEqual(std.math.maxInt(u32), handler.catch_ip);
     try std.testing.expectEqual(@as(u32, 4), handler.finally_ip);
     try std.testing.expectEqual(@as(u32, 0), handler.stack_depth);
+}
+
+test "optimizer publishes an exact catch edge after handler unwind" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    const seven = try chunk.addConst(RuntimeValue.num(7));
+    _ = try chunk.emitAB(.push_handler, 4, std.math.maxInt(u32));
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.throw_op, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 2), plan.graph.edges.len);
+    const edge = plan.graph.edges[1];
+    try std.testing.expectEqual(EdgeKind.catch_, edge.kind);
+    try std.testing.expectEqual(@as(u32, 0), edge.from);
+    try std.testing.expectEqual(@as(u32, 2), edge.to);
+    try std.testing.expectEqual(@as(u32, 1), edge.argument_count);
+    const state = plan.graph.edge_states[1];
+    try std.testing.expectEqual(@as(u32, 1), state.stack_count);
+    try std.testing.expectEqual(@as(u32, 0), state.handler_count);
+    try std.testing.expectEqual(@as(usize, 1), plan.graph.returns.len);
+    try std.testing.expectEqual(edge.to, plan.graph.returns[0].block);
 }
 
 test "optimizer models abrupt return as a resumable terminal frame" {
