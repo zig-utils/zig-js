@@ -191,6 +191,20 @@ pub const HandlerState = struct {
     stack_depth: u32,
 };
 
+/// Interpreter-owned operation target if the operation raises after its
+/// mandatory pre-effect side exit. The exception value does not exist yet, so
+/// this records control/unwind state rather than an SSA value edge.
+pub const ExceptionalTarget = struct {
+    block: u32,
+    origin: u32,
+    target: u32,
+    kind: EdgeKind,
+    unwind_stack_depth: u32,
+    target_stack_depth: u32,
+    first_handler: u32,
+    handler_count: u32,
+};
+
 /// Immutable interpreter reconstruction state at an optimizer entry or exit.
 /// Values are SSA ids in locals-then-operand-stack order. Keeping the boundary
 /// explicit prevents a future side exit from guessing at dead values or
@@ -230,6 +244,7 @@ pub const ValueGraph = struct {
     frame_state_values: []ValueId,
     handler_states: []HandlerState,
     edge_states: []EdgeState,
+    exceptional_targets: []ExceptionalTarget,
 
     pub fn deinit(self: *ValueGraph) void {
         self.allocator.free(self.nodes);
@@ -241,6 +256,7 @@ pub const ValueGraph = struct {
         self.allocator.free(self.frame_state_values);
         self.allocator.free(self.handler_states);
         self.allocator.free(self.edge_states);
+        self.allocator.free(self.exceptional_targets);
         self.* = undefined;
     }
 };
@@ -361,6 +377,19 @@ pub const Plan = struct {
             }
             try out.appendSlice(allocator, ")\n");
         }
+        for (self.graph.exceptional_targets) |target| try out.print(
+            allocator,
+            "exception {s} b{d} @{d} -> b{d} unwind={d} stack={d} handlers={d}\n",
+            .{
+                @tagName(target.kind),
+                target.block,
+                target.origin,
+                target.target,
+                target.unwind_stack_depth,
+                target.target_stack_depth,
+                target.handler_count,
+            },
+        );
         return out.toOwnedSlice(allocator);
     }
 };
@@ -531,6 +560,7 @@ const GraphBuilder = struct {
     frame_states: std.ArrayListUnmanaged(FrameState) = .empty,
     frame_state_values: std.ArrayListUnmanaged(ValueId) = .empty,
     handler_states: std.ArrayListUnmanaged(HandlerState) = .empty,
+    exceptional_targets: std.ArrayListUnmanaged(ExceptionalTarget) = .empty,
 
     fn deinit(self: *GraphBuilder) void {
         self.nodes.deinit(self.allocator);
@@ -542,6 +572,7 @@ const GraphBuilder = struct {
         self.frame_states.deinit(self.allocator);
         self.frame_state_values.deinit(self.allocator);
         self.handler_states.deinit(self.allocator);
+        self.exceptional_targets.deinit(self.allocator);
     }
 
     fn appendNode(self: *GraphBuilder, node: ValueNode) std.mem.Allocator.Error!ValueId {
@@ -611,6 +642,35 @@ const GraphBuilder = struct {
             .stack_count = @intCast(stack.len),
             .first_handler = first_handler,
             .handler_count = @intCast(handlers.len),
+        });
+    }
+
+    fn appendExceptionalTarget(
+        self: *GraphBuilder,
+        blocks: []const Block,
+        block: u32,
+        origin: u32,
+        handlers: []const HandlerState,
+    ) BuildError!void {
+        if (handlers.len == 0) return;
+        const handler = handlers[handlers.len - 1];
+        const catches = handler.catch_ip != std.math.maxInt(u32);
+        const target_ip = if (catches) handler.catch_ip else handler.finally_ip;
+        if (target_ip == std.math.maxInt(u32)) return error.InvalidControlFlow;
+        const target = blockAtIp(blocks, target_ip) orelse return error.InvalidControlFlow;
+        const first_handler: u32 = @intCast(self.handler_states.items.len);
+        try self.handler_states.appendSlice(self.allocator, handlers[0 .. handlers.len - 1]);
+        const target_stack_depth = std.math.add(u32, handler.stack_depth, if (catches) 1 else 2) catch
+            return error.InvalidControlFlow;
+        try self.exceptional_targets.append(self.allocator, .{
+            .block = block,
+            .origin = origin,
+            .target = target,
+            .kind = if (catches) .catch_ else .finally_,
+            .unwind_stack_depth = handler.stack_depth,
+            .target_stack_depth = target_stack_depth,
+            .first_handler = first_handler,
+            .handler_count = @intCast(handlers.len - 1),
         });
     }
 };
@@ -912,6 +972,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 // publish the exact exceptional SSA edge after unwinding the
                 // innermost record; guarded native lowering may follow it.
                 try builder.appendFrameState(.throw_, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
                 depth -= 1;
                 if (handlers.items.len != 0) {
                     const handler = handlers.items[handlers.items.len - 1];
@@ -992,6 +1053,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 // Preserve every input and active handler so calls, allocation,
                 // environment access, iteration, and other effects execute once.
                 try builder.appendFrameState(kind, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
                 depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
             },
         };
@@ -1111,6 +1173,8 @@ fn compactValueGraph(
     for (builder.frame_state_values.items, frame_state_values) |old, *value| value.* = remap[old];
     const handler_states = try allocator.dupe(HandlerState, builder.handler_states.items);
     errdefer allocator.free(handler_states);
+    const exceptional_targets = try allocator.dupe(ExceptionalTarget, builder.exceptional_targets.items);
+    errdefer allocator.free(exceptional_targets);
     const edge_states = try allocator.alloc(EdgeState, owned_edges.len);
     errdefer allocator.free(edge_states);
     for (owned_edges, edge_states) |edge, *state| {
@@ -1143,6 +1207,7 @@ fn compactValueGraph(
         .frame_state_values = frame_state_values,
         .handler_states = handler_states,
         .edge_states = edge_states,
+        .exceptional_targets = exceptional_targets,
     };
 }
 
@@ -1450,6 +1515,67 @@ test "optimizer models a call as a pre-effect terminal frame" {
     try std.testing.expectEqual(@as(u32, 2), state.origin);
     try std.testing.expectEqual(@as(u32, 2), state.stack_count);
     try std.testing.expectEqual(@as(usize, 0), plan.graph.returns.len);
+}
+
+test "optimizer records exact exceptional targets for interpreter-owned effects" {
+    const Case = struct { op: bc.Op, inputs: u32, a: u32 = 0, b: u32 = 0 };
+    const cases = [_]Case{
+        .{ .op = .call, .inputs = 2, .a = 1 },
+        .{ .op = .new_call, .inputs = 2, .a = 1 },
+        .{ .op = .get_prop, .inputs = 1 },
+        .{ .op = .to_numeric, .inputs = 1 },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = case.inputs;
+        chunk.local_count = case.inputs;
+        const catch_ip = case.inputs + 3;
+        _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
+        for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        _ = try chunk.emitAB(case.op, case.a, case.b);
+        _ = try chunk.emit(.ret_undef, 0);
+        _ = try chunk.emit(.ret_undef, 0);
+
+        var plan = try build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        try std.testing.expectEqual(@as(usize, 1), plan.graph.exceptional_targets.len);
+        const target = plan.graph.exceptional_targets[0];
+        try std.testing.expectEqual(EdgeKind.catch_, target.kind);
+        try std.testing.expectEqual(case.inputs + 1, target.origin);
+        try std.testing.expectEqual(@as(u32, 0), target.unwind_stack_depth);
+        try std.testing.expectEqual(@as(u32, 1), target.target_stack_depth);
+        try std.testing.expectEqual(@as(u32, 0), target.handler_count);
+        try std.testing.expectEqual(catch_ip, plan.blocks[target.target].start);
+    }
+}
+
+test "optimizer exceptional targets retain outer handlers after finally unwind" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emitAB(.push_handler, 7, std.math.maxInt(u32));
+    _ = try chunk.emitAB(.push_handler, std.math.maxInt(u32), 6);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.call, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+    _ = try chunk.emit(.end_finally, 0);
+    _ = try chunk.emit(.ret_undef, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.graph.exceptional_targets.len);
+    const target = plan.graph.exceptional_targets[0];
+    try std.testing.expectEqual(EdgeKind.finally_, target.kind);
+    try std.testing.expectEqual(@as(u32, 2), target.target_stack_depth);
+    try std.testing.expectEqual(@as(u32, 1), target.handler_count);
+    const outer = plan.graph.handler_states[target.first_handler];
+    try std.testing.expectEqual(@as(u32, 7), outer.catch_ip);
+    try std.testing.expectEqual(std.math.maxInt(u32), outer.finally_ip);
 }
 
 test "optimizer canonicalizes pure values and removes dead SSA" {
