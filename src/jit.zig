@@ -255,6 +255,36 @@ pub const Tier = struct {
 };
 
 pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated };
+
+/// Result of one runtime-backed operation requested by optimized code. Unlike
+/// `ExitStatus`, this preserves why the operation could not produce a value so
+/// the generated region can choose an exceptional edge, a VM exit, or
+/// invalidation without collapsing distinct observable conditions.
+pub const NativeOperationStatus = enum(u32) {
+    value,
+    catchable_exception,
+    termination,
+    watchdog,
+    debugger_trap,
+    host_trap,
+    out_of_memory,
+    invalidated,
+};
+
+/// Architecture-neutral description selected by `operation_id`. Operand
+/// values occupy a contiguous scratch range. The callback writes the result to
+/// `NativeFrame.operation_value_bits`; generated code owns the destination
+/// scratch assignment so normal and exceptional control remain explicit.
+pub const NativeOperationDescriptor = extern struct {
+    bytecode_op: u16,
+    first_input: u16,
+    input_count: u16,
+    exceptional_target: u16 = none,
+    origin: u32,
+
+    pub const none = std.math.maxInt(u16);
+};
+
 pub const numeric_scratch_capacity = 64;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
@@ -296,6 +326,18 @@ pub const NativeFrame = extern struct {
     /// publishing an exact deoptimization index. Unlike `checkpoint`, this
     /// does not own step-budget or termination semantics.
     moving_safepoint: ?*const fn (*NativeFrame) callconv(.c) void = null,
+    /// Runtime-backed optimized operation entry. `operation_id` selects an
+    /// immutable descriptor owned by the compiled artifact. On `.value`,
+    /// `operation_value_bits` contains the normal result; on
+    /// `.catchable_exception`, it contains the thrown value and the VM's
+    /// pending exception is set. Other statuses leave it unspecified.
+    operation: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
+    operation_context: ?*anyopaque = null,
+    operation_value_bits: u64 = 0,
+    /// Status-specific immutable/runtime detail, such as a trap or watchdog
+    /// reason. Generated code must not interpret it unless the descriptor's
+    /// operation kind defines that status.
+    operation_detail: u64 = 0,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;
@@ -1017,6 +1059,46 @@ test "optimizer publication and invalidation races converge" {
     try std.testing.expect(tier.loadArtifact(u8) == null);
     try std.testing.expect(tier.compileCount() == 0 or tier.compileCount() == 1);
     try std.testing.expectEqual(shared.published.load(.acquire), tier.compileCount() == 1);
+}
+
+test "native operation ABI preserves value exception and trap outcomes" {
+    const Stub = struct {
+        fn invoke(frame: *NativeFrame, operation_id: u32) callconv(.c) u32 {
+            frame.operation_value_bits = operation_id;
+            frame.operation_detail = operation_id + 1;
+            return @backingInt(if (operation_id == 7)
+                NativeOperationStatus.catchable_exception
+            else
+                NativeOperationStatus.value);
+        }
+    };
+    var frame = NativeFrame{ .operation = Stub.invoke };
+    const callback = frame.operation.?;
+    try std.testing.expectEqual(
+        @backingInt(NativeOperationStatus.value),
+        callback(&frame, 3),
+    );
+    try std.testing.expectEqual(@as(u64, 3), frame.operation_value_bits);
+    try std.testing.expectEqual(@as(u64, 4), frame.operation_detail);
+    try std.testing.expectEqual(
+        @backingInt(NativeOperationStatus.catchable_exception),
+        callback(&frame, 7),
+    );
+    const descriptor = NativeOperationDescriptor{
+        .bytecode_op = 9,
+        .first_input = 2,
+        .input_count = 3,
+        .origin = 17,
+    };
+    try std.testing.expectEqual(@as(u16, 9), descriptor.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), descriptor.first_input);
+    try std.testing.expectEqual(@as(u16, 3), descriptor.input_count);
+    try std.testing.expectEqual(NativeOperationDescriptor.none, descriptor.exceptional_target);
+    try std.testing.expectEqual(@as(u32, 17), descriptor.origin);
+    inline for (@typeInfo(NativeOperationStatus).@"enum".field_values, 0..) |value, ordinal| {
+        try std.testing.expectEqual(ordinal, value);
+    }
+    try std.testing.expect(@offsetOf(NativeFrame, "operation") > @offsetOf(NativeFrame, "moving_safepoint"));
 }
 
 test "native entry publishes an exact result word through the stable ABI" {
