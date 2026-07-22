@@ -3965,6 +3965,7 @@ pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState 
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
     const realm = active_realm_context orelse heap.ctx.context;
     errdefer realm.gpa.free(bytes);
+    strcell.debugAssertWtf8(bytes);
     const cell = try heap.create(StringCell, .string);
     cell.* = .{ .bytes = bytes, .hash = strcell.contentHash(bytes) };
     cell.setGcManaged(true);

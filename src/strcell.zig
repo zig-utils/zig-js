@@ -231,6 +231,39 @@ pub fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) s
     return out.toOwnedSlice(allocator);
 }
 
+/// Debug-only tripwire: a StringCell's stored image must be well-formed WTF-8
+/// (UTF-8 extended so a lone surrogate U+D800..U+DFFF is a legal 3-byte `ED xx
+/// xx`). Every construction path runs this on the exact bytes it is about to
+/// store. Today all cells store WTF-8 so it is always satisfied; its purpose is
+/// the flat-string model — when storage becomes representation-dependent, this
+/// fires the instant a non-WTF-8 image (e.g. a raw flat-latin1 byte produced by
+/// slicing a flat cell and re-wrapping it as WTF-8) reaches a WTF-8 constructor,
+/// which is precisely the silent "slice-then-build" corruption that a mixed
+/// flat/WTF-8 world otherwise hides. Compiled out entirely in release builds.
+pub fn debugAssertWtf8(bytes: []const u8) void {
+    if (!std.debug.runtime_safety) return;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const b = bytes[i];
+        const seq_len: usize = if (b < 0x80) 1 else if (b >= 0xC2 and b <= 0xDF)
+            2
+        else if (b >= 0xE0 and b <= 0xEF)
+            3
+        else if (b >= 0xF0 and b <= 0xF4)
+            4
+        else
+            std.debug.panic("StringCell: invalid WTF-8 lead byte 0x{x:0>2} at index {d} of {x}", .{ b, i, bytes });
+        if (i + seq_len > bytes.len)
+            std.debug.panic("StringCell: truncated WTF-8 sequence at index {d} of {x}", .{ i, bytes });
+        var k: usize = 1;
+        while (k < seq_len) : (k += 1) {
+            if (bytes[i + k] & 0xC0 != 0x80)
+                std.debug.panic("StringCell: bad WTF-8 continuation 0x{x:0>2} at index {d} of {x}", .{ bytes[i + k], i + k, bytes });
+        }
+        i += seq_len;
+    }
+}
+
 /// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized) copy
 /// of `bytes`. This is the minimal constructor the NaN-box `Value` representation
 /// needs; interning is optional (below). `allocator` owns both the cell and the
@@ -240,6 +273,7 @@ pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Alloc
         return factory.create(factory.context, allocator, bytes);
     const owned = try canonicalizeSurrogates(allocator, bytes);
     errdefer allocator.free(owned);
+    debugAssertWtf8(owned);
     const cell = try allocator.create(StringCell);
     cell.* = .{ .bytes = owned, .hash = contentHash(owned) };
     return cell;
@@ -262,6 +296,7 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
     };
     owns_original = false;
     errdefer allocator.free(bytes);
+    debugAssertWtf8(bytes);
     const cell = try allocator.create(StringCell);
     cell.* = .{ .bytes = bytes, .hash = contentHash(bytes) };
     return cell;
@@ -344,6 +379,7 @@ pub const InternTable = struct {
         // (so the key outlives the caller's slice).
         const owned = try self.allocator.dupe(u8, bytes);
         errdefer self.allocator.free(owned);
+        debugAssertWtf8(owned);
         const cell = try self.allocator.create(StringCell);
         errdefer self.allocator.destroy(cell);
         cell.* = .{ .bytes = owned, .hash = h };
