@@ -8356,9 +8356,11 @@ test "vm: non-tail invocation generator spread preserves direct eval and method 
     try std.testing.expect((try vmRun(arena.allocator(),
         \\function* direct() { let local = 42; return eval(...["local"]); }
         \\let log = "";
-        \\let receiver = { get method() { log = log + "g"; return function () { return log; }; } };
         \\function mark() { log = log + "a"; return []; }
-        \\function* ordered() { return receiver.method(...mark()); }
+        \\function* ordered() {
+        \\  let receiver = { get method() { log = log + "g"; return function () { return log; }; } };
+        \\  return receiver.method(...mark());
+        \\}
         \\direct().next().value === 42 && ordered().next().value === "ga" && log === "ga"
     )).asBool());
 }
@@ -9035,7 +9037,7 @@ test "vm: optimizer native tail call replaces the current activation" {
     const allocator = arena.allocator();
     const source =
         \\function plus(x) { return x + 5; }
-        \\function invoke(f, x) { return f(x); }
+        \\function invoke(f, x) { "use strict"; return f(x); }
         \\invoke(plus, 0); invoke(plus, 1); invoke(plus, 2); invoke(plus, 3); invoke(plus, 4);
         \\invoke(plus, 5); invoke(plus, 6); invoke(plus, 7); invoke(plus, 8); invoke(plus, 9)
     ;
@@ -9078,9 +9080,9 @@ test "vm: optimizer executes native object and array construction effects" {
     const source =
         \\"use strict";
         \\function make(value) {
-        \\  const object = { value: value, ["other"]: value + 1 };
+        \\  const object = { value: value, [1]: value + 1 };
         \\  const array = [value, , value + 2];
-        \\  return object.value + object.other + array[0] + array[2] + array.length;
+        \\  return object.value + object[1] + array[0] + array[2] + array.length;
         \\}
         \\make(0); make(1); make(2); make(3); make(4);
         \\make(5); make(6); make(7); make(8); make(9)
@@ -9154,8 +9156,12 @@ test "vm: optimizer object and array construction resumes a spread throw once" {
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
 
     try std.testing.expectEqual(@as(f64, 93), (try run(&machine, root, null)).asNum());
-    const collect_chunk = Interpreter.funcOf(env.get("collect").?).?.chunk.?;
-    const artifact = collect_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    var collect_chunk: ?*bc.Chunk = null;
+    for (root.fns.items) |template| if (std.mem.eql(u8, template.name, "collect")) {
+        collect_chunk = template.chunk;
+    };
+    const owned_collect_chunk = collect_chunk orelse return error.TestUnexpectedResult;
+    const artifact = owned_collect_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var spread_operation: ?jit.NativeOperationDescriptor = null;
     for (operations.descriptors) |descriptor| {
