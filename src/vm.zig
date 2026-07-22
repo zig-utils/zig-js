@@ -3613,6 +3613,35 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     return 0;
 }
 
+fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
+        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+    const metadata: *const jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
+        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+    if (operation_id >= metadata.descriptors.len or frame.scratch == null)
+        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+    const descriptor = metadata.descriptors[operation_id];
+    const first: usize = descriptor.first_input;
+    const count: usize = descriptor.input_count;
+    if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
+        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+    const inputs = frame.scratch.?[first .. first + count];
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.to_numeric) and inputs.len == 1) {
+        const result = vm.toNumericPrimitive(Value.fromRawBits(inputs[0])) catch |err| return switch (err) {
+            error.Throw => thrown: {
+                frame.operation_value_bits = vm.exception.rawBits();
+                break :thrown @intFromEnum(jit.NativeOperationStatus.catchable_exception);
+            },
+            error.OutOfMemory => @intFromEnum(jit.NativeOperationStatus.out_of_memory),
+            error.OptShortCircuit => @intFromEnum(jit.NativeOperationStatus.host_trap),
+        };
+        frame.operation_value_bits = result.rawBits();
+        frame.operation_detail = 0;
+        return @intFromEnum(jit.NativeOperationStatus.value);
+    }
+    return @intFromEnum(jit.NativeOperationStatus.host_trap);
+}
+
 fn nativeMovingSafepoint(frame: *jit.NativeFrame) callconv(.c) void {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return));
     const requested = vm.gc_moving_requested orelse return;
@@ -3817,6 +3846,37 @@ test "vm: deoptimization reconstructs nested handlers transactionally" {
     try std.testing.expectEqual(@as(usize, 2), exec.handlers.items.len);
 }
 
+test "vm: native operation dispatcher validates and executes to_numeric" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var env = Environment{ .arena = arena.allocator(), .fn_scope = true };
+    const root_shape = try Shape.createRoot(arena.allocator());
+    var machine = Interpreter{ .arena = arena.allocator(), .env = &env, .root_shape = root_shape };
+    const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
+        .bytecode_op = @intFromEnum(bc.Op.to_numeric),
+        .first_input = 0,
+        .input_count = 1,
+        .origin = 9,
+    }});
+    defer metadata.destroy();
+    var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+    scratch[0] = Value.num(42).rawBits();
+    var frame = jit.NativeFrame{
+        .scratch = &scratch,
+        .runtime_context = &machine,
+        .operation_context = metadata,
+    };
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.value),
+        nativeOperationDispatch(&frame, 0),
+    );
+    try std.testing.expectEqual(Value.num(42).rawBits(), frame.operation_value_bits);
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 1),
+    );
+}
+
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
     if (!native.manages_steps or native.max_stack_depth > jit.numeric_scratch_capacity or
         !nativeSlotGuardsPass(native, slots)) return .miss;
@@ -3833,6 +3893,8 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .scratch = scratch[0..].ptr,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .operation = if (native.native_operations != null) nativeOperationDispatch else null,
+        .operation_context = if (native.native_operations) |metadata| @constCast(metadata) else null,
         .checkpoint = nativeCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
@@ -3886,6 +3948,8 @@ fn tryRunOsrNative(
         .scratch = &scratch,
         .steps = &vm.steps,
         .runtime_context = vm,
+        .operation = if (native.native_operations != null) nativeOperationDispatch else null,
+        .operation_context = if (native.native_operations) |operations| @constCast(operations) else null,
         .checkpoint = nativeCheckpoint,
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
