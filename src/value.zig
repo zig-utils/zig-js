@@ -4854,7 +4854,7 @@ pub fn strictEquals(a: Value, b: Value) bool {
         .null => b.isNull(),
         .boolean => b.isBoolean() and b.asBool() == a.asBool(),
         .number => b.isNumber() and b.asNum() == a.asNum(),
-        .string => b.isString() and std.mem.eql(u8, a.asStr(), b.asStr()),
+        .string => b.isString() and a.asStringCell().eql(b.asStringCell()),
         // BigInt is a primitive: `===` compares its value, not object identity.
         .object => if (a.asObj().is_bigint)
             (b.isObject() and b.asObj().is_bigint and bigIntEquals(a.asObj(), b.asObj()))
