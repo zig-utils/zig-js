@@ -74,7 +74,7 @@ Run `zig build --help` for the full command list.
 
 - 10 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
 - automatic shared-realm compaction ([#446](https://github.com/zig-utils/zig-js/issues/446)) and a moving nursery ([#447](https://github.com/zig-utils/zig-js/issues/447));
-- additional native optimizer architecture backends. AArch64 executes profiled dynamic arithmetic/comparisons plus unary, bitwise, guarded named-property and packed existing-index reads/writes (including loops), membership, direct-eval, spread, invocation, construction, literal initialization, proper-tail-call effects, and exact completion dispatch; see [optimizer status](docs/optimizing-jit.md).
+- additional native optimizer architecture backends. AArch64 executes profiled dynamic arithmetic/comparisons plus unary, bitwise, guarded named-property and packed existing-index access, membership, and exact completion dispatch; reducible loops also execute rooted invocation, construction, and literal allocation effects; see [optimizer status](docs/optimizing-jit.md).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 
