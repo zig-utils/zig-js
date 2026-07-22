@@ -294,7 +294,11 @@ fn stageNativeOperationDescriptors(
             runtime_operation = operation;
         }
         const first_input: usize = if (runtime_operation) |operation| runtime: {
-            if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .private_in) {
+            if (inst.op == .to_numeric or inst.op == .neg or inst.op == .pos or inst.op == .not or
+                inst.op == .typeof_op or inst.op == .inc or inst.op == .dec or inst.op == .bit_not or
+                inst.op == .to_string or inst.op == .to_property_key or inst.op == .get_prop or
+                inst.op == .private_in)
+            {
                 if (input_count != 1) return error.UnsupportedChunk;
                 const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
                 if (source != operation.lhs) return error.UnsupportedChunk;
@@ -327,7 +331,7 @@ fn stageNativeOperationDescriptors(
         var step_delta: u16 = 0;
         if (runtime_operation != null) {
             const block = plan.blocks[state.block];
-            const absolute_steps = try deterministicPathSteps(
+            const absolute_steps = try deterministicPrefixSteps(
                 plan,
                 state.block,
                 state.origin - block.start + 1,
@@ -386,6 +390,23 @@ fn deterministicPathSteps(
     target_block: u32,
     target_steps: u32,
 ) error{UnsupportedChunk}!u32 {
+    return deterministicSteps(plan, target_block, target_steps, false);
+}
+
+fn deterministicPrefixSteps(
+    plan: *const optimizer.Plan,
+    target_block: u32,
+    target_steps: u32,
+) error{UnsupportedChunk}!u32 {
+    return deterministicSteps(plan, target_block, target_steps, true);
+}
+
+fn deterministicSteps(
+    plan: *const optimizer.Plan,
+    target_block: u32,
+    target_steps: u32,
+    allow_target_successors: bool,
+) error{UnsupportedChunk}!u32 {
     const graph = &plan.graph;
     var entry_count: usize = 0;
     for (graph.edges) |edge| if (edge.from == optimizer.Block.none and edge.to == 0) {
@@ -398,6 +419,11 @@ fn deterministicPathSteps(
     var traversed: usize = 0;
     var steps: u32 = 0;
     while (traversed <= plan.blocks.len) : (traversed += 1) {
+        // A runtime operation in the common prefix owns a deterministic step
+        // count even when control branches after it. Only predecessors must be
+        // single-path; successors are irrelevant until the operation returns.
+        if (current == target_block and allow_target_successors)
+            return std.math.add(u32, steps, target_steps) catch error.UnsupportedChunk;
         var outgoing: ?optimizer.Edge = null;
         for (graph.edges) |edge| if (edge.from == current) {
             if (outgoing != null) return error.UnsupportedChunk;
@@ -418,7 +444,10 @@ fn deterministicPathSteps(
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
-    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .get_prop or node.kind == .get_index or
+    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
+        node.kind == .not or node.kind == .typeof_op or node.kind == .inc or node.kind == .dec or
+        node.kind == .bit_not or node.kind == .to_string or node.kind == .to_property_key or
+        node.kind == .get_prop or node.kind == .get_index or
         node.kind == .set_prop or node.kind == .set_index or node.kind == .in_op or
         node.kind == .instance_of or node.kind == .private_in or node.kind == .call or
         node.kind == .call_with_this or node.kind == .construct) and node.block == state.block and
@@ -547,9 +576,14 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .rhs = @intCast(rhs),
             });
         },
-        .to_numeric, .get_prop, .private_in => {
+        .to_numeric, .neg, .pos, .not, .typeof_op, .inc, .dec, .bit_not, .to_string, .to_property_key, .get_prop, .private_in => {
             const input = try resolveAlias(node.lhs, aliases);
-            types[node.id] = if (node.kind == .private_in) .boolean else .other;
+            types[node.id] = if (node.kind == .not or node.kind == .private_in)
+                .boolean
+            else if (node.kind == .pos)
+                .number
+            else
+                .other;
             try operations.append(allocator, .{
                 .kind = .runtime_operation,
                 .destination = @intCast(node.id),
@@ -3224,6 +3258,79 @@ test "optimizer executes to_numeric through the native operation ABI" {
     }
 }
 
+test "optimizer lowering publishes executable unary coercions" {
+    const effects = [_]bc.Op{
+        .neg,
+        .pos,
+        .not,
+        .typeof_op,
+        .inc,
+        .dec,
+        .bit_not,
+        .to_string,
+        .to_property_key,
+    };
+    for (effects) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const descriptor = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(op)), descriptor.bytecode_op);
+        try std.testing.expectEqual(@as(u16, 1), descriptor.input_count);
+        try std.testing.expect(program.stack_maps[descriptor.deopt_index].scratch_pointer_slots &
+            (@as(u64, 1) << @intCast(descriptor.first_input)) != 0);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.void_op, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 0), program.native_operations.len);
+
+    var branch_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer branch_arena.deinit();
+    var branch = bc.Chunk.init(branch_arena.allocator());
+    branch.param_count = 1;
+    branch.local_count = 1;
+    const eleven = try branch.addConst(Value.num(11));
+    const twenty_two = try branch.addConst(Value.num(22));
+    _ = try branch.emit(.load_local, 0);
+    _ = try branch.emit(.not, 0);
+    _ = try branch.emit(.jump_if_false, 5);
+    _ = try branch.emit(.load_const, eleven);
+    _ = try branch.emit(.ret, 0);
+    _ = try branch.emit(.load_const, twenty_two);
+    _ = try branch.emit(.ret, 0);
+    var branch_plan = try optimizer.build(&branch, std.testing.allocator);
+    defer branch_plan.deinit();
+    var branch_program = try lower(&branch, &branch_plan, std.testing.allocator);
+    defer branch_program.deinit();
+    try std.testing.expect(branch_program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 1), branch_program.native_operations.len);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.not)), branch_program.native_operations[0].bytecode_op);
+}
+
 test "optimizer routes native to_numeric exceptions to an owned catch target" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3544,16 +3651,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .def_lex, .inputs = 1, .kind = .effect },
         .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
         .{ .op = .store_upval, .inputs = 1, .kind = .effect },
-        .{ .op = .neg, .inputs = 1, .kind = .effect },
-        .{ .op = .pos, .inputs = 1, .kind = .effect },
-        .{ .op = .not, .inputs = 1, .kind = .effect },
-        .{ .op = .typeof_op, .inputs = 1, .kind = .effect },
-        .{ .op = .void_op, .inputs = 1, .kind = .effect },
-        .{ .op = .inc, .inputs = 1, .kind = .effect },
-        .{ .op = .dec, .inputs = 1, .kind = .effect },
-        .{ .op = .to_property_key, .inputs = 1, .kind = .effect },
-        .{ .op = .bit_not, .inputs = 1, .kind = .effect },
-        .{ .op = .to_string, .inputs = 1, .kind = .effect },
         .{ .op = .pow, .inputs = 2, .kind = .effect },
         .{ .op = .bit_and, .inputs = 2, .kind = .effect },
         .{ .op = .bit_or, .inputs = 2, .kind = .effect },

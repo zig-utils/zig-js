@@ -15365,7 +15365,12 @@ pub const Interpreter = struct {
         // ReferenceError — the one context where an unbound name doesn't throw.
         if (op == .typeof and operand.* == .identifier and self.env.get(operand.identifier) == null and !try self.globalHasBinding(operand.identifier))
             return Value.str("undefined");
-        const v = try self.eval(operand);
+        return self.applyUnary(op, try self.eval(operand));
+    }
+
+    /// Apply a unary operator to an already-evaluated operand. Shared by the
+    /// tree walker, bytecode VM, and optimizer runtime-operation boundary.
+    pub fn applyUnary(self: *Interpreter, op: ast.UnaryOp, v: Value) EvalError!Value {
         // `-`/`+`/`~` begin with ToNumeric: reduce a wrapper object to a numeric
         // primitive (one valueOf) so `~new Boolean(true)`, `~Object(1n)`, etc.
         // dispatch on the underlying value, not on the object reference. BigInt

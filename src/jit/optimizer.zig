@@ -52,6 +52,15 @@ pub const ValueKind = enum {
     eq_strict,
     neq_strict,
     to_numeric,
+    neg,
+    pos,
+    not,
+    typeof_op,
+    inc,
+    dec,
+    bit_not,
+    to_string,
+    to_property_key,
     call,
     call_with_this,
     construct,
@@ -129,16 +138,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .bind_pattern,
         .load_upval,
         .store_upval,
-        .neg,
-        .pos,
-        .not,
-        .typeof_op,
-        .bit_not,
-        .void_op,
-        .to_string,
-        .inc,
-        .dec,
-        .to_property_key,
         .name_anon,
         .pow,
         .bit_and,
@@ -554,11 +553,30 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 }
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
-    if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .get_index or
-        inst.op == .set_prop or inst.op == .set_index or inst.op == .in_op or
-        inst.op == .instance_of or inst.op == .private_in or inst.op == .call or
-        inst.op == .call_with_this or inst.op == .new_call)
-        return depthEffect(inst).required;
+    switch (inst.op) {
+        .to_numeric,
+        .neg,
+        .pos,
+        .not,
+        .typeof_op,
+        .inc,
+        .dec,
+        .bit_not,
+        .to_string,
+        .to_property_key,
+        .get_prop,
+        .get_index,
+        .set_prop,
+        .set_index,
+        .in_op,
+        .instance_of,
+        .private_in,
+        .call,
+        .call_with_this,
+        .new_call,
+        => return depthEffect(inst).required,
+        else => {},
+    }
     const kind = terminalFrameStateKind(inst.op) orelse return null;
     if (kind != .call and kind != .effect) return null;
     return depthEffect(inst).required;
@@ -953,7 +971,7 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 depth -= 1;
                 stack[depth - 1] = try builder.appendBinary(@intCast(block_id), @intCast(origin), valueKindForBinary(inst.op), lhs, rhs);
             },
-            .to_numeric => {
+            .to_numeric, .neg, .pos, .not, .typeof_op, .inc, .dec, .bit_not, .to_string, .to_property_key => {
                 if (depth == 0) return error.InvalidControlFlow;
                 try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
@@ -962,12 +980,28 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .id = undefined,
                     .block = @intCast(block_id),
                     .origin = @intCast(origin),
-                    .kind = .to_numeric,
+                    .kind = switch (inst.op) {
+                        .to_numeric => .to_numeric,
+                        .neg => .neg,
+                        .pos => .pos,
+                        .not => .not,
+                        .typeof_op => .typeof_op,
+                        .inc => .inc,
+                        .dec => .dec,
+                        .bit_not => .bit_not,
+                        .to_string => .to_string,
+                        .to_property_key => .to_property_key,
+                        else => unreachable,
+                    },
                     .lhs = input,
                     .may_have_effect = true,
                 });
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
+            },
+            .void_op => {
+                if (depth == 0) return error.InvalidControlFlow;
+                stack[depth - 1] = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
             },
             .get_prop => {
                 if (depth == 0 or inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
@@ -1430,6 +1464,16 @@ fn supports(op: bc.Op) bool {
         .pop_handler,
         .push_completion,
         .to_numeric,
+        .neg,
+        .pos,
+        .not,
+        .typeof_op,
+        .void_op,
+        .inc,
+        .dec,
+        .bit_not,
+        .to_string,
+        .to_property_key,
         .get_prop,
         .get_index,
         .set_prop,
@@ -1796,6 +1840,15 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .instance_of, .inputs = 2 },
         .{ .op = .private_in, .inputs = 1 },
         .{ .op = .to_numeric, .inputs = 1 },
+        .{ .op = .neg, .inputs = 1 },
+        .{ .op = .pos, .inputs = 1 },
+        .{ .op = .not, .inputs = 1 },
+        .{ .op = .typeof_op, .inputs = 1 },
+        .{ .op = .inc, .inputs = 1 },
+        .{ .op = .dec, .inputs = 1 },
+        .{ .op = .bit_not, .inputs = 1 },
+        .{ .op = .to_string, .inputs = 1 },
+        .{ .op = .to_property_key, .inputs = 1 },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

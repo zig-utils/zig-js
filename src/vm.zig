@@ -3666,6 +3666,23 @@ fn nativePrivateIn(vm: *Interpreter, name: []const u8, object: Value) EvalError!
     return Value.boolVal(try vm.privateIn(name, object));
 }
 
+fn applyUnaryEffect(vm: *Interpreter, op: bc.Op, input: Value) EvalError!Value {
+    return switch (op) {
+        .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => vm.applyUnary(unaryOp(op), input),
+        .to_property_key => Value.strAlloc(vm.arena, try propKey(vm, input)),
+        .inc, .dec => update: {
+            const numeric = try vm.toNumericPrimitive(input);
+            if (numeric.isObject() and numeric.asObj().is_bigint) {
+                const one = try vm.makeBigInt(1);
+                break :update vm.applyBinary(if (op == .inc) .add else .sub, numeric, one);
+            }
+            const number = try vm.toNumberV(numeric);
+            break :update Value.num(if (op == .inc) number + 1 else number - 1);
+        },
+        else => unreachable,
+    };
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
@@ -3686,6 +3703,19 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     const inputs = frame.scratch.?[first .. first + count];
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericPrimitive(Value.fromRawBits(inputs[0])));
+    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.neg) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.pos) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.not) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.typeof_op) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.inc) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.dec) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.bit_not) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.to_string) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.to_property_key)) and inputs.len == 1)
+    {
+        const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
+        return finishNativeOperation(frame, vm, operation_id, applyUnaryEffect(vm, op, Value.fromRawBits(inputs[0])));
+    }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop) and inputs.len == 1) {
         const name = metadata.nameFor(operation_id) orelse
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
@@ -4105,6 +4135,12 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         nativeOperationDispatch(&frame, 0),
     );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.private_in);
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.neg);
+    metadata.descriptors[0].input_count = 2;
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
@@ -4907,18 +4943,8 @@ fn runChunk(
                 f.unlockSlots(held);
             },
 
-            .neg => {
-                const v = try vm.toNumericPrimitive(stack.pop().?);
-                if (v.isObject() and v.asObj().is_bigint)
-                    try stack.append(stack_alloc, try interp.negateBigIntObject(vm, v.asObj()))
-                else
-                    try stack.append(stack_alloc, Value.num(-(try vm.toNumberV(v))));
-            },
-            .pos => {
-                const v = try vm.toNumericPrimitive(stack.pop().?);
-                if (v.isObject() and v.asObj().is_bigint)
-                    return vm.throwError("TypeError", "Cannot convert a BigInt value to a number");
-                try stack.append(stack_alloc, Value.num(try vm.toNumberV(v)));
+            .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {
+                try stack.append(stack_alloc, try vm.applyUnary(unaryOp(inst.op), stack.pop().?));
             },
             .to_numeric => {
                 try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
@@ -4927,7 +4953,7 @@ fn runChunk(
                 // ToPropertyKey: coerce to the property-key string once (runs the
                 // key's toString/valueOf), so a computed key's coercion happens
                 // before the property value is evaluated.
-                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, try propKey(vm, stack.pop().?)));
+                try stack.append(stack_alloc, try applyUnaryEffect(vm, .to_property_key, stack.pop().?));
             },
             .name_anon => {
                 // NamedEvaluation: name the bare anonymous function/class value on
@@ -4938,39 +4964,8 @@ fn runChunk(
                 // ToNumeric then ±1 of the operand's own numeric type, matching
                 // the tree-walker's evalUpdate (so `"5"++` is 6, not "51", and a
                 // BigInt increments as a BigInt rather than TypeError-ing on `+1`).
-                const v = try vm.toNumericPrimitive(stack.pop().?);
-                if (v.isObject() and v.asObj().is_bigint) {
-                    const one = try vm.makeBigInt(1);
-                    try stack.append(stack_alloc, try vm.applyBinary(if (inst.op == .inc) .add else .sub, v, one));
-                } else {
-                    const n = try vm.toNumberV(v);
-                    try stack.append(stack_alloc, Value.num(if (inst.op == .inc) n + 1 else n - 1));
-                }
+                try stack.append(stack_alloc, try applyUnaryEffect(vm, inst.op, stack.pop().?));
             },
-            .not => {
-                const v = stack.pop().?;
-                try stack.append(stack_alloc, Value.boolVal(!v.toBoolean()));
-            },
-            .typeof_op => {
-                const v = stack.pop().?;
-                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, v.typeOf()));
-            },
-            .bit_not => {
-                const v = try vm.toNumericPrimitive(stack.pop().?);
-                if (v.isObject() and v.asObj().is_bigint)
-                    try stack.append(stack_alloc, try interp.bitNotBigIntObject(vm, v.asObj()))
-                else
-                    try stack.append(stack_alloc, Value.num(@floatFromInt(~Value.num(try vm.toNumberV(v)).toInt32())));
-            },
-            .void_op => {
-                _ = stack.pop().?;
-                try stack.append(stack_alloc, Value.undef());
-            },
-            .to_string => {
-                const v = stack.pop().?;
-                try stack.append(stack_alloc, try Value.strAlloc(vm.arena, try vm.toStringV(v)));
-            },
-
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
@@ -6962,9 +6957,22 @@ test "vm native private relocation mirrors async resume tracing" {
     try std.testing.expectEqual(@as(*anyopaque, @ptrCast(&new_result)), done.private_data.?);
 }
 
+fn unaryOp(op: bc.Op) ast.UnaryOp {
+    return switch (op) {
+        .neg => .neg,
+        .pos => .pos,
+        .not => .not,
+        .typeof_op => .typeof,
+        .bit_not => .bit_not,
+        .void_op => .void_op,
+        .to_string => .to_string,
+        else => unreachable,
+    };
+}
+
 /// Map a binary opcode back to the shared `ast.BinaryOp`. The opcode set mirrors
 /// the operator set 1:1 (minus `instanceof`, which the compiler never emits).
-fn binOp(op: bc.Op) @import("ast.zig").BinaryOp {
+fn binOp(op: bc.Op) ast.BinaryOp {
     return switch (op) {
         .add => .add,
         .sub => .sub,
@@ -9010,6 +9018,151 @@ test "vm: optimizer native private-in preserves the class brand" {
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.private_in)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 1), operation.input_count);
     try std.testing.expectEqualStrings("#value", operations.nameFor(0).?);
+}
+
+test "vm: optimizer native unary coercions preserve primitive results" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const Case = struct { op: bc.Op, input: Value };
+    const cases = [_]Case{
+        .{ .op = .neg, .input = Value.num(5) },
+        .{ .op = .pos, .input = Value.str("7") },
+        .{ .op = .not, .input = Value.num(0) },
+        .{ .op = .typeof_op, .input = Value.num(5) },
+        .{ .op = .inc, .input = Value.num(5) },
+        .{ .op = .dec, .input = Value.num(5) },
+        .{ .op = .bit_not, .input = Value.num(5) },
+        .{ .op = .to_string, .input = Value.boolVal(true) },
+        .{ .op = .to_property_key, .input = Value.num(12) },
+        .{ .op = .void_op, .input = Value.num(5) },
+    };
+
+    for (cases) |case| {
+        var chunk = bc.Chunk.init(allocator);
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(case.op, 0);
+        _ = try chunk.emit(.ret, 0);
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        var slots = [_]Value{case.input};
+        const result = if (case.op == .void_op)
+            tryRunUnmanagedNative(&machine, &compiled, &slots) orelse return error.TestUnexpectedResult
+        else managed: {
+            const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+            break :managed switch (outcome) {
+                .complete => |value_word| value_word,
+                else => return error.TestUnexpectedResult,
+            };
+        };
+        switch (case.op) {
+            .neg => try std.testing.expectEqual(@as(f64, -5), result.asNum()),
+            .pos => try std.testing.expectEqual(@as(f64, 7), result.asNum()),
+            .not => try std.testing.expect(result.asBool()),
+            .typeof_op => try std.testing.expectEqualStrings("number", result.asStr()),
+            .inc => try std.testing.expectEqual(@as(f64, 6), result.asNum()),
+            .dec => try std.testing.expectEqual(@as(f64, 4), result.asNum()),
+            .bit_not => try std.testing.expectEqual(@as(f64, -6), result.asNum()),
+            .to_string => try std.testing.expectEqualStrings("true", result.asStr()),
+            .to_property_key => try std.testing.expectEqualStrings("12", result.asStr()),
+            .void_op => try std.testing.expect(result.isUndefined()),
+            else => unreachable,
+        }
+        if (case.op == .void_op) {
+            try std.testing.expect(compiled.native_operations == null);
+        } else {
+            const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+            try std.testing.expectEqual(@as(u16, @intFromEnum(case.op)), operations.descriptors[0].bytecode_op);
+        }
+    }
+}
+
+test "vm: optimizer native unary coercion resumes an exact catch once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let calls = 0;
+        \\function coerce(value) { try { return -value; } catch (e) { return e + calls; } }
+        \\function badValue() { calls = calls + 1; throw 91; }
+        \\const bad = { valueOf: badValue };
+        \\coerce(0); coerce(1); coerce(2); coerce(3); coerce(4);
+        \\coerce(5); coerce(6); coerce(7); coerce(8); coerce(bad)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 92), (try run(&machine, root, null)).asNum());
+    const coerce_chunk = root.fns.items[0].chunk.?;
+    const artifact = coerce_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.neg)), operation.bytecode_op);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "vm: optimizer native logical not feeds Boolean control" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const eleven = try chunk.addConst(Value.num(11));
+    const twenty_two = try chunk.addConst(Value.num(22));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.not, 0);
+    _ = try chunk.emit(.jump_if_false, 5);
+    _ = try chunk.emit(.load_const, eleven);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.load_const, twenty_two);
+    _ = try chunk.emit(.ret, 0);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var slots = [_]Value{Value.boolVal(true)};
+    const truthy = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const truthy_result = switch (truthy) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 22), truthy_result.asNum());
+    slots[0] = Value.num(0);
+    const falsy = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const falsy_result = switch (falsy) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 11), falsy_result.asNum());
+
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.not)), operations.descriptors[0].bytecode_op);
 }
 
 test "vm: optimizer coercion-effect side exit preserves caught user exceptions" {
