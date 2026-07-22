@@ -75,7 +75,7 @@ Run `zig build --help` for the full command list.
 - remaining JSC framework/private and Bun/Home ABI surfaces;
 - 10 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
 - automatic/concurrent compaction and a moving nursery;
-- remaining native optimizer dynamic-finally dispatch and additional architecture backends. AArch64 executes profiled dynamic arithmetic/comparisons plus unary, bitwise, property, membership, direct-eval, spread, invocation, construction, literal object/array initialization, and proper-tail-call effects through precisely rooted callbacks; see [optimizer status](docs/optimizing-jit.md).
+- additional native optimizer architecture backends. AArch64 executes profiled dynamic arithmetic/comparisons plus unary, bitwise, property, membership, direct-eval, spread, invocation, construction, literal object/array initialization, proper-tail-call effects, and exact normal/throw/return/break/continue completion dispatch through precisely rooted callbacks; see [optimizer status](docs/optimizing-jit.md).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 
