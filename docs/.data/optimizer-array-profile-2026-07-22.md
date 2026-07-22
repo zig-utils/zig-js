@@ -46,6 +46,34 @@ No `nativeArrayPushGrow` leaf appears in either profile. The focused quickening
 witness also records the packed-push and packed-sum kernels, so the attribution
 matches the runtime tier counters rather than relying on symbol names alone.
 
+## Focused optimizer-region dispatch A/B
+
+The published workload cannot measure #452 because its VM kernel wins before
+optimizer OSR. The existing moving-GC `optimizerArrayGrow` differential is the
+focused complement: it warms the same reducible one-value push loop, then runs
+20,000 iterations against a retained array in native and bytecode contexts.
+Both parent and candidate pass the same 4/4 filtered group with equal result
+`20007`; the candidate also moves the retained target and value successfully.
+
+| exact engine revision | direct | narrow | actual growth | general operation |
+| --- | ---: | ---: | ---: | ---: |
+| parent `db91caba` | 19,564 | 0 | 0 | 14 |
+| candidate `f4916c3c` | 19,564 | 14 | 14 | **0** |
+
+The parent run used only a temporary print hook around the existing before/after
+counters. Candidate commit `bb0c54e7` keeps the machine-readable line in the
+focused test:
+
+```sh
+zig build test -Dtest-filter='optimizer allocating array'
+```
+
+This is a causal dispatch result, not a timing claim: all 14 reallocations move
+from the general operation dispatcher to the rooted narrow callback, while the
+19,564 spare-capacity publications remain direct. The general-dispatch count
+therefore falls 100% for the measured growth subset without adding repeated
+callbacks to the direct path.
+
 ## Decision
 
 Keep the current tier priority. The exact published workload is still owned by
