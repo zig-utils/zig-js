@@ -487,15 +487,15 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     defer exit_guards.deinit(allocator);
     var latch: u32 = undefined;
     var true_steps: u32 = undefined;
+    var tail_block = branch.true_block;
+    var tail_prefix_steps = plan.blocks[header].instruction_count;
 
     // Recognize a reducible chain of conditional exits. Each guard has exactly
     // one arm into the outer exit (directly or through a tiny arm block) and
-    // one arm that advances to the next guard or the final backedge block.
+    // one arm that advances to the next guard, a branch tail, or a backedge.
     if (branchForBlock(graph.branches, branch.true_block) != null) chain: {
-        var current = branch.true_block;
-        var path_steps = plan.blocks[header].instruction_count;
         while (exit_guards.items.len < graph.branches.len) {
-            const guard_branch = branchForBlock(graph.branches, current) orelse break;
+            const guard_branch = branchForBlock(graph.branches, tail_block) orelse break;
             if (guard_branch.false_block == guard_branch.true_block or
                 guard_branch.false_block >= plan.blocks.len or guard_branch.true_block >= plan.blocks.len)
                 break;
@@ -505,35 +505,41 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             const exit = false_exit orelse true_exit.?;
             const exit_on_true = true_exit != null;
             const continue_block = if (exit_on_true) guard_branch.false_block else guard_branch.true_block;
-            path_steps = std.math.add(u32, path_steps, plan.blocks[current].instruction_count) catch break;
+            tail_prefix_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[tail_block].instruction_count) catch break;
             const exit_steps = if (exit.direct)
-                path_steps
+                tail_prefix_steps
             else
-                std.math.add(u32, path_steps, plan.blocks[exit.block].instruction_count) catch break;
+                std.math.add(u32, tail_prefix_steps, plan.blocks[exit.block].instruction_count) catch break;
             exit_guards.append(allocator, .{
-                .entry_block = current,
+                .entry_block = tail_block,
                 .condition = std.math.cast(u8, guard_branch.condition) orelse break,
                 .exit_block = exit.block,
-                .exit_from = if (exit.direct) current else exit.block,
+                .exit_from = if (exit.direct) tail_block else exit.block,
                 .exit_on_true = exit_on_true,
                 .exit_steps = std.math.cast(u12, exit_steps) orelse break,
             }) catch return error.OutOfMemory;
-            current = continue_block;
+            tail_block = continue_block;
         }
-        if (exit_guards.items.len == 0 or current >= plan.blocks.len or
-            plan.blocks[current].successor_count != 1 or plan.blocks[current].successors[0] != header)
-        {
+        if (exit_guards.items.len == 0 or tail_block >= plan.blocks.len) {
             exit_guards.clearRetainingCapacity();
+            tail_block = branch.true_block;
+            tail_prefix_steps = plan.blocks[header].instruction_count;
             break :chain;
         }
-        body = current;
-        latch = current;
-        true_steps = std.math.add(u32, path_steps, plan.blocks[current].instruction_count) catch
-            return error.UnsupportedChunk;
+        if (plan.blocks[tail_block].successor_count == 1 and plan.blocks[tail_block].successors[0] == header) {
+            body = tail_block;
+            latch = tail_block;
+            true_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[tail_block].instruction_count) catch
+                return error.UnsupportedChunk;
+        } else if (branchForBlock(graph.branches, tail_block) == null) {
+            exit_guards.clearRetainingCapacity();
+            tail_block = branch.true_block;
+            tail_prefix_steps = plan.blocks[header].instruction_count;
+        }
     }
 
-    if (exit_guards.items.len == 0) if (branchForBlock(graph.branches, branch.true_block)) |nested| {
-        if (nested.block != branch.true_block or nested.false_block == nested.true_block or
+    if (body == null) if (branchForBlock(graph.branches, tail_block)) |nested| {
+        if (nested.block != tail_block or nested.false_block == nested.true_block or
             nested.false_block >= plan.blocks.len or nested.true_block >= plan.blocks.len)
             return error.UnsupportedChunk;
         const false_arm = plan.blocks[nested.false_block];
@@ -553,14 +559,18 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         } else if (false_successor != header or true_successor != header) {
             return error.UnsupportedChunk;
         }
-        const false_steps = if (merge) |merge_block|
-            try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block, merge_block })
-        else
-            try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block });
-        const nested_true_steps = if (merge) |merge_block|
-            try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block, merge_block })
-        else
-            try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block });
+        const common_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[nested.block].instruction_count) catch
+            return error.UnsupportedChunk;
+        var false_steps = std.math.add(u32, common_steps, plan.blocks[nested.false_block].instruction_count) catch
+            return error.UnsupportedChunk;
+        var nested_true_steps = std.math.add(u32, common_steps, plan.blocks[nested.true_block].instruction_count) catch
+            return error.UnsupportedChunk;
+        if (merge) |merge_block| {
+            false_steps = std.math.add(u32, false_steps, plan.blocks[merge_block].instruction_count) catch
+                return error.UnsupportedChunk;
+            nested_true_steps = std.math.add(u32, nested_true_steps, plan.blocks[merge_block].instruction_count) catch
+                return error.UnsupportedChunk;
+        }
         latch = merge orelse nested.true_block;
         true_steps = @max(false_steps, nested_true_steps);
         nested_loop = .{
@@ -573,6 +583,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
         };
     } else {
+        if (exit_guards.items.len != 0) return error.UnsupportedChunk;
         const straight_body = branch.true_block;
         if (straight_body >= plan.blocks.len or plan.blocks[straight_body].successor_count != 1 or
             plan.blocks[straight_body].successors[0] != header)
@@ -591,24 +602,19 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    if (exit_guards.items.len != 0) {
-        var from = header;
-        for (exit_guards.items) |guard| {
-            try appendEdgeCopies(graph, from, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-            if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
-            if (guard.exit_from != guard.entry_block) {
-                try appendEdgeCopies(graph, guard.entry_block, guard.exit_block, guard.exit_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-                try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-            }
-            from = guard.entry_block;
+    var path_from = header;
+    for (exit_guards.items) |guard| {
+        try appendEdgeCopies(graph, path_from, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
+        if (guard.exit_from != guard.entry_block) {
+            try appendEdgeCopies(graph, guard.entry_block, guard.exit_block, guard.exit_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+            try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric);
         }
-        const straight_body = body.?;
-        try appendEdgeCopies(graph, from, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
-        try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-    } else if (nested_loop) |nested| {
-        try appendEdgeCopies(graph, header, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        path_from = guard.entry_block;
+    }
+    if (nested_loop) |nested| {
+        try appendEdgeCopies(graph, path_from, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
         if (types[nested.condition] != .boolean) return error.UnsupportedChunk;
 
@@ -632,7 +638,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         }
     } else {
         const straight_body = body.?;
-        try appendEdgeCopies(graph, header, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendEdgeCopies(graph, path_from, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
         try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
     }
@@ -1196,34 +1202,25 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        if (program.loop_exit_guards.len != 0) {
-            for (program.loop_exit_guards) |guard| {
-                try emitBlockOperations(&assembler, program, guard.entry_block);
-                try assembler.load64(9, 14, try slotOffset(guard.condition));
-                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-                try assembler.compareRegister64(9, 10);
-                const continue_jump = try assembler.branchConditionPlaceholder(
-                    if (guard.exit_on_true) .eq else .ne,
-                );
-                if (guard.exit_from != guard.entry_block)
-                    try emitBlockOperations(&assembler, program, guard.exit_block);
-                try emitStepIncrement(&assembler, guard.exit_steps);
-                try emitSideExit(
-                    &assembler,
-                    guard.exit_deopt_index,
-                    program.deopt_points[guard.exit_deopt_index].exit_ip,
-                );
-                try assembler.patchConditionBranch(continue_jump, assembler.position());
-            }
-            try emitBlockOperations(&assembler, program, branch.true_block.?);
-            try emitStepIncrement(&assembler, branch.true_steps);
-            try assembler.subtractImmediate64(15, 15, branch.true_steps);
-            try assembler.subtractImmediate64(16, 16, branch.true_steps);
-            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(backedge, loop_top);
-        } else if (branch.nested_loop) |nested| {
+        for (program.loop_exit_guards) |guard| {
+            try emitBlockOperations(&assembler, program, guard.entry_block);
+            try assembler.load64(9, 14, try slotOffset(guard.condition));
+            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+            try assembler.compareRegister64(9, 10);
+            const continue_jump = try assembler.branchConditionPlaceholder(
+                if (guard.exit_on_true) .eq else .ne,
+            );
+            if (guard.exit_from != guard.entry_block)
+                try emitBlockOperations(&assembler, program, guard.exit_block);
+            try emitStepIncrement(&assembler, guard.exit_steps);
+            try emitSideExit(
+                &assembler,
+                guard.exit_deopt_index,
+                program.deopt_points[guard.exit_deopt_index].exit_ip,
+            );
+            try assembler.patchConditionBranch(continue_jump, assembler.position());
+        }
+        if (branch.nested_loop) |nested| {
             try emitBlockOperations(&assembler, program, nested.entry_block);
             try assembler.load64(9, 14, try slotOffset(nested.condition));
             try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
@@ -3072,4 +3069,38 @@ test "optimizer loop OSR side exits either guard in a multi-exit chain" {
         compiled.deopt.?.values[exit.first_value + 2].materialize(&slots, &scratch) orelse
             return error.TestUnexpectedResult,
     ).asNum());
+}
+
+fn makeIrreducibleLoopChunk(allocator: std.mem.Allocator) !bc.Chunk {
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    const enter_second = try chunk.emit(.jump_if_false, 0);
+
+    const first: u32 = @intCast(chunk.code.items.len);
+    _ = try chunk.emit(.load_local, 0);
+    const leave_first = try chunk.emit(.jump_if_false, 0);
+    const first_to_second = try chunk.emit(.jump, 0);
+
+    const second: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[enter_second].a = second;
+    chunk.code.items[first_to_second].a = second;
+    _ = try chunk.emit(.load_local, 0);
+    const leave_second = try chunk.emit(.jump_if_false, 0);
+    _ = try chunk.emit(.jump, first);
+
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[leave_first].a = exit;
+    chunk.code.items[leave_second].a = exit;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.ret, 0);
+    return chunk;
+}
+
+test "optimizer loop OSR rejects an irreducible two-entry region" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeIrreducibleLoopChunk(arena.allocator());
+    try std.testing.expectError(error.UnsupportedChunk, compile(&chunk));
 }
