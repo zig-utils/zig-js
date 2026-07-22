@@ -57,6 +57,8 @@ pub const ValueKind = enum {
     construct,
     get_prop,
     get_index,
+    set_prop,
+    set_index,
 };
 
 pub const ValueNode = struct {
@@ -66,6 +68,7 @@ pub const ValueNode = struct {
     kind: ValueKind,
     lhs: ValueId = none,
     rhs: ValueId = none,
+    third: ValueId = none,
     immediate: u64 = 0,
     may_have_effect: bool = false,
 
@@ -165,8 +168,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .register_disposable,
         .array_append_hole,
         .import_call,
-        .set_prop,
-        .set_index,
         .instance_of,
         .private_in,
         .make_closure,
@@ -318,6 +319,7 @@ pub const Plan = struct {
             try out.print(allocator, "value %{d} b{d} @{d} {s}", .{ node.id, node.block, node.origin, @tagName(node.kind) });
             if (node.lhs != ValueNode.none) try out.print(allocator, " %{d}", .{node.lhs});
             if (node.rhs != ValueNode.none) try out.print(allocator, " %{d}", .{node.rhs});
+            if (node.third != ValueNode.none) try out.print(allocator, " %{d}", .{node.third});
             switch (node.kind) {
                 .argument, .block_argument, .constant => try out.print(allocator, " 0x{x}", .{node.immediate}),
                 else => {},
@@ -552,7 +554,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 }
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
-    if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .get_index or inst.op == .call or
+    if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .get_index or
+        inst.op == .set_prop or inst.op == .set_index or inst.op == .call or
         inst.op == .call_with_this or inst.op == .new_call)
         return depthEffect(inst).required;
     const kind = terminalFrameStateKind(inst.op) orelse return null;
@@ -1001,6 +1004,47 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
+            .set_prop => {
+                if (depth < 2 or inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const object = stack[depth - 2];
+                const value_word = stack[depth - 1];
+                depth -= 1;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .set_prop,
+                    .lhs = object,
+                    .rhs = value_word,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
+            .set_index => {
+                if (depth < 3) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const object = stack[depth - 3];
+                const key = stack[depth - 2];
+                const value_word = stack[depth - 1];
+                depth -= 2;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .set_index,
+                    .lhs = object,
+                    .rhs = key,
+                    .third = value_word,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
             .call, .call_with_this, .new_call => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
@@ -1190,6 +1234,7 @@ fn compactValueGraph(
         const node = builder.nodes.items[id];
         if (node.lhs != ValueNode.none) try queue.append(allocator, node.lhs);
         if (node.rhs != ValueNode.none) try queue.append(allocator, node.rhs);
+        if (node.third != ValueNode.none) try queue.append(allocator, node.third);
         if (node.kind == .block_argument) {
             const slot: usize = @intCast(node.immediate);
             for (builder.edges.items) |edge| {
@@ -1216,6 +1261,7 @@ fn compactValueGraph(
         node.id = remap[old_id];
         if (node.lhs != ValueNode.none) node.lhs = remap[node.lhs];
         if (node.rhs != ValueNode.none) node.rhs = remap[node.rhs];
+        if (node.third != ValueNode.none) node.third = remap[node.third];
         nodes[next_node] = node;
         next_node += 1;
     }
@@ -1349,6 +1395,8 @@ fn supports(op: bc.Op) bool {
         .to_numeric,
         .get_prop,
         .get_index,
+        .set_prop,
+        .set_index,
         .call,
         .call_with_this,
         .new_call,
@@ -1672,6 +1720,28 @@ test "optimizer models a named read through dup and swap with normal flow" {
     try std.testing.expect(plan.graph.nodes[result].may_have_effect);
 }
 
+test "optimizer keeps every computed write operand live" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    const seven = try chunk.addConst(RuntimeValue.num(7));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, seven);
+    _ = try chunk.emit(.set_index, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    const result = plan.graph.returns[0].value;
+    const write = plan.graph.nodes[result];
+    try std.testing.expectEqual(ValueKind.set_index, write.kind);
+    try std.testing.expect(write.lhs != ValueNode.none and write.rhs != ValueNode.none and write.third != ValueNode.none);
+    try std.testing.expectEqual(ValueKind.constant, plan.graph.nodes[write.third].kind);
+}
+
 test "optimizer records exact exceptional targets for interpreter-owned effects" {
     const Case = struct { op: bc.Op, inputs: u32, a: u32 = 0, b: u32 = 0 };
     const cases = [_]Case{
@@ -1680,6 +1750,8 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .new_call, .inputs = 2, .a = 1 },
         .{ .op = .get_prop, .inputs = 1 },
         .{ .op = .get_index, .inputs = 2 },
+        .{ .op = .set_prop, .inputs = 2 },
+        .{ .op = .set_index, .inputs = 3 },
         .{ .op = .to_numeric, .inputs = 1 },
     };
     for (cases) |case| {
@@ -1691,7 +1763,7 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         const catch_ip = case.inputs + 3;
         _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
         for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
-        const operand_a = if (case.op == .get_prop) try chunk.addName("value") else case.a;
+        const operand_a = if (case.op == .get_prop or case.op == .set_prop) try chunk.addName("value") else case.a;
         _ = try chunk.emitAB(case.op, operand_a, case.b);
         _ = try chunk.emit(.ret_undef, 0);
         _ = try chunk.emit(.ret_undef, 0);
