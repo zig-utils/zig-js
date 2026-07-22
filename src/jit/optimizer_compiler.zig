@@ -58,8 +58,8 @@ pub const SideExitBranch = struct {
     true_deopt_index: u16,
     false_steps: u12,
     true_steps: u12,
+    loop_prefix_steps: u12 = 0,
     true_block: ?u32 = null,
-    nested_loop: ?NestedLoopBranch = null,
 };
 
 pub const SideExit = struct {
@@ -67,14 +67,17 @@ pub const SideExit = struct {
     steps: u12,
 };
 
-pub const NestedLoopBranch = struct {
+pub const LoopBranch = struct {
     entry_block: u32,
     condition: u8,
     false_block: u32,
     true_block: u32,
-    /// Shared latch for a diamond, or null when both arms independently
-    /// backedge to the loop header.
+    /// Shared join, or null when both arms independently backedge.
     merge_block: ?u32,
+    /// Emit the shared join in each selected arm. False when the join is the
+    /// next branch entry and therefore executes once after the machine join.
+    emit_merge: bool,
+    terminal: bool,
     false_steps: u12,
     true_steps: u12,
 };
@@ -97,6 +100,7 @@ pub const Program = struct {
     side_exit: ?SideExit,
     side_exit_branch: ?SideExitBranch,
     loop_exit_guards: []LoopExitGuard = &.{},
+    loop_branches: []LoopBranch = &.{},
     scratch_slots: u8,
     frame_slots: u32,
     required_numeric_slots: u64,
@@ -117,6 +121,7 @@ pub const Program = struct {
         self.allocator.free(self.deopt_handlers);
         self.allocator.free(self.stack_maps);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
+        if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
@@ -482,9 +487,10 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     if (branch.block != header or branch.false_block == branch.true_block) return error.UnsupportedChunk;
 
     var body: ?u32 = null;
-    var nested_loop: ?NestedLoopBranch = null;
     var exit_guards: std.ArrayListUnmanaged(LoopExitGuard) = .empty;
     defer exit_guards.deinit(allocator);
+    var loop_branches: std.ArrayListUnmanaged(LoopBranch) = .empty;
+    defer loop_branches.deinit(allocator);
     var latch: u32 = undefined;
     var true_steps: u32 = undefined;
     var tail_block = branch.true_block;
@@ -538,51 +544,77 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         }
     }
 
-    if (body == null) if (branchForBlock(graph.branches, tail_block)) |nested| {
-        if (nested.block != tail_block or nested.false_block == nested.true_block or
-            nested.false_block >= plan.blocks.len or nested.true_block >= plan.blocks.len)
-            return error.UnsupportedChunk;
-        const false_arm = plan.blocks[nested.false_block];
-        const true_arm = plan.blocks[nested.true_block];
-        if (false_arm.successor_count != 1 or true_arm.successor_count != 1) return error.UnsupportedChunk;
-        const false_successor = false_arm.successors[0];
-        const true_successor = true_arm.successors[0];
-        const shared_successor = false_successor == true_successor;
-        const merge: ?u32 = if (shared_successor and false_successor != header)
-            false_successor
-        else
-            null;
-        if (merge) |merge_block| {
-            if (merge_block >= plan.blocks.len or plan.blocks[merge_block].successor_count != 1 or
-                plan.blocks[merge_block].successors[0] != header)
+    if (body == null and branchForBlock(graph.branches, tail_block) != null) {
+        var current = tail_block;
+        var total_steps = tail_prefix_steps;
+        var terminal = false;
+        while (loop_branches.items.len < graph.branches.len) {
+            const nested = branchForBlock(graph.branches, current) orelse return error.UnsupportedChunk;
+            if (nested.false_block == nested.true_block or nested.false_block >= plan.blocks.len or
+                nested.true_block >= plan.blocks.len)
                 return error.UnsupportedChunk;
-        } else if (false_successor != header or true_successor != header) {
-            return error.UnsupportedChunk;
+            const false_arm = plan.blocks[nested.false_block];
+            const true_arm = plan.blocks[nested.true_block];
+            if (false_arm.successor_count != 1 or true_arm.successor_count != 1)
+                return error.UnsupportedChunk;
+            const false_successor = false_arm.successors[0];
+            const true_successor = true_arm.successors[0];
+            var merge: ?u32 = null;
+            var emit_merge = false;
+            var next: ?u32 = null;
+            if (false_successor == header and true_successor == header) {
+                terminal = true;
+                latch = nested.true_block;
+            } else if (false_successor == true_successor and false_successor != header) {
+                merge = false_successor;
+                if (merge.? >= plan.blocks.len) return error.UnsupportedChunk;
+                if (branchForBlock(graph.branches, merge.?)) |_| {
+                    next = merge.?;
+                } else {
+                    const merge_plan = plan.blocks[merge.?];
+                    if (merge_plan.successor_count != 1) return error.UnsupportedChunk;
+                    emit_merge = true;
+                    if (merge_plan.successors[0] == header) {
+                        terminal = true;
+                        latch = merge.?;
+                    } else if (branchForBlock(graph.branches, merge_plan.successors[0]) != null) {
+                        next = merge_plan.successors[0];
+                    } else return error.UnsupportedChunk;
+                }
+            } else return error.UnsupportedChunk;
+
+            const common_steps = plan.blocks[nested.block].instruction_count;
+            var false_steps = std.math.add(u32, common_steps, false_arm.instruction_count) catch
+                return error.UnsupportedChunk;
+            var nested_true_steps = std.math.add(u32, common_steps, true_arm.instruction_count) catch
+                return error.UnsupportedChunk;
+            if (emit_merge) {
+                false_steps = std.math.add(u32, false_steps, plan.blocks[merge.?].instruction_count) catch
+                    return error.UnsupportedChunk;
+                nested_true_steps = std.math.add(u32, nested_true_steps, plan.blocks[merge.?].instruction_count) catch
+                    return error.UnsupportedChunk;
+            }
+            try loop_branches.append(allocator, .{
+                .entry_block = nested.block,
+                .condition = std.math.cast(u8, nested.condition) orelse return error.UnsupportedChunk,
+                .false_block = nested.false_block,
+                .true_block = nested.true_block,
+                .merge_block = merge,
+                .emit_merge = emit_merge,
+                .terminal = terminal,
+                .false_steps = std.math.cast(u12, false_steps) orelse return error.UnsupportedChunk,
+                .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
+            });
+            total_steps = std.math.add(u32, total_steps, @max(false_steps, nested_true_steps)) catch
+                return error.UnsupportedChunk;
+            if (terminal) {
+                true_steps = total_steps;
+                break;
+            }
+            current = next orelse return error.UnsupportedChunk;
         }
-        const common_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[nested.block].instruction_count) catch
-            return error.UnsupportedChunk;
-        var false_steps = std.math.add(u32, common_steps, plan.blocks[nested.false_block].instruction_count) catch
-            return error.UnsupportedChunk;
-        var nested_true_steps = std.math.add(u32, common_steps, plan.blocks[nested.true_block].instruction_count) catch
-            return error.UnsupportedChunk;
-        if (merge) |merge_block| {
-            false_steps = std.math.add(u32, false_steps, plan.blocks[merge_block].instruction_count) catch
-                return error.UnsupportedChunk;
-            nested_true_steps = std.math.add(u32, nested_true_steps, plan.blocks[merge_block].instruction_count) catch
-                return error.UnsupportedChunk;
-        }
-        latch = merge orelse nested.true_block;
-        true_steps = @max(false_steps, nested_true_steps);
-        nested_loop = .{
-            .entry_block = nested.block,
-            .condition = @intCast(nested.condition),
-            .false_block = nested.false_block,
-            .true_block = nested.true_block,
-            .merge_block = merge,
-            .false_steps = std.math.cast(u12, false_steps) orelse return error.UnsupportedChunk,
-            .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
-        };
-    } else {
+        if (!terminal) return error.UnsupportedChunk;
+    } else if (body == null) {
         if (exit_guards.items.len != 0) return error.UnsupportedChunk;
         const straight_body = branch.true_block;
         if (straight_body >= plan.blocks.len or plan.blocks[straight_body].successor_count != 1 or
@@ -591,7 +623,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         body = straight_body;
         latch = straight_body;
         true_steps = try sumInstructionCounts(plan, &.{ header, straight_body });
-    };
+    }
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
@@ -602,9 +634,9 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    var path_from = header;
+    var path_from: ?u32 = header;
     for (exit_guards.items) |guard| {
-        try appendEdgeCopies(graph, path_from, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendEdgeCopies(graph, path_from.?, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
         if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
         if (guard.exit_from != guard.entry_block) {
@@ -613,32 +645,41 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         }
         path_from = guard.entry_block;
     }
-    if (nested_loop) |nested| {
-        try appendEdgeCopies(graph, path_from, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-        if (types[nested.condition] != .boolean) return error.UnsupportedChunk;
+    for (loop_branches.items) |segment| {
+        if (path_from) |from|
+            try appendEdgeCopies(graph, from, segment.entry_block, segment.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, segment.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (types[segment.condition] != .boolean) return error.UnsupportedChunk;
 
-        try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-        if (nested.merge_block) |merge_block|
-            try appendEdgeCopies(graph, nested.true_block, merge_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
-        else
-            try appendEdgeCopies(graph, nested.true_block, header, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        const true_target = segment.merge_block orelse header;
+        try appendEdgeCopies(graph, segment.entry_block, segment.true_block, segment.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, segment.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, segment.true_block, true_target, segment.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
-        try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-        try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-        if (nested.merge_block) |merge_block|
-            try appendEdgeCopies(graph, nested.false_block, merge_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
-        else
-            try appendEdgeCopies(graph, nested.false_block, header, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        const false_target = segment.merge_block orelse header;
+        try appendEdgeCopies(graph, segment.entry_block, segment.false_block, segment.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, segment.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, segment.false_block, false_target, segment.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
-        if (nested.merge_block) |merge_block| {
-            try appendBlockOperations(graph, merge_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-            try appendEdgeCopies(graph, merge_block, header, merge_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        if (segment.merge_block) |merge_block| {
+            if (segment.emit_merge) {
+                try appendBlockOperations(graph, merge_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+                if (segment.terminal) {
+                    try appendEdgeCopies(graph, merge_block, header, merge_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+                    path_from = null;
+                } else {
+                    path_from = merge_block;
+                }
+            } else {
+                path_from = null;
+            }
+        } else {
+            path_from = null;
         }
-    } else {
+    }
+    if (loop_branches.items.len == 0) {
         const straight_body = body.?;
-        try appendEdgeCopies(graph, path_from, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendEdgeCopies(graph, path_from.?, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
         try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
     }
@@ -674,6 +715,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(stack_maps);
     const owned_exit_guards = try exit_guards.toOwnedSlice(allocator);
     errdefer if (owned_exit_guards.len != 0) allocator.free(owned_exit_guards);
+    const owned_loop_branches = try loop_branches.toOwnedSlice(allocator);
+    errdefer if (owned_loop_branches.len != 0) allocator.free(owned_loop_branches);
     var local_mask: u64 = 0;
     for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
         if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
@@ -695,10 +738,11 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .true_deopt_index = true_index,
             .false_steps = exit_steps,
             .true_steps = iteration_steps,
+            .loop_prefix_steps = std.math.cast(u12, tail_prefix_steps) orelse return error.UnsupportedChunk,
             .true_block = body,
-            .nested_loop = nested_loop,
         },
         .loop_exit_guards = owned_exit_guards,
+        .loop_branches = owned_loop_branches,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = local_mask,
@@ -1220,32 +1264,38 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             );
             try assembler.patchConditionBranch(continue_jump, assembler.position());
         }
-        if (branch.nested_loop) |nested| {
-            try emitBlockOperations(&assembler, program, nested.entry_block);
-            try assembler.load64(9, 14, try slotOffset(nested.condition));
-            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-            try assembler.compareRegister64(9, 10);
-            const nested_false_jump = try assembler.branchConditionPlaceholder(.eq);
-            try emitBlockOperations(&assembler, program, nested.true_block);
-            if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
-            try emitStepIncrement(&assembler, nested.true_steps);
-            try assembler.subtractImmediate64(15, 15, nested.true_steps);
-            try assembler.subtractImmediate64(16, 16, nested.true_steps);
-            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const true_backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(true_backedge, loop_top);
+        if (program.loop_branches.len != 0) {
+            try emitStepIncrement(&assembler, branch.loop_prefix_steps);
+            try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
+            try assembler.subtractImmediate64(16, 16, branch.loop_prefix_steps);
+            for (program.loop_branches) |segment| {
+                try emitBlockOperations(&assembler, program, segment.entry_block);
+                try assembler.load64(9, 14, try slotOffset(segment.condition));
+                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                try assembler.compareRegister64(9, 10);
+                const segment_false_jump = try assembler.branchConditionPlaceholder(.eq);
 
-            try assembler.patchConditionBranch(nested_false_jump, assembler.position());
-            try emitBlockOperations(&assembler, program, nested.false_block);
-            if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
-            try emitStepIncrement(&assembler, nested.false_steps);
-            try assembler.subtractImmediate64(15, 15, nested.false_steps);
-            try assembler.subtractImmediate64(16, 16, nested.false_steps);
+                try emitBlockOperations(&assembler, program, segment.true_block);
+                if (segment.emit_merge) if (segment.merge_block) |merge_block|
+                    try emitBlockOperations(&assembler, program, merge_block);
+                try emitStepIncrement(&assembler, segment.true_steps);
+                try assembler.subtractImmediate64(15, 15, segment.true_steps);
+                try assembler.subtractImmediate64(16, 16, segment.true_steps);
+                const true_join = try assembler.branchPlaceholder();
+
+                try assembler.patchConditionBranch(segment_false_jump, assembler.position());
+                try emitBlockOperations(&assembler, program, segment.false_block);
+                if (segment.emit_merge) if (segment.merge_block) |merge_block|
+                    try emitBlockOperations(&assembler, program, merge_block);
+                try emitStepIncrement(&assembler, segment.false_steps);
+                try assembler.subtractImmediate64(15, 15, segment.false_steps);
+                try assembler.subtractImmediate64(16, 16, segment.false_steps);
+                try assembler.patchBranch(true_join, assembler.position());
+            }
             try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
             if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const false_backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(false_backedge, loop_top);
+            const backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(backedge, loop_top);
         } else {
             try emitBlockOperations(&assembler, program, branch.true_block.?);
             try emitStepIncrement(&assembler, branch.true_steps);
