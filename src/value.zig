@@ -3058,12 +3058,16 @@ pub const Object = struct {
         self.lockElements();
         defer self.unlockElements();
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len) return null;
-        const new_len = self.elementsItems().len + values.len;
+        const new_len = std.math.add(usize, self.elementsItems().len, values.len) catch return null;
         if (new_len > 4294967295) return null;
-        for (values) |v| gcBarrier(self, v);
-        if (values.len != 0) self.indexed_own_seen.store(true, .release);
         const elements = try self.ensureElementsList(arena);
-        try elements.appendSlice(self.elementsAllocator(arena), values);
+        // Capacity is the only fallible step. Reserve it before barriers,
+        // indexed publication, or the observable length changes so OOM leaves
+        // the packed array logically untouched.
+        try elements.ensureTotalCapacity(self.elementsAllocator(arena), new_len);
+        for (values) |v| gcBarrier(self, v);
+        elements.appendSliceAssumeCapacity(values);
+        if (values.len != 0) self.indexed_own_seen.store(true, .release);
         return new_len;
     }
 

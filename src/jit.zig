@@ -423,6 +423,9 @@ pub const NativeOperationMetadata = struct {
 };
 
 pub const numeric_scratch_capacity = 128;
+/// Maximum fixed argument count unrolled by direct packed append code. Larger
+/// intrinsic pushes use the narrow rooted callback without general dispatch.
+pub const native_direct_append_limit = 8;
 
 /// Stable C-compatible boundary between generated code and the Zig runtime.
 /// More fields are appended as lowering grows; generated code only addresses
@@ -481,7 +484,10 @@ pub const NativeFrame = extern struct {
     property_write_barrier: ?*const fn (object_bits: u64, value_bits: u64) callconv(.c) void = null,
     /// Read-only semantic guard for generated in-capacity dense appends. The
     /// generated path owns the barrier and mutation after this returns true.
-    array_append_guard: ?*const fn (runtime_context: ?*anyopaque, object_bits: u64, callee_bits: u64) callconv(.c) bool = null,
+    array_append_guard: ?*const fn (runtime_context: ?*anyopaque, object_bits: u64, callee_bits: u64, value_count: u64) callconv(.c) bool = null,
+    /// Allocation-capable intrinsic-push boundary. Inputs remain in the exact
+    /// operation scratch range and therefore stay rooted across growth/GC.
+    array_push_grow: ?*const fn (*NativeFrame, operation_id: u32) callconv(.c) u32 = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;

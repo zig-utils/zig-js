@@ -15807,6 +15807,7 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
     try std.testing.expect(native_ctx.requestGarbageCompaction());
 
     const osr_before = vm.optimizerOsrEntriesForTesting();
+    const grow_stats_before = vm.optimizerNativeArrayAppendStatsForTesting();
     const native_grow = try native_ctx.evaluate(
         "optimizerArrayGrow(20000, optimizerArrayTarget, optimizerArrayHeld)",
     );
@@ -15819,6 +15820,9 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
     try std.testing.expect(target_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayTarget").?.asObj()));
     try std.testing.expect(held_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayHeld").?.asObj()));
     try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
+    const grow_stats_after = vm.optimizerNativeArrayAppendStatsForTesting();
+    try std.testing.expect(grow_stats_after.direct > grow_stats_before.direct);
+    try std.testing.expect(grow_stats_after.growth_callbacks > grow_stats_before.growth_callbacks);
     try std.testing.expectEqual(grow_artifact, grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
 
     const append_stats_before = vm.optimizerNativeArrayAppendStatsForTesting();
