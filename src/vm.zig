@@ -8504,6 +8504,142 @@ test "vm: optimizer selects an exact innermost region in nested loops" {
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
 
+test "vm: optimizer general loop region converges nested diamonds" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function nestedDiamonds(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) {
+        \\    if (i < 2) {
+        \\      if (i === 0) sum = sum + 100;
+        \\      else sum = sum + 10;
+        \\    } else {
+        \\      if (i === 2) sum = sum + 5;
+        \\      else sum = sum + 1;
+        \\    }
+        \\    i = i + 1;
+        \\  }
+        \\  return sum;
+        \\}
+        \\nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4);
+        \\nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4); nestedDiamonds(4)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+}
+
+test "vm: optimizer general loop region converges four nested latches" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function nestedLatches(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) {
+        \\    if (i < 2) {
+        \\      if (i === 0) { sum = sum + 100; i = i + 1; continue; }
+        \\      sum = sum + 10; i = i + 1; continue;
+        \\    } else {
+        \\      if (i === 2) { sum = sum + 5; i = i + 1; continue; }
+        \\      sum = sum + 1; i = i + 1; continue;
+        \\    }
+        \\  }
+        \\  return sum;
+        \\}
+        \\nestedLatches(4); nestedLatches(4); nestedLatches(4); nestedLatches(4); nestedLatches(4);
+        \\nestedLatches(4); nestedLatches(4); nestedLatches(4); nestedLatches(4); nestedLatches(4)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 116), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+}
+
+test "vm: optimizer general loop region exits from a nested arm exactly" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function nestedBreak(n) {
+        \\  let i = 0; let sum = 0;
+        \\  while (i < n) {
+        \\    if (i < 3) {
+        \\      if (i === 2) break;
+        \\      sum = sum + 10;
+        \\    } else {
+        \\      sum = sum + 1;
+        \\    }
+        \\    i = i + 1;
+        \\  }
+        \\  return sum;
+        \\}
+        \\nestedBreak(5); nestedBreak(5); nestedBreak(5); nestedBreak(5); nestedBreak(5);
+        \\nestedBreak(5); nestedBreak(5); nestedBreak(5); nestedBreak(5); nestedBreak(5)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 20), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 20), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+}
+
 test "vm: optimizer conditional loop exit converges" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
