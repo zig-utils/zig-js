@@ -1089,6 +1089,10 @@ pub const Interpreter = struct {
     /// it so hot native calls do not pay an atomic pair per invocation.
     jit_execution_depth: usize = 0,
     jit_execution_allowed: bool = false,
+    /// Epoch token captured by the outer executable-owner lease. A native
+    /// pointer is loaded and entered only while this remains the owner's
+    /// current epoch; an invalidated outer execution stays bytecode-only.
+    jit_execution_epoch: usize = 0,
     /// Prefer a whole-activation baseline artifact over compiling the same
     /// managed loop into a slower generic optimizer region. Unit-test
     /// interpreters default this off so optimizer-specific tests exercise that

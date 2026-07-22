@@ -919,6 +919,8 @@ var optimizer_native_array_append_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_array_append_direct: std.atomic.Value(u64) = .init(0);
 var optimizer_native_array_growth_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_array_narrow_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_call_link_hits: std.atomic.Value(u64) = .init(0);
+var optimizer_native_call_link_publications: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -3972,10 +3974,53 @@ fn nativeArraySpread(vm: *Interpreter, target: Value, iterable: Value) EvalError
     return target;
 }
 
+const OptimizerCallTarget = struct {
+    generation: u64,
+    artifact: *const jit.CompiledCode,
+};
+
+fn optimizerCallTarget(function: *Function) ?OptimizerCallTarget {
+    const chunk = function.chunk orelse return null;
+    const generation = chunk.optimizer_tier.generation.load(.acquire);
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return null;
+    if (chunk.optimizer_tier.generation.load(.acquire) != generation) return null;
+    return .{ .generation = generation, .artifact = artifact };
+}
+
+fn tryLinkedNativeCall(
+    vm: *Interpreter,
+    maybe_link: ?*jit.NativeCallLink,
+    callee: Value,
+    args: []const Value,
+) EvalError!?Value {
+    const function = jsChunkFn(callee) orelse return null;
+    const link = maybe_link orelse return null;
+    const identity = @intFromPtr(function);
+    if (link.lookup(identity)) |snapshot| {
+        if (optimizerCallTarget(function)) |target| {
+            if (snapshot.target_generation == target.generation and
+                snapshot.target_artifact == @intFromPtr(target.artifact))
+            {
+                if (builtin.is_test) _ = optimizer_native_call_link_hits.fetchAdd(1, .monotonic);
+                return tryRunNativeDirectCall(vm, function, args);
+            }
+        }
+        _ = link.reset();
+    }
+
+    const result = try tryRunNativeDirectCall(vm, function, args);
+    if (result != null) if (optimizerCallTarget(function)) |target| {
+        if (link.publish(identity, target.generation, @intFromPtr(target.artifact))) {
+            if (builtin.is_test) _ = optimizer_native_call_link_publications.fetchAdd(1, .monotonic);
+        }
+    };
+    return result;
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
-    const metadata: *const jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
+    const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
     if (operation_id >= metadata.descriptors.len or frame.scratch == null)
         return @intFromEnum(jit.NativeOperationStatus.host_trap);
@@ -4200,7 +4245,9 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             values.len == 3 and Interpreter.isIntrinsicArrayPush(values[0]))
             _ = optimizer_native_array_append_callbacks.fetchAdd(1, .monotonic);
         const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and values.len >= 1)
-            callValue(vm, values[0], values[1..], Value.undef())
+            (tryLinkedNativeCall(vm, metadata.callLinkFor(operation_id), values[0], values[1..]) catch |err|
+                return finishNativeOperation(frame, vm, operation_id, err)) orelse
+                callValue(vm, values[0], values[1..], Value.undef())
         else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) and values.len >= 1)
             callEvalValue(vm, values[0], values[1..])
         else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) and values.len >= 1)
@@ -5262,12 +5309,14 @@ pub fn run(vm: *Interpreter, chunk: *Chunk, frame: ?*Frame) EvalError!Value {
     if (outer_execution) {
         execution = if (vm.jit_owner) |owner| owner.enterExecution() else null;
         vm.jit_execution_allowed = execution != null;
+        vm.jit_execution_epoch = if (execution) |*lease| lease.token() else 0;
     }
     vm.jit_execution_depth += 1;
     defer {
         vm.jit_execution_depth -= 1;
         if (outer_execution) {
             vm.jit_execution_allowed = false;
+            vm.jit_execution_epoch = 0;
             if (execution) |*lease| lease.release();
         }
     }
@@ -5339,11 +5388,18 @@ fn statementHooksRequireBytecode(vm: *const Interpreter) bool {
         vm.profile_statement_hook != null;
 }
 
+fn nativeExecutionPermitted(vm: *const Interpreter, owner: *const jit.Owner) bool {
+    if (!vm.jit_execution_allowed) return false;
+    if (vm.jit_execution_epoch == 0) return owner.executionPermitted();
+    return owner.executionTokenPermitted(vm.jit_execution_epoch);
+}
+
 fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!NativeRunOutcome {
-    if (gen != null or !vm.jit_execution_allowed or statementHooksRequireBytecode(vm)) return .miss;
+    if (gen != null or statementHooksRequireBytecode(vm)) return .miss;
     const owner = vm.jit_owner orelse return .miss;
-    if (!owner.executionPermitted()) return .miss;
+    if (!nativeExecutionPermitted(vm, owner)) return .miss;
     const native = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return .miss;
+    if (!nativeExecutionPermitted(vm, owner)) return .miss;
     if (native.osr == null) return .miss;
     if (native.frame_slots > 0) {
         const live_frame = frame orelse return .miss;
@@ -5363,8 +5419,9 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
 
-    if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
+    if (!nativeExecutionPermitted(vm, owner)) return null;
     if (loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline)) |artifact| {
+        if (!nativeExecutionPermitted(vm, owner)) return null;
         if (builtin.is_test) _ = optimizer_native_attempts.fetchAdd(1, .monotonic);
         switch (try tryExecuteNative(vm, artifact, frame, exec)) {
             .complete => |result| return result,
@@ -5377,6 +5434,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
     }
 
     var code = chunk.tier.loadCode();
+    if (!nativeExecutionPermitted(vm, owner)) return null;
     // Candidate numeric chunks compile on their first call: a substantial loop
     // repays the baseline compiler cost immediately, and cold contexts have no
     // second call. Object/call-heavy chunks retain the ordinary hot threshold
@@ -5401,6 +5459,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
         claim.release();
         code = chunk.tier.loadCode();
     };
+    if (!nativeExecutionPermitted(vm, owner)) return null;
     const native = code orelse return null;
     return switch (try tryExecuteNative(vm, native, frame, exec)) {
         .complete => |result| result,
@@ -5416,7 +5475,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
     if (statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
-    if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
+    if (!nativeExecutionPermitted(vm, owner)) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
     const slot_count: usize = @intCast(chunk.local_count);
@@ -5429,6 +5488,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
 
     const optimizer_artifact = loadOrCompileOptimizer(owner, chunk, vm.prefer_managed_baseline);
     const baseline_artifact = chunk.tier.loadCode();
+    if (!nativeExecutionPermitted(vm, owner)) return null;
     if (optimizer_artifact == null and baseline_artifact == null) return null;
     if (optimizer_artifact) |artifact| if (artifact.has_side_exits) return null;
 
@@ -9115,6 +9175,8 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
     const hits_before = optimizer_native_hits.load(.monotonic);
+    const call_link_hits_before = optimizer_native_call_link_hits.load(.monotonic);
+    const call_link_publications_before = optimizer_native_call_link_publications.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -9131,10 +9193,12 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+    try std.testing.expect(optimizer_native_call_link_publications.load(.monotonic) > call_link_publications_before);
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_native_call_link_hits.load(.monotonic) > call_link_hits_before);
 }
 
 test "vm: optimizer native tail call replaces the current activation" {

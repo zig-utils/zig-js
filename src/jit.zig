@@ -318,6 +318,69 @@ pub const NativePropertyCache = extern struct {
     }
 };
 
+/// One coherently published advisory optimizer call target. Each field is
+/// atomic because readers and competing runtime linkers may access the same
+/// operation concurrently; the version bracket makes the tuple indivisible.
+/// The target artifact remains owned by the same execution epoch as the caller
+/// and every use revalidates the callee tier generation before dispatch.
+pub const NativeCallLink = struct {
+    pub const Snapshot = struct {
+        callee_identity: usize,
+        target_generation: u64,
+        target_artifact: usize,
+    };
+
+    version: std.atomic.Value(u64) = .init(0),
+    callee_identity: std.atomic.Value(usize) = .init(0),
+    target_generation: std.atomic.Value(u64) = .init(0),
+    target_artifact: std.atomic.Value(usize) = .init(0),
+
+    pub fn lookup(self: *const NativeCallLink, callee_identity: usize) ?Snapshot {
+        if (callee_identity == 0) return null;
+        const before = self.version.load(.acquire);
+        if (before & 1 != 0) return null;
+        const snapshot = Snapshot{
+            .callee_identity = self.callee_identity.load(.monotonic),
+            .target_generation = self.target_generation.load(.monotonic),
+            .target_artifact = self.target_artifact.load(.monotonic),
+        };
+        const after = self.version.load(.acquire);
+        if (before != after or after & 1 != 0 or snapshot.callee_identity != callee_identity or
+            snapshot.target_artifact == 0) return null;
+        return snapshot;
+    }
+
+    pub fn publish(
+        self: *NativeCallLink,
+        callee_identity: usize,
+        target_generation: u64,
+        target_artifact: usize,
+    ) bool {
+        if (callee_identity == 0 or target_artifact == 0) return false;
+        return self.replace(callee_identity, target_generation, target_artifact);
+    }
+
+    pub fn reset(self: *NativeCallLink) bool {
+        return self.replace(0, 0, 0);
+    }
+
+    fn replace(
+        self: *NativeCallLink,
+        callee_identity: usize,
+        target_generation: u64,
+        target_artifact: usize,
+    ) bool {
+        const stable = self.version.load(.acquire);
+        if (stable & 1 != 0 or self.version.cmpxchgStrong(stable, stable +% 1, .acq_rel, .acquire) != null)
+            return false;
+        self.callee_identity.store(callee_identity, .monotonic);
+        self.target_generation.store(target_generation, .monotonic);
+        self.target_artifact.store(target_artifact, .monotonic);
+        self.version.store(stable +% 2, .release);
+        return true;
+    }
+};
+
 pub const NativeExceptionalTargetKind = enum(u8) { catch_, finally_ };
 
 /// Exact bytecode continuation after a runtime operation has already raised.
@@ -338,6 +401,7 @@ pub const NativeOperationMetadata = struct {
     exceptional_targets: []NativeExceptionalTarget,
     operation_names: []?[]const u8,
     property_caches: []NativePropertyCache,
+    call_links: []NativeCallLink,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -379,6 +443,9 @@ pub const NativeOperationMetadata = struct {
         errdefer allocator.free(owned_targets);
         const owned_property_caches = try allocator.dupe(NativePropertyCache, property_caches);
         errdefer allocator.free(owned_property_caches);
+        const owned_call_links = try allocator.alloc(NativeCallLink, descriptors.len);
+        errdefer allocator.free(owned_call_links);
+        for (owned_call_links) |*call_link| call_link.* = .{};
         const owned_names = try allocator.alloc(?[]const u8, operation_names.len);
         var owned_name_count: usize = 0;
         errdefer {
@@ -395,6 +462,7 @@ pub const NativeOperationMetadata = struct {
             .exceptional_targets = owned_targets,
             .operation_names = owned_names,
             .property_caches = owned_property_caches,
+            .call_links = owned_call_links,
         };
         return metadata;
     }
@@ -411,11 +479,17 @@ pub const NativeOperationMetadata = struct {
         return &self.property_caches[operation_id];
     }
 
+    pub fn callLinkFor(self: *NativeOperationMetadata, operation_id: usize) ?*NativeCallLink {
+        if (operation_id >= self.call_links.len) return null;
+        return &self.call_links[operation_id];
+    }
+
     pub fn destroy(self: *NativeOperationMetadata) void {
         const allocator = self.allocator;
         allocator.free(self.descriptors);
         allocator.free(self.exceptional_targets);
         if (self.property_caches.len != 0) allocator.free(self.property_caches);
+        if (self.call_links.len != 0) allocator.free(self.call_links);
         for (self.operation_names) |name| if (name) |bytes| allocator.free(bytes);
         if (self.operation_names.len != 0) allocator.free(self.operation_names);
         allocator.destroy(self);
@@ -774,18 +848,43 @@ pub const CompiledCode = struct {
     }
 };
 
+const ExecutionEpoch = struct {
+    active: std.atomic.Value(usize) = .init(0),
+    retired: bool = false,
+    codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
+};
+
+pub const OwnerStats = struct {
+    live_artifacts: usize,
+    live_bytes: usize,
+    retired_artifacts: usize,
+    retired_bytes: usize,
+    reclaimed_artifacts: usize,
+    reclaimed_bytes: usize,
+};
+
 /// Context-owned lifetime registry for immutable compiled mappings. Adoption is
-/// serialized because different shared-realm chunks can tier concurrently;
-/// teardown runs only after all JavaScript threads have joined.
+/// serialized because different shared-realm chunks can tier concurrently.
+/// Invalidation rotates the execution epoch and retires the prior generation;
+/// its final reader reclaims it without waiting for later-generation readers.
 pub const Owner = struct {
     allocator: ?std.mem.Allocator = null,
     lock: std.atomic.Mutex = .unlocked,
     codes: std.ArrayListUnmanaged(*CompiledCode) = .empty,
     tiers: std.ArrayListUnmanaged(*Tier) = .empty,
     optimizer_tiers: std.ArrayListUnmanaged(*OptimizerTier) = .empty,
-    active_leases: std.atomic.Value(usize) = .init(0),
+    active_compilations: std.atomic.Value(usize) = .init(0),
+    current_execution_epoch: std.atomic.Value(usize) = .init(0),
+    initial_execution_epoch: ExecutionEpoch = .{},
+    execution_epochs: std.ArrayListUnmanaged(*ExecutionEpoch) = .empty,
     invalidating: std.atomic.Value(bool) = .init(false),
     invalidation_generation: std.atomic.Value(u64) = .init(0),
+    live_artifacts: std.atomic.Value(usize) = .init(0),
+    live_bytes: std.atomic.Value(usize) = .init(0),
+    retired_artifacts: std.atomic.Value(usize) = .init(0),
+    retired_bytes: std.atomic.Value(usize) = .init(0),
+    reclaimed_artifacts: std.atomic.Value(usize) = .init(0),
+    reclaimed_bytes: std.atomic.Value(usize) = .init(0),
 
     pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
 
@@ -793,7 +892,7 @@ pub const Owner = struct {
         owner: *Owner,
 
         pub fn release(self: *Compilation) void {
-            _ = self.owner.active_leases.fetchSub(1, .release);
+            _ = self.owner.active_compilations.fetchSub(1, .release);
             self.* = undefined;
         }
     };
@@ -803,17 +902,24 @@ pub const Owner = struct {
         claim: OptimizerTier.CompilationClaim,
 
         pub fn release(self: *OptimizerCompilation) void {
-            _ = self.owner.active_leases.fetchSub(1, .release);
+            _ = self.owner.active_compilations.fetchSub(1, .release);
             self.* = undefined;
         }
     };
 
     pub const Execution = struct {
         owner: *Owner,
+        epoch: *ExecutionEpoch,
+
+        pub fn token(self: *const Execution) usize {
+            return @intFromPtr(self.epoch);
+        }
 
         pub fn release(self: *Execution) void {
-            _ = self.owner.active_leases.fetchSub(1, .release);
+            const owner = self.owner;
+            const epoch = self.epoch;
             self.* = undefined;
+            if (epoch.active.fetchSub(1, .acq_rel) == 1) owner.reclaimRetiredEpochs();
         }
     };
 
@@ -831,7 +937,10 @@ pub const Owner = struct {
 
         self.acquireLock();
         defer self.lock.unlock();
-        if (self.invalidating.load(.acquire)) return error.Invalidated;
+        if (self.invalidating.load(.acquire)) {
+            tier.invalidate();
+            return error.Invalidated;
+        }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
@@ -840,6 +949,7 @@ pub const Owner = struct {
         self.codes.appendAssumeCapacity(owned);
         self.tiers.appendAssumeCapacity(tier);
         tier.publishReady(owned);
+        self.accountPublished(owned);
         return owned;
     }
 
@@ -858,7 +968,10 @@ pub const Owner = struct {
 
         self.acquireLock();
         defer self.lock.unlock();
-        if (self.invalidating.load(.acquire)) return error.Invalidated;
+        if (self.invalidating.load(.acquire)) {
+            tier.invalidate();
+            return error.Invalidated;
+        }
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
@@ -867,6 +980,7 @@ pub const Owner = struct {
         if (!tier.publishReady(claim, owned)) return error.Invalidated;
         self.codes.appendAssumeCapacity(owned);
         self.optimizer_tiers.appendAssumeCapacity(tier);
+        self.accountPublished(owned);
         return owned;
     }
 
@@ -875,12 +989,15 @@ pub const Owner = struct {
     /// lease through `Interpreter.jit_execution_depth`.
     pub fn enterExecution(self: *Owner) ?Execution {
         if (!self.executionPermitted()) return null;
-        _ = self.active_leases.fetchAdd(1, .acquire);
-        if (!self.executionPermitted()) {
-            _ = self.active_leases.fetchSub(1, .release);
+        const epoch = self.currentExecutionEpoch();
+        _ = epoch.active.fetchAdd(1, .acquire);
+        if (!self.executionPermitted() or
+            self.current_execution_epoch.load(.acquire) != @intFromPtr(epoch))
+        {
+            if (epoch.active.fetchSub(1, .acq_rel) == 1) self.reclaimRetiredEpochs();
             return null;
         }
-        return .{ .owner = self };
+        return .{ .owner = self, .epoch = epoch };
     }
 
     /// Native entry and OSR polls use this even while an outer execution lease
@@ -890,13 +1007,18 @@ pub const Owner = struct {
         return !self.invalidating.load(.acquire);
     }
 
+    pub fn executionTokenPermitted(self: *const Owner, token: usize) bool {
+        return token != 0 and !self.invalidating.load(.acquire) and
+            self.current_execution_epoch.load(.acquire) == token;
+    }
+
     /// Claim compilation as an owner operation so invalidation cannot finish
     /// while a pre-existing compiler is still capable of publishing code.
     pub fn claimCompilation(self: *Owner, tier: *Tier, threshold: u32) ?Compilation {
         if (self.invalidating.load(.acquire)) return null;
-        _ = self.active_leases.fetchAdd(1, .acquire);
+        _ = self.active_compilations.fetchAdd(1, .acquire);
         if (self.invalidating.load(.acquire) or !tier.observeEntry(threshold)) {
-            _ = self.active_leases.fetchSub(1, .release);
+            _ = self.active_compilations.fetchSub(1, .release);
             return null;
         }
         return .{ .owner = self };
@@ -909,60 +1031,185 @@ pub const Owner = struct {
         threshold: u64,
     ) ?OptimizerCompilation {
         if (self.invalidating.load(.acquire)) return null;
-        _ = self.active_leases.fetchAdd(1, .acquire);
+        _ = self.active_compilations.fetchAdd(1, .acquire);
         if (self.invalidating.load(.acquire)) {
-            _ = self.active_leases.fetchSub(1, .release);
+            _ = self.active_compilations.fetchSub(1, .release);
             return null;
         }
         const claim = tier.claimCompilation(profile, threshold) orelse {
-            _ = self.active_leases.fetchSub(1, .release);
+            _ = self.active_compilations.fetchSub(1, .release);
             return null;
         };
         return .{ .owner = self, .claim = claim };
     }
 
-    /// Invalidate every published tier before releasing executable mappings.
-    /// A later entry observes `.cold` and may compile a fresh mapping.
+    /// Jettison every published tier and rotate the execution epoch. Existing
+    /// readers retain only the detached generation; later readers enter the
+    /// fresh epoch and cannot postpone reclamation of the retired mappings.
     pub fn clear(self: *Owner) void {
         if (self.allocator == null) return;
         self.beginInvalidation();
-        while (self.active_leases.load(.acquire) != 0) std.Thread.yield() catch {};
+        while (self.active_compilations.load(.acquire) != 0) std.Thread.yield() catch {};
 
         self.acquireLock();
+        const old_epoch = self.currentExecutionEpochLocked();
+        const new_epoch = self.createExecutionEpochLocked() catch {
+            self.lock.unlock();
+            self.clearAfterReadersRetire();
+            return;
+        };
         for (self.tiers.items) |tier| tier.invalidate();
         self.tiers.clearRetainingCapacity();
         for (self.optimizer_tiers.items) |tier| tier.invalidate();
         self.optimizer_tiers.clearRetainingCapacity();
-        const allocator = self.allocator.?;
-        for (self.codes.items) |code| {
-            code.deinit();
-            allocator.destroy(code);
-        }
-        self.codes.clearRetainingCapacity();
+        old_epoch.codes = self.codes;
+        old_epoch.retired = true;
+        self.codes = .empty;
+        const retired_count = old_epoch.codes.items.len;
+        const retired_size = codeListBytes(old_epoch.codes.items);
+        _ = self.live_artifacts.fetchSub(retired_count, .monotonic);
+        _ = self.live_bytes.fetchSub(retired_size, .monotonic);
+        _ = self.retired_artifacts.fetchAdd(retired_count, .monotonic);
+        _ = self.retired_bytes.fetchAdd(retired_size, .monotonic);
+        self.current_execution_epoch.store(@intFromPtr(new_epoch), .release);
         self.lock.unlock();
         self.invalidating.store(false, .release);
+        self.reclaimRetiredEpochs();
     }
 
     pub fn deinit(self: *Owner) void {
         const allocator = self.allocator orelse return;
         self.beginInvalidation();
-        while (self.active_leases.load(.acquire) != 0) std.Thread.yield() catch {};
+        while (self.active_compilations.load(.acquire) != 0 or !self.allExecutionEpochsIdle())
+            std.Thread.yield() catch {};
         self.acquireLock();
         for (self.tiers.items) |tier| tier.invalidate();
         for (self.optimizer_tiers.items) |tier| tier.invalidate();
-        for (self.codes.items) |code| {
-            code.deinit();
-            allocator.destroy(code);
+        self.destroyCodeListLocked(&self.codes, false);
+        self.destroyCodeListLocked(&self.initial_execution_epoch.codes, true);
+        for (self.execution_epochs.items) |epoch| {
+            self.destroyCodeListLocked(&epoch.codes, true);
+            allocator.destroy(epoch);
         }
         self.codes.deinit(allocator);
         self.tiers.deinit(allocator);
         self.optimizer_tiers.deinit(allocator);
+        self.execution_epochs.deinit(allocator);
         self.lock.unlock();
         self.* = .{};
     }
 
+    pub fn stats(self: *const Owner) OwnerStats {
+        return .{
+            .live_artifacts = self.live_artifacts.load(.acquire),
+            .live_bytes = self.live_bytes.load(.acquire),
+            .retired_artifacts = self.retired_artifacts.load(.acquire),
+            .retired_bytes = self.retired_bytes.load(.acquire),
+            .reclaimed_artifacts = self.reclaimed_artifacts.load(.acquire),
+            .reclaimed_bytes = self.reclaimed_bytes.load(.acquire),
+        };
+    }
+
     fn acquireLock(self: *Owner) void {
         while (!self.lock.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn currentExecutionEpoch(self: *Owner) *ExecutionEpoch {
+        const address = self.current_execution_epoch.load(.acquire);
+        if (address != 0) return @ptrFromInt(address);
+        self.acquireLock();
+        defer self.lock.unlock();
+        return self.currentExecutionEpochLocked();
+    }
+
+    fn currentExecutionEpochLocked(self: *Owner) *ExecutionEpoch {
+        const address = self.current_execution_epoch.load(.monotonic);
+        if (address != 0) return @ptrFromInt(address);
+        const epoch = &self.initial_execution_epoch;
+        self.current_execution_epoch.store(@intFromPtr(epoch), .release);
+        return epoch;
+    }
+
+    fn createExecutionEpochLocked(self: *Owner) std.mem.Allocator.Error!*ExecutionEpoch {
+        const allocator = self.allocator.?;
+        const epoch = try allocator.create(ExecutionEpoch);
+        errdefer allocator.destroy(epoch);
+        epoch.* = .{};
+        try self.execution_epochs.append(allocator, epoch);
+        return epoch;
+    }
+
+    fn allExecutionEpochsIdle(self: *Owner) bool {
+        self.acquireLock();
+        defer self.lock.unlock();
+        if (self.initial_execution_epoch.active.load(.acquire) != 0) return false;
+        for (self.execution_epochs.items) |epoch|
+            if (epoch.active.load(.acquire) != 0) return false;
+        return true;
+    }
+
+    fn clearAfterReadersRetire(self: *Owner) void {
+        while (!self.allExecutionEpochsIdle()) std.Thread.yield() catch {};
+        self.acquireLock();
+        for (self.tiers.items) |tier| tier.invalidate();
+        self.tiers.clearRetainingCapacity();
+        for (self.optimizer_tiers.items) |tier| tier.invalidate();
+        self.optimizer_tiers.clearRetainingCapacity();
+        self.destroyCodeListLocked(&self.codes, false);
+        self.lock.unlock();
+        self.invalidating.store(false, .release);
+        self.reclaimRetiredEpochs();
+    }
+
+    fn reclaimRetiredEpochs(self: *Owner) void {
+        if (self.allocator == null) return;
+        self.acquireLock();
+        defer self.lock.unlock();
+        if (self.initial_execution_epoch.retired and
+            self.initial_execution_epoch.active.load(.acquire) == 0)
+        {
+            self.destroyCodeListLocked(&self.initial_execution_epoch.codes, true);
+            self.initial_execution_epoch.retired = false;
+        }
+        const allocator = self.allocator.?;
+        const current = self.current_execution_epoch.load(.monotonic);
+        var index: usize = 0;
+        while (index < self.execution_epochs.items.len) {
+            const epoch = self.execution_epochs.items[index];
+            if (@intFromPtr(epoch) != current and epoch.retired and epoch.active.load(.acquire) == 0) {
+                self.destroyCodeListLocked(&epoch.codes, true);
+                _ = self.execution_epochs.swapRemove(index);
+                allocator.destroy(epoch);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn destroyCodeListLocked(self: *Owner, list: *std.ArrayListUnmanaged(*CompiledCode), retired: bool) void {
+        const allocator = self.allocator.?;
+        const count = list.items.len;
+        const bytes = codeListBytes(list.items);
+        for (list.items) |code| {
+            code.deinit();
+            allocator.destroy(code);
+        }
+        list.deinit(allocator);
+        list.* = .empty;
+        if (retired) {
+            _ = self.retired_artifacts.fetchSub(count, .monotonic);
+            _ = self.retired_bytes.fetchSub(bytes, .monotonic);
+        } else {
+            _ = self.live_artifacts.fetchSub(count, .monotonic);
+            _ = self.live_bytes.fetchSub(bytes, .monotonic);
+        }
+        _ = self.reclaimed_artifacts.fetchAdd(count, .monotonic);
+        _ = self.reclaimed_bytes.fetchAdd(bytes, .monotonic);
+    }
+
+    fn accountPublished(self: *Owner, code: *const CompiledCode) void {
+        _ = self.live_artifacts.fetchAdd(1, .monotonic);
+        _ = self.live_bytes.fetchAdd(code.memory.mapping.len, .monotonic);
     }
 
     fn beginInvalidation(self: *Owner) void {
@@ -972,6 +1219,12 @@ pub const Owner = struct {
         _ = self.invalidation_generation.fetchAdd(1, .acq_rel);
     }
 };
+
+fn codeListBytes(codes: []const *CompiledCode) usize {
+    var total: usize = 0;
+    for (codes) |code| total += code.memory.mapping.len;
+    return total;
+}
 
 const State = enum { writable, executable };
 
@@ -1217,6 +1470,70 @@ test "optimizer publication and invalidation races converge" {
     try std.testing.expectEqual(shared.published.load(.acquire), tier.compileCount() == 1);
 }
 
+test "optimizer call-link writer writer and reader reset stay coherent" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var link = NativeCallLink{};
+    const Shared = struct {
+        link: *NativeCallLink,
+        start: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(u32) = .init(0),
+        failed: std.atomic.Value(bool) = .init(false),
+
+        fn awaitStart(shared: *@This()) void {
+            while (!shared.start.load(.acquire)) std.atomic.spinLoopHint();
+        }
+
+        fn publish(shared: *@This(), callee: usize) void {
+            shared.awaitStart();
+            for (0..20_000) |_| {
+                const generation: u64 = if (callee == 1) 11 else 22;
+                const artifact: usize = if (callee == 1) 111 else 222;
+                _ = shared.link.publish(callee, generation, artifact);
+            }
+            _ = shared.done.fetchAdd(1, .release);
+        }
+
+        fn reset(shared: *@This()) void {
+            shared.awaitStart();
+            for (0..20_000) |_| {
+                _ = shared.link.reset();
+            }
+            _ = shared.done.fetchAdd(1, .release);
+        }
+
+        fn read(shared: *@This()) void {
+            shared.awaitStart();
+            while (shared.done.load(.acquire) != 3) {
+                if (shared.link.lookup(1)) |snapshot| {
+                    if (snapshot.target_generation != 11 or snapshot.target_artifact != 111)
+                        shared.failed.store(true, .release);
+                }
+                if (shared.link.lookup(2)) |snapshot| {
+                    if (snapshot.target_generation != 22 or snapshot.target_artifact != 222)
+                        shared.failed.store(true, .release);
+                }
+            }
+        }
+    };
+    var shared = Shared{ .link = &link };
+    var first = try std.Thread.spawn(.{}, Shared.publish, .{ &shared, @as(usize, 1) });
+    var second = try std.Thread.spawn(.{}, Shared.publish, .{ &shared, @as(usize, 2) });
+    var resetter = try std.Thread.spawn(.{}, Shared.reset, .{&shared});
+    var reader = try std.Thread.spawn(.{}, Shared.read, .{&shared});
+    shared.start.store(true, .release);
+    first.join();
+    second.join();
+    resetter.join();
+    reader.join();
+
+    try std.testing.expect(!shared.failed.load(.acquire));
+    while (!link.publish(1, 11, 111)) std.atomic.spinLoopHint();
+    const snapshot = link.lookup(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 11), snapshot.target_generation);
+    try std.testing.expectEqual(@as(usize, 111), snapshot.target_artifact);
+}
+
 test "native operation ABI preserves value exception and trap outcomes" {
     const Stub = struct {
         fn invoke(frame: *NativeFrame, operation_id: u32) callconv(.c) u32 {
@@ -1337,7 +1654,46 @@ test "Owner adopts and invalidates optimizer artifacts under one lease" {
     try std.testing.expectEqual(@as(usize, 0), owner.optimizer_tiers.items.len);
 }
 
-test "Owner invalidates tiers only after active native leases retire" {
+test "Owner rejects a compiler publishing across an epoch rotation" {
+    if (!supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var tier = Tier{};
+    var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    var compiled = try compileConstantEntry(0x4567);
+
+    const Shared = struct {
+        owner: *Owner,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn clear(shared: *@This()) void {
+            shared.started.store(true, .release);
+            shared.owner.clear();
+            shared.finished.store(true, .release);
+        }
+    };
+    var shared = Shared{ .owner = &owner };
+    var thread = try std.Thread.spawn(.{}, Shared.clear, .{&shared});
+    while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
+    while (owner.executionPermitted()) std.atomic.spinLoopHint();
+
+    try std.testing.expectError(error.Invalidated, owner.adoptAndPublish(&tier, compiled));
+    compiled.deinit();
+    try std.testing.expect(!shared.finished.load(.acquire));
+    compilation.release();
+    thread.join();
+
+    try std.testing.expect(shared.finished.load(.acquire));
+    try std.testing.expectEqual(TierState.cold, tier.loadState());
+    try std.testing.expect(tier.loadCode() == null);
+    const stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live_artifacts);
+    try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
+}
+
+test "Owner retires invalidated artifacts by execution epoch" {
     if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
     var owner = Owner.init(std.testing.allocator);
@@ -1366,11 +1722,6 @@ test "Owner invalidates tiers only after active native leases retire" {
     var shared = Shared{ .owner = &owner };
     var thread = try std.Thread.spawn(.{}, Shared.clear, .{&shared});
     while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
-    while (owner.executionPermitted()) std.atomic.spinLoopHint();
-    for (0..32) |_| std.Thread.yield() catch {};
-    try std.testing.expect(!shared.finished.load(.acquire));
-    try std.testing.expect(owner.enterExecution() == null);
-    execution.release();
     thread.join();
 
     try std.testing.expect(shared.finished.load(.acquire));
@@ -1378,6 +1729,61 @@ test "Owner invalidates tiers only after active native leases retire" {
     try std.testing.expect(tier.loadCode() == null);
     try std.testing.expectEqual(@as(usize, 0), owner.codes.items.len);
     try std.testing.expectEqual(@as(usize, 0), owner.tiers.items.len);
+    var stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live_artifacts);
+    try std.testing.expectEqual(@as(usize, 1), stats.retired_artifacts);
+    try std.testing.expect(stats.retired_bytes >= std.heap.page_size_min);
+
+    var second_compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+    _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(0x6789));
+    second_compilation.release();
+    var second_execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    const second_code = tier.loadCode() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ExitStatus.complete, second_code.run(&frame));
+    try std.testing.expectEqual(@as(u64, 0x6789), frame.result_bits);
+
+    execution.release();
+    stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 1), stats.live_artifacts);
+    try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
+    try std.testing.expectEqual(@as(usize, 1), stats.reclaimed_artifacts);
+    try std.testing.expect(stats.reclaimed_bytes >= std.heap.page_size_min);
+
+    owner.clear();
+    stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 1), stats.retired_artifacts);
+    second_execution.release();
+    stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
+    try std.testing.expectEqual(@as(usize, 2), stats.reclaimed_artifacts);
+}
+
+test "Owner retirement churn keeps executable memory at steady state" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var tier = Tier{};
+    const rounds = 32;
+    for (0..rounds) |round| {
+        var compilation = owner.claimCompilation(&tier, 1) orelse return error.TestUnexpectedResult;
+        _ = try owner.adoptAndPublish(&tier, try compileConstantEntry(round));
+        compilation.release();
+        var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+        owner.clear();
+        var stats = owner.stats();
+        try std.testing.expectEqual(@as(usize, 0), stats.live_artifacts);
+        try std.testing.expectEqual(@as(usize, 1), stats.retired_artifacts);
+        execution.release();
+        stats = owner.stats();
+        try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
+        try std.testing.expectEqual(round + 1, stats.reclaimed_artifacts);
+        try std.testing.expect(owner.execution_epochs.items.len <= 1);
+    }
+    const stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stats.retired_bytes);
+    try std.testing.expect(stats.reclaimed_bytes >= rounds * std.heap.page_size_min);
 }
 
 test "CodeMemory publishes and executes native code" {
