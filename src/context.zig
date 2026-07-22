@@ -15559,6 +15559,110 @@ test "parallel_js: optimizer live safepoint relocates a recovery-only object loc
     });
 }
 
+test "optimizer property regions match bytecode and survive a moving GC checkpoint" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+
+    const source =
+        \\globalThis.optimizerPropertyDiscard = [];
+        \\for (var dead = 0; dead < 4096; dead = dead + 1)
+        \\  optimizerPropertyDiscard.push({ dead, child: { value: dead + 1 } });
+        \\function optimizerPropertyCheckpoint(n, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < n) cursor = cursor + 1;
+        \\  return held;
+        \\}
+        \\function optimizerPropertyMove(n, target, held) {
+        \\  target.value = held;
+        \\  held = optimizerPropertyCheckpoint(n, target.value);
+        \\  target.value = held;
+        \\  return target.value.marker + held.marker;
+        \\}
+        \\function optimizerPropertyPoly(object, held) {
+        \\  object.value = held;
+        \\  return object.value.marker;
+        \\}
+        \\globalThis.optimizerPropertyHeld = { marker: 3 };
+        \\globalThis.optimizerPropertyTarget = { value: optimizerPropertyHeld };
+        \\globalThis.optimizerPropertyObjects = [
+        \\  { value: optimizerPropertyHeld, a: 1 },
+        \\  { b: 1, value: optimizerPropertyHeld },
+        \\  { c: 1, d: 2, value: optimizerPropertyHeld },
+        \\  { e: 1, f: 2, g: 3, value: optimizerPropertyHeld }
+        \\];
+        \\for (var warm = 0; warm < 10; warm = warm + 1) {
+        \\  optimizerPropertyMove(8, optimizerPropertyTarget, optimizerPropertyHeld);
+        \\  optimizerPropertyPoly(optimizerPropertyObjects[0], optimizerPropertyHeld);
+        \\  optimizerPropertyPoly(optimizerPropertyObjects[1], optimizerPropertyHeld);
+        \\  optimizerPropertyPoly(optimizerPropertyObjects[2], optimizerPropertyHeld);
+        \\  optimizerPropertyPoly(optimizerPropertyObjects[3], optimizerPropertyHeld);
+        \\}
+        \\optimizerPropertyDiscard = null;
+    ;
+
+    const native_ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer native_ctx.destroy();
+    const bytecode_ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer bytecode_ctx.destroy();
+
+    _ = try native_ctx.evaluate(source);
+    _ = try bytecode_ctx.evaluate(source);
+    const function_object = native_ctx.global_object.getOwn("optimizerPropertyMove").?.asObj();
+    const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
+    const chunk = function.chunk.?;
+    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+    try std.testing.expect(artifact.entry_enabled and artifact.native_operations != null);
+    const checkpoint_object = native_ctx.global_object.getOwn("optimizerPropertyCheckpoint").?.asObj();
+    const checkpoint_function: *interp.Function = @ptrCast(@alignCast(checkpoint_object.jsFunction().?));
+    const checkpoint_artifact = checkpoint_function.chunk.?.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(checkpoint_artifact.osr != null and checkpoint_artifact.has_side_exits);
+
+    native_ctx.collectGarbage();
+    bytecode_ctx.collectGarbage();
+    const target_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyTarget").?.asObj());
+    const held_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyHeld").?.asObj());
+    const property_stats_before = vm.optimizerNativePropertyStatsForTesting();
+    try std.testing.expect(native_ctx.requestGarbageCompaction());
+
+    const native_monomorphic = try native_ctx.evaluate(
+        "optimizerPropertyMove(20000, optimizerPropertyTarget, optimizerPropertyHeld)",
+    );
+    const bytecode_monomorphic = try bytecode_ctx.evaluate(
+        "optimizerPropertyMove(20000, optimizerPropertyTarget, optimizerPropertyHeld)",
+    );
+    try std.testing.expectEqual(bytecode_monomorphic.rawBits(), native_monomorphic.rawBits());
+    try std.testing.expectEqual(@as(f64, 6), native_monomorphic.asNum());
+    try std.testing.expect(!native_ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(target_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyTarget").?.asObj()));
+    try std.testing.expect(held_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerPropertyHeld").?.asObj()));
+
+    const native_polymorphic = try native_ctx.evaluate(
+        \\optimizerPropertyPoly(optimizerPropertyObjects[0], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[1], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[2], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[3], optimizerPropertyHeld)
+    );
+    const bytecode_polymorphic = try bytecode_ctx.evaluate(
+        \\optimizerPropertyPoly(optimizerPropertyObjects[0], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[1], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[2], optimizerPropertyHeld) +
+        \\optimizerPropertyPoly(optimizerPropertyObjects[3], optimizerPropertyHeld)
+    );
+    try std.testing.expectEqual(bytecode_polymorphic.rawBits(), native_polymorphic.rawBits());
+    try std.testing.expectEqual(@as(f64, 12), native_polymorphic.asNum());
+    try std.testing.expectEqual(property_stats_before, vm.optimizerNativePropertyStatsForTesting());
+}
+
 test "GC compaction rewrites public Zig protected handles" {
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,

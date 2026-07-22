@@ -920,6 +920,19 @@ pub fn nativeDirectCallHitsForTesting() u64 {
     return quick_native_direct_call_hits.load(.monotonic);
 }
 
+pub const OptimizerNativePropertyStats = struct {
+    read_callbacks: u64,
+    write_callbacks: u64,
+};
+
+pub fn optimizerNativePropertyStatsForTesting() OptimizerNativePropertyStats {
+    std.debug.assert(builtin.is_test);
+    return .{
+        .read_callbacks = optimizer_native_property_read_callbacks.load(.monotonic),
+        .write_callbacks = optimizer_native_property_write_callbacks.load(.monotonic),
+    };
+}
+
 var quick_numeric_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_call_loop_hits: std.atomic.Value(u64) = .init(0);
 var quick_numeric_arguments_direct_call_hits: std.atomic.Value(u64) = .init(0);
@@ -9388,6 +9401,8 @@ test "vm: optimizer native named read composes with a caught downstream call" {
 
 test "vm: optimizer native property cache guards polymorphic shapes and malformed slots" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -9519,6 +9534,21 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
     };
     try std.testing.expectEqual(@as(f64, 10), transitioned_result.asNum());
     try std.testing.expectEqual(before_transition + 1, optimizer_native_property_read_callbacks.load(.monotonic));
+
+    var invalidation_generation: std.atomic.Value(u64) = .init(1);
+    compiled.invalidation_generation = &invalidation_generation;
+    compiled.expected_invalidation_generation = 0;
+    const steps_before_invalidation = machine.steps;
+    const callbacks_before_invalidation = optimizer_native_property_read_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        NativeRunOutcome.miss,
+        try tryRunManagedNative(&machine, &compiled, &object_value_slots, null),
+    );
+    try std.testing.expectEqual(steps_before_invalidation, machine.steps);
+    try std.testing.expectEqual(
+        callbacks_before_invalidation,
+        optimizer_native_property_read_callbacks.load(.monotonic),
+    );
 }
 
 test "vm: optimizer native named getter resumes an exact catch once" {
@@ -9824,6 +9854,23 @@ test "vm: optimizer native property cache uses the shared write protocol" {
     try std.testing.expectEqual(@as(f64, 12), (try machine.getProperty(target, "value")).asNum());
     try std.testing.expectEqual(
         before_transition + 1,
+        optimizer_native_property_write_callbacks.load(.monotonic),
+    );
+
+    var invalidation_generation: std.atomic.Value(u64) = .init(1);
+    compiled.invalidation_generation = &invalidation_generation;
+    compiled.expected_invalidation_generation = 0;
+    slots[1] = Value.num(99);
+    const steps_before_invalidation = machine.steps;
+    const callbacks_before_invalidation = optimizer_native_property_write_callbacks.load(.monotonic);
+    try std.testing.expectEqual(
+        NativeRunOutcome.miss,
+        try tryRunManagedNative(&machine, &compiled, &slots, null),
+    );
+    try std.testing.expectEqual(steps_before_invalidation, machine.steps);
+    try std.testing.expectEqual(@as(f64, 12), (try machine.getProperty(target, "value")).asNum());
+    try std.testing.expectEqual(
+        callbacks_before_invalidation,
         optimizer_native_property_write_callbacks.load(.monotonic),
     );
 }
