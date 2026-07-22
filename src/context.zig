@@ -15823,6 +15823,15 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
     const grow_stats_after = vm.optimizerNativeArrayAppendStatsForTesting();
     try std.testing.expect(grow_stats_after.direct > grow_stats_before.direct);
     try std.testing.expect(grow_stats_after.growth_callbacks > grow_stats_before.growth_callbacks);
+    std.debug.print(
+        "optimizer-array-attribution\titerations=20000\tdirect={d}\tnarrow={d}\tgrowth={d}\tgeneral={d}\n",
+        .{
+            grow_stats_after.direct - grow_stats_before.direct,
+            grow_stats_after.narrow_callbacks - grow_stats_before.narrow_callbacks,
+            grow_stats_after.growth_callbacks - grow_stats_before.growth_callbacks,
+            grow_stats_after.callbacks - grow_stats_before.callbacks,
+        },
+    );
     try std.testing.expectEqual(grow_artifact, grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
 
     const append_stats_before = vm.optimizerNativeArrayAppendStatsForTesting();
