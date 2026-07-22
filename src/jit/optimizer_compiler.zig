@@ -103,6 +103,23 @@ pub const LoopLatchGuard = struct {
     backedge_steps: u12,
 };
 
+pub const LoopRegionTargetKind = enum(u8) { block, header, exit };
+
+pub const LoopRegionTarget = struct {
+    kind: LoopRegionTargetKind,
+    block: u32,
+    operations_block: u32 = optimizer.Block.none,
+    deopt_index: u16 = 0,
+};
+
+pub const LoopRegionBlock = struct {
+    block: u32,
+    condition: u8 = 0,
+    successor_count: u8,
+    steps: u12,
+    successors: [2]LoopRegionTarget = @splat(.{ .kind = .block, .block = optimizer.Block.none }),
+};
+
 pub const Program = struct {
     allocator: std.mem.Allocator,
     operations: []Operation,
@@ -113,6 +130,9 @@ pub const Program = struct {
     loop_exit_guards: []LoopExitGuard = &.{},
     loop_latch_guards: []LoopLatchGuard = &.{},
     loop_branches: []LoopBranch = &.{},
+    loop_region_blocks: []LoopRegionBlock = &.{},
+    loop_region_entry_operations_block: u32 = optimizer.Block.none,
+    loop_region_header_steps: u12 = 0,
     scratch_slots: u8,
     frame_slots: u32,
     required_numeric_slots: u64,
@@ -135,6 +155,7 @@ pub const Program = struct {
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
+        if (self.loop_region_blocks.len != 0) self.allocator.free(self.loop_region_blocks);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
@@ -187,6 +208,36 @@ pub fn buildOsrMetadata(plan: *const optimizer.Plan, allocator: std.mem.Allocato
         });
     }
     return jit.OsrMetadata.create(allocator, entries.items, imports.items);
+}
+
+fn selectLoopOsrMetadata(plan: *const optimizer.Plan, allocator: std.mem.Allocator) !*jit.OsrMetadata {
+    const available = try buildOsrMetadata(plan, allocator);
+    defer available.destroy();
+    if (available.entries.len == 0) return error.UnsupportedChunk;
+
+    // One artifact owns one native loop region. Prefer the last bytecode loop
+    // header, which is the innermost header for ordinary structured nesting,
+    // and publish only that exact entry. Other backedges miss the table and
+    // remain in bytecode instead of entering a region compiled for a different
+    // header.
+    const selected = available.entries[available.entries.len - 1];
+    const selected_first: usize = selected.first_import;
+    const selected_count: usize = @as(usize, selected.local_count) + selected.stack_count;
+    if (selected_first > available.imports.len or selected_count > available.imports.len - selected_first)
+        return error.UnsupportedChunk;
+    const selected_entry = jit.OsrEntry{
+        .entry_ip = selected.entry_ip,
+        .first_import = 0,
+        .local_count = selected.local_count,
+        .stack_count = selected.stack_count,
+        .handler_count = selected.handler_count,
+        .accumulator_bits = selected.accumulator_bits,
+    };
+    return jit.OsrMetadata.create(
+        allocator,
+        &.{selected_entry},
+        available.imports[selected_first .. selected_first + selected_count],
+    );
 }
 
 const ValueType = enum { number, boolean, other };
@@ -492,34 +543,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         graph.branches.len == 0)
         return error.UnsupportedChunk;
 
-    const available_osr = try buildOsrMetadata(plan, allocator);
-    defer available_osr.destroy();
-    if (available_osr.entries.len == 0) return error.UnsupportedChunk;
-
-    // One artifact owns one native loop region. Prefer the last bytecode loop
-    // header, which is the innermost header for ordinary structured nesting,
-    // and publish only that exact entry. Other backedges miss the table and
-    // remain in bytecode instead of entering a region compiled for a different
-    // header.
-    const selected = available_osr.entries[available_osr.entries.len - 1];
-    const selected_first: usize = selected.first_import;
-    const selected_count: usize = selected.local_count + selected.stack_count;
-    if (selected_first > available_osr.imports.len or
-        selected_count > available_osr.imports.len - selected_first)
-        return error.UnsupportedChunk;
-    const selected_entry = jit.OsrEntry{
-        .entry_ip = selected.entry_ip,
-        .first_import = 0,
-        .local_count = selected.local_count,
-        .stack_count = selected.stack_count,
-        .handler_count = selected.handler_count,
-        .accumulator_bits = selected.accumulator_bits,
-    };
-    const osr = try jit.OsrMetadata.create(
-        allocator,
-        &.{selected_entry},
-        available_osr.imports[selected_first .. selected_first + selected_count],
-    );
+    const osr = try selectLoopOsrMetadata(plan, allocator);
     errdefer osr.destroy();
     const entry = osr.entries[0];
     if (entry.stack_count != 0) return error.UnsupportedChunk;
@@ -879,6 +903,335 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         .stack_maps = stack_maps,
         .osr = osr,
         .execution_block = header,
+        .entry_enabled = false,
+    };
+}
+
+const RegionEdgeOperations = struct {
+    from: u32,
+    to: u32,
+    operations_block: u32,
+};
+
+const RegionExitDeopt = struct {
+    from: u32,
+    deopt_index: u16,
+};
+
+fn regionEdgeOperations(edges: []const RegionEdgeOperations, from: u32, to: u32) ?u32 {
+    var found: ?u32 = null;
+    for (edges) |edge| if (edge.from == from and edge.to == to) {
+        if (found != null) return null;
+        found = edge.operations_block;
+    };
+    return found;
+}
+
+fn regionExitDeopt(exits: []const RegionExitDeopt, from: u32) ?u16 {
+    var found: ?u16 = null;
+    for (exits) |exit| if (exit.from == from) {
+        if (found != null) return null;
+        found = exit.deopt_index;
+    };
+    return found;
+}
+
+fn lowerGeneralLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
+    const graph = &plan.graph;
+    if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
+        graph.branches.len == 0 or plan.blocks.len == 0)
+        return error.UnsupportedChunk;
+
+    const osr = try selectLoopOsrMetadata(plan, allocator);
+    errdefer osr.destroy();
+    if (osr.entries.len != 1 or osr.entries[0].stack_count != 0) return error.UnsupportedChunk;
+    const entry = osr.entries[0];
+
+    var header: ?u32 = null;
+    for (plan.blocks) |block| if (block.start == entry.entry_ip) {
+        if (header != null) return error.UnsupportedChunk;
+        header = block.id;
+    };
+    const header_block = header orelse return error.UnsupportedChunk;
+    const outer = branchForBlock(graph.branches, header_block) orelse return error.UnsupportedChunk;
+    if (outer.false_block == outer.true_block or outer.false_block >= plan.blocks.len or
+        outer.true_block >= plan.blocks.len)
+        return error.UnsupportedChunk;
+    const outer_exit = outer.false_block;
+    const region_entry = outer.true_block;
+    if (region_entry == header_block or region_entry == outer_exit) return error.UnsupportedChunk;
+
+    const reachable = try allocator.alloc(bool, plan.blocks.len);
+    defer allocator.free(reachable);
+    @memset(reachable, false);
+    var discover: std.ArrayListUnmanaged(u32) = .empty;
+    defer discover.deinit(allocator);
+    try discover.append(allocator, region_entry);
+    reachable[region_entry] = true;
+    var discover_index: usize = 0;
+    while (discover_index < discover.items.len) : (discover_index += 1) {
+        const block_id = discover.items[discover_index];
+        if (block_id >= plan.blocks.len) return error.UnsupportedChunk;
+        const block = plan.blocks[block_id];
+        if (block.successor_count == 0 or block.successor_count > 2) return error.UnsupportedChunk;
+        if (block.successor_count == 2) {
+            const conditional = branchForBlock(graph.branches, block_id) orelse return error.UnsupportedChunk;
+            if (conditional.false_block == conditional.true_block) return error.UnsupportedChunk;
+        } else if (branchForBlock(graph.branches, block_id) != null) {
+            return error.UnsupportedChunk;
+        }
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (successor == header_block or successor == outer_exit) continue;
+            if (successor >= plan.blocks.len) return error.UnsupportedChunk;
+            if (!reachable[successor]) {
+                reachable[successor] = true;
+                try discover.append(allocator, successor);
+            }
+        }
+    }
+
+    // A selected region has one external entry from its header. Any other
+    // predecessor would be a second entry and therefore irreducible here.
+    for (graph.edges) |edge| {
+        if (edge.to >= reachable.len or !reachable[edge.to]) continue;
+        if (edge.from == header_block) {
+            if (edge.to != region_entry) return error.UnsupportedChunk;
+        } else if (edge.from >= reachable.len or !reachable[edge.from]) {
+            return error.UnsupportedChunk;
+        }
+    }
+
+    const indegree = try allocator.alloc(u32, plan.blocks.len);
+    defer allocator.free(indegree);
+    @memset(indegree, 0);
+    var region_count: usize = 0;
+    for (reachable, 0..) |is_reachable, block_index| {
+        if (!is_reachable) continue;
+        region_count += 1;
+        const block = plan.blocks[block_index];
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (successor < reachable.len and reachable[successor])
+                indegree[successor] = std.math.add(u32, indegree[successor], 1) catch
+                    return error.UnsupportedChunk;
+        }
+    }
+    if (indegree[region_entry] != 0) return error.UnsupportedChunk;
+    var topo: std.ArrayListUnmanaged(u32) = .empty;
+    defer topo.deinit(allocator);
+    try topo.append(allocator, region_entry);
+    var topo_index: usize = 0;
+    while (topo_index < topo.items.len) : (topo_index += 1) {
+        const block_id = topo.items[topo_index];
+        const block = plan.blocks[block_id];
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (successor >= reachable.len or !reachable[successor]) continue;
+            if (indegree[successor] == 0) return error.UnsupportedChunk;
+            indegree[successor] -= 1;
+            if (indegree[successor] == 0) try topo.append(allocator, successor);
+        }
+    }
+    if (topo.items.len != region_count) return error.UnsupportedChunk;
+
+    const longest = try allocator.alloc(u32, plan.blocks.len);
+    defer allocator.free(longest);
+    @memset(longest, 0);
+    var reverse_index = topo.items.len;
+    while (reverse_index != 0) {
+        reverse_index -= 1;
+        const block_id = topo.items[reverse_index];
+        const block = plan.blocks[block_id];
+        var longest_tail: u32 = 0;
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (successor < reachable.len and reachable[successor])
+                longest_tail = @max(longest_tail, longest[successor]);
+        }
+        longest[block_id] = std.math.add(u32, block.instruction_count, longest_tail) catch
+            return error.UnsupportedChunk;
+    }
+    const maximum_steps = std.math.add(
+        u32,
+        plan.blocks[header_block].instruction_count,
+        longest[region_entry],
+    ) catch return error.UnsupportedChunk;
+
+    var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
+    var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
+    const required_numeric = try numericRequirements(graph);
+    var scratch_slots = graph.nodes.len;
+    var operations: std.ArrayListUnmanaged(Operation) = .empty;
+    errdefer operations.deinit(allocator);
+    var edge_operations: std.ArrayListUnmanaged(RegionEdgeOperations) = .empty;
+    defer edge_operations.deinit(allocator);
+    var next_synthetic_block = std.math.cast(u32, plan.blocks.len) orelse return error.UnsupportedChunk;
+
+    try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
+    try appendBlockOperations(graph, header_block, true, allocator, &operations, &types, &initialized, &required_numeric);
+    if (types[outer.condition] != .boolean) return error.UnsupportedChunk;
+
+    const entry_operations_block = next_synthetic_block;
+    next_synthetic_block = std.math.add(u32, next_synthetic_block, 1) catch return error.UnsupportedChunk;
+    try edge_operations.append(allocator, .{
+        .from = header_block,
+        .to = region_entry,
+        .operations_block = entry_operations_block,
+    });
+    try appendEdgeCopies(graph, header_block, region_entry, entry_operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+
+    for (topo.items) |block_id| {
+        for (graph.edges) |edge| {
+            if (edge.to != block_id or edge.from == header_block) continue;
+            if (edge.from >= reachable.len or !reachable[edge.from]) return error.UnsupportedChunk;
+            const operations_block = next_synthetic_block;
+            next_synthetic_block = std.math.add(u32, next_synthetic_block, 1) catch
+                return error.UnsupportedChunk;
+            try edge_operations.append(allocator, .{
+                .from = edge.from,
+                .to = edge.to,
+                .operations_block = operations_block,
+            });
+            try appendEdgeCopies(graph, edge.from, edge.to, operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        }
+        try appendBlockOperations(graph, block_id, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (plan.blocks[block_id].successor_count == 2) {
+            const conditional = branchForBlock(graph.branches, block_id) orelse return error.UnsupportedChunk;
+            if (types[conditional.condition] != .boolean) return error.UnsupportedChunk;
+        }
+    }
+
+    var first_backedge: ?u32 = null;
+    for (topo.items) |block_id| {
+        const block = plan.blocks[block_id];
+        for (block.successors[0..block.successor_count]) |successor| {
+            if (successor != header_block) continue;
+            if (first_backedge == null) first_backedge = block_id;
+            const operations_block = next_synthetic_block;
+            next_synthetic_block = std.math.add(u32, next_synthetic_block, 1) catch
+                return error.UnsupportedChunk;
+            try edge_operations.append(allocator, .{
+                .from = block_id,
+                .to = header_block,
+                .operations_block = operations_block,
+            });
+            try appendEdgeCopies(graph, block_id, header_block, operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        }
+    }
+    const recovery_backedge = first_backedge orelse return error.UnsupportedChunk;
+
+    var deopt_points: std.ArrayListUnmanaged(jit.DeoptPoint) = .empty;
+    errdefer deopt_points.deinit(allocator);
+    var deopt_values: std.ArrayListUnmanaged(jit.RecoveryValue) = .empty;
+    errdefer deopt_values.deinit(allocator);
+    var exit_deopts: std.ArrayListUnmanaged(RegionExitDeopt) = .empty;
+    defer exit_deopts.deinit(allocator);
+    const entry_index = try appendBlockEntryDeopt(graph, &initialized, header_block, allocator, &deopt_points, &deopt_values);
+    const false_index = try appendEdgeDeopt(graph, &initialized, header_block, outer_exit, allocator, &deopt_points, &deopt_values);
+    const true_index = try appendEdgeDeopt(graph, &initialized, recovery_backedge, header_block, allocator, &deopt_points, &deopt_values);
+    for (topo.items) |block_id| {
+        const block = plan.blocks[block_id];
+        for (block.successors[0..block.successor_count]) |successor| if (successor == outer_exit) {
+            try exit_deopts.append(allocator, .{
+                .from = block_id,
+                .deopt_index = try appendEdgeDeopt(graph, &initialized, block_id, outer_exit, allocator, &deopt_points, &deopt_values),
+            });
+        };
+    }
+
+    var region_blocks: std.ArrayListUnmanaged(LoopRegionBlock) = .empty;
+    defer region_blocks.deinit(allocator);
+    for (topo.items) |block_id| {
+        const block = plan.blocks[block_id];
+        var lowered = LoopRegionBlock{
+            .block = block_id,
+            .successor_count = block.successor_count,
+            .steps = std.math.cast(u12, block.instruction_count) orelse return error.UnsupportedChunk,
+        };
+        var targets: [2]u32 = undefined;
+        if (block.successor_count == 2) {
+            const conditional = branchForBlock(graph.branches, block_id) orelse return error.UnsupportedChunk;
+            lowered.condition = std.math.cast(u8, conditional.condition) orelse return error.UnsupportedChunk;
+            targets[0] = conditional.false_block;
+            targets[1] = conditional.true_block;
+        } else {
+            targets[0] = block.successors[0];
+        }
+        for (targets[0..block.successor_count], 0..) |target, target_index| {
+            lowered.successors[target_index] = if (target == header_block)
+                .{
+                    .kind = .header,
+                    .block = target,
+                    .operations_block = regionEdgeOperations(edge_operations.items, block_id, target) orelse
+                        return error.UnsupportedChunk,
+                }
+            else if (target == outer_exit)
+                .{
+                    .kind = .exit,
+                    .block = target,
+                    .deopt_index = regionExitDeopt(exit_deopts.items, block_id) orelse
+                        return error.UnsupportedChunk,
+                }
+            else if (target < reachable.len and reachable[target])
+                .{
+                    .kind = .block,
+                    .block = target,
+                    .operations_block = regionEdgeOperations(edge_operations.items, block_id, target) orelse
+                        return error.UnsupportedChunk,
+                }
+            else
+                return error.UnsupportedChunk;
+        }
+        try region_blocks.append(allocator, lowered);
+    }
+
+    const owned_operations = try operations.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_operations);
+    const owned_deopt_points = try deopt_points.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_points);
+    const owned_deopt_values = try deopt_values.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_deopt_values);
+    const owned_deopt_handlers = try ownRecoveryHandlers(allocator, graph.handler_states);
+    errdefer allocator.free(owned_deopt_handlers);
+    const stack_maps = try typedRecoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values, &types);
+    errdefer allocator.free(stack_maps);
+    const owned_region_blocks = try region_blocks.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_region_blocks);
+
+    var local_mask: u64 = 0;
+    for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
+        if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
+            return error.UnsupportedChunk;
+        if (required_numeric[import.destination]) local_mask |= @as(u64, 1) << @intCast(import.source_index);
+    }
+    const header_steps = std.math.cast(u12, plan.blocks[header_block].instruction_count) orelse
+        return error.UnsupportedChunk;
+    const iteration_steps = std.math.cast(u12, maximum_steps) orelse return error.UnsupportedChunk;
+    return .{
+        .allocator = allocator,
+        .operations = owned_operations,
+        .result = 0,
+        .branch = null,
+        .side_exit = null,
+        .side_exit_branch = .{
+            .condition = @intCast(outer.condition),
+            .entry_deopt_index = entry_index,
+            .false_deopt_index = false_index,
+            .true_deopt_index = true_index,
+            .false_steps = header_steps,
+            .true_steps = iteration_steps,
+            .backedge_steps = iteration_steps,
+        },
+        .loop_region_blocks = owned_region_blocks,
+        .loop_region_entry_operations_block = entry_operations_block,
+        .loop_region_header_steps = header_steps,
+        .scratch_slots = @intCast(scratch_slots),
+        .frame_slots = chunk.local_count,
+        .required_numeric_slots = local_mask,
+        .bytecode_steps = maximum_steps,
+        .deopt_points = owned_deopt_points,
+        .deopt_values = owned_deopt_values,
+        .deopt_handlers = owned_deopt_handlers,
+        .stack_maps = stack_maps,
+        .osr = osr,
+        .execution_block = header_block,
         .entry_enabled = false,
     };
 }
@@ -1332,16 +1685,61 @@ pub fn compile(chunk: *const bc.Chunk) !jit.CompiledCode {
     var plan = try optimizer.build(chunk, std.heap.page_allocator);
     defer plan.deinit();
     var program = lower(chunk, &plan, std.heap.page_allocator) catch |err| switch (err) {
-        error.UnsupportedChunk => try lowerLoopOsr(chunk, &plan, std.heap.page_allocator),
+        error.UnsupportedChunk => lowerLoopOsr(chunk, &plan, std.heap.page_allocator) catch |loop_err| switch (loop_err) {
+            error.UnsupportedChunk => try lowerGeneralLoopOsr(chunk, &plan, std.heap.page_allocator),
+            else => return loop_err,
+        },
         else => return err,
     };
     defer program.deinit();
     return compileAarch64(&program);
 }
 
+const LoopRegionPatch = struct {
+    at: usize,
+    target_block: u32,
+};
+
+fn emitLoopRegionTarget(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    target: LoopRegionTarget,
+    loop_top: usize,
+    entry_deopt_index: u16,
+    patches: *std.ArrayListUnmanaged(LoopRegionPatch),
+) !void {
+    switch (target.kind) {
+        .block => {
+            try emitBlockOperations(assembler, program, target.operations_block);
+            try patches.append(std.heap.page_allocator, .{
+                .at = try assembler.branchPlaceholder(),
+                .target_block = target.block,
+            });
+        },
+        .header => {
+            try emitBlockOperations(assembler, program, target.operations_block);
+            try emitMovingSafepointPoll(
+                assembler,
+                entry_deopt_index,
+                program.deopt_points[entry_deopt_index].exit_ip,
+            );
+            if (program.observe_loop_backedges) try emitBackedgeObserver(assembler);
+            const backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(backedge, loop_top);
+        },
+        .exit => try emitSideExit(
+            assembler,
+            target.deopt_index,
+            program.deopt_points[target.deopt_index].exit_ip,
+        ),
+    }
+}
+
 fn compileAarch64(program: *const Program) !jit.CompiledCode {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
-    var memory = try jit.CodeMemory.init(@as(usize, program.operations.len) * 64 + 1024);
+    var memory = try jit.CodeMemory.init(
+        @as(usize, program.operations.len) * 64 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
+    );
     errdefer memory.deinit();
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     try assembler.moveRegister64(12, 0); // stable NativeFrame
@@ -1368,91 +1766,155 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         const budget_exit = try assembler.branchConditionPlaceholder(.lo);
         for (program.operations) |operation| if (operation.block == program.execution_block)
             try emitOperation(&assembler, operation);
+        if (program.loop_region_blocks.len != 0) {
+            try emitStepIncrement(&assembler, program.loop_region_header_steps);
+            try assembler.subtractImmediate64(15, 15, program.loop_region_header_steps);
+            try assembler.subtractImmediate64(16, 16, program.loop_region_header_steps);
+        }
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        for (program.loop_exit_guards) |guard| {
-            try emitBlockOperations(&assembler, program, guard.entry_block);
-            try assembler.load64(9, 14, try slotOffset(guard.condition));
-            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-            try assembler.compareRegister64(9, 10);
-            const continue_jump = try assembler.branchConditionPlaceholder(
-                if (guard.exit_on_true) .eq else .ne,
-            );
-            if (guard.exit_from != guard.entry_block)
-                try emitBlockOperations(&assembler, program, guard.exit_block);
-            try emitStepIncrement(&assembler, guard.exit_steps);
-            try emitSideExit(
-                &assembler,
-                guard.exit_deopt_index,
-                program.deopt_points[guard.exit_deopt_index].exit_ip,
-            );
-            try assembler.patchConditionBranch(continue_jump, assembler.position());
-        }
-        for (program.loop_latch_guards) |guard| {
-            try emitBlockOperations(&assembler, program, guard.entry_block);
-            try assembler.load64(9, 14, try slotOffset(guard.condition));
-            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
-            try assembler.compareRegister64(9, 10);
-            const continue_jump = try assembler.branchConditionPlaceholder(
-                if (guard.backedge_on_true) .eq else .ne,
-            );
-            try emitBlockOperations(&assembler, program, guard.operations_block);
-            try emitStepIncrement(&assembler, guard.backedge_steps);
-            try assembler.subtractImmediate64(15, 15, guard.backedge_steps);
-            try assembler.subtractImmediate64(16, 16, guard.backedge_steps);
-            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const guarded_backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(guarded_backedge, loop_top);
-            try assembler.patchConditionBranch(continue_jump, assembler.position());
-        }
-        if (program.loop_branches.len != 0) {
-            try emitStepIncrement(&assembler, branch.loop_prefix_steps);
-            try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
-            try assembler.subtractImmediate64(16, 16, branch.loop_prefix_steps);
-            for (program.loop_branches) |segment| {
-                try emitBlockOperations(&assembler, program, segment.entry_block);
-                try assembler.load64(9, 14, try slotOffset(segment.condition));
+        if (program.loop_region_blocks.len != 0) {
+            var patches: std.ArrayListUnmanaged(LoopRegionPatch) = .empty;
+            defer patches.deinit(std.heap.page_allocator);
+            const block_positions = try std.heap.page_allocator.alloc(usize, program.loop_region_blocks.len);
+            defer std.heap.page_allocator.free(block_positions);
+
+            try emitBlockOperations(&assembler, program, program.loop_region_entry_operations_block);
+            for (program.loop_region_blocks, 0..) |region, region_index| {
+                block_positions[region_index] = assembler.position();
+                try emitBlockOperations(&assembler, program, region.block);
+                if (region.steps != 0) {
+                    try emitStepIncrement(&assembler, region.steps);
+                    try assembler.subtractImmediate64(15, 15, region.steps);
+                    try assembler.subtractImmediate64(16, 16, region.steps);
+                }
+                if (region.successor_count == 1) {
+                    try emitLoopRegionTarget(
+                        &assembler,
+                        program,
+                        region.successors[0],
+                        loop_top,
+                        entry_deopt_index,
+                        &patches,
+                    );
+                } else {
+                    try assembler.load64(9, 14, try slotOffset(region.condition));
+                    try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                    try assembler.compareRegister64(9, 10);
+                    const false_edge = try assembler.branchConditionPlaceholder(.eq);
+                    try emitLoopRegionTarget(
+                        &assembler,
+                        program,
+                        region.successors[1],
+                        loop_top,
+                        entry_deopt_index,
+                        &patches,
+                    );
+                    try assembler.patchConditionBranch(false_edge, assembler.position());
+                    try emitLoopRegionTarget(
+                        &assembler,
+                        program,
+                        region.successors[0],
+                        loop_top,
+                        entry_deopt_index,
+                        &patches,
+                    );
+                }
+            }
+            for (patches.items) |patch| {
+                var target_position: ?usize = null;
+                for (program.loop_region_blocks, block_positions) |region, position| {
+                    if (region.block != patch.target_block) continue;
+                    if (target_position != null) return error.UnsupportedChunk;
+                    target_position = position;
+                }
+                try assembler.patchBranch(patch.at, target_position orelse return error.UnsupportedChunk);
+            }
+        } else {
+            for (program.loop_exit_guards) |guard| {
+                try emitBlockOperations(&assembler, program, guard.entry_block);
+                try assembler.load64(9, 14, try slotOffset(guard.condition));
                 try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
                 try assembler.compareRegister64(9, 10);
-                const segment_false_jump = try assembler.branchConditionPlaceholder(.eq);
-
-                try emitBlockOperations(&assembler, program, segment.true_block);
-                if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                    try emitBlockOperations(&assembler, program, merge_block);
-                try emitStepIncrement(&assembler, segment.true_steps);
-                try assembler.subtractImmediate64(15, 15, segment.true_steps);
-                try assembler.subtractImmediate64(16, 16, segment.true_steps);
-                const true_join = try assembler.branchPlaceholder();
-
-                try assembler.patchConditionBranch(segment_false_jump, assembler.position());
-                try emitBlockOperations(&assembler, program, segment.false_block);
-                if (segment.emit_merge) if (segment.merge_block) |merge_block|
-                    try emitBlockOperations(&assembler, program, merge_block);
-                try emitStepIncrement(&assembler, segment.false_steps);
-                try assembler.subtractImmediate64(15, 15, segment.false_steps);
-                try assembler.subtractImmediate64(16, 16, segment.false_steps);
-                try assembler.patchBranch(true_join, assembler.position());
+                const continue_jump = try assembler.branchConditionPlaceholder(
+                    if (guard.exit_on_true) .eq else .ne,
+                );
+                if (guard.exit_from != guard.entry_block)
+                    try emitBlockOperations(&assembler, program, guard.exit_block);
+                try emitStepIncrement(&assembler, guard.exit_steps);
+                try emitSideExit(
+                    &assembler,
+                    guard.exit_deopt_index,
+                    program.deopt_points[guard.exit_deopt_index].exit_ip,
+                );
+                try assembler.patchConditionBranch(continue_jump, assembler.position());
             }
-            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(backedge, loop_top);
-        } else {
-            try emitBlockOperations(&assembler, program, branch.true_block.?);
-            try emitStepIncrement(&assembler, branch.backedge_steps);
-            try assembler.subtractImmediate64(15, 15, branch.backedge_steps);
-            try assembler.subtractImmediate64(16, 16, branch.backedge_steps);
-            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-            const backedge = try assembler.branchPlaceholder();
-            try assembler.patchBranch(backedge, loop_top);
+            for (program.loop_latch_guards) |guard| {
+                try emitBlockOperations(&assembler, program, guard.entry_block);
+                try assembler.load64(9, 14, try slotOffset(guard.condition));
+                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                try assembler.compareRegister64(9, 10);
+                const continue_jump = try assembler.branchConditionPlaceholder(
+                    if (guard.backedge_on_true) .eq else .ne,
+                );
+                try emitBlockOperations(&assembler, program, guard.operations_block);
+                try emitStepIncrement(&assembler, guard.backedge_steps);
+                try assembler.subtractImmediate64(15, 15, guard.backedge_steps);
+                try assembler.subtractImmediate64(16, 16, guard.backedge_steps);
+                try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+                if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+                const guarded_backedge = try assembler.branchPlaceholder();
+                try assembler.patchBranch(guarded_backedge, loop_top);
+                try assembler.patchConditionBranch(continue_jump, assembler.position());
+            }
+            if (program.loop_branches.len != 0) {
+                try emitStepIncrement(&assembler, branch.loop_prefix_steps);
+                try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
+                try assembler.subtractImmediate64(16, 16, branch.loop_prefix_steps);
+                for (program.loop_branches) |segment| {
+                    try emitBlockOperations(&assembler, program, segment.entry_block);
+                    try assembler.load64(9, 14, try slotOffset(segment.condition));
+                    try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                    try assembler.compareRegister64(9, 10);
+                    const segment_false_jump = try assembler.branchConditionPlaceholder(.eq);
+
+                    try emitBlockOperations(&assembler, program, segment.true_block);
+                    if (segment.emit_merge) if (segment.merge_block) |merge_block|
+                        try emitBlockOperations(&assembler, program, merge_block);
+                    try emitStepIncrement(&assembler, segment.true_steps);
+                    try assembler.subtractImmediate64(15, 15, segment.true_steps);
+                    try assembler.subtractImmediate64(16, 16, segment.true_steps);
+                    const true_join = try assembler.branchPlaceholder();
+
+                    try assembler.patchConditionBranch(segment_false_jump, assembler.position());
+                    try emitBlockOperations(&assembler, program, segment.false_block);
+                    if (segment.emit_merge) if (segment.merge_block) |merge_block|
+                        try emitBlockOperations(&assembler, program, merge_block);
+                    try emitStepIncrement(&assembler, segment.false_steps);
+                    try assembler.subtractImmediate64(15, 15, segment.false_steps);
+                    try assembler.subtractImmediate64(16, 16, segment.false_steps);
+                    try assembler.patchBranch(true_join, assembler.position());
+                }
+                try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+                if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+                const backedge = try assembler.branchPlaceholder();
+                try assembler.patchBranch(backedge, loop_top);
+            } else {
+                try emitBlockOperations(&assembler, program, branch.true_block.?);
+                try emitStepIncrement(&assembler, branch.backedge_steps);
+                try assembler.subtractImmediate64(15, 15, branch.backedge_steps);
+                try assembler.subtractImmediate64(16, 16, branch.backedge_steps);
+                try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+                if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+                const backedge = try assembler.branchPlaceholder();
+                try assembler.patchBranch(backedge, loop_top);
+            }
         }
 
         try assembler.patchConditionBranch(false_jump, assembler.position());
-        try emitStepIncrement(&assembler, branch.false_steps);
+        if (program.loop_region_blocks.len == 0) try emitStepIncrement(&assembler, branch.false_steps);
         try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
 
         const poll_exit = assembler.position();
