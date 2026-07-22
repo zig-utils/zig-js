@@ -254,7 +254,7 @@ pub const Tier = struct {
     }
 };
 
-pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated };
+pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated, operation_trap };
 
 /// Result of one runtime-backed operation requested by optimized code. Unlike
 /// `ExitStatus`, this preserves why the operation could not produce a value so
@@ -280,6 +280,8 @@ pub const NativeOperationDescriptor = extern struct {
     first_input: u16,
     input_count: u16,
     exceptional_target: u16 = none,
+    deopt_index: u16,
+    step_delta: u16,
     origin: u32,
 
     pub const none = std.math.maxInt(u16);
@@ -1114,12 +1116,16 @@ test "native operation ABI preserves value exception and trap outcomes" {
         .bytecode_op = 9,
         .first_input = 2,
         .input_count = 3,
+        .deopt_index = 4,
+        .step_delta = 5,
         .origin = 17,
     };
     try std.testing.expectEqual(@as(u16, 9), descriptor.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), descriptor.first_input);
     try std.testing.expectEqual(@as(u16, 3), descriptor.input_count);
     try std.testing.expectEqual(NativeOperationDescriptor.none, descriptor.exceptional_target);
+    try std.testing.expectEqual(@as(u16, 4), descriptor.deopt_index);
+    try std.testing.expectEqual(@as(u16, 5), descriptor.step_delta);
     try std.testing.expectEqual(@as(u32, 17), descriptor.origin);
     const metadata = try NativeOperationMetadata.create(std.testing.allocator, &.{descriptor});
     defer metadata.destroy();

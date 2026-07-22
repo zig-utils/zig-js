@@ -28,6 +28,7 @@ pub const OperationKind = enum {
     ge,
     eq,
     neq,
+    runtime_operation,
 };
 
 pub const Operation = struct {
@@ -256,6 +257,7 @@ const ValueType = enum { number, boolean, other };
 
 fn stageNativeOperationDescriptors(
     chunk: *const bc.Chunk,
+    plan: *const optimizer.Plan,
     graph: *const optimizer.ValueGraph,
     aliases: [jit.numeric_scratch_capacity]optimizer.ValueId,
     allocator: std.mem.Allocator,
@@ -264,26 +266,15 @@ fn stageNativeOperationDescriptors(
 ) ![]jit.NativeOperationDescriptor {
     var descriptors: std.ArrayListUnmanaged(jit.NativeOperationDescriptor) = .empty;
     errdefer descriptors.deinit(allocator);
-    for (graph.frame_states) |state| {
+    var previous_runtime_steps: u32 = 0;
+    for (graph.frame_states, 0..) |state, state_index| {
         if (state.kind != .call and state.kind != .effect) continue;
         if (state.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[state.origin];
         const input_count = optimizer.nativeOperationInputCount(inst) orelse return error.UnsupportedChunk;
-        if (input_count > state.stack_count or scratch_slots.* + input_count > jit.numeric_scratch_capacity)
-            return error.UnsupportedChunk;
-        const first_input = scratch_slots.*;
+        if (input_count > state.stack_count) return error.UnsupportedChunk;
         const stack_start: usize = state.first_value + state.local_count;
         const source_start = stack_start + state.stack_count - input_count;
-        for (0..input_count) |input| {
-            const source = try resolveAlias(graph.frame_state_values[source_start + input], aliases);
-            try operations.append(allocator, .{
-                .kind = .copy,
-                .destination = @intCast(scratch_slots.*),
-                .block = state.block,
-                .lhs = @intCast(source),
-            });
-            scratch_slots.* += 1;
-        }
         var exceptional_target: u16 = jit.NativeOperationDescriptor.none;
         for (graph.exceptional_targets, 0..) |target, index| {
             if (target.block == state.block and target.origin == state.origin) {
@@ -291,13 +282,58 @@ fn stageNativeOperationDescriptors(
                 exceptional_target = std.math.cast(u16, index) orelse return error.UnsupportedChunk;
             }
         }
+        var runtime_operation: ?*Operation = null;
+        for (operations.items) |*operation| {
+            if (operation.kind != .runtime_operation or operation.block != state.block or
+                operation.immediate != state.origin) continue;
+            if (runtime_operation != null) return error.UnsupportedChunk;
+            runtime_operation = operation;
+        }
+        const first_input: usize = if (runtime_operation) |operation| runtime: {
+            if (inst.op != .to_numeric or input_count != 1 or exceptional_target != jit.NativeOperationDescriptor.none)
+                return error.UnsupportedChunk;
+            const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
+            if (source != operation.lhs) return error.UnsupportedChunk;
+            break :runtime source;
+        } else staged: {
+            if (scratch_slots.* + input_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+            const first = scratch_slots.*;
+            for (0..input_count) |input| {
+                const source = try resolveAlias(graph.frame_state_values[source_start + input], aliases);
+                try operations.append(allocator, .{
+                    .kind = .copy,
+                    .destination = @intCast(scratch_slots.*),
+                    .block = state.block,
+                    .lhs = @intCast(source),
+                });
+                scratch_slots.* += 1;
+            }
+            break :staged first;
+        };
+        var step_delta: u16 = 0;
+        if (runtime_operation != null) {
+            const block = plan.blocks[state.block];
+            const absolute_steps = try deterministicPathSteps(
+                plan,
+                state.block,
+                state.origin - block.start + 1,
+            );
+            if (absolute_steps <= previous_runtime_steps) return error.UnsupportedChunk;
+            step_delta = std.math.cast(u16, absolute_steps - previous_runtime_steps) orelse
+                return error.UnsupportedChunk;
+            previous_runtime_steps = absolute_steps;
+        }
+        const descriptor_index = std.math.cast(u32, descriptors.items.len) orelse return error.UnsupportedChunk;
         try descriptors.append(allocator, .{
             .bytecode_op = std.math.cast(u16, @backingInt(inst.op)) orelse return error.UnsupportedChunk,
             .first_input = @intCast(first_input),
             .input_count = @intCast(input_count),
             .exceptional_target = exceptional_target,
+            .deopt_index = std.math.cast(u16, state_index) orelse return error.UnsupportedChunk,
+            .step_delta = step_delta,
             .origin = state.origin,
         });
+        if (runtime_operation) |operation| operation.immediate = descriptor_index;
     }
     return descriptors.toOwnedSlice(allocator);
 }
@@ -337,12 +373,64 @@ fn deterministicPathSteps(
     return error.UnsupportedChunk;
 }
 
+fn deterministicPrefixSteps(
+    plan: *const optimizer.Plan,
+    target_block: u32,
+    target_steps: u32,
+) error{UnsupportedChunk}!u32 {
+    const graph = &plan.graph;
+    if (target_block >= plan.blocks.len or target_steps > plan.blocks[target_block].instruction_count)
+        return error.UnsupportedChunk;
+    var current: u32 = 0;
+    var traversed: usize = 0;
+    var steps: u32 = 0;
+    while (traversed <= plan.blocks.len) : (traversed += 1) {
+        if (current == target_block)
+            return std.math.add(u32, steps, target_steps) catch error.UnsupportedChunk;
+        var outgoing: ?optimizer.Edge = null;
+        for (graph.edges) |edge| if (edge.from == current) {
+            if (outgoing != null) return error.UnsupportedChunk;
+            outgoing = edge;
+        };
+        steps = std.math.add(u32, steps, plan.blocks[current].instruction_count) catch
+            return error.UnsupportedChunk;
+        const edge = outgoing orelse return error.UnsupportedChunk;
+        if (edge.to >= plan.blocks.len) return error.UnsupportedChunk;
+        current = edge.to;
+    }
+    return error.UnsupportedChunk;
+}
+
+fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
+    if (state.kind != .effect) return false;
+    for (graph.nodes) |node| if (node.kind == .to_numeric and node.block == state.block and
+        node.origin == state.origin)
+    {
+        for (graph.exceptional_targets) |target| if (target.block == state.block and
+            target.origin == state.origin) return false;
+        return true;
+    };
+    return false;
+}
+
 pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
     const graph = &plan.graph;
     if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
         graph.branches.len > 1)
         return error.UnsupportedChunk;
     var scratch_slots = graph.nodes.len;
+    var fallback_effect_index: ?u16 = null;
+    for (graph.frame_states, 0..) |state, state_index| {
+        if (state.kind != .effect or state.origin >= chunk.code.items.len or
+            chunk.code.items[state.origin].op != .to_numeric) continue;
+        var has_exceptional_target = false;
+        for (graph.exceptional_targets) |target| if (target.block == state.block and target.origin == state.origin) {
+            has_exceptional_target = true;
+        };
+        if (!has_exceptional_target) continue;
+        if (fallback_effect_index != null) return error.UnsupportedChunk;
+        fallback_effect_index = std.math.cast(u16, state_index) orelse return error.UnsupportedChunk;
+    }
 
     var aliases: [jit.numeric_scratch_capacity]optimizer.ValueId = @splat(optimizer.ValueNode.none);
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
@@ -455,6 +543,19 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .rhs = @intCast(rhs),
             });
         },
+        .to_numeric => {
+            const input = try resolveAlias(node.lhs, aliases);
+            types[node.id] = .other;
+            const fallback = if (fallback_effect_index) |index| graph.frame_states[index] else null;
+            if (fallback == null or fallback.?.block != node.block or fallback.?.origin != node.origin)
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = node.block,
+                    .lhs = @intCast(input),
+                    .immediate = node.origin,
+                });
+        },
         .mod => return error.UnsupportedChunk,
     };
 
@@ -464,7 +565,15 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     var side_exit_branch: ?SideExitBranch = null;
     var bytecode_steps: u32 = 0;
     var deterministic_path = false;
-    if (graph.branches.len == 0) {
+    if (fallback_effect_index) |index| {
+        const state = graph.frame_states[index];
+        const block = plan.blocks[state.block];
+        bytecode_steps = try deterministicPrefixSteps(plan, state.block, state.origin - block.start);
+        side_exit = .{
+            .deopt_index = index,
+            .steps = std.math.cast(u12, bytecode_steps) orelse return error.UnsupportedChunk,
+        };
+    } else if (graph.branches.len == 0) {
         if (graph.returns.len == 1) {
             result = try resolveAlias(graph.returns[0].value, aliases);
             const return_block = plan.blocks[graph.returns[0].block];
@@ -476,7 +585,9 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             deterministic_path = true;
         } else if (graph.returns.len == 0) {
             var throw_index: ?u16 = null;
-            for (graph.frame_states, 0..) |state, index| if (state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .abrupt_jump or state.kind == .call or state.kind == .effect) {
+            for (graph.frame_states, 0..) |state, index| if ((state.kind == .throw_ or state.kind == .abrupt_return or state.kind == .abrupt_jump or state.kind == .call or state.kind == .effect) and
+                !frameStateHasRuntimeValue(graph, state))
+            {
                 const block = plan.blocks[state.block];
                 const steps = deterministicPathSteps(plan, state.block, state.origin - block.start) catch continue;
                 if (throw_index != null) return error.UnsupportedChunk;
@@ -581,6 +692,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     }
     const native_operations = try stageNativeOperationDescriptors(
         chunk,
+        plan,
         graph,
         aliases,
         allocator,
@@ -598,6 +710,26 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     errdefer allocator.free(owned_deopt_handlers);
     const stack_maps = try recoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values);
     errdefer allocator.free(stack_maps);
+    for (native_operations) |descriptor| {
+        if (descriptor.step_delta == 0) continue;
+        if (descriptor.deopt_index >= stack_maps.len) return error.UnsupportedChunk;
+        const point = owned_deopt_points[descriptor.deopt_index];
+        const first: usize = point.first_value;
+        const count: usize = point.local_count + point.stack_count;
+        if (first > owned_deopt_values.len or count > owned_deopt_values.len - first)
+            return error.UnsupportedChunk;
+        for (owned_deopt_values[first .. first + count]) |recovery| if (recovery.source == .scratch_slot) {
+            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, recovery.index) orelse return error.UnsupportedChunk);
+        };
+        if (point.accumulator.source == .scratch_slot)
+            stack_maps[descriptor.deopt_index].scratch_pointer_slots |= @as(u64, 1) <<
+                (std.math.cast(u6, point.accumulator.index) orelse return error.UnsupportedChunk);
+        const end = @as(usize, descriptor.first_input) + descriptor.input_count;
+        if (end > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+        for (descriptor.first_input..end) |slot| stack_maps[descriptor.deopt_index].scratch_pointer_slots |=
+            @as(u64, 1) << (std.math.cast(u6, slot) orelse return error.UnsupportedChunk);
+    }
     return .{
         .allocator = allocator,
         .operations = owned_operations,
@@ -1990,12 +2122,15 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     try emitInvalidationPoll(&assembler);
 
     for (program.operations) |operation| if (operation.block == optimizer.Block.none)
-        try emitOperation(&assembler, operation);
+        try emitOperation(&assembler, program, operation);
     if (program.side_exit) |side_exit| {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, operation);
-        try emitStepIncrement(&assembler, side_exit.steps);
+            try emitOperation(&assembler, program, operation);
+        const runtime_steps = try runtimeOperationSteps(program);
+        if (runtime_steps > side_exit.steps) return error.UnsupportedChunk;
+        const remaining_steps: u12 = @intCast(side_exit.steps - runtime_steps);
+        if (remaining_steps != 0) try emitStepIncrement(&assembler, remaining_steps);
         try emitSideExit(&assembler, side_exit.deopt_index, program.deopt_points[side_exit.deopt_index].exit_ip);
     } else if (program.side_exit_branch) |branch| if (branch.entry_deopt_index) |entry_deopt_index| {
         try assembler.load64(15, 12, frameOffset("steps_until_checkpoint"));
@@ -2008,7 +2143,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.compareImmediate64(16, branch.true_steps);
         const budget_exit = try assembler.branchConditionPlaceholder(.lo);
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, operation);
+            try emitOperation(&assembler, program, operation);
         if (program.loop_region_blocks.len != 0) {
             try emitStepIncrement(&assembler, program.loop_region_header_steps);
             try assembler.subtractImmediate64(15, 15, program.loop_region_header_steps);
@@ -2188,13 +2323,13 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try emitSideExit(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
     } else {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, operation);
+            try emitOperation(&assembler, program, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
         if (branch.true_block) |block| for (program.operations) |operation|
-            if (operation.block == block) try emitOperation(&assembler, operation);
+            if (operation.block == block) try emitOperation(&assembler, program, operation);
         try emitStepIncrement(&assembler, branch.true_steps);
         try emitSideExit(&assembler, branch.true_deopt_index, program.deopt_points[branch.true_deopt_index].exit_ip);
         try assembler.patchConditionBranch(false_jump, assembler.position());
@@ -2202,7 +2337,7 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try emitSideExit(&assembler, branch.false_deopt_index, program.deopt_points[branch.false_deopt_index].exit_ip);
     } else if (program.branch) |branch| {
         for (program.operations) |operation| if (operation.block == program.execution_block)
-            try emitOperation(&assembler, operation);
+            try emitOperation(&assembler, program, operation);
         try assembler.load64(9, 14, try slotOffset(branch.condition));
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
@@ -2217,11 +2352,17 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     } else {
         for (program.operations) |operation| if ((program.deterministic_path and operation.block != optimizer.Block.none) or
             (!program.deterministic_path and operation.block == program.execution_block))
-            try emitOperation(&assembler, operation);
+            try emitOperation(&assembler, program, operation);
         try assembler.load64(9, 14, try slotOffset(program.result));
     }
     if (program.side_exit == null and program.side_exit_branch == null) {
         try assembler.store64(9, 12, frameOffset("result_bits"));
+        const runtime_steps = try runtimeOperationSteps(program);
+        if (runtime_steps > program.bytecode_steps) return error.UnsupportedChunk;
+        const suffix_steps = std.math.cast(u12, program.bytecode_steps - runtime_steps) orelse
+            return error.UnsupportedChunk;
+        if (program.native_operations.len != 0 and suffix_steps != 0)
+            try emitStepIncrement(&assembler, suffix_steps);
         try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.complete));
         try assembler.ret();
     }
@@ -2259,17 +2400,31 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         .native_operations = native_operations,
         .osr = osr,
         .entry_enabled = program.entry_enabled,
-        .manages_steps = program.side_exit != null or program.side_exit_branch != null,
+        .manages_steps = program.side_exit != null or program.side_exit_branch != null or
+            program.native_operations.len != 0,
         .has_side_exits = program.side_exit != null or program.side_exit_branch != null,
     };
 }
 
-fn emitBlockOperations(assembler: *aarch64.Assembler, program: *const Program, block: u32) !void {
-    for (program.operations) |operation| if (operation.block == block)
-        try emitOperation(assembler, operation);
+fn runtimeOperationSteps(program: *const Program) !u32 {
+    var steps: u32 = 0;
+    for (program.operations) |operation| if (operation.kind == .runtime_operation) {
+        if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
+        steps = std.math.add(
+            u32,
+            steps,
+            program.native_operations[operation.immediate].step_delta,
+        ) catch return error.UnsupportedChunk;
+    };
+    return steps;
 }
 
-fn emitOperation(assembler: *aarch64.Assembler, operation: Operation) !void {
+fn emitBlockOperations(assembler: *aarch64.Assembler, program: *const Program, block: u32) !void {
+    for (program.operations) |operation| if (operation.block == block)
+        try emitOperation(assembler, program, operation);
+}
+
+fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operation: Operation) !void {
     switch (operation.kind) {
         .copy => {
             try assembler.load64(9, 14, try slotOffset(operation.lhs));
@@ -2303,7 +2458,74 @@ fn emitOperation(assembler: *aarch64.Assembler, operation: Operation) !void {
             try assembler.addRegister64(9, 10, 9);
             try assembler.store64(9, 14, try slotOffset(operation.destination));
         },
+        .runtime_operation => try emitRuntimeOperation(assembler, program, operation),
     }
+}
+
+fn emitRuntimeOperation(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+) !void {
+    if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
+    const descriptor = program.native_operations[operation.immediate];
+    if (descriptor.first_input != operation.lhs or descriptor.input_count != 1 or
+        descriptor.exceptional_target != jit.NativeOperationDescriptor.none or descriptor.step_delta == 0)
+        return error.UnsupportedChunk;
+
+    try assembler.movImmediate64(9, descriptor.origin);
+    try assembler.store64(9, 12, frameOffset("exit_ip"));
+    try assembler.movImmediate64(9, descriptor.deopt_index);
+    try assembler.store64(9, 12, frameOffset("deopt_index"));
+    try emitStepIncrement(
+        assembler,
+        std.math.cast(u12, descriptor.step_delta) orelse return error.UnsupportedChunk,
+    );
+
+    try assembler.load64(17, 12, frameOffset("operation"));
+    try assembler.compareImmediate64(17, 0);
+    const absent = try assembler.branchConditionPlaceholder(.eq);
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.moveRegister64(0, 12);
+    try assembler.movImmediate32(1, @intCast(operation.immediate));
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+
+    try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.value));
+    const non_value = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.load64(9, 12, frameOffset("operation_value_bits"));
+    try assembler.store64(9, 14, try slotOffset(operation.destination));
+    const done = try assembler.branchPlaceholder();
+
+    try assembler.patchConditionBranch(non_value, assembler.position());
+    try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.catchable_exception));
+    const not_throw = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.throw));
+    try assembler.ret();
+
+    try assembler.patchConditionBranch(not_throw, assembler.position());
+    try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.invalidated));
+    const trap = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.invalidated));
+    try assembler.ret();
+
+    try assembler.patchConditionBranch(trap, assembler.position());
+    try assembler.compareImmediate64(0, @backingInt(jit.NativeOperationStatus.out_of_memory));
+    const operation_trap = try assembler.branchConditionPlaceholder(.ne);
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.stop));
+    try assembler.ret();
+    const trap_position = assembler.position();
+    try assembler.patchConditionBranch(absent, trap_position);
+    try assembler.patchConditionBranch(operation_trap, trap_position);
+    try assembler.movImmediate32(0, @backingInt(jit.ExitStatus.operation_trap));
+    try assembler.ret();
+    try assembler.patchBranch(done, assembler.position());
 }
 
 fn emitStepIncrement(assembler: *aarch64.Assembler, steps: u12) !void {
@@ -2819,6 +3041,96 @@ test "optimizer lowering publishes an exact pre-call side exit" {
     }
 }
 
+const RuntimeOperationTestContext = struct {
+    input_slot: u16,
+    expected_input: u64,
+    output: u64,
+    status: jit.NativeOperationStatus,
+    calls: u32 = 0,
+
+    fn dispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
+        const context: *@This() = @ptrCast(@alignCast(frame.operation_context.?));
+        if (operation_id != 0 or frame.scratch.?[context.input_slot] != context.expected_input)
+            return @backingInt(jit.NativeOperationStatus.host_trap);
+        context.calls += 1;
+        frame.operation_value_bits = context.output;
+        return @backingInt(context.status);
+    }
+};
+
+test "optimizer executes to_numeric through the native operation ABI" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.to_numeric, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(u32, 3), program.bytecode_steps);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const descriptor = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.to_numeric)), descriptor.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 1), descriptor.input_count);
+    try std.testing.expectEqual(@as(u16, 2), descriptor.step_delta);
+    try std.testing.expectEqual(jit.NativeOperationDescriptor.none, descriptor.exceptional_target);
+    const map = program.stack_maps[descriptor.deopt_index];
+    try std.testing.expect(map.scratch_pointer_slots & (@as(u64, 1) << @intCast(descriptor.first_input)) != 0);
+    var runtime_operation: ?Operation = null;
+    for (program.operations) |operation| if (operation.kind == .runtime_operation) {
+        runtime_operation = operation;
+    };
+    const operation = runtime_operation orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), operation.immediate);
+    try std.testing.expectEqual(descriptor.first_input, operation.lhs);
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compileAarch64(&program);
+        defer compiled.deinit();
+        try std.testing.expect(compiled.manages_steps);
+        var slots = [_]u64{Value.num(7).rawBits()};
+        var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+        var steps: u64 = 0;
+        var context = RuntimeOperationTestContext{
+            .input_slot = descriptor.first_input,
+            .expected_input = slots[0],
+            .output = Value.num(42).rawBits(),
+            .status = .value,
+        };
+        var frame = jit.NativeFrame{
+            .slots = &slots,
+            .scratch = &scratch,
+            .steps = &steps,
+            .operation = RuntimeOperationTestContext.dispatch,
+            .operation_context = &context,
+        };
+        try std.testing.expectEqual(jit.ExitStatus.complete, compiled.run(&frame));
+        try std.testing.expectEqual(Value.num(42).rawBits(), frame.result_bits);
+        try std.testing.expectEqual(@as(u64, 3), steps);
+        try std.testing.expectEqual(@as(u32, 1), context.calls);
+
+        inline for (.{
+            .{ jit.NativeOperationStatus.catchable_exception, jit.ExitStatus.throw },
+            .{ jit.NativeOperationStatus.out_of_memory, jit.ExitStatus.stop },
+            .{ jit.NativeOperationStatus.host_trap, jit.ExitStatus.operation_trap },
+            .{ jit.NativeOperationStatus.invalidated, jit.ExitStatus.invalidated },
+        }) |case| {
+            steps = 0;
+            context.status = case[0];
+            context.calls = 0;
+            try std.testing.expectEqual(case[1], compiled.run(&frame));
+            try std.testing.expectEqual(@as(u64, 2), steps);
+            try std.testing.expectEqual(@as(u32, 1), context.calls);
+        }
+    }
+}
+
 test "optimizer lowering publishes an exact pre-tail-call side exit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2920,7 +3232,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .not, .inputs = 1, .kind = .effect },
         .{ .op = .typeof_op, .inputs = 1, .kind = .effect },
         .{ .op = .void_op, .inputs = 1, .kind = .effect },
-        .{ .op = .to_numeric, .inputs = 1, .kind = .effect },
         .{ .op = .inc, .inputs = 1, .kind = .effect },
         .{ .op = .dec, .inputs = 1, .kind = .effect },
         .{ .op = .to_property_key, .inputs = 1, .kind = .effect },
@@ -3507,6 +3818,7 @@ test "optimizer loop moving safepoint publishes and rewrites recovery-only local
             self.hits += 1;
             self.seen_deopt = frame.deopt_index;
             frame.scratch.?[self.held_slot] = Value.boolVal(true).rawBits();
+            frame.moving_safepoint = null;
         }
     };
     var callback = Callback{ .held_slot = held_import.destination };
