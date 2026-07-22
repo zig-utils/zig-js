@@ -568,6 +568,19 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .get_index,
         .set_prop,
         .set_index,
+        .add,
+        .sub,
+        .mul,
+        .div,
+        .mod,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        .eq,
+        .neq,
+        .eq_strict,
+        .neq_strict,
         .pow,
         .bit_and,
         .bit_or,
@@ -636,8 +649,17 @@ const GraphBuilder = struct {
         });
     }
 
-    fn appendBinary(self: *GraphBuilder, block: u32, origin: u32, kind: ValueKind, lhs: ValueId, rhs: ValueId) std.mem.Allocator.Error!ValueId {
-        const may_have_effect = !knownSafePrimitive(self.nodes.items[lhs]) or !knownSafePrimitive(self.nodes.items[rhs]);
+    fn appendBinary(
+        self: *GraphBuilder,
+        block: u32,
+        origin: u32,
+        kind: ValueKind,
+        lhs: ValueId,
+        rhs: ValueId,
+        force_effect: bool,
+    ) std.mem.Allocator.Error!ValueId {
+        const may_have_effect = force_effect or !knownSafePrimitive(self.nodes.items[lhs]) or
+            !knownSafePrimitive(self.nodes.items[rhs]);
         if (!may_have_effect) {
             for (self.nodes.items) |node| {
                 if (node.block == block and node.kind == kind and node.lhs == lhs and node.rhs == rhs and !node.may_have_effect)
@@ -973,10 +995,22 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
                 if (depth < 2) return error.InvalidControlFlow;
+                const runtime_operation = chunk.optimizerBinaryRequiresRuntime(origin);
+                if (runtime_operation) {
+                    try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                    try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                }
                 const rhs = stack[depth - 1];
                 const lhs = stack[depth - 2];
                 depth -= 1;
-                stack[depth - 1] = try builder.appendBinary(@intCast(block_id), @intCast(origin), valueKindForBinary(inst.op), lhs, rhs);
+                stack[depth - 1] = try builder.appendBinary(
+                    @intCast(block_id),
+                    @intCast(origin),
+                    valueKindForBinary(inst.op),
+                    lhs,
+                    rhs,
+                    runtime_operation,
+                );
             },
             .to_numeric, .neg, .pos, .not, .typeof_op, .inc, .dec, .bit_not, .to_string, .to_property_key => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1854,6 +1888,19 @@ test "optimizer keeps every computed write operand live" {
 test "optimizer records exact exceptional targets for interpreter-owned effects" {
     const Case = struct { op: bc.Op, inputs: u32, a: u32 = 0, b: u32 = 0 };
     const cases = [_]Case{
+        .{ .op = .add, .inputs = 2 },
+        .{ .op = .sub, .inputs = 2 },
+        .{ .op = .mul, .inputs = 2 },
+        .{ .op = .div, .inputs = 2 },
+        .{ .op = .mod, .inputs = 2 },
+        .{ .op = .lt, .inputs = 2 },
+        .{ .op = .le, .inputs = 2 },
+        .{ .op = .gt, .inputs = 2 },
+        .{ .op = .ge, .inputs = 2 },
+        .{ .op = .eq, .inputs = 2 },
+        .{ .op = .neq, .inputs = 2 },
+        .{ .op = .eq_strict, .inputs = 2 },
+        .{ .op = .neq_strict, .inputs = 2 },
         .{ .op = .call, .inputs = 2, .a = 1 },
         .{ .op = .call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .new_call, .inputs = 2, .a = 1 },
@@ -1897,9 +1944,14 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
             try chunk.addName("#value")
         else
             case.a;
-        _ = try chunk.emitAB(case.op, operand_a, case.b);
+        const operation = try chunk.emitAB(case.op, operand_a, case.b);
         _ = try chunk.emit(.ret_undef, 0);
         _ = try chunk.emit(.ret_undef, 0);
+        try chunk.finalize();
+        switch (case.op) {
+            .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => chunk.observeOptimizerBinary(operation, .object, .number),
+            else => {},
+        }
 
         var plan = try build(&chunk, std.testing.allocator);
         defer plan.deinit();

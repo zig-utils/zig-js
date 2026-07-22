@@ -304,7 +304,11 @@ fn stageNativeOperationDescriptors(
                 if (source != operation.lhs) return error.UnsupportedChunk;
                 break :runtime source;
             }
-            if ((inst.op == .get_index or inst.op == .set_prop or inst.op == .pow or
+            if ((inst.op == .get_index or inst.op == .set_prop or inst.op == .add or
+                inst.op == .sub or inst.op == .mul or inst.op == .div or inst.op == .mod or
+                inst.op == .lt or inst.op == .le or inst.op == .gt or inst.op == .ge or
+                inst.op == .eq or inst.op == .neq or inst.op == .eq_strict or inst.op == .neq_strict or
+                inst.op == .pow or
                 inst.op == .bit_and or inst.op == .bit_or or inst.op == .bit_xor or
                 inst.op == .shl or inst.op == .shr or inst.op == .ushr or inst.op == .in_op or
                 inst.op == .instance_of) and input_count == 2) break :runtime operation.lhs;
@@ -449,7 +453,11 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
     for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .neg or node.kind == .pos or
         node.kind == .not or node.kind == .typeof_op or node.kind == .inc or node.kind == .dec or
         node.kind == .bit_not or node.kind == .to_string or node.kind == .to_property_key or
-        node.kind == .get_prop or node.kind == .get_index or node.kind == .pow or
+        node.kind == .get_prop or node.kind == .get_index or node.kind == .add or
+        node.kind == .sub or node.kind == .mul or node.kind == .div or node.kind == .mod or
+        node.kind == .lt or node.kind == .le or node.kind == .gt or node.kind == .ge or
+        node.kind == .eq or node.kind == .neq or node.kind == .eq_strict or node.kind == .neq_strict or
+        node.kind == .pow or
         node.kind == .bit_and or node.kind == .bit_or or node.kind == .bit_xor or
         node.kind == .shl or node.kind == .shr or node.kind == .ushr or
         node.kind == .set_prop or node.kind == .set_index or node.kind == .in_op or
@@ -492,6 +500,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     var numeric_inputs: [jit.numeric_scratch_capacity]bool = @splat(false);
     for (graph.nodes) |node| switch (node.kind) {
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+            if (chunk.optimizerBinaryRequiresRuntime(node.origin)) continue;
             numeric_inputs[try resolveAlias(node.lhs, aliases)] = true;
             numeric_inputs[try resolveAlias(node.rhs, aliases)] = true;
         },
@@ -547,9 +556,34 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = Value.boolVal(node.kind == .true).rawBits(),
             });
         },
-        .add, .sub, .mul, .div, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
+        .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
             const lhs = try resolveAlias(node.lhs, aliases);
             const rhs = try resolveAlias(node.rhs, aliases);
+            if (chunk.optimizerBinaryRequiresRuntime(node.origin)) {
+                if (scratch_slots + 2 > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+                const first_input = scratch_slots;
+                for ([_]optimizer.ValueId{ lhs, rhs }) |source| {
+                    try operations.append(allocator, .{
+                        .kind = .copy,
+                        .destination = @intCast(scratch_slots),
+                        .block = node.block,
+                        .lhs = @intCast(source),
+                    });
+                    scratch_slots += 1;
+                }
+                types[node.id] = switch (node.kind) {
+                    .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .boolean,
+                    else => .other,
+                };
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = node.block,
+                    .lhs = @intCast(first_input),
+                    .immediate = node.origin,
+                });
+                continue;
+            }
             // The architecture-neutral graph must conservatively mark
             // parameter operations effectful because it has no type guards.
             // This lowering installs Number guards for every live argument,
@@ -566,6 +600,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .ge => .ge,
                 .eq, .eq_strict => .eq,
                 .neq, .neq_strict => .neq,
+                .mod => return error.UnsupportedChunk,
                 else => unreachable,
             };
             types[node.id] = switch (kind) {
@@ -657,7 +692,6 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
-        .mod => return error.UnsupportedChunk,
     };
 
     var result: optimizer.ValueId = 0;
@@ -3606,6 +3640,58 @@ test "optimizer lowering publishes executable binary coercions" {
             (@as(u64, 1) << @intCast(operation.first_input + 1));
         try std.testing.expectEqual(roots, program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots);
     }
+}
+
+test "optimizer lowering selects runtime semantics only for observed dynamic arithmetic" {
+    const cases = [_]bc.Op{
+        .add, .sub,       .mul,        .div, .mod,
+        .lt,  .le,        .gt,         .ge,  .eq,
+        .neq, .eq_strict, .neq_strict,
+    };
+
+    for (cases) |op| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 2;
+        chunk.local_count = 2;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.load_local, 1);
+        const operation_origin = try chunk.emit(op, 0);
+        _ = try chunk.emit(.ret, 0);
+        try chunk.finalize();
+        chunk.observeOptimizerBinary(operation_origin, .object, .number);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const operation = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(op)), operation.bytecode_op);
+        try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+        const roots = (@as(u64, 1) << @intCast(operation.first_input)) |
+            (@as(u64, 1) << @intCast(operation.first_input + 1));
+        try std.testing.expectEqual(roots, program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots);
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var numeric = bc.Chunk.init(arena.allocator());
+    numeric.param_count = 2;
+    numeric.local_count = 2;
+    _ = try numeric.emit(.load_local, 0);
+    _ = try numeric.emit(.load_local, 1);
+    _ = try numeric.emit(.add, 0);
+    _ = try numeric.emit(.ret, 0);
+    var numeric_plan = try optimizer.build(&numeric, std.testing.allocator);
+    defer numeric_plan.deinit();
+    var numeric_program = try lower(&numeric, &numeric_plan, std.testing.allocator);
+    defer numeric_program.deinit();
+    try std.testing.expectEqual(@as(u64, 0b11), numeric_program.required_numeric_slots);
+    try std.testing.expectEqual(@as(usize, 0), numeric_program.native_operations.len);
 }
 
 test "optimizer lowering publishes an executable construction" {

@@ -3720,7 +3720,20 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
         return finishNativeOperation(frame, vm, operation_id, applyUnaryEffect(vm, op, Value.fromRawBits(inputs[0])));
     }
-    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.pow) or
+    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.add) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.sub) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.mul) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.div) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.mod) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.lt) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.le) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.gt) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.ge) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.eq) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.neq) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.eq_strict) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.neq_strict) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.pow) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.bit_and) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.bit_or) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.bit_xor) or
@@ -4167,6 +4180,11 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.pow);
     metadata.descriptors[0].input_count = 1;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.add);
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
@@ -4995,6 +5013,7 @@ fn runChunk(
             .add, .sub, .mul, .div, .mod, .pow, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => {
                 const r = stack.pop().?;
                 const l = stack.pop().?;
+                chunk.observeOptimizerBinary(ip - 1, optimizerProfileKind(l), optimizerProfileKind(r));
                 // Number-number fast path: when both operands are numbers the
                 // result is computed inline, bit-for-bit identical to
                 // Interpreter.applyBinary, skipping its ToPrimitive / BigInt /
@@ -9248,6 +9267,179 @@ test "vm: optimizer native binary coercion preserves left-to-right one-shot exce
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "vm: optimizer native dynamic arithmetic preserves canonical results" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const Expected = union(enum) { number: f64, boolean: bool, string: []const u8 };
+    const Case = struct { op: bc.Op, lhs: Value, rhs: Value, expected: Expected };
+    const cases = [_]Case{
+        .{ .op = .add, .lhs = Value.str("x"), .rhs = Value.num(2), .expected = .{ .string = "x2" } },
+        .{ .op = .sub, .lhs = Value.str("8"), .rhs = Value.num(3), .expected = .{ .number = 5 } },
+        .{ .op = .mul, .lhs = Value.str("6"), .rhs = Value.num(3), .expected = .{ .number = 18 } },
+        .{ .op = .div, .lhs = Value.str("8"), .rhs = Value.num(2), .expected = .{ .number = 4 } },
+        .{ .op = .mod, .lhs = Value.str("8"), .rhs = Value.num(3), .expected = .{ .number = 2 } },
+        .{ .op = .lt, .lhs = Value.str("2"), .rhs = Value.str("10"), .expected = .{ .boolean = false } },
+        .{ .op = .le, .lhs = Value.str("2"), .rhs = Value.str("2"), .expected = .{ .boolean = true } },
+        .{ .op = .gt, .lhs = Value.str("2"), .rhs = Value.str("10"), .expected = .{ .boolean = true } },
+        .{ .op = .ge, .lhs = Value.str("2"), .rhs = Value.str("2"), .expected = .{ .boolean = true } },
+        .{ .op = .eq, .lhs = Value.str("5"), .rhs = Value.num(5), .expected = .{ .boolean = true } },
+        .{ .op = .neq, .lhs = Value.str("5"), .rhs = Value.num(6), .expected = .{ .boolean = true } },
+        .{ .op = .eq_strict, .lhs = Value.str("5"), .rhs = Value.num(5), .expected = .{ .boolean = false } },
+        .{ .op = .neq_strict, .lhs = Value.str("5"), .rhs = Value.num(5), .expected = .{ .boolean = true } },
+    };
+
+    for (cases) |case| {
+        var chunk = bc.Chunk.init(allocator);
+        chunk.param_count = 2;
+        chunk.local_count = 2;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.load_local, 1);
+        const operation_origin = try chunk.emit(case.op, 0);
+        _ = try chunk.emit(.ret, 0);
+        try chunk.finalize();
+        chunk.observeOptimizerBinary(
+            operation_origin,
+            optimizerProfileKind(case.lhs),
+            optimizerProfileKind(case.rhs),
+        );
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        var slots = [_]Value{ case.lhs, case.rhs };
+        const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+        const result = switch (outcome) {
+            .complete => |value_word| value_word,
+            else => return error.TestUnexpectedResult,
+        };
+        switch (case.expected) {
+            .number => |expected| try std.testing.expectEqual(expected, result.asNum()),
+            .boolean => |expected| try std.testing.expectEqual(expected, result.asBool()),
+            .string => |expected| try std.testing.expectEqualStrings(expected, result.asStr()),
+        }
+        try std.testing.expectEqual(@as(u64, 0), compiled.required_numeric_slots);
+        const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+        try std.testing.expectEqual(@as(u16, @intFromEnum(case.op)), operations.descriptors[0].bytecode_op);
+    }
+
+    var bigint_chunk = bc.Chunk.init(allocator);
+    bigint_chunk.param_count = 2;
+    bigint_chunk.local_count = 2;
+    _ = try bigint_chunk.emit(.load_local, 0);
+    _ = try bigint_chunk.emit(.load_local, 1);
+    const bigint_origin = try bigint_chunk.emit(.add, 0);
+    _ = try bigint_chunk.emit(.ret, 0);
+    try bigint_chunk.finalize();
+    bigint_chunk.observeOptimizerBinary(bigint_origin, .object, .object);
+    var bigint_compiled = try optimizer_compiler.compile(&bigint_chunk);
+    defer bigint_compiled.deinit();
+    var bigint_slots = [_]Value{ try machine.makeBigInt(40), try machine.makeBigInt(2) };
+    const bigint_outcome = try tryRunManagedNative(&machine, &bigint_compiled, &bigint_slots, null);
+    const bigint_result = switch (bigint_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("42", try machine.toStringV(bigint_result));
+    bigint_slots[1] = Value.num(2);
+    try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &bigint_compiled, &bigint_slots, null));
+}
+
+test "vm: optimizer profiles dynamic arithmetic and resumes its exact catch once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let left_calls = 0;
+        \\let right_calls = 0;
+        \\let should_throw = false;
+        \\function dynamic(left, right) { try { return left + right; } catch (e) { return e + left_calls * 10 + right_calls; } }
+        \\function leftValue() { left_calls = left_calls + 1; if (should_throw) throw 90; return 1; }
+        \\function rightValue() { right_calls = right_calls + 1; return 2; }
+        \\const left = { valueOf: leftValue };
+        \\const right = { valueOf: rightValue };
+        \\dynamic(left, right); dynamic(left, right); dynamic(left, right); dynamic(left, right); dynamic(left, right);
+        \\dynamic(left, right); dynamic(left, right); dynamic(left, right); dynamic(left, right);
+        \\should_throw = true; left_calls = 0; right_calls = 0; dynamic(left, right)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    const dynamic_chunk = root.fns.items[0].chunk.?;
+    const artifact = dynamic_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), artifact.required_numeric_slots);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.add)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expect(dynamic_chunk.optimizerBinaryRequiresRuntime(operation.origin));
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "vm: optimizer native dynamic arithmetic comparison feeds Boolean control" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    const eleven = try chunk.addConst(Value.num(11));
+    const twenty_two = try chunk.addConst(Value.num(22));
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    const comparison_origin = try chunk.emit(.lt, 0);
+    _ = try chunk.emit(.jump_if_false, 6);
+    _ = try chunk.emit(.load_const, eleven);
+    _ = try chunk.emit(.ret, 0);
+    _ = try chunk.emit(.load_const, twenty_two);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+    chunk.observeOptimizerBinary(comparison_origin, .string, .string);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var slots = [_]Value{ Value.str("10"), Value.str("2") };
+    const truthy = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const truthy_result = switch (truthy) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 11), truthy_result.asNum());
+    slots = .{ Value.str("2"), Value.str("10") };
+    const falsy = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const falsy_result = switch (falsy) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 22), falsy_result.asNum());
+
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.lt)), operations.descriptors[0].bytecode_op);
 }
 
 test "vm: optimizer native logical not feeds Boolean control" {

@@ -371,6 +371,21 @@ pub const Inst = struct {
     b: u32 = 0,
 };
 
+const OptimizerBinaryProfile = struct {
+    lhs_kinds: std.atomic.Value(u8) = .init(0),
+    rhs_kinds: std.atomic.Value(u8) = .init(0),
+
+    fn observe(self: *OptimizerBinaryProfile, lhs: jit.ProfileValueKind, rhs: jit.ProfileValueKind) void {
+        _ = self.lhs_kinds.fetchOr(@as(u8, 1) << @backingInt(lhs), .monotonic);
+        _ = self.rhs_kinds.fetchOr(@as(u8, 1) << @backingInt(rhs), .monotonic);
+    }
+
+    fn requiresRuntime(self: *const OptimizerBinaryProfile) bool {
+        const number = @as(u8, 1) << @backingInt(jit.ProfileValueKind.number);
+        return (self.lhs_kinds.load(.acquire) | self.rhs_kinds.load(.acquire)) & ~number != 0;
+    }
+};
+
 pub const quick_call_loop_candidate: u8 = 1 << 0;
 pub const quick_array_loop_candidate: u8 = 1 << 1;
 
@@ -514,6 +529,12 @@ pub const Chunk = struct {
     /// One inline cache per instruction, allocated by `finalize` once the code
     /// stream is complete. Warm across runs of the same chunk.
     ics: []InlineCache = &.{},
+    /// Instruction-local operand observations for arithmetic/comparison sites.
+    /// Keeping these separate from the coarse function result profile lets the
+    /// optimizer retain Number-specialized lowering at numeric sites while
+    /// selecting the canonical runtime operation only where dynamic operands
+    /// have actually appeared.
+    optimizer_binary_profiles: []OptimizerBinaryProfile = &.{},
     /// Lazily allocated VM-owned quick-trace plans, indexed by their first
     /// bytecode. Kept type-erased here to avoid a bytecode → VM import cycle.
     /// Isolated execution publishes a plan only after fully decoding it and may
@@ -563,6 +584,8 @@ pub const Chunk = struct {
     pub fn finalize(self: *Chunk) std.mem.Allocator.Error!void {
         self.ics = try self.arena.alloc(InlineCache, self.code.items.len);
         @memset(self.ics, .{});
+        self.optimizer_binary_profiles = try self.arena.alloc(OptimizerBinaryProfile, self.code.items.len);
+        @memset(self.optimizer_binary_profiles, .{});
         self.quick_property_kernel_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
         @memset(self.quick_property_kernel_plans, null);
         self.quick_array_plans = try self.arena.alloc(?*anyopaque, self.code.items.len);
@@ -587,6 +610,21 @@ pub const Chunk = struct {
 
     pub fn markDebugStatement(self: *Chunk, node: *const ast.Node) std.mem.Allocator.Error!void {
         try self.debug_sites.append(self.arena, .{ .instruction = self.code.items.len, .node = node });
+    }
+
+    pub fn observeOptimizerBinary(
+        self: *Chunk,
+        instruction: usize,
+        lhs: jit.ProfileValueKind,
+        rhs: jit.ProfileValueKind,
+    ) void {
+        if (instruction < self.optimizer_binary_profiles.len)
+            self.optimizer_binary_profiles[instruction].observe(lhs, rhs);
+    }
+
+    pub fn optimizerBinaryRequiresRuntime(self: *const Chunk, instruction: usize) bool {
+        return instruction < self.optimizer_binary_profiles.len and
+            self.optimizer_binary_profiles[instruction].requiresRuntime();
     }
 
     /// Emit an instruction, returning its index (for later jump back-patching).
@@ -670,6 +708,46 @@ test "InlineCache retains four polymorphic shape-slot pairs" {
         retained_secondary += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), retained_secondary);
+}
+
+test "optimizer binary profiles remain instruction-local and preserve numeric sites" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = Chunk.init(arena.allocator());
+    const numeric = try chunk.emit(.add, 0);
+    const dynamic = try chunk.emit(.sub, 0);
+    try chunk.finalize();
+
+    try std.testing.expect(!chunk.optimizerBinaryRequiresRuntime(numeric));
+    try std.testing.expect(!chunk.optimizerBinaryRequiresRuntime(dynamic));
+    chunk.observeOptimizerBinary(numeric, .number, .number);
+    chunk.observeOptimizerBinary(dynamic, .object, .number);
+    try std.testing.expect(!chunk.optimizerBinaryRequiresRuntime(numeric));
+    try std.testing.expect(chunk.optimizerBinaryRequiresRuntime(dynamic));
+}
+
+test "optimizer binary profile observations merge race-free" {
+    const builtin = @import("builtin");
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const Shared = struct {
+        profile: OptimizerBinaryProfile = .{},
+
+        fn observe(shared: *@This(), lhs: jit.ProfileValueKind, rhs: jit.ProfileValueKind) void {
+            for (0..10_000) |_| shared.profile.observe(lhs, rhs);
+        }
+    };
+
+    var shared = Shared{};
+    const t0 = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, .number, .number });
+    const t1 = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, .string, .number });
+    const t2 = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, .object, .boolean });
+    const t3 = try std.Thread.spawn(.{}, Shared.observe, .{ &shared, .null, .undefined });
+    t0.join();
+    t1.join();
+    t2.join();
+    t3.join();
+    try std.testing.expect(shared.profile.requiresRuntime());
 }
 
 test "InlineCache seqlock: concurrent writers never tear shape-slot pairs" {
