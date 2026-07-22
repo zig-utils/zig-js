@@ -51,7 +51,9 @@ The published arrays workload still selects the older guarded VM packed-push and
 
 The saved [July 21 property profile](.data/optimizer-property-profile-2026-07-21.md) attributes 46.2% of collapsed leaves to generated code and records 52.6% fewer `runChunk`, 69.1% fewer quick-property, and 40.0% fewer numeric-property leaves than the July 16 baseline.
 
-Executable-code invalidation now closes native entry immediately while existing owner leases keep published mappings alive. Function entry and direct calls poll the owner before entering native code. Optimizer machine code then compares the artifact's owner generation before its first operation, closing the race after the VM poll; the native loop repeats that poll at every header and side-exits exact current state when it changes. Rejection before work performs no step accounting or state mutation, while a later poll preserves completed iterations and resumes bytecode at the current header.
+Executable-code invalidation closes native entry immediately, jettisons every registered tier, and rotates the owner's execution epoch. Published code and all artifact-owned property caches, call links, handler chains, recovery records, and stack maps move into the retired epoch; its final reader reclaims them without waiting for readers that began in a later generation. Live, retired, and cumulatively reclaimed artifact counts and executable bytes are maintained at every transition. Compilation claims use a separate lease, so invalidation rejects a stale publisher before rotation while long-running bytecode does not pin unrelated generations. Native entry carries the outer epoch token and checks it around artifact loads, preventing an invalidated execution from entering newer code.
+
+Every ordinary optimizer call operation owns an atomic versioned call-link tuple containing the stable callee identity, target optimizer generation, and artifact address. Competing runtime linkers publish or reset the tuple under one seqlock bracket; readers either observe one complete record or miss. A hit revalidates both the live callee tier generation and exact artifact before using the rooted direct-call path. A miss retains the canonical runtime call, exception, tail-call, and side-exit behavior, then publishes only a still-current successful target. The tuple is inline artifact metadata and therefore retires with the caller's epoch.
 
 Focused verification:
 
@@ -79,6 +81,8 @@ zig build test-jit -Dtest-filter='non-tail invocation'
 zig build test-jit -Dtest-filter='object and array construction'
 zig build test -Dtest-filter='logical not'
 zig build test-jit -Dtest-filter='tail call'
+zig build test -Dtest-filter='Owner '
+zig build test-jit -Dtest-filter='optimizer call-link'
 zig build test -Dtest-filter='native named write'
 zig build test -Dtest-filter='native computed write'
 zig build test -Dtest-filter='optimizer packed index'
