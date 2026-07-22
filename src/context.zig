@@ -15486,13 +15486,10 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
 }
 
-test "optimizer live safepoint relocates a recovery-only object local" {
+fn verifyOptimizerLiveSafepointRelocation(options: Context.TestingOptions) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
-    const ctx = try Context.createWith(std.testing.allocator, .{
-        .enable_gc = true,
-        .enable_jit = true,
-    });
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
 
     _ = try ctx.evaluate(
@@ -15545,6 +15542,21 @@ test "optimizer live safepoint relocates a recovery-only object local" {
     try std.testing.expectEqual(@as(f64, 362), handle.get().asObj().getOwn("marker").?.asNum());
     try std.testing.expectEqual(artifact, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
     try std.testing.expect(ctx.gc_cell_backing.?.stats().chunks < backing_before.chunks);
+}
+
+test "optimizer live safepoint relocates a recovery-only object local" {
+    try verifyOptimizerLiveSafepointRelocation(.{ .enable_gc = true, .enable_jit = true });
+}
+
+test "parallel_js: optimizer live safepoint relocates a recovery-only object local" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try verifyOptimizerLiveSafepointRelocation(.{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
 }
 
 test "GC compaction rewrites public Zig protected handles" {
