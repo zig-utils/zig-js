@@ -89,6 +89,98 @@ pub const BranchValue = struct {
 
 pub const FrameStateKind = enum { block_entry, branch, return_, throw_, abrupt_return, abrupt_jump, call, effect };
 
+fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
+    return switch (op) {
+        .throw_op => .throw_,
+        .abrupt_return => .abrupt_return,
+        .abrupt_break, .abrupt_continue => .abrupt_jump,
+        .call,
+        .call_eval,
+        .call_method,
+        .call_spread,
+        .call_method_spread,
+        .call_with_this,
+        .new_call,
+        .new_spread,
+        .tail_call,
+        .tail_call_eval,
+        .tail_call_method,
+        .tail_call_with_this,
+        => .call,
+        .load_bigint,
+        .load_var,
+        .load_var_or_undef,
+        .store_var,
+        .def_var,
+        .def_lex,
+        .bind_pattern,
+        .load_upval,
+        .store_upval,
+        .neg,
+        .pos,
+        .not,
+        .typeof_op,
+        .bit_not,
+        .void_op,
+        .to_string,
+        .to_numeric,
+        .inc,
+        .dec,
+        .to_property_key,
+        .name_anon,
+        .pow,
+        .in_op,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .shl,
+        .shr,
+        .ushr,
+        .load_this,
+        .load_new_target,
+        .new_object,
+        .new_array,
+        .init_prop,
+        .init_proto,
+        .init_prop_computed,
+        .init_spread,
+        .init_getter,
+        .init_setter,
+        .array_append,
+        .array_spread,
+        .get_prop,
+        .super_get,
+        .super_get_index,
+        .enter_block,
+        .exit_block,
+        .dispose_scope,
+        .enter_with,
+        .exit_with,
+        .make_regex,
+        .register_disposable,
+        .array_append_hole,
+        .import_call,
+        .get_index,
+        .set_prop,
+        .set_index,
+        .instance_of,
+        .private_in,
+        .make_closure,
+        .assert_iter_result,
+        .iter_of,
+        .async_iter_of,
+        .enum_keys,
+        .iter_close,
+        .iter_close_completion,
+        .async_iter_close,
+        .async_iter_close_completion,
+        .eval_class,
+        .template_object,
+        => .effect,
+        else => null,
+    };
+}
+
 pub const HandlerState = struct {
     catch_ip: u32,
     finally_ip: u32,
@@ -289,45 +381,7 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
             starts[inst.a] = true;
             if (ip + 1 < code.len) starts[ip + 1] = true;
         },
-        .ret,
-        .ret_undef,
-        .throw_op,
-        .abrupt_return,
-        .call,
-        .call_eval,
-        .call_method,
-        .call_spread,
-        .call_method_spread,
-        .call_with_this,
-        .new_call,
-        .new_spread,
-        .tail_call,
-        .tail_call_eval,
-        .tail_call_method,
-        .tail_call_with_this,
-        .get_prop,
-        .get_index,
-        .set_prop,
-        .set_index,
-        .instance_of,
-        .private_in,
-        .neg,
-        .pos,
-        .to_numeric,
-        .inc,
-        .dec,
-        .to_property_key,
-        .bit_not,
-        .to_string,
-        .pow,
-        .in_op,
-        .bit_and,
-        .bit_or,
-        .bit_xor,
-        .shl,
-        .shr,
-        .ushr,
-        => if (ip + 1 < code.len) {
+        .ret, .ret_undef => if (ip + 1 < code.len) {
             starts[ip + 1] = true;
         },
         .push_handler => {
@@ -340,7 +394,9 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 starts[inst.b] = true;
             }
         },
-        else => {},
+        else => if (terminalFrameStateKind(inst.op) != null and ip + 1 < code.len) {
+            starts[ip + 1] = true;
+        },
     };
 
     var blocks_list: std.ArrayListUnmanaged(Block) = .empty;
@@ -374,50 +430,9 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
                 addSuccessor(block, block_at[last.a]);
                 if (index + 1 < blocks_list.items.len) addSuccessor(block, @intCast(index + 1));
             },
-            .ret,
-            .ret_undef,
-            .throw_op,
-            .abrupt_return,
-            .abrupt_break,
-            .abrupt_continue,
-            .call,
-            .call_eval,
-            .call_method,
-            .call_spread,
-            .call_method_spread,
-            .call_with_this,
-            .new_call,
-            .new_spread,
-            .tail_call,
-            .tail_call_eval,
-            .tail_call_method,
-            .tail_call_with_this,
-            .get_prop,
-            .get_index,
-            .set_prop,
-            .set_index,
-            .instance_of,
-            .private_in,
-            .neg,
-            .pos,
-            .to_numeric,
-            .inc,
-            .dec,
-            .to_property_key,
-            .bit_not,
-            .to_string,
-            .pow,
-            .in_op,
-            .bit_and,
-            .bit_or,
-            .bit_xor,
-            .shl,
-            .shr,
-            .ushr,
-            => {},
-            else => if (index + 1 < blocks_list.items.len) {
-                addSuccessor(block, @intCast(index + 1));
-            },
+            .ret, .ret_undef => {},
+            else => if (terminalFrameStateKind(last.op) == null and index + 1 < blocks_list.items.len)
+                addSuccessor(block, @intCast(index + 1)),
         }
     }
 
@@ -472,21 +487,50 @@ const DepthEffect = struct {
 
 fn depthEffect(inst: bc.Inst) DepthEffect {
     return switch (inst.op) {
-        .load_const, .load_undefined, .load_null, .load_true, .load_false, .load_local => .{ .required = 0, .removed = 0, .added = 1 },
+        .load_const,
+        .load_bigint,
+        .load_undefined,
+        .load_null,
+        .load_true,
+        .load_false,
+        .load_var,
+        .load_var_or_undef,
+        .load_local,
+        .load_upval,
+        .load_this,
+        .load_new_target,
+        .new_object,
+        .new_array,
+        .super_get,
+        .make_regex,
+        .make_closure,
+        .template_object,
+        => .{ .required = 0, .removed = 0, .added = 1 },
         .pop, .jump_if_false, .ret, .throw_op, .abrupt_return => .{ .required = 1, .removed = 1, .added = 0 },
-        .store_local => .{ .required = 1, .removed = 0, .added = 0 },
+        .store_var, .store_local, .store_upval, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
+        .def_var, .def_lex, .bind_pattern, .enter_with, .register_disposable, .iter_close => .{ .required = 1, .removed = 1, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
-        .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue => .{ .required = 0, .removed = 0, .added = 0 },
+        .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue, .enter_block, .exit_block, .exit_with => .{ .required = 0, .removed = 0, .added = 0 },
         .call, .call_eval, .new_call, .tail_call, .tail_call_eval => .{ .required = inst.a +| 1, .removed = inst.a +| 1, .added = 1 },
         .call_method, .tail_call_method => .{ .required = inst.b +| 1, .removed = inst.b +| 1, .added = 1 },
         .call_with_this, .tail_call_with_this => .{ .required = inst.a +| 2, .removed = inst.a +| 2, .added = 1 },
         .call_spread, .call_method_spread, .new_spread => .{ .required = 2, .removed = 2, .added = 1 },
-        .get_prop => .{ .required = 1, .removed = 1, .added = 1 },
-        .get_index, .set_prop, .instance_of => .{ .required = 2, .removed = 2, .added = 1 },
+        .get_prop, .super_get_index, .iter_of, .async_iter_of, .enum_keys => .{ .required = 1, .removed = 1, .added = 1 },
+        .get_index, .set_prop, .instance_of, .import_call => .{ .required = 2, .removed = 2, .added = 1 },
         .set_index => .{ .required = 3, .removed = 3, .added = 1 },
         .private_in => .{ .required = 1, .removed = 1, .added = 1 },
-        .neg, .pos, .to_numeric, .inc, .dec, .to_property_key, .bit_not, .to_string => .{ .required = 1, .removed = 1, .added = 1 },
+        .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string, .to_numeric, .inc, .dec, .to_property_key => .{ .required = 1, .removed = 1, .added = 1 },
         .pow, .in_op, .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => .{ .required = 2, .removed = 2, .added = 1 },
+        .init_prop, .init_proto, .init_spread, .array_append, .array_spread => .{ .required = 2, .removed = 1, .added = 0 },
+        .init_prop_computed, .init_getter, .init_setter => .{ .required = 3, .removed = 2, .added = 0 },
+        .iter_close_completion => .{ .required = 3, .removed = 1, .added = 0 },
+        .async_iter_close => .{ .required = 1, .removed = 1, .added = 2 },
+        .async_iter_close_completion => .{ .required = 3, .removed = 1, .added = 2 },
+        .eval_class => .{ .required = inst.b, .removed = inst.b, .added = 1 },
+        .dispose_scope => if (inst.a == 1)
+            .{ .required = 0, .removed = 0, .added = 1 }
+        else
+            .{ .required = 0, .removed = 0, .added = 0 },
         else => unreachable,
     };
 }
@@ -877,65 +921,24 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 // active finally records before canonical completion unwinding.
                 try builder.appendFrameState(.abrupt_jump, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
             },
-            .call,
-            .call_eval,
-            .call_method,
-            .call_spread,
-            .call_method_spread,
-            .call_with_this,
-            .new_call,
-            .new_spread,
-            .tail_call,
-            .tail_call_eval,
-            .tail_call_method,
-            .tail_call_with_this,
-            => {
-                const effect = depthEffect(inst);
-                const required: usize = @intCast(effect.required);
-                if (depth < required) return error.InvalidControlFlow;
-                // Calls remain bytecode-owned. This state preserves the callee
-                // or receiver plus arguments before user or host code can run.
-                try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
-                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
-            },
-            .get_prop,
-            .get_index,
-            .set_prop,
-            .set_index,
-            .instance_of,
-            .private_in,
-            .neg,
-            .pos,
-            .to_numeric,
-            .inc,
-            .dec,
-            .to_property_key,
-            .bit_not,
-            .to_string,
-            .pow,
-            .in_op,
-            .bit_and,
-            .bit_or,
-            .bit_xor,
-            .shl,
-            .shr,
-            .ushr,
-            => {
-                const effect = depthEffect(inst);
-                const required: usize = @intCast(effect.required);
-                if (depth < required) return error.InvalidControlFlow;
-                // Reads, writes, coercions, and brand checks may invoke user
-                // code or throw. Resume before the interpreter performs them.
-                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
-                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
-            },
             .push_handler => try handlers.append(allocator, .{
                 .catch_ip = inst.a,
                 .finally_ip = inst.b,
                 .stack_depth = @intCast(depth),
             }),
             .pop_handler => if (handlers.pop() == null) return error.InvalidControlFlow,
-            else => unreachable,
+            else => {
+                const kind = terminalFrameStateKind(inst.op) orelse unreachable;
+                if (kind != .call and kind != .effect) unreachable;
+                const effect = depthEffect(inst);
+                const required: usize = @intCast(effect.required);
+                if (depth < required) return error.InvalidControlFlow;
+                // Interpreter-owned operations exit before observable work.
+                // Preserve every input and active handler so calls, allocation,
+                // environment access, iteration, and other effects execute once.
+                try builder.appendFrameState(kind, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
+            },
         };
 
         for (block.successors[0..block.successor_count]) |successor| {
@@ -1095,6 +1098,7 @@ fn addSuccessor(block: *Block, successor: u32) void {
 }
 
 fn supports(op: bc.Op) bool {
+    if (terminalFrameStateKind(op) != null) return true;
     return switch (op) {
         .load_const,
         .load_undefined,
@@ -1123,44 +1127,6 @@ fn supports(op: bc.Op) bool {
         .ret_undef,
         .push_handler,
         .pop_handler,
-        .throw_op,
-        .abrupt_return,
-        .abrupt_break,
-        .abrupt_continue,
-        .call,
-        .call_eval,
-        .call_method,
-        .call_spread,
-        .call_method_spread,
-        .call_with_this,
-        .new_call,
-        .new_spread,
-        .tail_call,
-        .tail_call_eval,
-        .tail_call_method,
-        .tail_call_with_this,
-        .get_prop,
-        .get_index,
-        .set_prop,
-        .set_index,
-        .instance_of,
-        .private_in,
-        .neg,
-        .pos,
-        .to_numeric,
-        .inc,
-        .dec,
-        .to_property_key,
-        .bit_not,
-        .to_string,
-        .pow,
-        .in_op,
-        .bit_and,
-        .bit_or,
-        .bit_xor,
-        .shl,
-        .shr,
-        .ushr,
         => true,
         else => false,
     };

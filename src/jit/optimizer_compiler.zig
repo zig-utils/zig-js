@@ -1491,7 +1491,7 @@ test "optimizer lowering publishes an exact pre-construction side exit" {
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
 }
 
-test "optimizer lowering publishes rooted remaining call and effect side exits" {
+test "optimizer lowering publishes rooted interpreter-owned side exits" {
     const Case = struct {
         op: bc.Op,
         a: u32 = 0,
@@ -1514,8 +1514,16 @@ test "optimizer lowering publishes rooted remaining call and effect side exits" 
         .{ .op = .set_index, .inputs = 3, .kind = .effect },
         .{ .op = .instance_of, .inputs = 2, .kind = .effect },
         .{ .op = .private_in, .inputs = 1, .kind = .effect },
+        .{ .op = .store_var, .inputs = 1, .kind = .effect },
+        .{ .op = .def_var, .inputs = 1, .kind = .effect },
+        .{ .op = .def_lex, .inputs = 1, .kind = .effect },
+        .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
+        .{ .op = .store_upval, .inputs = 1, .kind = .effect },
         .{ .op = .neg, .inputs = 1, .kind = .effect },
         .{ .op = .pos, .inputs = 1, .kind = .effect },
+        .{ .op = .not, .inputs = 1, .kind = .effect },
+        .{ .op = .typeof_op, .inputs = 1, .kind = .effect },
+        .{ .op = .void_op, .inputs = 1, .kind = .effect },
         .{ .op = .to_numeric, .inputs = 1, .kind = .effect },
         .{ .op = .inc, .inputs = 1, .kind = .effect },
         .{ .op = .dec, .inputs = 1, .kind = .effect },
@@ -1530,6 +1538,29 @@ test "optimizer lowering publishes rooted remaining call and effect side exits" 
         .{ .op = .shl, .inputs = 2, .kind = .effect },
         .{ .op = .shr, .inputs = 2, .kind = .effect },
         .{ .op = .ushr, .inputs = 2, .kind = .effect },
+        .{ .op = .name_anon, .inputs = 1, .kind = .effect },
+        .{ .op = .init_prop, .inputs = 2, .kind = .effect },
+        .{ .op = .init_proto, .inputs = 2, .kind = .effect },
+        .{ .op = .init_prop_computed, .inputs = 3, .kind = .effect },
+        .{ .op = .init_spread, .inputs = 2, .kind = .effect },
+        .{ .op = .init_getter, .inputs = 3, .kind = .effect },
+        .{ .op = .init_setter, .inputs = 3, .kind = .effect },
+        .{ .op = .array_append, .inputs = 2, .kind = .effect },
+        .{ .op = .array_spread, .inputs = 2, .kind = .effect },
+        .{ .op = .array_append_hole, .inputs = 1, .kind = .effect },
+        .{ .op = .super_get_index, .inputs = 1, .kind = .effect },
+        .{ .op = .enter_with, .inputs = 1, .kind = .effect },
+        .{ .op = .register_disposable, .inputs = 1, .kind = .effect },
+        .{ .op = .import_call, .inputs = 2, .kind = .effect },
+        .{ .op = .assert_iter_result, .inputs = 1, .kind = .effect },
+        .{ .op = .iter_of, .inputs = 1, .kind = .effect },
+        .{ .op = .async_iter_of, .inputs = 1, .kind = .effect },
+        .{ .op = .enum_keys, .inputs = 1, .kind = .effect },
+        .{ .op = .iter_close, .inputs = 1, .kind = .effect },
+        .{ .op = .iter_close_completion, .inputs = 3, .kind = .effect },
+        .{ .op = .async_iter_close, .inputs = 1, .kind = .effect },
+        .{ .op = .async_iter_close_completion, .inputs = 3, .kind = .effect },
+        .{ .op = .eval_class, .b = 2, .inputs = 2, .kind = .effect },
     };
 
     for (cases) |case| {
@@ -1553,6 +1584,55 @@ test "optimizer lowering publishes rooted remaining call and effect side exits" 
         try std.testing.expectEqual(@as(u64, 0), program.required_numeric_slots);
         const expected_roots = (@as(u64, 1) << @intCast(case.inputs)) - 1;
         try std.testing.expectEqual(expected_roots, program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
+        try std.testing.expectEqual(@as(u64, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
+    }
+}
+
+test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
+    const Case = struct {
+        op: bc.Op,
+        a: u32 = 0,
+    };
+    const cases = [_]Case{
+        .{ .op = .load_bigint },
+        .{ .op = .load_var },
+        .{ .op = .load_var_or_undef },
+        .{ .op = .load_upval },
+        .{ .op = .load_this },
+        .{ .op = .load_new_target },
+        .{ .op = .new_object },
+        .{ .op = .new_array },
+        .{ .op = .super_get },
+        .{ .op = .enter_block },
+        .{ .op = .exit_block },
+        .{ .op = .dispose_scope },
+        .{ .op = .dispose_scope, .a = 1 },
+        .{ .op = .exit_with },
+        .{ .op = .make_regex },
+        .{ .op = .make_closure },
+        .{ .op = .template_object },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = 1;
+        chunk.local_count = 1;
+        _ = try chunk.emit(.load_local, 0);
+        _ = try chunk.emit(.pop, 0);
+        _ = try chunk.emit(case.op, case.a);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
+        const point = program.deopt_points[side_exit.deopt_index];
+        try std.testing.expectEqual(jit.DeoptPointKind.effect, point.kind);
+        try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
+        try std.testing.expectEqual(@as(u16, 0), point.stack_count);
+        try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
         try std.testing.expectEqual(@as(u64, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
     }
 }
