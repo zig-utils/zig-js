@@ -58,6 +58,7 @@ pub const SideExitBranch = struct {
     true_deopt_index: u16,
     false_steps: u12,
     true_steps: u12,
+    backedge_steps: u12 = 0,
     loop_prefix_steps: u12 = 0,
     true_block: ?u32 = null,
 };
@@ -92,6 +93,16 @@ pub const LoopExitGuard = struct {
     exit_steps: u12,
 };
 
+pub const LoopLatchGuard = struct {
+    entry_block: u32,
+    condition: u8,
+    latch_block: u32,
+    latch_from: u32,
+    operations_block: u32,
+    backedge_on_true: bool,
+    backedge_steps: u12,
+};
+
 pub const Program = struct {
     allocator: std.mem.Allocator,
     operations: []Operation,
@@ -100,6 +111,7 @@ pub const Program = struct {
     side_exit: ?SideExit,
     side_exit_branch: ?SideExitBranch,
     loop_exit_guards: []LoopExitGuard = &.{},
+    loop_latch_guards: []LoopLatchGuard = &.{},
     loop_branches: []LoopBranch = &.{},
     scratch_slots: u8,
     frame_slots: u32,
@@ -121,6 +133,7 @@ pub const Program = struct {
         self.allocator.free(self.deopt_handlers);
         self.allocator.free(self.stack_maps);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
+        if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
@@ -459,6 +472,20 @@ fn loopExitArm(
     return .{ .block = target, .direct = false };
 }
 
+fn loopBackedgeArm(
+    plan: *const optimizer.Plan,
+    branches: []const optimizer.BranchValue,
+    header: u32,
+    target: u32,
+) ?LoopExitArm {
+    if (target == header) return .{ .block = target, .direct = true };
+    if (target >= plan.blocks.len) return null;
+    for (branches) |branch| if (branch.block == target) return null;
+    const block = plan.blocks[target];
+    if (block.successor_count != 1 or block.successors[0] != header) return null;
+    return .{ .block = target, .direct = false };
+}
+
 fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
     const graph = &plan.graph;
     if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
@@ -489,10 +516,14 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     var body: ?u32 = null;
     var exit_guards: std.ArrayListUnmanaged(LoopExitGuard) = .empty;
     defer exit_guards.deinit(allocator);
+    var latch_guards: std.ArrayListUnmanaged(LoopLatchGuard) = .empty;
+    defer latch_guards.deinit(allocator);
     var loop_branches: std.ArrayListUnmanaged(LoopBranch) = .empty;
     defer loop_branches.deinit(allocator);
     var latch: u32 = undefined;
     var true_steps: u32 = undefined;
+    var backedge_steps: u32 = undefined;
+    var guarded_backedge_steps: u32 = 0;
     var tail_block = branch.true_block;
     var tail_prefix_steps = plan.blocks[header].instruction_count;
 
@@ -537,10 +568,62 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             latch = tail_block;
             true_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[tail_block].instruction_count) catch
                 return error.UnsupportedChunk;
+            backedge_steps = true_steps;
         } else if (branchForBlock(graph.branches, tail_block) == null) {
             exit_guards.clearRetainingCapacity();
             tail_block = branch.true_block;
             tail_prefix_steps = plan.blocks[header].instruction_count;
+        }
+    }
+
+    // Consume a chain of conditional continues before the shared tail. Each
+    // guard owns one exact backedge arm and leaves the other arm available for
+    // another guard, a shared branch region, or the final straight latch.
+    if (body == null and branchForBlock(graph.branches, tail_block) != null) {
+        while (latch_guards.items.len < graph.branches.len) {
+            const guard_branch = branchForBlock(graph.branches, tail_block) orelse break;
+            if (guard_branch.false_block == guard_branch.true_block or
+                guard_branch.false_block >= plan.blocks.len or guard_branch.true_block >= plan.blocks.len)
+                break;
+            const false_latch = loopBackedgeArm(plan, graph.branches, header, guard_branch.false_block);
+            const true_latch = loopBackedgeArm(plan, graph.branches, header, guard_branch.true_block);
+            if ((false_latch == null) == (true_latch == null)) break;
+            const backedge = false_latch orelse true_latch.?;
+            const backedge_on_true = true_latch != null;
+            const continue_block = if (backedge_on_true) guard_branch.false_block else guard_branch.true_block;
+            tail_prefix_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[tail_block].instruction_count) catch
+                return error.UnsupportedChunk;
+            const latch_steps = if (backedge.direct)
+                tail_prefix_steps
+            else
+                std.math.add(u32, tail_prefix_steps, plan.blocks[backedge.block].instruction_count) catch
+                    return error.UnsupportedChunk;
+            const synthetic_block = std.math.add(
+                u32,
+                std.math.cast(u32, plan.blocks.len) orelse return error.UnsupportedChunk,
+                std.math.cast(u32, latch_guards.items.len) orelse return error.UnsupportedChunk,
+            ) catch return error.UnsupportedChunk;
+            try latch_guards.append(allocator, .{
+                .entry_block = tail_block,
+                .condition = std.math.cast(u8, guard_branch.condition) orelse return error.UnsupportedChunk,
+                .latch_block = backedge.block,
+                .latch_from = if (backedge.direct) tail_block else backedge.block,
+                .operations_block = if (backedge.direct) synthetic_block else backedge.block,
+                .backedge_on_true = backedge_on_true,
+                .backedge_steps = std.math.cast(u12, latch_steps) orelse return error.UnsupportedChunk,
+            });
+            guarded_backedge_steps = @max(guarded_backedge_steps, latch_steps);
+            tail_block = continue_block;
+            if (tail_block >= plan.blocks.len) return error.UnsupportedChunk;
+            if (plan.blocks[tail_block].successor_count == 1 and plan.blocks[tail_block].successors[0] == header) {
+                body = tail_block;
+                latch = tail_block;
+                backedge_steps = std.math.add(u32, tail_prefix_steps, plan.blocks[tail_block].instruction_count) catch
+                    return error.UnsupportedChunk;
+                true_steps = @max(guarded_backedge_steps, backedge_steps);
+                break;
+            }
+            if (branchForBlock(graph.branches, tail_block) == null) return error.UnsupportedChunk;
         }
     }
 
@@ -608,7 +691,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             total_steps = std.math.add(u32, total_steps, @max(false_steps, nested_true_steps)) catch
                 return error.UnsupportedChunk;
             if (terminal) {
-                true_steps = total_steps;
+                true_steps = @max(guarded_backedge_steps, total_steps);
+                backedge_steps = total_steps;
                 break;
             }
             current = next orelse return error.UnsupportedChunk;
@@ -623,6 +707,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         body = straight_body;
         latch = straight_body;
         true_steps = try sumInstructionCounts(plan, &.{ header, straight_body });
+        backedge_steps = true_steps;
     }
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
@@ -642,6 +727,17 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         if (guard.exit_from != guard.entry_block) {
             try appendEdgeCopies(graph, guard.entry_block, guard.exit_block, guard.exit_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
             try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        }
+        path_from = guard.entry_block;
+    }
+    for (latch_guards.items) |guard| {
+        try appendEdgeCopies(graph, path_from.?, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
+        try appendEdgeCopies(graph, guard.entry_block, guard.latch_block, guard.operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        if (guard.latch_from != guard.entry_block) {
+            try appendBlockOperations(graph, guard.latch_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+            try appendEdgeCopies(graph, guard.latch_block, header, guard.operations_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         }
         path_from = guard.entry_block;
     }
@@ -715,6 +811,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(stack_maps);
     const owned_exit_guards = try exit_guards.toOwnedSlice(allocator);
     errdefer if (owned_exit_guards.len != 0) allocator.free(owned_exit_guards);
+    const owned_latch_guards = try latch_guards.toOwnedSlice(allocator);
+    errdefer if (owned_latch_guards.len != 0) allocator.free(owned_latch_guards);
     const owned_loop_branches = try loop_branches.toOwnedSlice(allocator);
     errdefer if (owned_loop_branches.len != 0) allocator.free(owned_loop_branches);
     var local_mask: u64 = 0;
@@ -738,10 +836,12 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .true_deopt_index = true_index,
             .false_steps = exit_steps,
             .true_steps = iteration_steps,
+            .backedge_steps = std.math.cast(u12, backedge_steps) orelse return error.UnsupportedChunk,
             .loop_prefix_steps = std.math.cast(u12, tail_prefix_steps) orelse return error.UnsupportedChunk,
             .true_block = body,
         },
         .loop_exit_guards = owned_exit_guards,
+        .loop_latch_guards = owned_latch_guards,
         .loop_branches = owned_loop_branches,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
@@ -1264,6 +1364,24 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             );
             try assembler.patchConditionBranch(continue_jump, assembler.position());
         }
+        for (program.loop_latch_guards) |guard| {
+            try emitBlockOperations(&assembler, program, guard.entry_block);
+            try assembler.load64(9, 14, try slotOffset(guard.condition));
+            try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+            try assembler.compareRegister64(9, 10);
+            const continue_jump = try assembler.branchConditionPlaceholder(
+                if (guard.backedge_on_true) .eq else .ne,
+            );
+            try emitBlockOperations(&assembler, program, guard.operations_block);
+            try emitStepIncrement(&assembler, guard.backedge_steps);
+            try assembler.subtractImmediate64(15, 15, guard.backedge_steps);
+            try assembler.subtractImmediate64(16, 16, guard.backedge_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const guarded_backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(guarded_backedge, loop_top);
+            try assembler.patchConditionBranch(continue_jump, assembler.position());
+        }
         if (program.loop_branches.len != 0) {
             try emitStepIncrement(&assembler, branch.loop_prefix_steps);
             try assembler.subtractImmediate64(15, 15, branch.loop_prefix_steps);
@@ -1298,9 +1416,9 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
             try assembler.patchBranch(backedge, loop_top);
         } else {
             try emitBlockOperations(&assembler, program, branch.true_block.?);
-            try emitStepIncrement(&assembler, branch.true_steps);
-            try assembler.subtractImmediate64(15, 15, branch.true_steps);
-            try assembler.subtractImmediate64(16, 16, branch.true_steps);
+            try emitStepIncrement(&assembler, branch.backedge_steps);
+            try assembler.subtractImmediate64(15, 15, branch.backedge_steps);
+            try assembler.subtractImmediate64(16, 16, branch.backedge_steps);
             try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
             if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
             const backedge = try assembler.branchPlaceholder();
