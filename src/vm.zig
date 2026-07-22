@@ -4011,8 +4011,13 @@ fn tryExecuteNative(vm: *Interpreter, native: *const jit.CompiledCode, frame: ?*
     return if (result) |value_word| .{ .complete = value_word } else .miss;
 }
 
+fn statementHooksRequireBytecode(vm: *const Interpreter) bool {
+    return vm.debug_statement_hook != null or vm.host_statement_hook != null or
+        vm.profile_statement_hook != null;
+}
+
 fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!NativeRunOutcome {
-    if (gen != null or !vm.jit_execution_allowed) return .miss;
+    if (gen != null or !vm.jit_execution_allowed or statementHooksRequireBytecode(vm)) return .miss;
     const owner = vm.jit_owner orelse return .miss;
     if (!owner.executionPermitted()) return .miss;
     const native = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return .miss;
@@ -4031,7 +4036,8 @@ fn tryRunLoopOsr(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, g
 }
 
 fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?*Generator) EvalError!?Value {
-    if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0) return null;
+    if (gen != null or exec.ip != 0 or exec.stack.items.len != 0 or exec.handlers.items.len != 0 or
+        statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
 
     if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
@@ -4085,6 +4091,7 @@ fn tryRunNative(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, ge
 /// and recycling a heap activation. Extra arguments stay rooted on the caller's
 /// operand stack; only formal parameters are copied, matching buildActivation.
 fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value) EvalError!?Value {
+    if (statementHooksRequireBytecode(vm)) return null;
     const owner = vm.jit_owner orelse return null;
     if (!vm.jit_execution_allowed or !owner.executionPermitted()) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
@@ -8212,6 +8219,12 @@ test "vm: optimizer interpreter-owned iterator exit preserves protocol exception
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
+fn optimizerProfileStatementNoop(
+    _: *anyopaque,
+    _: *Interpreter,
+    _: interp.DebugStatementLocation,
+) void {}
+
 test "vm: optimizer executes multiple iterations after a hot backedge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -8269,6 +8282,25 @@ test "vm: optimizer executes multiple iterations after a hot backedge" {
     try std.testing.expectEqual(steps_before_refusal, machine.steps);
     try std.testing.expectEqual(artifact.osr.?.entries[0].entry_ip, refused_exec.ip);
     refused_slots[1] = Value.num(1);
+
+    var hook_context: u8 = 0;
+    machine.profile_statement_ctx = &hook_context;
+    machine.profile_statement_hook = optimizerProfileStatementNoop;
+    const attempts_before_hook_refusal = optimizer_native_attempts.load(.monotonic);
+    try std.testing.expectEqual(NativeRunOutcome.miss, try tryRunLoopOsr(
+        &machine,
+        &refused_exec,
+        function_chunk,
+        &refused_frame,
+        null,
+    ));
+    try std.testing.expectEqual(steps_before_refusal, machine.steps);
+    try std.testing.expectEqual(attempts_before_hook_refusal, optimizer_native_attempts.load(.monotonic));
+    var entry_exec = Exec{};
+    try std.testing.expect(try tryRunNative(&machine, &entry_exec, function_chunk, &refused_frame, null) == null);
+    try std.testing.expectEqual(attempts_before_hook_refusal, optimizer_native_attempts.load(.monotonic));
+    machine.profile_statement_hook = null;
+    machine.profile_statement_ctx = null;
 
     try std.testing.expectEqual(NativeRunOutcome.deoptimized, try tryRunLoopOsr(
         &machine,
@@ -8487,6 +8519,49 @@ test "vm: optimizer conditional loop exit converges" {
     try std.testing.expect(!shell_timeout.load(.acquire));
     try std.testing.expect(shell_termination.load(.acquire));
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+}
+
+test "vm: optimizer multiple conditional loop exits converge" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function twoBreaks(n, initial) {
+        \\  let i = 0; let sum = initial;
+        \\  while (i < n) {
+        \\    if (i === 2) break;
+        \\    if (sum === 99) break;
+        \\    sum = sum + 1; i = i + 1;
+        \\  }
+        \\  if (sum === 99) return 100;
+        \\  return sum;
+        \\}
+        \\twoBreaks(5, 0); twoBreaks(5, 0); twoBreaks(5, 0); twoBreaks(5, 0);
+        \\twoBreaks(5, 0); twoBreaks(5, 0); twoBreaks(5, 0); twoBreaks(5, 0);
+        \\twoBreaks(5, 0); twoBreaks(5, 0); twoBreaks(5, 99)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const function_chunk = root.fns.items[0].chunk.?;
+    const artifact = function_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(!artifact.entry_enabled and artifact.osr != null and artifact.has_side_exits);
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 }
 
 test "vm: unsupported optimizer input caches rejection and preserves fallback" {
