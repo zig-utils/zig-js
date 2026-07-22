@@ -1205,6 +1205,33 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 stack[depth] = result;
                 depth += effect.added;
             },
+            .tail_call, .tail_call_eval, .tail_call_method, .tail_call_with_this => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                try builder.appendFrameState(.call, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                depth -= effect.removed;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = switch (inst.op) {
+                        .tail_call => .call,
+                        .tail_call_eval => .call_eval,
+                        .tail_call_method => .call_method,
+                        .tail_call_with_this => .call_with_this,
+                        else => unreachable,
+                    },
+                    .immediate = if (inst.op == .tail_call_method) inst.b else inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                try builder.returns.append(allocator, .{
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .value = result,
+                });
+            },
             .jump => {},
             .jump_if_false => {
                 if (depth == 0) return error.InvalidControlFlow;
@@ -1930,6 +1957,10 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .new_call, .inputs = 2, .a = 1 },
         .{ .op = .new_spread, .inputs = 2 },
+        .{ .op = .tail_call, .inputs = 2, .a = 1 },
+        .{ .op = .tail_call_eval, .inputs = 2, .a = 1 },
+        .{ .op = .tail_call_method, .inputs = 2, .b = 1 },
+        .{ .op = .tail_call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .get_prop, .inputs = 1 },
         .{ .op = .get_index, .inputs = 2 },
         .{ .op = .set_prop, .inputs = 2 },

@@ -316,7 +316,9 @@ fn stageNativeOperationDescriptors(
             if (inst.op == .call or inst.op == .call_eval or inst.op == .call_method or
                 inst.op == .call_spread or inst.op == .call_eval_spread or
                 inst.op == .call_with_this_spread or inst.op == .call_with_this or
-                inst.op == .new_call or inst.op == .new_spread)
+                inst.op == .new_call or inst.op == .new_spread or inst.op == .tail_call or
+                inst.op == .tail_call_eval or inst.op == .tail_call_method or
+                inst.op == .tail_call_with_this)
                 break :runtime operation.lhs;
             return error.UnsupportedChunk;
         } else staged: {
@@ -836,7 +838,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
         native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or
-            inst.op == .private_in or inst.op == .call_method)
+            inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method)
         name: {
             if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
             break :name chunk.names.items[inst.a];
@@ -3431,7 +3433,7 @@ test "optimizer routes native to_numeric exceptions to an owned catch target" {
     }
 }
 
-test "optimizer lowering publishes an exact pre-tail-call side exit" {
+test "optimizer lowering publishes an executable tail call" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -3445,12 +3447,12 @@ test "optimizer lowering publishes an exact pre-tail-call side exit" {
     var program = try lower(&chunk, &plan, std.testing.allocator);
     defer program.deinit();
 
-    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
-    const point = program.deopt_points[side_exit.deopt_index];
-    try std.testing.expectEqual(jit.DeoptPointKind.call, point.kind);
-    try std.testing.expectEqual(@as(u32, 2), point.exit_ip);
-    try std.testing.expectEqual(@as(u16, 2), point.stack_count);
-    try std.testing.expectEqual(@as(u64, 0b11), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.tail_call)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    try std.testing.expectEqual(@as(u32, 3), program.bytecode_steps);
 }
 
 test "optimizer lowering publishes an executable named property read" {
@@ -3753,7 +3755,7 @@ test "optimizer lowering publishes an executable explicit-this call" {
     try std.testing.expectEqual(roots, map.scratch_pointer_slots & roots);
 }
 
-test "optimizer lowering publishes executable non-tail invocation forms" {
+test "optimizer lowering publishes executable invocation forms" {
     const Case = struct {
         op: bc.Op,
         a: u32 = 0,
@@ -3768,6 +3770,10 @@ test "optimizer lowering publishes executable non-tail invocation forms" {
         .{ .op = .call_eval_spread, .inputs = 2 },
         .{ .op = .call_with_this_spread, .inputs = 3 },
         .{ .op = .new_spread, .inputs = 2 },
+        .{ .op = .tail_call, .a = 1, .inputs = 2 },
+        .{ .op = .tail_call_eval, .a = 1, .inputs = 2 },
+        .{ .op = .tail_call_method, .b = 1, .inputs = 2, .name = "method" },
+        .{ .op = .tail_call_with_this, .a = 1, .inputs = 3 },
     };
 
     for (cases) |case| {
@@ -3813,9 +3819,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         kind: jit.DeoptPointKind,
     };
     const cases = [_]Case{
-        .{ .op = .tail_call_eval, .a = 1, .inputs = 2, .kind = .call },
-        .{ .op = .tail_call_method, .b = 1, .inputs = 2, .kind = .call },
-        .{ .op = .tail_call_with_this, .a = 1, .inputs = 3, .kind = .call },
         .{ .op = .store_var, .inputs = 1, .kind = .effect },
         .{ .op = .def_var, .inputs = 1, .kind = .effect },
         .{ .op = .def_lex, .inputs = 1, .kind = .effect },

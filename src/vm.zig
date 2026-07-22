@@ -3713,6 +3713,26 @@ fn constructSpreadValue(vm: *Interpreter, callee: Value, args_array: Value) Eval
     return construct(vm, callee, try spreadArguments(vm, args_array));
 }
 
+fn tailCallValue(vm: *Interpreter, callee: Value, args: []const Value, this_val: Value) EvalError!Value {
+    if (vm.driver_active) {
+        if (jsChunkFn(callee)) |func| {
+            vm.pending_activation = try buildActivation(vm, func, func.chunk.?, args, this_val, Value.undef());
+            vm.pending_tail_call = true;
+            return Value.undef();
+        }
+    }
+    return callValue(vm, callee, args, this_val);
+}
+
+fn tailCallEvalValue(vm: *Interpreter, callee: Value, args: []const Value) EvalError!Value {
+    if (vm.isDirectEvalCallee(callee)) return callEvalValue(vm, callee, args);
+    return tailCallValue(vm, callee, args, Value.undef());
+}
+
+fn tailCallMethodValue(vm: *Interpreter, receiver: Value, name: []const u8, args: []const Value) EvalError!Value {
+    return tailCallValue(vm, try vm.getProperty(receiver, name), args, receiver);
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
@@ -3841,7 +3861,11 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this_spread) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread))
+        descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_eval) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_method) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_with_this))
     {
         const values: []const Value = @ptrCast(inputs);
         const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and values.len >= 1)
@@ -3863,6 +3887,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             construct(vm, values[0], values[1..])
         else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread) and values.len == 2)
             constructSpreadValue(vm, values[0], values[1])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call) and values.len >= 1)
+            tailCallValue(vm, values[0], values[1..], Value.undef())
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_eval) and values.len >= 1)
+            tailCallEvalValue(vm, values[0], values[1..])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_method) and values.len >= 1)
+            tailCallMethodValue(vm, values[0], metadata.nameFor(operation_id) orelse
+                return @intFromEnum(jit.NativeOperationStatus.host_trap), values[1..])
+        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_with_this) and values.len >= 2)
+            tailCallValue(vm, values[0], values[2..], values[1])
         else
             return @intFromEnum(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
@@ -4291,7 +4324,7 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
     try std.testing.expectEqual(Value.obj(&receiver).rawBits(), frame.operation_value_bits);
 }
 
-test "vm: native operation dispatcher executes non-tail invocation forms" {
+test "vm: native operation dispatcher executes invocation forms including tail calls" {
     const Native = struct {
         fn call(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
             _ = ctx;
@@ -4367,6 +4400,23 @@ test "vm: native operation dispatcher executes non-tail invocation forms" {
     );
     try std.testing.expectEqual(
         @as(f64, 42),
+        (try Dispatch.run(&machine, .tail_call, &.{ Value.obj(&callable), Value.num(20), Value.num(22) }, null)).asNum(),
+    );
+    try std.testing.expectEqual(
+        Value.obj(&receiver).rawBits(),
+        (try Dispatch.run(&machine, .tail_call_method, &.{ Value.obj(&receiver), Value.num(42) }, "method")).rawBits(),
+    );
+    try std.testing.expectEqual(
+        Value.obj(&receiver).rawBits(),
+        (try Dispatch.run(
+            &machine,
+            .tail_call_with_this,
+            &.{ Value.obj(&callable), Value.obj(&receiver), Value.num(42) },
+            null,
+        )).rawBits(),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 42),
         (try Dispatch.run(
             &machine,
             .call_with_this_spread,
@@ -4389,6 +4439,10 @@ test "vm: native operation dispatcher executes non-tail invocation forms" {
     try std.testing.expectEqual(
         @as(f64, 42),
         (try Dispatch.run(&machine, .call_eval, &.{ eval, Value.str("local") }, null)).asNum(),
+    );
+    try std.testing.expectEqual(
+        @as(f64, 42),
+        (try Dispatch.run(&machine, .tail_call_eval, &.{ eval, Value.str("local") }, null)).asNum(),
     );
     var eval_spread = value.Object{ .is_array = true };
     try eval_spread.appendInternalElement(allocator, Value.str("local"));
@@ -5711,7 +5765,7 @@ fn runChunk(
                         return acc;
                     }
                 }
-                return try invokeMethod(vm, recv, name, args);
+                return try callValue(vm, method, args, recv);
             },
             .new_call => {
                 const argc = inst.a;
@@ -8429,7 +8483,7 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
 }
 
-test "vm: optimizer pre-tail-call side exit resumes a function-valued parameter" {
+test "vm: optimizer native tail call replaces the current activation" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -8449,6 +8503,7 @@ test "vm: optimizer pre-tail-call side exit resumes a function-valued parameter"
     const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
     try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
 
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     const first_steps = machine.steps;
@@ -8460,6 +8515,10 @@ test "vm: optimizer pre-tail-call side exit resumes a function-valued parameter"
     }
     const index = call_index orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0b11), artifact.stack_maps.?.forDeopt(index).?.frame_pointer_slots);
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.tail_call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
