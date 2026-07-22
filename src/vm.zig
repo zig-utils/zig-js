@@ -3654,6 +3654,18 @@ fn nativeSetIndex(vm: *Interpreter, object: Value, key: Value, value_word: Value
     return value_word;
 }
 
+fn nativeInOperator(vm: *Interpreter, key: Value, object: Value) EvalError!Value {
+    return Value.boolVal(try vm.inOperator(key, object));
+}
+
+fn nativeInstanceOf(vm: *Interpreter, value_word: Value, constructor: Value) EvalError!Value {
+    return Value.boolVal(try vm.instanceOf(value_word, constructor));
+}
+
+fn nativePrivateIn(vm: *Interpreter, name: []const u8, object: Value) EvalError!Value {
+    return Value.boolVal(try vm.privateIn(name, object));
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
@@ -3708,6 +3720,30 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 Value.fromRawBits(inputs[2]),
             ),
         );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.in_op) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInOperator(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.instance_of) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInstanceOf(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.private_in) and inputs.len == 1) {
+        const name = metadata.nameFor(operation_id) orelse
+            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativePrivateIn(vm, name, Value.fromRawBits(inputs[0])),
+        );
+    }
     if ((descriptor.bytecode_op == @intFromEnum(bc.Op.call) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.new_call)) and inputs.len >= 1)
@@ -4058,6 +4094,17 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         nativeOperationDispatch(&frame, 0),
     );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.set_index);
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.in_op);
+    metadata.descriptors[0].input_count = 1;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.private_in);
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
@@ -8841,6 +8888,128 @@ test "vm: optimizer native computed write evaluates rhs before nullish key rejec
     try std.testing.expectEqual(@as(usize, 2), operations.descriptors.len);
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_index)), operations.descriptors[1].bytecode_op);
+}
+
+test "vm: optimizer native in operator invokes a proxy trap once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let calls = 0;
+        \\function trap(target, key) { calls = calls + 1; if (key === "boom") throw 90; return key in target; }
+        \\function check(key, object) { try { return key in object; } catch (e) { return e + calls; } }
+        \\const proxy = new Proxy({ x: 1 }, { has: trap });
+        \\check("x", proxy); check("x", proxy); check("x", proxy); check("x", proxy); check("x", proxy);
+        \\check("x", proxy); check("x", proxy); check("x", proxy); check("x", proxy); check("boom", proxy)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    const check_chunk = root.fns.items[1].chunk.?;
+    const artifact = check_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.in_op)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "vm: optimizer native instanceof invokes Symbol.hasInstance once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let calls = 0;
+        \\function hasInstance(value) { calls = calls + 1; if (value === 9) throw 90; return true; }
+        \\function check(value, constructor) { try { return value instanceof constructor; } catch (e) { return e + calls; } }
+        \\const checker = { [Symbol.hasInstance]: hasInstance };
+        \\check(0, checker); check(1, checker); check(2, checker); check(3, checker); check(4, checker);
+        \\check(5, checker); check(6, checker); check(7, checker); check(8, checker); check(9, checker)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    const check_chunk = root.fns.items[1].chunk.?;
+    const artifact = check_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.instance_of)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+}
+
+test "vm: optimizer native private-in preserves the class brand" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("#value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.private_in, name);
+    _ = try chunk.emit(.ret, 0);
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    var branded = value.Object{};
+    try branded.setOwn(allocator, root_shape, "#value", Value.undef());
+    var plain = value.Object{};
+    var slots = [_]Value{Value.obj(&branded)};
+
+    const present = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const present_value = switch (present) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(present_value.asBool());
+    slots[0] = Value.obj(&plain);
+    const absent = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const absent_value = switch (absent) {
+        .complete => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(!absent_value.asBool());
+    slots[0] = Value.num(0);
+    try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, &slots, null));
+
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
+    const operation = operations.descriptors[0];
+    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.private_in)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 1), operation.input_count);
+    try std.testing.expectEqualStrings("#value", operations.nameFor(0).?);
 }
 
 test "vm: optimizer coercion-effect side exit preserves caught user exceptions" {

@@ -59,6 +59,9 @@ pub const ValueKind = enum {
     get_index,
     set_prop,
     set_index,
+    in_op,
+    instance_of,
+    private_in,
 };
 
 pub const ValueNode = struct {
@@ -138,7 +141,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .to_property_key,
         .name_anon,
         .pow,
-        .in_op,
         .bit_and,
         .bit_or,
         .bit_xor,
@@ -168,8 +170,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .register_disposable,
         .array_append_hole,
         .import_call,
-        .instance_of,
-        .private_in,
         .make_closure,
         .assert_iter_result,
         .iter_of,
@@ -555,7 +555,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
     if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .get_index or
-        inst.op == .set_prop or inst.op == .set_index or inst.op == .call or
+        inst.op == .set_prop or inst.op == .set_index or inst.op == .in_op or
+        inst.op == .instance_of or inst.op == .private_in or inst.op == .call or
         inst.op == .call_with_this or inst.op == .new_call)
         return depthEffect(inst).required;
     const kind = terminalFrameStateKind(inst.op) orelse return null;
@@ -1045,6 +1046,42 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
+            .in_op, .instance_of => {
+                if (depth < 2) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const lhs = stack[depth - 2];
+                const rhs = stack[depth - 1];
+                depth -= 1;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = if (inst.op == .in_op) .in_op else .instance_of,
+                    .lhs = lhs,
+                    .rhs = rhs,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
+            .private_in => {
+                if (depth == 0 or inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const input = stack[depth - 1];
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .private_in,
+                    .lhs = input,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
             .call, .call_with_this, .new_call => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
@@ -1397,6 +1434,9 @@ fn supports(op: bc.Op) bool {
         .get_index,
         .set_prop,
         .set_index,
+        .in_op,
+        .instance_of,
+        .private_in,
         .call,
         .call_with_this,
         .new_call,
@@ -1752,6 +1792,9 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .get_index, .inputs = 2 },
         .{ .op = .set_prop, .inputs = 2 },
         .{ .op = .set_index, .inputs = 3 },
+        .{ .op = .in_op, .inputs = 2 },
+        .{ .op = .instance_of, .inputs = 2 },
+        .{ .op = .private_in, .inputs = 1 },
         .{ .op = .to_numeric, .inputs = 1 },
     };
     for (cases) |case| {
@@ -1763,7 +1806,12 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         const catch_ip = case.inputs + 3;
         _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
         for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
-        const operand_a = if (case.op == .get_prop or case.op == .set_prop) try chunk.addName("value") else case.a;
+        const operand_a = if (case.op == .get_prop or case.op == .set_prop)
+            try chunk.addName("value")
+        else if (case.op == .private_in)
+            try chunk.addName("#value")
+        else
+            case.a;
         _ = try chunk.emitAB(case.op, operand_a, case.b);
         _ = try chunk.emit(.ret_undef, 0);
         _ = try chunk.emit(.ret_undef, 0);

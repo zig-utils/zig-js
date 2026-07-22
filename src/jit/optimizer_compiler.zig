@@ -294,14 +294,14 @@ fn stageNativeOperationDescriptors(
             runtime_operation = operation;
         }
         const first_input: usize = if (runtime_operation) |operation| runtime: {
-            if (inst.op == .to_numeric or inst.op == .get_prop) {
+            if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .private_in) {
                 if (input_count != 1) return error.UnsupportedChunk;
                 const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
                 if (source != operation.lhs) return error.UnsupportedChunk;
                 break :runtime source;
             }
-            if (inst.op == .get_index and input_count == 2) break :runtime operation.lhs;
-            if (inst.op == .set_prop and input_count == 2) break :runtime operation.lhs;
+            if ((inst.op == .get_index or inst.op == .set_prop or inst.op == .in_op or
+                inst.op == .instance_of) and input_count == 2) break :runtime operation.lhs;
             if (inst.op == .set_index and input_count == 3) break :runtime operation.lhs;
             if (inst.op == .call or inst.op == .call_with_this or inst.op == .new_call) {
                 const receiver_words: u32 = if (inst.op == .call_with_this) 2 else 1;
@@ -419,7 +419,8 @@ fn deterministicPathSteps(
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
     for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .get_prop or node.kind == .get_index or
-        node.kind == .set_prop or node.kind == .set_index or node.kind == .call or
+        node.kind == .set_prop or node.kind == .set_index or node.kind == .in_op or
+        node.kind == .instance_of or node.kind == .private_in or node.kind == .call or
         node.kind == .call_with_this or node.kind == .construct) and node.block == state.block and
         node.origin == state.origin)
     {
@@ -546,9 +547,9 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .rhs = @intCast(rhs),
             });
         },
-        .to_numeric, .get_prop => {
+        .to_numeric, .get_prop, .private_in => {
             const input = try resolveAlias(node.lhs, aliases);
-            types[node.id] = .other;
+            types[node.id] = if (node.kind == .private_in) .boolean else .other;
             try operations.append(allocator, .{
                 .kind = .runtime_operation,
                 .destination = @intCast(node.id),
@@ -557,7 +558,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
-        .get_index, .set_prop, .set_index => {
+        .get_index, .set_prop, .set_index, .in_op, .instance_of => {
             const input_count: usize = if (node.kind == .set_index) 3 else 2;
             if (scratch_slots + input_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
             const first_input = scratch_slots;
@@ -572,7 +573,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 });
                 scratch_slots += 1;
             }
-            types[node.id] = .other;
+            types[node.id] = if (node.kind == .in_op or node.kind == .instance_of) .boolean else .other;
             try operations.append(allocator, .{
                 .kind = .runtime_operation,
                 .destination = @intCast(node.id),
@@ -759,7 +760,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop) name: {
+        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or inst.op == .private_in) name: {
             if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
             break :name chunk.names.items[inst.a];
         } else null;
@@ -3424,6 +3425,49 @@ test "optimizer lowering publishes an executable computed property write" {
     try std.testing.expectEqual(roots, program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots);
 }
 
+test "optimizer lowering publishes executable membership operations" {
+    const Case = struct {
+        op: bc.Op,
+        inputs: u32,
+        name: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .op = .in_op, .inputs = 2 },
+        .{ .op = .instance_of, .inputs = 2 },
+        .{ .op = .private_in, .inputs = 1, .name = "#value" },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = case.inputs;
+        chunk.local_count = case.inputs;
+        for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        const operand = if (case.name) |name| try chunk.addName(name) else 0;
+        _ = try chunk.emit(case.op, operand);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const operation = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(case.op)), operation.bytecode_op);
+        try std.testing.expectEqual(@as(u16, @intCast(case.inputs)), operation.input_count);
+        if (case.name) |name|
+            try std.testing.expectEqualStrings(name, program.native_operation_names[0].?)
+        else
+            try std.testing.expect(program.native_operation_names[0] == null);
+        var roots: u64 = 0;
+        for (operation.first_input..operation.first_input + operation.input_count) |slot|
+            roots |= @as(u64, 1) << @intCast(slot);
+        try std.testing.expectEqual(roots, program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots);
+    }
+}
+
 test "optimizer lowering publishes an executable construction" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -3495,8 +3539,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .tail_call_eval, .a = 1, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_method, .b = 1, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_with_this, .a = 1, .inputs = 3, .kind = .call },
-        .{ .op = .instance_of, .inputs = 2, .kind = .effect },
-        .{ .op = .private_in, .inputs = 1, .kind = .effect },
         .{ .op = .store_var, .inputs = 1, .kind = .effect },
         .{ .op = .def_var, .inputs = 1, .kind = .effect },
         .{ .op = .def_lex, .inputs = 1, .kind = .effect },
@@ -3513,7 +3555,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .bit_not, .inputs = 1, .kind = .effect },
         .{ .op = .to_string, .inputs = 1, .kind = .effect },
         .{ .op = .pow, .inputs = 2, .kind = .effect },
-        .{ .op = .in_op, .inputs = 2, .kind = .effect },
         .{ .op = .bit_and, .inputs = 2, .kind = .effect },
         .{ .op = .bit_or, .inputs = 2, .kind = .effect },
         .{ .op = .bit_xor, .inputs = 2, .kind = .effect },
