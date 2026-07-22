@@ -151,6 +151,13 @@ pub const StringCell = struct {
 
     pub fn eql(self: *const StringCell, other: *const StringCell) bool {
         if (self == other) return true; // interned ⇒ pointer identity is enough
+        // `hash` is computed over the WTF-8 CONTENT (never the stored image) and
+        // carries the latin1/ASCII classification in its top bits, so equal
+        // hashes imply equal representation. That separates a flat latin1 image
+        // from a byte-identical non-latin1 WTF-8 image of *different* content:
+        // their contents differ ⇒ their content hashes differ ⇒ not equal, even
+        // though the stored bytes collide. Within one representation the stored
+        // image is injective, so hash-equal + bytes-equal ⇒ content-equal.
         return self.hash == other.hash and std.mem.eql(u8, self.bytes, other.bytes);
     }
 
@@ -231,17 +238,98 @@ pub fn canonicalizeSurrogates(allocator: std.mem.Allocator, bytes: []const u8) s
     return out.toOwnedSlice(allocator);
 }
 
-/// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized) copy
-/// of `bytes`. This is the minimal constructor the NaN-box `Value` representation
-/// needs; interning is optional (below). `allocator` owns both the cell and the
-/// byte copy.
+/// Transcode a **flat-latin1** byte image (1 raw byte per code unit, values
+/// 0x00–0xFF) into canonical WTF-8, returning an owned copy. Bytes < 0x80 copy
+/// unchanged; each 0x80–0xFF byte becomes the 2-byte UTF-8 encoding of
+/// U+0080–U+00FF (a 0xC2/0xC3 lead + one 0x80–0xBF continuation). This is the
+/// **egress** transform for the flat-string model: once latin1 strings are
+/// stored flat (Phase 2/3), a caller that needs real WTF-8/UTF-8 bytes for a
+/// latin1 cell materializes them through here. Always allocates (the caller that
+/// wants to borrow-when-ASCII checks `isAscii()`/for a high byte first).
+pub fn latin1FlatToWtf8(allocator: std.mem.Allocator, flat: []const u8) std.mem.Allocator.Error![]u8 {
+    var extra: usize = 0;
+    for (flat) |b| extra += @intFromBool(b >= 0x80);
+    const out = try allocator.alloc(u8, flat.len + extra);
+    var j: usize = 0;
+    for (flat) |b| {
+        if (b < 0x80) {
+            out[j] = b;
+            j += 1;
+        } else {
+            out[j] = 0xC0 | (b >> 6); // 0xC2 or 0xC3
+            out[j + 1] = 0x80 | (b & 0x3F);
+            j += 2;
+        }
+    }
+    return out;
+}
+
+/// Transcode canonical WTF-8 that is KNOWN to be latin1 (every code unit ≤ 0xFF,
+/// i.e. only ASCII bytes plus 0xC2/0xC3 two-byte sequences — exactly what
+/// `latin1_flag` marks) into the flat-latin1 image (1 raw byte per code unit),
+/// returning an owned copy. Inverse of `latin1FlatToWtf8`; this is the
+/// **construction** transform that shrinks a latin1-non-ASCII string to
+/// 1 byte/unit at storage time. Caller MUST guarantee latin1 input — a lead byte
+/// ≥ 0xC4 or a 3/4-byte sequence would be mis-decoded (asserted in debug).
+pub fn wtf8ToLatin1Flat(allocator: std.mem.Allocator, wtf8: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacityPrecise(allocator, wtf8.len); // latin1 WTF-8 only shrinks (≤2→1)
+    var i: usize = 0;
+    while (i < wtf8.len) {
+        const b = wtf8[i];
+        if (b < 0x80) {
+            out.appendAssumeCapacity(b);
+            i += 1;
+        } else {
+            std.debug.assert(b == 0xC2 or b == 0xC3); // latin1 lead only
+            const cont = wtf8[i + 1];
+            out.appendAssumeCapacity((@as(u8, b & 0x1F) << 6) | (cont & 0x3F));
+            i += 2;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Choose the STORED byte image for canonical WTF-8 `canon` (whose content hash
+/// is `h`): a flat latin1 image (1 raw byte per code unit) when the content is
+/// latin1 but not pure ASCII, otherwise `canon` itself unchanged (ASCII is
+/// already flat; non-latin1 stays WTF-8 until the UTF-16 phase). **Takes
+/// ownership of `canon`**: on the flat path it frees `canon` (even on an
+/// allocation failure) and returns the flat copy; otherwise it returns `canon`
+/// verbatim. This is the storage side of the flat-string model — the stored
+/// image is a deterministic function of content, so equal strings still get one
+/// byte image *within a representation*, and cross-representation collisions
+/// (a flat latin1 image equal to some non-latin1 WTF-8 image) are separated by
+/// the content hash (computed over `canon`, never the stored image) and the
+/// cached latin1 flag — see `StringCell.eql`.
+///
+/// TRANSITIONAL NOTE: `createCell`/`createCellOwned`/`InternTable.intern` use
+/// this now; `staticCell` and the gc managed factory still store WTF-8, so the
+/// live engine (which builds strings through the factory) is unchanged. Those
+/// two flip together in the coordinated engine change; until then, do not mix a
+/// latin1 `staticCell` with a latin1 `createCell` of the same content.
+fn storedImage(allocator: std.mem.Allocator, canon: []u8, h: u64) std.mem.Allocator.Error![]u8 {
+    if (h & latin1_flag != 0 and h & ascii_flag == 0) {
+        defer allocator.free(canon);
+        return try wtf8ToLatin1Flat(allocator, canon);
+    }
+    return canon;
+}
+
+/// Allocate a fresh (un-interned) cell that owns a (surrogate-canonicalized),
+/// representation-selected copy of `bytes`. This is the minimal constructor the
+/// NaN-box `Value` representation needs; interning is optional (below).
+/// `allocator` owns both the cell and the byte copy.
 pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!*StringCell {
     if (active_managed_factory) |factory|
         return factory.create(factory.context, allocator, bytes);
-    const owned = try canonicalizeSurrogates(allocator, bytes);
-    errdefer allocator.free(owned);
+    const canon = try canonicalizeSurrogates(allocator, bytes);
+    const h = contentHash(canon); // over the WTF-8 content, not the stored image
+    const stored = try storedImage(allocator, canon, h); // consumes canon
+    errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = owned, .hash = contentHash(owned) };
+    cell.* = .{ .bytes = stored, .hash = h };
     return cell;
 }
 
@@ -254,16 +342,18 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
         return factory.create_owned(factory.context, allocator, owned);
     var owns_original = true;
     errdefer if (owns_original) allocator.free(owned);
-    const bytes = if (std.mem.indexOfScalar(u8, owned, 0xED) == null) owned else blk: {
+    const canon = if (std.mem.indexOfScalar(u8, owned, 0xED) == null) owned else blk: {
         const canonical = try canonicalizeSurrogates(allocator, owned);
         allocator.free(owned);
         owns_original = false;
         break :blk canonical;
     };
-    owns_original = false;
-    errdefer allocator.free(bytes);
+    owns_original = false; // ownership of `canon` now passes to storedImage
+    const h = contentHash(canon); // over the WTF-8 content, not the stored image
+    const stored = try storedImage(allocator, canon, h); // consumes canon
+    errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = bytes, .hash = contentHash(bytes) };
+    cell.* = .{ .bytes = stored, .hash = h };
     return cell;
 }
 
@@ -322,6 +412,9 @@ pub const InternTable = struct {
         for (&self.shards) |*shard| {
             var it = shard.map.iterator();
             while (it.next()) |entry| {
+                // Key (WTF-8 content) and cell.bytes (stored image) are now
+                // separate allocations — the stored image may be flat latin1.
+                self.allocator.free(entry.key_ptr.*);
                 self.allocator.free(entry.value_ptr.*.bytes);
                 self.allocator.destroy(entry.value_ptr.*);
             }
@@ -338,16 +431,24 @@ pub const InternTable = struct {
         shard.acquire();
         defer shard.releaseLock();
 
+        // Look up by the WTF-8 CONTENT `bytes`: the map is keyed on content, not
+        // on the cell's stored image, because a flat latin1 image can collide
+        // byte-for-byte with a different string's WTF-8 image.
         if (shard.map.get(bytes)) |existing| return existing;
 
-        // Miss: allocate an owned copy + cell, key the map by the owned bytes
-        // (so the key outlives the caller's slice).
-        const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
+        // Miss: the map key is an owned copy of the WTF-8 content (so it outlives
+        // the caller's slice and stays a canonical, collision-free key); the cell
+        // stores the representation-selected image (flat latin1 when applicable),
+        // a separate allocation.
+        const key = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(key);
+        const canon = try self.allocator.dupe(u8, bytes);
+        const stored = try storedImage(self.allocator, canon, h); // consumes canon
+        errdefer self.allocator.free(stored);
         const cell = try self.allocator.create(StringCell);
         errdefer self.allocator.destroy(cell);
-        cell.* = .{ .bytes = owned, .hash = h };
-        try shard.map.put(self.allocator, owned, cell);
+        cell.* = .{ .bytes = stored, .hash = h };
+        try shard.map.put(self.allocator, key, cell);
         return cell;
     }
 
@@ -542,6 +643,120 @@ test "strcell: isLatin1 tracks the is8Bit boundary (≤ 0xFF) at construction" {
         try std.testing.expectEqual(c.ascii, cell.isAscii());
         try std.testing.expectEqual(c.latin1, cell.isLatin1());
     }
+}
+
+test "strcell: latin1<->WTF-8 transcode round-trips every code unit and matches std UTF-8" {
+    const a = std.testing.allocator;
+    // Flat image of all 256 latin1 code units 0x00..0xFF, once each.
+    var flat: [256]u8 = undefined;
+    for (0..256) |i| flat[i] = @intCast(i);
+
+    const wtf8 = try latin1FlatToWtf8(a, &flat);
+    defer a.free(wtf8);
+
+    // The produced WTF-8 must be exactly the UTF-8 encoding of U+0000..U+00FF and
+    // must classify as latin1 (never ASCII, since it contains 0x80..0xFF units).
+    var expected: std.ArrayListUnmanaged(u8) = .empty;
+    defer expected.deinit(a);
+    for (0..256) |cp| {
+        var buf: [4]u8 = undefined;
+        const n = try std.unicode.utf8Encode(@intCast(cp), &buf);
+        try expected.appendSlice(a, buf[0..n]);
+    }
+    try std.testing.expectEqualSlices(u8, expected.items, wtf8);
+    try std.testing.expect(contentHash(wtf8) & latin1_flag != 0);
+    try std.testing.expect(contentHash(wtf8) & ascii_flag == 0);
+
+    // Inverse recovers the original flat image exactly.
+    const back = try wtf8ToLatin1Flat(a, wtf8);
+    defer a.free(back);
+    try std.testing.expectEqualSlices(u8, &flat, back);
+
+    // A pure-ASCII flat image transcodes to itself (byte-identical, no widening).
+    const ascii_flat = "hello, world!";
+    const ascii_wtf8 = try latin1FlatToWtf8(a, ascii_flat);
+    defer a.free(ascii_wtf8);
+    try std.testing.expectEqualStrings(ascii_flat, ascii_wtf8);
+    const ascii_back = try wtf8ToLatin1Flat(a, ascii_wtf8);
+    defer a.free(ascii_back);
+    try std.testing.expectEqualStrings(ascii_flat, ascii_back);
+}
+
+test "strcell: latin1 non-ASCII stores flat (1 byte/unit); ASCII and non-latin1 unchanged" {
+    const a = std.testing.allocator;
+    // café — é is U+00E9 (latin1). Stored flat: the 2-byte WTF-8 C3 A9 becomes 0xE9.
+    const cafe = try createCell(a, "caf\xc3\xa9");
+    defer {
+        a.free(cafe.bytes);
+        a.destroy(cafe);
+    }
+    try std.testing.expectEqualStrings("caf\xe9", cafe.bytes);
+    try std.testing.expect(cafe.isLatin1() and !cafe.isAscii());
+
+    // Pure ASCII: byte-identical in both encodings, so storage is unchanged.
+    const ascii = try createCell(a, "hello");
+    defer {
+        a.free(ascii.bytes);
+        a.destroy(ascii);
+    }
+    try std.testing.expectEqualStrings("hello", ascii.bytes);
+
+    // Non-latin1 (😀, astral) keeps its WTF-8 image (flat UTF-16 is a later phase).
+    const emoji = try createCell(a, "\xf0\x9f\x98\x80");
+    defer {
+        a.free(emoji.bytes);
+        a.destroy(emoji);
+    }
+    try std.testing.expectEqualStrings("\xf0\x9f\x98\x80", emoji.bytes);
+    try std.testing.expect(!emoji.isLatin1());
+
+    // Two independently-built "café" cells are still content-equal despite flat
+    // storage — the hash is over content, the stored image is deterministic.
+    const cafe2 = try createCell(a, "caf\xc3\xa9");
+    defer {
+        a.free(cafe2.bytes);
+        a.destroy(cafe2);
+    }
+    try std.testing.expect(cafe.eql(cafe2));
+}
+
+test "strcell: flat-latin1 image colliding with a WTF-8 image stays a distinct string" {
+    const a = std.testing.allocator;
+    // A latin1 string of code units U+00E4 U+00BA U+009C. Its WTF-8 *input* is
+    // C3 A4 C2 BA C2 9C; stored FLAT it becomes the 3 bytes E4 BA 9C.
+    const latin1_input = "\xc3\xa4\xc2\xba\xc2\x9c";
+    // The CJK char 亜 (U+4E9C) has WTF-8 exactly E4 BA 9C — the SAME stored image.
+    const cjk_input = "\xe4\xba\x9c";
+
+    const l = try createCell(a, latin1_input);
+    defer {
+        a.free(l.bytes);
+        a.destroy(l);
+    }
+    const c = try createCell(a, cjk_input);
+    defer {
+        a.free(c.bytes);
+        a.destroy(c);
+    }
+
+    // Their STORED images collide byte-for-byte...
+    try std.testing.expectEqualSlices(u8, "\xe4\xba\x9c", l.bytes);
+    try std.testing.expectEqualSlices(u8, l.bytes, c.bytes);
+    // ...yet they are different strings: representation and content hash differ,
+    // so byte-equality does NOT make them equal.
+    try std.testing.expect(l.isLatin1() and !c.isLatin1());
+    try std.testing.expect(l.hash != c.hash);
+    try std.testing.expect(!l.eql(c));
+
+    // Interning keeps them distinct too (keyed on WTF-8 content, not the image).
+    var t = InternTable.init(a);
+    defer t.deinit();
+    const il = try t.intern(latin1_input);
+    const ic = try t.intern(cjk_input);
+    try std.testing.expect(il != ic);
+    try std.testing.expectEqual(@as(usize, 2), t.count());
+    try std.testing.expectEqual(il, try t.intern(latin1_input)); // re-intern → same cell
+    try std.testing.expectEqual(ic, try t.intern(cjk_input));
 }
 
 test "strcell: intern dedups equal bytes to one cell, separates distinct" {
