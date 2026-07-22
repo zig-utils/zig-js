@@ -8425,21 +8425,67 @@ test "vm: optimizer conditional loop exit converges" {
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
 
-    // A pending host termination remains owned by the exact interpreter
-    // checkpoint. Optimizer OSR reconstructs the current header before the
-    // boundary, then bytecode consumes the trap at precisely step 1,024.
+    // Pending termination remains owned by the exact interpreter checkpoint.
+    // Each fresh activation completes generic and optimizer iterations, OSR
+    // reconstructs the current header, then bytecode consumes the request at
+    // precisely step 1,024.
+    var stop_requested: std.atomic.Value(bool) = .init(true);
+    var stop_machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .stop_flag = &stop_requested,
+        .steps = 970,
+    };
+    var stop_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
+    var stop_frame = Frame{ .slots = &stop_slots, .parent = null };
+    var trap_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectError(error.Throw, run(&stop_machine, function_chunk, &stop_frame));
+    try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
+    try std.testing.expect(stop_requested.load(.acquire));
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+
+    var watchdog_check: std.atomic.Value(bool) = .init(true);
+    var watchdog_deadline: std.atomic.Value(u64) = .init(1);
+    var watchdog_termination: std.atomic.Value(bool) = .init(false);
+    var watchdog_machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .watchdog_check_flag = &watchdog_check,
+        .watchdog_deadline_ns = &watchdog_deadline,
+        .termination_request_flag = &watchdog_termination,
+        .steps = 970,
+    };
+    var watchdog_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
+    var watchdog_frame = Frame{ .slots = &watchdog_slots, .parent = null };
+    trap_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectError(error.Throw, run(&watchdog_machine, function_chunk, &watchdog_frame));
+    try std.testing.expectEqual(@as(u64, 1024), watchdog_machine.steps);
+    try std.testing.expect(!watchdog_check.load(.acquire));
+    try std.testing.expect(watchdog_termination.load(.acquire));
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
+
     var shell_timeout: std.atomic.Value(bool) = .init(true);
-    var termination_requested: std.atomic.Value(bool) = .init(false);
-    machine.shell_timeout_check_flag = &shell_timeout;
-    machine.termination_request_flag = &termination_requested;
-    machine.steps = 970;
-    var trap_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
-    var trap_frame = Frame{ .slots = &trap_slots, .parent = null };
-    const trap_osr_before = optimizer_osr_entries.load(.monotonic);
-    try std.testing.expectError(error.Throw, run(&machine, function_chunk, &trap_frame));
-    try std.testing.expectEqual(@as(u64, 1024), machine.steps);
+    var shell_termination: std.atomic.Value(bool) = .init(false);
+    var shell_machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .shell_timeout_check_flag = &shell_timeout,
+        .termination_request_flag = &shell_termination,
+        .steps = 970,
+    };
+    var shell_slots = [_]Value{ Value.num(5), Value.undef(), Value.undef() };
+    var shell_frame = Frame{ .slots = &shell_slots, .parent = null };
+    trap_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectError(error.Throw, run(&shell_machine, function_chunk, &shell_frame));
+    try std.testing.expectEqual(@as(u64, 1024), shell_machine.steps);
     try std.testing.expect(!shell_timeout.load(.acquire));
-    try std.testing.expect(termination_requested.load(.acquire));
+    try std.testing.expect(shell_termination.load(.acquire));
     try std.testing.expect(optimizer_osr_entries.load(.monotonic) > trap_osr_before);
 }
 
