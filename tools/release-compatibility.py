@@ -96,7 +96,10 @@ def main() -> int:
     for relative in gate_by_id["private_abi_profiles"]["evidence"]:
         inventory = json.loads(artifact_path(relative).read_text())
         private_pending += inventory.get("totals", {}).get("by_status", {}).get("pending", 0)
-    require(private_pending > 0, "private ABI inventories are terminal; mark their gate green")
+    if gate_by_id["private_abi_profiles"]["status"] == "green":
+        require(private_pending == 0, "private ABI gate is green with pending entries")
+    else:
+        require(private_pending > 0, "private ABI inventories are terminal; mark their gate green")
 
     summaries = matrix.get("summaries", {})
     test262_summary = summaries.get("test262", {})

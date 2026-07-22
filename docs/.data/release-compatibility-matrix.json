@@ -8,10 +8,10 @@
   "platform_scope": {
     "correctness": [
       { "os": "linux", "architecture": "x86_64", "evidence": ".github/workflows/ci.yml" },
-      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.md" }
+      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-22-property-osr.md" }
     ],
     "performance": [
-      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv" }
+      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv" }
     ]
   },
   "summaries": {
@@ -35,7 +35,7 @@
       "id": "platform_matrix",
       "issue": 147,
       "status": "open",
-      "evidence": [".github/workflows/ci.yml", "docs/.data/benchmark-comparison-2026-07-17-structured-stacks.tsv"],
+      "evidence": [".github/workflows/ci.yml", "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"],
       "blockers": ["publish the final supported OS/architecture correctness, sanitizer, and performance matrix"]
     },
     {
@@ -62,9 +62,9 @@
     {
       "id": "private_abi_profiles",
       "issue": 140,
-      "status": "open",
+      "status": "green",
       "evidence": ["docs/abi/home-private-7ed99c02-inventory.json", "docs/abi/bun-private-core-4982b91e-inventory.json"],
-      "blockers": ["remove every pending Home and Bun private-JSC declaration"]
+      "blockers": []
     },
     {
       "id": "webassembly_mvp",
@@ -89,32 +89,32 @@
     },
     {
       "id": "moving_gc",
-      "issue": 144,
-      "status": "green",
+      "issue": 446,
+      "status": "open",
       "evidence": [
         "docs/threads/gc-relocation.md",
         "docs/.data/gc-relocation-inventory.json",
         "docs/.data/gc-compaction-2026-07-19.md"
       ],
-      "blockers": []
+      "blockers": ["enable automatic compaction at shared precise safepoints"]
     },
     {
       "id": "generational_gc",
-      "issue": 145,
-      "status": "green",
+      "issue": 447,
+      "status": "open",
       "evidence": [
         "docs/threads/P7-gc-design.md",
         "docs/.data/gc-generation-2026-07-20.md",
         "docs/.data/gc-generation-2026-07-20.tsv"
       ],
-      "blockers": []
+      "blockers": ["make the multi-age nursery moving"]
     },
     {
       "id": "optimizing_jit",
       "issue": 146,
       "status": "open",
-      "evidence": ["docs/.data/baseline-jit-profile-2026-07-16.md", "docs/baseline-jit.md"],
-      "blockers": ["implement the optimizing tier, deoptimization, and precise-GC integration"]
+      "evidence": ["docs/.data/optimizer-property-profile-2026-07-21.md", "docs/optimizing-jit.md"],
+      "blockers": ["complete packed arrays, concurrent artifact lifetime, backend coverage, and differential evidence"]
     },
     {
       "id": "readme_generation",
