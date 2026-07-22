@@ -1666,7 +1666,7 @@ fn lowerRegionOsr(
     var scratch_slots = graph.nodes.len;
     var operations: std.ArrayListUnmanaged(Operation) = .empty;
     errdefer operations.deinit(allocator);
-    var runtime_lowering = RegionRuntimeLowering{ .scratch_slots = &scratch_slots };
+    var runtime_lowering = RegionRuntimeLowering{ .chunk = chunk, .scratch_slots = &scratch_slots };
     var edge_operations: std.ArrayListUnmanaged(RegionEdgeOperations) = .empty;
     defer edge_operations.deinit(allocator);
     var next_synthetic_block = std.math.cast(u32, plan.blocks.len) orelse return error.UnsupportedChunk;
@@ -2250,9 +2250,50 @@ fn appendParallelCopies(
 }
 
 const RegionRuntimeLowering = struct {
+    chunk: *const bc.Chunk,
     scratch_slots: *usize,
     binary_inputs: ?u8 = null,
     ternary_inputs: ?u8 = null,
+
+    fn stageFrameInputs(
+        self: *RegionRuntimeLowering,
+        graph: *const optimizer.ValueGraph,
+        node: optimizer.ValueNode,
+        state_kind: optimizer.FrameStateKind,
+        initialized: *const [jit.numeric_scratch_capacity]bool,
+        allocator: std.mem.Allocator,
+        operations: *std.ArrayListUnmanaged(Operation),
+    ) !u8 {
+        if (node.origin >= self.chunk.code.items.len) return error.UnsupportedChunk;
+        const input_count = optimizer.nativeOperationInputCount(self.chunk.code.items[node.origin]) orelse
+            return error.UnsupportedChunk;
+        var state: ?optimizer.FrameState = null;
+        for (graph.frame_states) |candidate| if (candidate.kind == state_kind and
+            candidate.block == node.block and candidate.origin == node.origin)
+        {
+            if (state != null) return error.UnsupportedChunk;
+            state = candidate;
+        };
+        const frame_state = state orelse return error.UnsupportedChunk;
+        if (input_count > frame_state.stack_count) return error.UnsupportedChunk;
+        if (input_count == 0) return std.math.cast(u8, node.id) orelse error.UnsupportedChunk;
+        if (self.scratch_slots.* + input_count > jit.numeric_scratch_capacity)
+            return error.UnsupportedChunk;
+        const first = std.math.cast(u8, self.scratch_slots.*) orelse return error.UnsupportedChunk;
+        const stack_start: usize = frame_state.first_value + frame_state.local_count;
+        const source_start = stack_start + frame_state.stack_count - input_count;
+        for (graph.frame_state_values[source_start .. source_start + input_count]) |source| {
+            if (source >= initialized.len or !initialized[source]) return error.UnsupportedChunk;
+            try operations.append(allocator, .{
+                .kind = .copy,
+                .destination = @intCast(self.scratch_slots.*),
+                .block = node.block,
+                .lhs = @intCast(source),
+            });
+            self.scratch_slots.* += 1;
+        }
+        return first;
+    }
 
     fn stageBinaryInputs(
         self: *RegionRuntimeLowering,
@@ -2420,6 +2461,66 @@ fn appendBlockOperations(
                     @intCast(node.lhs),
                     @intCast(node.rhs),
                     @intCast(node.third),
+                );
+                types[node.id] = .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .call,
+            .call_eval,
+            .call_method,
+            .call_spread,
+            .call_eval_spread,
+            .call_with_this_spread,
+            .call_with_this,
+            .construct,
+            .construct_spread,
+            => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                const first_input = try runtime.stageFrameInputs(
+                    graph,
+                    node,
+                    .call,
+                    initialized,
+                    allocator,
+                    operations,
+                );
+                types[node.id] = .other;
+                try operations.append(allocator, .{
+                    .kind = .runtime_operation,
+                    .destination = @intCast(node.id),
+                    .block = block,
+                    .lhs = first_input,
+                    .immediate = node.origin,
+                });
+                initialized[node.id] = true;
+            },
+            .new_object,
+            .new_array,
+            .init_prop,
+            .init_proto,
+            .init_prop_computed,
+            .init_spread,
+            .init_getter,
+            .init_setter,
+            .array_append,
+            .array_spread,
+            .array_append_hole,
+            => {
+                const runtime = runtime_lowering orelse return error.UnsupportedChunk;
+                const first_input = try runtime.stageFrameInputs(
+                    graph,
+                    node,
+                    .effect,
+                    initialized,
+                    allocator,
+                    operations,
                 );
                 types[node.id] = .other;
                 try operations.append(allocator, .{

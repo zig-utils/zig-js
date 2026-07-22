@@ -11287,6 +11287,150 @@ test "vm: optimizer packed index loop executes existing-index reads and writes d
     try std.testing.expectEqual(writes_before, optimizer_native_index_write_callbacks.load(.monotonic));
 }
 
+test "vm: optimizer allocating array loops execute calls and literal effects" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function grow(values, n, offset) {
+        \\  let i = 0;
+        \\  while (i < n) {
+        \\    if (i >= 0) values.push(i + offset);
+        \\    i = i + 1;
+        \\  }
+        \\  return values.length;
+        \\}
+        \\function build(n) {
+        \\  let i = 0; let total = 0;
+        \\  while (i < n) {
+        \\    if (i >= 0) { const values = [i, i + 1]; total = total + values[1]; }
+        \\    i = i + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\function growCaught(values, n) {
+        \\  let i = 0;
+        \\  try {
+        \\    while (i < n) {
+        \\      if (i >= 0) values.push(i);
+        \\      i = i + 1;
+        \\    }
+        \\  } catch (error) { return error + i; }
+        \\  return -1;
+        \\}
+        \\grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0);
+        \\grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0); grow([], 4, 0);
+        \\build(4); build(4); build(4); build(4); build(4);
+        \\build(4); build(4); build(4); build(4); build(4);
+        \\growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4);
+        \\growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4); growCaught([], 4);
+        \\let calls = 0; const custom = [];
+        \\custom.push = function (value) { calls = calls + value; };
+        \\const throwing = [];
+        \\throwing.push = function (value) { if (value === 2) throw 90; };
+        \\growCaught(throwing, 4) * 1000 + grow(custom, 3, 1) * 100 + calls + build(4)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 92016), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const grow_chunk = root.fns.items[0].chunk.?;
+    const grow_artifact = grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(grow_artifact.osr != null and grow_artifact.native_operations != null);
+    var saw_push_lookup = false;
+    var saw_push_call = false;
+    for (grow_artifact.native_operations.?.descriptors) |operation| {
+        saw_push_lookup = saw_push_lookup or operation.bytecode_op == @intFromEnum(bc.Op.get_prop);
+        saw_push_call = saw_push_call or operation.bytecode_op == @intFromEnum(bc.Op.call_with_this);
+    }
+    try std.testing.expect(saw_push_lookup and saw_push_call);
+
+    const build_chunk = root.fns.items[1].chunk.?;
+    const build_artifact = build_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(build_artifact.osr != null and build_artifact.native_operations != null);
+    var saw_new_array = false;
+    var saw_array_append = false;
+    for (build_artifact.native_operations.?.descriptors) |operation| {
+        saw_new_array = saw_new_array or operation.bytecode_op == @intFromEnum(bc.Op.new_array);
+        saw_array_append = saw_array_append or operation.bytecode_op == @intFromEnum(bc.Op.array_append);
+    }
+    try std.testing.expect(saw_new_array and saw_array_append);
+
+    const caught_chunk = root.fns.items[2].chunk.?;
+    const caught_artifact = caught_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_exceptional_push = false;
+    for (caught_artifact.native_operations.?.descriptors) |operation| {
+        if (operation.bytecode_op == @intFromEnum(bc.Op.call_with_this) and
+            operation.exceptional_target != jit.NativeOperationDescriptor.none)
+            saw_exceptional_push = true;
+    }
+    try std.testing.expect(saw_exceptional_push);
+
+    const steps_before_oom = machine.steps;
+    const execution_allowed_before_oom = machine.jit_execution_allowed;
+    {
+        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = 0 });
+        const arena_before_oom = machine.arena;
+        machine.arena = failing.allocator();
+        machine.jit_execution_allowed = true;
+        defer {
+            machine.arena = arena_before_oom;
+            machine.jit_execution_allowed = execution_allowed_before_oom;
+            machine.steps = steps_before_oom;
+        }
+        var oom_storage: [64]Value = @splat(Value.undef());
+        if (build_chunk.local_count > oom_storage.len) return error.TestUnexpectedResult;
+        oom_storage[0] = Value.num(4);
+        oom_storage[1] = Value.num(0);
+        oom_storage[2] = Value.num(0);
+        var oom_frame = Frame{ .slots = oom_storage[0..build_chunk.local_count], .parent = null };
+        var oom_exec = Exec{ .ip = build_artifact.osr.?.entries[0].entry_ip };
+        defer oom_exec.stack.deinit(allocator);
+        defer oom_exec.handlers.deinit(allocator);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            tryRunLoopOsr(&machine, &oom_exec, build_chunk, &oom_frame, null),
+        );
+    }
+
+    var stop_requested: std.atomic.Value(bool) = .init(true);
+    var stop_machine = Interpreter{
+        .arena = allocator,
+        .env = &env,
+        .root_shape = root_shape,
+        .jit_owner = &owner,
+        .stop_flag = &stop_requested,
+        .steps = 800,
+    };
+    var stop_storage: [64]Value = @splat(Value.undef());
+    if (build_chunk.local_count > stop_storage.len) return error.TestUnexpectedResult;
+    stop_storage[0] = Value.num(1000);
+    var stop_frame = Frame{ .slots = stop_storage[0..build_chunk.local_count], .parent = null };
+    const stop_osr_before = optimizer_osr_entries.load(.monotonic);
+    try std.testing.expectError(error.Throw, run(&stop_machine, build_chunk, &stop_frame));
+    try std.testing.expectEqual(@as(u64, 1024), stop_machine.steps);
+    try std.testing.expect(stop_requested.load(.acquire));
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > stop_osr_before);
+
+    const osr_before = optimizer_osr_entries.load(.monotonic);
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 92016), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+    try std.testing.expect(optimizer_osr_entries.load(.monotonic) > osr_before);
+}
+
 test "vm: optimizer unequal nested branch paths converge" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

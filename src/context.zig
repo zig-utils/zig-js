@@ -15730,6 +15730,104 @@ test "optimizer packed index and property regions match bytecode and survive a m
     try std.testing.expectEqual(index_stats_before, vm.optimizerNativeIndexStatsForTesting());
 }
 
+test "optimizer allocating array loops match bytecode and survive moving GC" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+
+    const source =
+        \\globalThis.optimizerArrayDiscard = [];
+        \\for (var dead = 0; dead < 4096; dead = dead + 1)
+        \\  optimizerArrayDiscard.push({ dead, child: { value: dead + 1 } });
+        \\function optimizerArrayGrow(n, target, held) {
+        \\  var i = 0;
+        \\  while (i < n) {
+        \\    if (i >= 0) target.push(held);
+        \\    i = i + 1;
+        \\  }
+        \\  return target.length + target[n - 1].marker;
+        \\}
+        \\function optimizerArrayBuild(n) {
+        \\  var i = 0; var total = 0;
+        \\  while (i < n) {
+        \\    if (i >= 0) { var pair = [i, i + 1]; total = total + pair[1]; }
+        \\    i = i + 1;
+        \\  }
+        \\  return total;
+        \\}
+        \\globalThis.optimizerArrayHeld = { marker: 7 };
+        \\globalThis.optimizerArrayTarget = [];
+        \\for (var warm = 0; warm < 10; warm = warm + 1) {
+        \\  optimizerArrayGrow(4, [], optimizerArrayHeld);
+        \\  optimizerArrayBuild(4);
+        \\}
+        \\optimizerArrayDiscard = null;
+    ;
+
+    const native_ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = true,
+    });
+    defer native_ctx.destroy();
+    const bytecode_ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer bytecode_ctx.destroy();
+
+    _ = try native_ctx.evaluate(source);
+    _ = try bytecode_ctx.evaluate(source);
+    const grow_object = native_ctx.global_object.getOwn("optimizerArrayGrow").?.asObj();
+    const grow_function: *interp.Function = @ptrCast(@alignCast(grow_object.jsFunction().?));
+    const grow_chunk = grow_function.chunk.?;
+    const grow_artifact = grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_push_call = false;
+    for (grow_artifact.native_operations.?.descriptors) |descriptor|
+        saw_push_call = saw_push_call or descriptor.bytecode_op == @backingInt(bc.Op.call_with_this);
+    try std.testing.expect(grow_artifact.osr != null and saw_push_call);
+
+    const build_object = native_ctx.global_object.getOwn("optimizerArrayBuild").?.asObj();
+    const build_function: *interp.Function = @ptrCast(@alignCast(build_object.jsFunction().?));
+    const build_chunk = build_function.chunk.?;
+    const build_artifact = build_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    var saw_new_array = false;
+    var saw_array_append = false;
+    for (build_artifact.native_operations.?.descriptors) |descriptor| {
+        saw_new_array = saw_new_array or descriptor.bytecode_op == @backingInt(bc.Op.new_array);
+        saw_array_append = saw_array_append or descriptor.bytecode_op == @backingInt(bc.Op.array_append);
+    }
+    try std.testing.expect(build_artifact.osr != null and saw_new_array and saw_array_append);
+
+    native_ctx.collectGarbage();
+    bytecode_ctx.collectGarbage();
+    const target_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayTarget").?.asObj());
+    const held_before = @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayHeld").?.asObj());
+    try std.testing.expect(native_ctx.requestGarbageCompaction());
+
+    const osr_before = vm.optimizerOsrEntriesForTesting();
+    const native_grow = try native_ctx.evaluate(
+        "optimizerArrayGrow(20000, optimizerArrayTarget, optimizerArrayHeld)",
+    );
+    const bytecode_grow = try bytecode_ctx.evaluate(
+        "optimizerArrayGrow(20000, optimizerArrayTarget, optimizerArrayHeld)",
+    );
+    try std.testing.expectEqual(bytecode_grow.rawBits(), native_grow.rawBits());
+    try std.testing.expectEqual(@as(f64, 20007), native_grow.asNum());
+    try std.testing.expect(!native_ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(target_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayTarget").?.asObj()));
+    try std.testing.expect(held_before != @intFromPtr(native_ctx.global_object.getOwn("optimizerArrayHeld").?.asObj()));
+    try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
+    try std.testing.expectEqual(grow_artifact, grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+
+    const native_build = try native_ctx.evaluate("optimizerArrayBuild(2000)");
+    const bytecode_build = try bytecode_ctx.evaluate("optimizerArrayBuild(2000)");
+    try std.testing.expectEqual(bytecode_build.rawBits(), native_build.rawBits());
+    try std.testing.expectEqual(@as(f64, 2001000), native_build.asNum());
+    try std.testing.expectEqual(build_artifact, build_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+}
+
 test "GC compaction rewrites public Zig protected handles" {
     const ctx = try Context.createWith(std.testing.allocator, .{
         .enable_gc = true,
