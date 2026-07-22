@@ -254,7 +254,7 @@ pub const Tier = struct {
     }
 };
 
-pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated, operation_trap };
+pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated, operation_trap, operation_exception };
 
 /// Result of one runtime-backed operation requested by optimized code. Unlike
 /// `ExitStatus`, this preserves why the operation could not produce a value so
@@ -287,19 +287,38 @@ pub const NativeOperationDescriptor = extern struct {
     pub const none = std.math.maxInt(u16);
 };
 
+pub const NativeExceptionalTargetKind = enum(u8) { catch_, finally_ };
+
+/// Exact bytecode continuation after a runtime operation has already raised.
+/// Handler indexes address the owning artifact's recovery-handler table.
+pub const NativeExceptionalTarget = extern struct {
+    target_ip: u32,
+    first_handler: u32,
+    unwind_stack_depth: u16,
+    target_stack_depth: u16,
+    handler_count: u16,
+    kind: NativeExceptionalTargetKind,
+    reserved: u8 = 0,
+};
+
 pub const NativeOperationMetadata = struct {
     allocator: std.mem.Allocator,
     descriptors: []NativeOperationDescriptor,
+    exceptional_targets: []NativeExceptionalTarget,
 
     pub fn create(
         allocator: std.mem.Allocator,
         descriptors: []const NativeOperationDescriptor,
+        exceptional_targets: []const NativeExceptionalTarget,
     ) std.mem.Allocator.Error!*NativeOperationMetadata {
         const metadata = try allocator.create(NativeOperationMetadata);
         errdefer allocator.destroy(metadata);
+        const owned_descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors);
+        errdefer allocator.free(owned_descriptors);
         metadata.* = .{
             .allocator = allocator,
-            .descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors),
+            .descriptors = owned_descriptors,
+            .exceptional_targets = try allocator.dupe(NativeExceptionalTarget, exceptional_targets),
         };
         return metadata;
     }
@@ -307,6 +326,7 @@ pub const NativeOperationMetadata = struct {
     pub fn destroy(self: *NativeOperationMetadata) void {
         const allocator = self.allocator;
         allocator.free(self.descriptors);
+        allocator.free(self.exceptional_targets);
         allocator.destroy(self);
     }
 };
@@ -1127,12 +1147,29 @@ test "native operation ABI preserves value exception and trap outcomes" {
     try std.testing.expectEqual(@as(u16, 4), descriptor.deopt_index);
     try std.testing.expectEqual(@as(u16, 5), descriptor.step_delta);
     try std.testing.expectEqual(@as(u32, 17), descriptor.origin);
-    const metadata = try NativeOperationMetadata.create(std.testing.allocator, &.{descriptor});
+    const exceptional_target = NativeExceptionalTarget{
+        .target_ip = 23,
+        .first_handler = 1,
+        .unwind_stack_depth = 2,
+        .target_stack_depth = 3,
+        .handler_count = 1,
+        .kind = .catch_,
+    };
+    const metadata = try NativeOperationMetadata.create(
+        std.testing.allocator,
+        &.{descriptor},
+        &.{exceptional_target},
+    );
     defer metadata.destroy();
     try std.testing.expectEqualSlices(
         NativeOperationDescriptor,
         &.{descriptor},
         metadata.descriptors,
+    );
+    try std.testing.expectEqualSlices(
+        NativeExceptionalTarget,
+        &.{exceptional_target},
+        metadata.exceptional_targets,
     );
     inline for (@typeInfo(NativeOperationStatus).@"enum".field_values, 0..) |value, ordinal| {
         try std.testing.expectEqual(ordinal, value);

@@ -3621,8 +3621,10 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
     if (operation_id >= metadata.descriptors.len or frame.scratch == null)
         return @intFromEnum(jit.NativeOperationStatus.host_trap);
     const descriptor = metadata.descriptors[operation_id];
-    if (frame.exit_ip != descriptor.origin or frame.deopt_index != descriptor.deopt_index or
-        descriptor.step_delta == 0)
+    if (frame.operation_detail != operation_id or frame.exit_ip != descriptor.origin or
+        frame.deopt_index != descriptor.deopt_index or descriptor.step_delta == 0 or
+        (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
+        descriptor.exceptional_target >= metadata.exceptional_targets.len))
         return @intFromEnum(jit.NativeOperationStatus.host_trap);
     const first: usize = descriptor.first_input;
     const count: usize = descriptor.input_count;
@@ -3639,7 +3641,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             error.OptShortCircuit => @intFromEnum(jit.NativeOperationStatus.host_trap),
         };
         frame.operation_value_bits = result.rawBits();
-        frame.operation_detail = 0;
+        frame.operation_detail = operation_id;
         return @intFromEnum(jit.NativeOperationStatus.value);
     }
     return @intFromEnum(jit.NativeOperationStatus.host_trap);
@@ -3776,6 +3778,63 @@ fn reconstructNativeSideExit(
     return true;
 }
 
+fn reconstructNativeOperationException(
+    native: *const jit.CompiledCode,
+    native_frame: *const jit.NativeFrame,
+    slots: []Value,
+    scratch: []const u64,
+    exec: *Exec,
+    allocator: std.mem.Allocator,
+) EvalError!bool {
+    const operations = native.native_operations orelse return false;
+    const deopt = native.deopt orelse return false;
+    const operation_id = std.math.cast(usize, native_frame.operation_detail) orelse return false;
+    if (operation_id >= operations.descriptors.len) return false;
+    const descriptor = operations.descriptors[operation_id];
+    if (descriptor.deopt_index != native_frame.deopt_index or descriptor.origin != native_frame.exit_ip or
+        descriptor.exceptional_target == jit.NativeOperationDescriptor.none or
+        descriptor.exceptional_target >= operations.exceptional_targets.len)
+        return false;
+    const target = operations.exceptional_targets[descriptor.exceptional_target];
+    if (descriptor.deopt_index >= deopt.points.len) return false;
+    const point = deopt.points[descriptor.deopt_index];
+    const expected_stack_depth = std.math.add(
+        u16,
+        target.unwind_stack_depth,
+        if (target.kind == .catch_) 1 else 2,
+    ) catch return false;
+    if (target.target_stack_depth != expected_stack_depth or target.handler_count > 64 or
+        target.unwind_stack_depth > point.stack_count or target.handler_count > point.handler_count or
+        target.first_handler > deopt.handlers.len or
+        target.handler_count > deopt.handlers.len - target.first_handler)
+        return false;
+
+    var recovered_handlers: [64]Handler = undefined;
+    for (deopt.handlers[target.first_handler .. target.first_handler + target.handler_count], 0..) |handler, index| {
+        if ((handler.catch_ip == jit.RecoveryHandler.none and handler.finally_ip == jit.RecoveryHandler.none) or
+            handler.stack_depth > target.unwind_stack_depth)
+            return false;
+        recovered_handlers[index] = .{
+            .catch_pc = handler.catch_ip,
+            .finally_pc = handler.finally_ip,
+            .stack_depth = handler.stack_depth,
+        };
+    }
+    try exec.stack.ensureTotalCapacity(allocator, target.target_stack_depth);
+    try exec.handlers.ensureTotalCapacity(allocator, target.handler_count);
+    if (!try reconstructNativeSideExit(deopt, native_frame, slots, scratch, exec, allocator)) return false;
+    if (target.unwind_stack_depth > exec.stack.items.len) return false;
+
+    exec.stack.shrinkRetainingCapacity(target.unwind_stack_depth);
+    exec.stack.appendAssumeCapacity(Value.fromRawBits(native_frame.operation_value_bits));
+    if (target.kind == .finally_)
+        exec.stack.appendAssumeCapacity(Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+    exec.handlers.clearRetainingCapacity();
+    for (recovered_handlers[0..target.handler_count]) |handler| exec.handlers.appendAssumeCapacity(handler);
+    exec.ip = target.target_ip;
+    return true;
+}
+
 test "vm: deoptimization reconstructs nested handlers transactionally" {
     const metadata = try jit.DeoptMetadata.create(
         std.testing.allocator,
@@ -3862,7 +3921,7 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         .deopt_index = 0,
         .step_delta = 1,
         .origin = 9,
-    }});
+    }}, &.{});
     defer metadata.destroy();
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
     scratch[0] = Value.num(42).rawBits();
@@ -3871,6 +3930,7 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         .runtime_context = &machine,
         .operation_context = metadata,
         .exit_ip = 9,
+        .deopt_index = 0,
     };
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.value),
@@ -3889,6 +3949,12 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     );
     metadata.descriptors[0].first_input = 0;
     metadata.descriptors[0].bytecode_op = std.math.maxInt(u16);
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.to_numeric);
+    metadata.descriptors[0].exceptional_target = 0;
     try std.testing.expectEqual(
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
@@ -3927,6 +3993,18 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .stop => error.OutOfMemory,
         .invalidated => .miss,
         .operation_trap => error.OutOfMemory,
+        .operation_exception => operation_exception: {
+            const target = exec orelse return error.OutOfMemory;
+            if (!try reconstructNativeOperationException(
+                native,
+                &native_frame,
+                live_slots,
+                &scratch,
+                target,
+                vm.arena,
+            )) return error.OutOfMemory;
+            break :operation_exception .deoptimized;
+        },
         .side_exit => side_exit: {
             std.debug.assert(native.has_side_exits);
             const target = exec orelse break :side_exit .miss;
@@ -3983,6 +4061,17 @@ fn tryRunOsrNative(
         .stop => error.OutOfMemory,
         .invalidated => .miss,
         .operation_trap => error.OutOfMemory,
+        .operation_exception => operation_exception: {
+            if (!try reconstructNativeOperationException(
+                native,
+                &native_frame,
+                slots,
+                &scratch,
+                exec,
+                vm.arena,
+            )) return error.OutOfMemory;
+            break :operation_exception .deoptimized;
+        },
         .side_exit => side_exit: {
             const deopt = native.deopt orelse return error.OutOfMemory;
             if (!try reconstructNativeSideExit(deopt, &native_frame, slots, &scratch, exec, vm.arena))
@@ -8238,6 +8327,87 @@ test "vm: optimizer native to_numeric returns and propagates uncaught object thr
     try std.testing.expect(map.scratch_pointer_slots &
         (@as(u64, 1) << @intCast(descriptor.first_input)) != 0);
     try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+}
+
+test "vm: optimizer native to_numeric resumes an active catch without replay" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function post(x) { try { return x++; } catch { return 99; } }
+        \\const good = { valueOf() { return 7; } };
+        \\let calls = 0;
+        \\const bad = { valueOf() { calls += 1; throw 91; } };
+        \\post(good); post(good); post(good); post(good); post(good);
+        \\post(good); post(good); post(good); post(good); post(good);
+        \\post(bad) + calls
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 100), (try run(&machine, root, null)).asNum());
+    const post_chunk = root.fns.items[0].chunk.?;
+    const artifact = post_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const metadata = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_catch = false;
+    for (metadata.descriptors) |descriptor| if (descriptor.exceptional_target != jit.NativeOperationDescriptor.none) {
+        const target = metadata.exceptional_targets[descriptor.exceptional_target];
+        try std.testing.expectEqual(jit.NativeExceptionalTargetKind.catch_, target.kind);
+        saw_catch = true;
+    };
+    try std.testing.expect(saw_catch);
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+}
+
+test "vm: optimizer native to_numeric resumes finally and rethrows once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let marker = 0;
+        \\function post(x) { try { return x++; } finally { marker = 41; } }
+        \\const good = { valueOf() { return 7; } };
+        \\let calls = 0;
+        \\const bad = { valueOf() { calls += 1; throw 91; } };
+        \\post(good); post(good); post(good); post(good); post(good);
+        \\post(good); post(good); post(good); post(good); post(good);
+        \\try { post(bad); } catch (e) { marker += e; }
+        \\marker + calls
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 133), (try run(&machine, root, null)).asNum());
+    const post_chunk = root.fns.items[0].chunk.?;
+    const artifact = post_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const metadata = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_finally = false;
+    for (metadata.descriptors) |descriptor| if (descriptor.exceptional_target != jit.NativeOperationDescriptor.none) {
+        const target = metadata.exceptional_targets[descriptor.exceptional_target];
+        try std.testing.expectEqual(jit.NativeExceptionalTargetKind.finally_, target.kind);
+        try std.testing.expectEqual(target.unwind_stack_depth + 2, target.target_stack_depth);
+        saw_finally = true;
+    };
+    try std.testing.expect(saw_finally);
 }
 
 test "vm: optimizer interpreter-owned environment exit preserves binding exceptions" {
