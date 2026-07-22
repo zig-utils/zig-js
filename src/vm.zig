@@ -11611,6 +11611,8 @@ test "vm: optimizer packed index loop executes existing-index reads and writes d
 
 test "vm: optimizer allocating array loops execute calls and literal effects" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
