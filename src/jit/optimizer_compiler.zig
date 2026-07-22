@@ -72,17 +72,21 @@ pub const NestedLoopBranch = struct {
     condition: u8,
     false_block: u32,
     true_block: u32,
-    /// Shared latch for a diamond, or null when arms independently backedge
-    /// or one arm exits the loop.
+    /// Shared latch for a diamond, or null when both arms independently
+    /// backedge to the loop header.
     merge_block: ?u32,
-    /// A conditional loop exit deoptimizes either directly from the branch
-    /// block or after a tiny arm block into the outer exit block.
-    false_exit_from: ?u32 = null,
-    true_exit_from: ?u32 = null,
-    false_exit_deopt_index: ?u16 = null,
-    true_exit_deopt_index: ?u16 = null,
     false_steps: u12,
     true_steps: u12,
+};
+
+pub const LoopExitGuard = struct {
+    entry_block: u32,
+    condition: u8,
+    exit_block: u32,
+    exit_from: u32,
+    exit_on_true: bool,
+    exit_deopt_index: u16 = 0,
+    exit_steps: u12,
 };
 
 pub const Program = struct {
@@ -92,6 +96,7 @@ pub const Program = struct {
     branch: ?BranchSelection,
     side_exit: ?SideExit,
     side_exit_branch: ?SideExitBranch,
+    loop_exit_guards: []LoopExitGuard = &.{},
     scratch_slots: u8,
     frame_slots: u32,
     required_numeric_slots: u64,
@@ -111,6 +116,7 @@ pub const Program = struct {
         self.allocator.free(self.deopt_values);
         self.allocator.free(self.deopt_handlers);
         self.allocator.free(self.stack_maps);
+        if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.osr) |metadata| metadata.destroy();
         self.* = undefined;
     }
@@ -420,10 +426,38 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     };
 }
 
+const LoopExitArm = struct {
+    block: u32,
+    direct: bool,
+};
+
+fn branchForBlock(branches: []const optimizer.BranchValue, block: u32) ?optimizer.BranchValue {
+    var found: ?optimizer.BranchValue = null;
+    for (branches) |branch| if (branch.block == block) {
+        if (found != null) return null;
+        found = branch;
+    };
+    return found;
+}
+
+fn loopExitArm(
+    plan: *const optimizer.Plan,
+    branches: []const optimizer.BranchValue,
+    outer_exit: u32,
+    target: u32,
+) ?LoopExitArm {
+    if (target == outer_exit) return .{ .block = target, .direct = true };
+    if (target >= plan.blocks.len) return null;
+    for (branches) |branch| if (branch.block == target) return null;
+    const block = plan.blocks[target];
+    if (block.successor_count != 1 or block.successors[0] != outer_exit) return null;
+    return .{ .block = target, .direct = false };
+}
+
 fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std.mem.Allocator) !Program {
     const graph = &plan.graph;
     if (graph.nodes.len == 0 or graph.nodes.len > jit.numeric_scratch_capacity or chunk.local_count > 64 or
-        graph.branches.len == 0 or graph.branches.len > 2)
+        graph.branches.len == 0)
         return error.UnsupportedChunk;
 
     const osr = try buildOsrMetadata(plan, allocator);
@@ -438,14 +472,10 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     };
     const header = header_block orelse return error.UnsupportedChunk;
     var outer_branch: ?optimizer.BranchValue = null;
-    var inner_branch: ?optimizer.BranchValue = null;
     for (graph.branches) |candidate| {
         if (candidate.block == header) {
             if (outer_branch != null) return error.UnsupportedChunk;
             outer_branch = candidate;
-        } else {
-            if (inner_branch != null) return error.UnsupportedChunk;
-            inner_branch = candidate;
         }
     }
     const branch = outer_branch orelse return error.UnsupportedChunk;
@@ -453,37 +483,65 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
 
     var body: ?u32 = null;
     var nested_loop: ?NestedLoopBranch = null;
+    var exit_guards: std.ArrayListUnmanaged(LoopExitGuard) = .empty;
+    defer exit_guards.deinit(allocator);
     var latch: u32 = undefined;
     var true_steps: u32 = undefined;
-    if (inner_branch) |nested| {
+
+    // Recognize a reducible chain of conditional exits. Each guard has exactly
+    // one arm into the outer exit (directly or through a tiny arm block) and
+    // one arm that advances to the next guard or the final backedge block.
+    if (branchForBlock(graph.branches, branch.true_block) != null) chain: {
+        var current = branch.true_block;
+        var path_steps = plan.blocks[header].instruction_count;
+        while (exit_guards.items.len < graph.branches.len) {
+            const guard_branch = branchForBlock(graph.branches, current) orelse break;
+            if (guard_branch.false_block == guard_branch.true_block or
+                guard_branch.false_block >= plan.blocks.len or guard_branch.true_block >= plan.blocks.len)
+                break;
+            const false_exit = loopExitArm(plan, graph.branches, branch.false_block, guard_branch.false_block);
+            const true_exit = loopExitArm(plan, graph.branches, branch.false_block, guard_branch.true_block);
+            if ((false_exit == null) == (true_exit == null)) break;
+            const exit = false_exit orelse true_exit.?;
+            const exit_on_true = true_exit != null;
+            const continue_block = if (exit_on_true) guard_branch.false_block else guard_branch.true_block;
+            path_steps = std.math.add(u32, path_steps, plan.blocks[current].instruction_count) catch break;
+            const exit_steps = if (exit.direct)
+                path_steps
+            else
+                std.math.add(u32, path_steps, plan.blocks[exit.block].instruction_count) catch break;
+            exit_guards.append(allocator, .{
+                .entry_block = current,
+                .condition = std.math.cast(u8, guard_branch.condition) orelse break,
+                .exit_block = exit.block,
+                .exit_from = if (exit.direct) current else exit.block,
+                .exit_on_true = exit_on_true,
+                .exit_steps = std.math.cast(u12, exit_steps) orelse break,
+            }) catch return error.OutOfMemory;
+            current = continue_block;
+        }
+        if (exit_guards.items.len == 0 or current >= plan.blocks.len or
+            plan.blocks[current].successor_count != 1 or plan.blocks[current].successors[0] != header)
+        {
+            exit_guards.clearRetainingCapacity();
+            break :chain;
+        }
+        body = current;
+        latch = current;
+        true_steps = std.math.add(u32, path_steps, plan.blocks[current].instruction_count) catch
+            return error.UnsupportedChunk;
+    }
+
+    if (exit_guards.items.len == 0) if (branchForBlock(graph.branches, branch.true_block)) |nested| {
         if (nested.block != branch.true_block or nested.false_block == nested.true_block or
             nested.false_block >= plan.blocks.len or nested.true_block >= plan.blocks.len)
             return error.UnsupportedChunk;
         const false_arm = plan.blocks[nested.false_block];
         const true_arm = plan.blocks[nested.true_block];
-        const false_direct_exit = nested.false_block == branch.false_block;
-        const true_direct_exit = nested.true_block == branch.false_block;
-        const false_successor = if (false_arm.successor_count == 1) false_arm.successors[0] else null;
-        const true_successor = if (true_arm.successor_count == 1) true_arm.successors[0] else null;
-        const false_backedge = false_successor == header;
-        const true_backedge = true_successor == header;
-        const false_exit_from: ?u32 = if (false_direct_exit)
-            nested.block
-        else if (false_successor == branch.false_block)
-            nested.false_block
-        else
-            null;
-        const true_exit_from: ?u32 = if (true_direct_exit)
-            nested.block
-        else if (true_successor == branch.false_block)
-            nested.true_block
-        else
-            null;
-        const conditional_exit = (false_exit_from != null and true_backedge) or
-            (true_exit_from != null and false_backedge);
-        if (!conditional_exit and (false_arm.successor_count != 1 or true_arm.successor_count != 1))
-            return error.UnsupportedChunk;
-        const shared_successor = !conditional_exit and false_successor == true_successor;
+        if (false_arm.successor_count != 1 or true_arm.successor_count != 1) return error.UnsupportedChunk;
+        const false_successor = false_arm.successors[0];
+        const true_successor = true_arm.successors[0];
+        const shared_successor = false_successor == true_successor;
         const merge: ?u32 = if (shared_successor and false_successor != header)
             false_successor
         else
@@ -492,22 +550,18 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             if (merge_block >= plan.blocks.len or plan.blocks[merge_block].successor_count != 1 or
                 plan.blocks[merge_block].successors[0] != header)
                 return error.UnsupportedChunk;
-        } else if (!conditional_exit and (!false_backedge or !true_backedge)) {
+        } else if (false_successor != header or true_successor != header) {
             return error.UnsupportedChunk;
         }
-        const false_steps = if (false_direct_exit)
-            try sumInstructionCounts(plan, &.{ header, nested.block })
-        else if (merge) |merge_block|
+        const false_steps = if (merge) |merge_block|
             try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block, merge_block })
         else
             try sumInstructionCounts(plan, &.{ header, nested.block, nested.false_block });
-        const nested_true_steps = if (true_direct_exit)
-            try sumInstructionCounts(plan, &.{ header, nested.block })
-        else if (merge) |merge_block|
+        const nested_true_steps = if (merge) |merge_block|
             try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block, merge_block })
         else
             try sumInstructionCounts(plan, &.{ header, nested.block, nested.true_block });
-        latch = merge orelse if (false_backedge) nested.false_block else nested.true_block;
+        latch = merge orelse nested.true_block;
         true_steps = @max(false_steps, nested_true_steps);
         nested_loop = .{
             .entry_block = nested.block,
@@ -515,8 +569,6 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .false_block = nested.false_block,
             .true_block = nested.true_block,
             .merge_block = merge,
-            .false_exit_from = false_exit_from,
-            .true_exit_from = true_exit_from,
             .false_steps = std.math.cast(u12, false_steps) orelse return error.UnsupportedChunk,
             .true_steps = std.math.cast(u12, nested_true_steps) orelse return error.UnsupportedChunk,
         };
@@ -528,7 +580,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
         body = straight_body;
         latch = straight_body;
         true_steps = try sumInstructionCounts(plan, &.{ header, straight_body });
-    }
+    };
 
     var types: [jit.numeric_scratch_capacity]ValueType = @splat(.other);
     var initialized: [jit.numeric_scratch_capacity]bool = @splat(false);
@@ -539,32 +591,40 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     try appendPrimitiveLeaves(graph, allocator, &operations, &types, &initialized);
     try appendBlockOperations(graph, header, true, allocator, &operations, &types, &initialized, &required_numeric);
     if (types[branch.condition] != .boolean) return error.UnsupportedChunk;
-    if (nested_loop) |nested| {
+    if (exit_guards.items.len != 0) {
+        var from = header;
+        for (exit_guards.items) |guard| {
+            try appendEdgeCopies(graph, from, guard.entry_block, guard.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+            try appendBlockOperations(graph, guard.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+            if (types[guard.condition] != .boolean) return error.UnsupportedChunk;
+            if (guard.exit_from != guard.entry_block) {
+                try appendEdgeCopies(graph, guard.entry_block, guard.exit_block, guard.exit_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+                try appendBlockOperations(graph, guard.exit_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+            }
+            from = guard.entry_block;
+        }
+        const straight_body = body.?;
+        try appendEdgeCopies(graph, from, straight_body, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, straight_body, false, allocator, &operations, &types, &initialized, &required_numeric);
+        try appendEdgeCopies(graph, straight_body, header, straight_body, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+    } else if (nested_loop) |nested| {
         try appendEdgeCopies(graph, header, nested.entry_block, nested.entry_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
         try appendBlockOperations(graph, nested.entry_block, false, allocator, &operations, &types, &initialized, &required_numeric);
         if (types[nested.condition] != .boolean) return error.UnsupportedChunk;
 
-        if (nested.true_exit_from != nested.entry_block) {
-            try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-            if (nested.true_exit_from == null) {
-                if (nested.merge_block) |merge_block|
-                    try appendEdgeCopies(graph, nested.true_block, merge_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
-                else
-                    try appendEdgeCopies(graph, nested.true_block, header, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            }
-        }
+        try appendEdgeCopies(graph, nested.entry_block, nested.true_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, nested.true_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (nested.merge_block) |merge_block|
+            try appendEdgeCopies(graph, nested.true_block, merge_block, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
+        else
+            try appendEdgeCopies(graph, nested.true_block, header, nested.true_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
-        if (nested.false_exit_from != nested.entry_block) {
-            try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
-            if (nested.false_exit_from == null) {
-                if (nested.merge_block) |merge_block|
-                    try appendEdgeCopies(graph, nested.false_block, merge_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
-                else
-                    try appendEdgeCopies(graph, nested.false_block, header, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
-            }
-        }
+        try appendEdgeCopies(graph, nested.entry_block, nested.false_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
+        try appendBlockOperations(graph, nested.false_block, false, allocator, &operations, &types, &initialized, &required_numeric);
+        if (nested.merge_block) |merge_block|
+            try appendEdgeCopies(graph, nested.false_block, merge_block, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots)
+        else
+            try appendEdgeCopies(graph, nested.false_block, header, nested.false_block, allocator, &operations, &types, &initialized, &required_numeric, &scratch_slots);
 
         if (nested.merge_block) |merge_block| {
             try appendBlockOperations(graph, merge_block, false, allocator, &operations, &types, &initialized, &required_numeric);
@@ -584,20 +644,11 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     const entry_index = try appendBlockEntryDeopt(graph, &initialized, header, allocator, &deopt_points, &deopt_values);
     const false_index = try appendEdgeDeopt(graph, &initialized, header, branch.false_block, allocator, &deopt_points, &deopt_values);
     const true_index = try appendEdgeDeopt(graph, &initialized, latch, header, allocator, &deopt_points, &deopt_values);
-    if (nested_loop) |*nested| {
-        if (nested.false_exit_from) |from| nested.false_exit_deopt_index = try appendEdgeDeopt(
+    for (exit_guards.items) |*guard| {
+        guard.exit_deopt_index = try appendEdgeDeopt(
             graph,
             &initialized,
-            from,
-            branch.false_block,
-            allocator,
-            &deopt_points,
-            &deopt_values,
-        );
-        if (nested.true_exit_from) |from| nested.true_exit_deopt_index = try appendEdgeDeopt(
-            graph,
-            &initialized,
-            from,
+            guard.exit_from,
             branch.false_block,
             allocator,
             &deopt_points,
@@ -615,6 +666,8 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
     errdefer allocator.free(owned_deopt_handlers);
     const stack_maps = try typedRecoveryStackMaps(allocator, owned_deopt_points, owned_deopt_values, &types);
     errdefer allocator.free(stack_maps);
+    const owned_exit_guards = try exit_guards.toOwnedSlice(allocator);
+    errdefer if (owned_exit_guards.len != 0) allocator.free(owned_exit_guards);
     var local_mask: u64 = 0;
     for (osr.imports[entry.first_import .. entry.first_import + entry.local_count]) |import| {
         if (import.source != .frame_slot or import.source_index >= 64 or import.destination >= required_numeric.len)
@@ -639,6 +692,7 @@ fn lowerLoopOsr(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: 
             .true_block = body,
             .nested_loop = nested_loop,
         },
+        .loop_exit_guards = owned_exit_guards,
         .scratch_slots = @intCast(scratch_slots),
         .frame_slots = chunk.local_count,
         .required_numeric_slots = local_mask,
@@ -1142,46 +1196,59 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
         try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
         try assembler.compareRegister64(9, 10);
         const false_jump = try assembler.branchConditionPlaceholder(.eq);
-        if (branch.nested_loop) |nested| {
+        if (program.loop_exit_guards.len != 0) {
+            for (program.loop_exit_guards) |guard| {
+                try emitBlockOperations(&assembler, program, guard.entry_block);
+                try assembler.load64(9, 14, try slotOffset(guard.condition));
+                try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
+                try assembler.compareRegister64(9, 10);
+                const continue_jump = try assembler.branchConditionPlaceholder(
+                    if (guard.exit_on_true) .eq else .ne,
+                );
+                if (guard.exit_from != guard.entry_block)
+                    try emitBlockOperations(&assembler, program, guard.exit_block);
+                try emitStepIncrement(&assembler, guard.exit_steps);
+                try emitSideExit(
+                    &assembler,
+                    guard.exit_deopt_index,
+                    program.deopt_points[guard.exit_deopt_index].exit_ip,
+                );
+                try assembler.patchConditionBranch(continue_jump, assembler.position());
+            }
+            try emitBlockOperations(&assembler, program, branch.true_block.?);
+            try emitStepIncrement(&assembler, branch.true_steps);
+            try assembler.subtractImmediate64(15, 15, branch.true_steps);
+            try assembler.subtractImmediate64(16, 16, branch.true_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(backedge, loop_top);
+        } else if (branch.nested_loop) |nested| {
             try emitBlockOperations(&assembler, program, nested.entry_block);
             try assembler.load64(9, 14, try slotOffset(nested.condition));
             try assembler.movImmediate64(10, Value.boolVal(false).rawBits());
             try assembler.compareRegister64(9, 10);
             const nested_false_jump = try assembler.branchConditionPlaceholder(.eq);
-            if (nested.true_exit_deopt_index) |exit_index| {
-                if (nested.true_exit_from != nested.entry_block)
-                    try emitBlockOperations(&assembler, program, nested.true_block);
-                try emitStepIncrement(&assembler, nested.true_steps);
-                try emitSideExit(&assembler, exit_index, program.deopt_points[exit_index].exit_ip);
-            } else {
-                try emitBlockOperations(&assembler, program, nested.true_block);
-                if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
-                try emitStepIncrement(&assembler, nested.true_steps);
-                try assembler.subtractImmediate64(15, 15, nested.true_steps);
-                try assembler.subtractImmediate64(16, 16, nested.true_steps);
-                try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-                if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-                const true_backedge = try assembler.branchPlaceholder();
-                try assembler.patchBranch(true_backedge, loop_top);
-            }
+            try emitBlockOperations(&assembler, program, nested.true_block);
+            if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
+            try emitStepIncrement(&assembler, nested.true_steps);
+            try assembler.subtractImmediate64(15, 15, nested.true_steps);
+            try assembler.subtractImmediate64(16, 16, nested.true_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const true_backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(true_backedge, loop_top);
 
             try assembler.patchConditionBranch(nested_false_jump, assembler.position());
-            if (nested.false_exit_deopt_index) |exit_index| {
-                if (nested.false_exit_from != nested.entry_block)
-                    try emitBlockOperations(&assembler, program, nested.false_block);
-                try emitStepIncrement(&assembler, nested.false_steps);
-                try emitSideExit(&assembler, exit_index, program.deopt_points[exit_index].exit_ip);
-            } else {
-                try emitBlockOperations(&assembler, program, nested.false_block);
-                if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
-                try emitStepIncrement(&assembler, nested.false_steps);
-                try assembler.subtractImmediate64(15, 15, nested.false_steps);
-                try assembler.subtractImmediate64(16, 16, nested.false_steps);
-                try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
-                if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
-                const false_backedge = try assembler.branchPlaceholder();
-                try assembler.patchBranch(false_backedge, loop_top);
-            }
+            try emitBlockOperations(&assembler, program, nested.false_block);
+            if (nested.merge_block) |merge_block| try emitBlockOperations(&assembler, program, merge_block);
+            try emitStepIncrement(&assembler, nested.false_steps);
+            try assembler.subtractImmediate64(15, 15, nested.false_steps);
+            try assembler.subtractImmediate64(16, 16, nested.false_steps);
+            try emitMovingSafepointPoll(&assembler, entry_deopt_index, program.deopt_points[entry_deopt_index].exit_ip);
+            if (program.observe_loop_backedges) try emitBackedgeObserver(&assembler);
+            const false_backedge = try assembler.branchPlaceholder();
+            try assembler.patchBranch(false_backedge, loop_top);
         } else {
             try emitBlockOperations(&assembler, program, branch.true_block.?);
             try emitStepIncrement(&assembler, branch.true_steps);
@@ -2886,6 +2953,122 @@ test "optimizer loop OSR side exits a conditional break edge" {
             return error.TestUnexpectedResult,
     ).asNum());
     try std.testing.expectEqual(@as(f64, 2), Value.fromRawBits(
+        compiled.deopt.?.values[exit.first_value + 2].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult,
+    ).asNum());
+}
+
+fn makeMultiExitLoopChunk(allocator: std.mem.Allocator) !bc.Chunk {
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 3;
+    const zero = try chunk.addConst(Value.num(0));
+    const one = try chunk.addConst(Value.num(1));
+    const two = try chunk.addConst(Value.num(2));
+    const ninety_nine = try chunk.addConst(Value.num(99));
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_const, zero);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    const enter_loop = try chunk.emit(.jump, 0);
+
+    const header: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[enter_loop].a = header;
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.lt, 0);
+    const leave_loop = try chunk.emit(.jump_if_false, 0);
+
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, two);
+    _ = try chunk.emit(.eq, 0);
+    const continue_first = try chunk.emit(.jump_if_false, 0);
+    const first_break = try chunk.emit(.jump, 0);
+
+    const second_guard: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[continue_first].a = second_guard;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, ninety_nine);
+    _ = try chunk.emit(.eq, 0);
+    const continue_second = try chunk.emit(.jump_if_false, 0);
+    const second_break = try chunk.emit(.jump, 0);
+
+    const body: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[continue_second].a = body;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 2);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.load_const, one);
+    _ = try chunk.emit(.add, 0);
+    _ = try chunk.emit(.store_local, 1);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.jump, header);
+
+    const exit: u32 = @intCast(chunk.code.items.len);
+    chunk.code.items[leave_loop].a = exit;
+    chunk.code.items[first_break].a = exit;
+    chunk.code.items[second_break].a = exit;
+    _ = try chunk.emit(.load_local, 2);
+    _ = try chunk.emit(.ret, 0);
+    return chunk;
+}
+
+test "optimizer loop OSR side exits either guard in a multi-exit chain" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = try makeMultiExitLoopChunk(arena.allocator());
+    var compiled = try compile(&chunk);
+    defer compiled.deinit();
+    try std.testing.expectEqual(@as(u32, 23), compiled.bytecode_steps);
+    try std.testing.expectEqual(@as(usize, 5), compiled.deopt.?.points.len);
+    const osr = compiled.osr orelse return error.TestUnexpectedResult;
+    const entry_index = osr.findEntry(7, 3, 0, 0, Value.undef().rawBits()) orelse
+        return error.TestUnexpectedResult;
+    var scratch: [jit.numeric_scratch_capacity]u64 = @splat(0);
+
+    var slots = [_]u64{ Value.num(5).rawBits(), Value.num(0).rawBits(), Value.num(0).rawBits() };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    var steps: u64 = 0;
+    var frame = jit.NativeFrame{
+        .slots = &slots,
+        .scratch = &scratch,
+        .steps = &steps,
+        .steps_until_checkpoint = 1024,
+        .steps_until_budget = 1024,
+    };
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 32), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 55), steps);
+    var exit = compiled.deopt.?.points[frame.deopt_index];
+    try std.testing.expectEqual(@as(f64, 2), Value.fromRawBits(
+        compiled.deopt.?.values[exit.first_value + 1].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult,
+    ).asNum());
+    try std.testing.expectEqual(@as(f64, 2), Value.fromRawBits(
+        compiled.deopt.?.values[exit.first_value + 2].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult,
+    ).asNum());
+
+    slots = .{ Value.num(5).rawBits(), Value.num(1).rawBits(), Value.num(99).rawBits() };
+    try std.testing.expect(osr.prepareScratch(entry_index, &slots, &.{}, &scratch));
+    steps = 0;
+    frame.steps_until_checkpoint = 1024;
+    frame.steps_until_budget = 1024;
+    try std.testing.expectEqual(jit.ExitStatus.side_exit, compiled.run(&frame));
+    try std.testing.expectEqual(@as(usize, 32), frame.exit_ip);
+    try std.testing.expectEqual(@as(u64, 13), steps);
+    exit = compiled.deopt.?.points[frame.deopt_index];
+    try std.testing.expectEqual(@as(f64, 1), Value.fromRawBits(
+        compiled.deopt.?.values[exit.first_value + 1].materialize(&slots, &scratch) orelse
+            return error.TestUnexpectedResult,
+    ).asNum());
+    try std.testing.expectEqual(@as(f64, 99), Value.fromRawBits(
         compiled.deopt.?.values[exit.first_value + 2].materialize(&slots, &scratch) orelse
             return error.TestUnexpectedResult,
     ).asNum());
