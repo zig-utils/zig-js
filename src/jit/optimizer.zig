@@ -77,6 +77,17 @@ pub const ValueKind = enum {
     call_with_this,
     construct,
     construct_spread,
+    new_object,
+    new_array,
+    init_prop,
+    init_proto,
+    init_prop_computed,
+    init_spread,
+    init_getter,
+    init_setter,
+    array_append,
+    array_spread,
+    array_append_hole,
     get_prop,
     get_index,
     set_prop,
@@ -149,16 +160,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .name_anon,
         .load_this,
         .load_new_target,
-        .new_object,
-        .new_array,
-        .init_prop,
-        .init_proto,
-        .init_prop_computed,
-        .init_spread,
-        .init_getter,
-        .init_setter,
-        .array_append,
-        .array_spread,
         .super_get,
         .super_get_index,
         .enter_block,
@@ -168,7 +169,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .exit_with,
         .make_regex,
         .register_disposable,
-        .array_append_hole,
         .import_call,
         .make_closure,
         .assert_iter_result,
@@ -602,6 +602,17 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .call_with_this,
         .new_call,
         .new_spread,
+        .new_object,
+        .new_array,
+        .init_prop,
+        .init_proto,
+        .init_prop_computed,
+        .init_spread,
+        .init_getter,
+        .init_setter,
+        .array_append,
+        .array_spread,
+        .array_append_hole,
         => return depthEffect(inst).required,
         else => {},
     }
@@ -1176,6 +1187,54 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 try builder.roots.append(allocator, result);
                 stack[depth - 1] = result;
             },
+            .new_object, .new_array => {
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = if (inst.op == .new_object) .new_object else .new_array,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth] = result;
+                depth += 1;
+            },
+            .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+                const effect = depthEffect(inst);
+                if (depth < effect.required) return error.InvalidControlFlow;
+                if (inst.op == .init_prop and inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const input_count: usize = @intCast(effect.required);
+                const first_input = depth - input_count;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = switch (inst.op) {
+                        .init_prop => .init_prop,
+                        .init_proto => .init_proto,
+                        .init_prop_computed => .init_prop_computed,
+                        .init_spread => .init_spread,
+                        .init_getter => .init_getter,
+                        .init_setter => .init_setter,
+                        .array_append => .array_append,
+                        .array_spread => .array_spread,
+                        .array_append_hole => .array_append_hole,
+                        else => unreachable,
+                    },
+                    .lhs = stack[first_input],
+                    .rhs = if (input_count >= 2) stack[first_input + 1] else ValueNode.none,
+                    .third = if (input_count >= 3) stack[first_input + 2] else ValueNode.none,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                depth -= effect.removed;
+                stack[depth - 1] = result;
+            },
             .call, .call_eval, .call_method, .call_spread, .call_eval_spread, .call_with_this_spread, .call_with_this, .new_call, .new_spread => {
                 const effect = depthEffect(inst);
                 if (depth < effect.required) return error.InvalidControlFlow;
@@ -1590,6 +1649,17 @@ fn supports(op: bc.Op) bool {
         .call_with_this,
         .new_call,
         .new_spread,
+        .new_object,
+        .new_array,
+        .init_prop,
+        .init_proto,
+        .init_prop_computed,
+        .init_spread,
+        .init_getter,
+        .init_setter,
+        .array_append,
+        .array_spread,
+        .array_append_hole,
         => true,
         else => false,
     };
@@ -1961,6 +2031,17 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .tail_call_eval, .inputs = 2, .a = 1 },
         .{ .op = .tail_call_method, .inputs = 2, .b = 1 },
         .{ .op = .tail_call_with_this, .inputs = 3, .a = 1 },
+        .{ .op = .new_object, .inputs = 0 },
+        .{ .op = .new_array, .inputs = 0 },
+        .{ .op = .init_prop, .inputs = 2 },
+        .{ .op = .init_proto, .inputs = 2 },
+        .{ .op = .init_prop_computed, .inputs = 3 },
+        .{ .op = .init_spread, .inputs = 2 },
+        .{ .op = .init_getter, .inputs = 3 },
+        .{ .op = .init_setter, .inputs = 3 },
+        .{ .op = .array_append, .inputs = 2 },
+        .{ .op = .array_spread, .inputs = 2 },
+        .{ .op = .array_append_hole, .inputs = 1 },
         .{ .op = .get_prop, .inputs = 1 },
         .{ .op = .get_index, .inputs = 2 },
         .{ .op = .set_prop, .inputs = 2 },
@@ -1995,7 +2076,8 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         const catch_ip = case.inputs + 3;
         _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
         for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
-        const operand_a = if (case.op == .get_prop or case.op == .set_prop or case.op == .call_method)
+        const operand_a = if (case.op == .get_prop or case.op == .set_prop or case.op == .call_method or
+            case.op == .init_prop)
             try chunk.addName("value")
         else if (case.op == .private_in)
             try chunk.addName("#value")

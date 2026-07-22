@@ -320,6 +320,11 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_eval or inst.op == .tail_call_method or
                 inst.op == .tail_call_with_this)
                 break :runtime operation.lhs;
+            if (inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
+                inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
+                inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
+                inst.op == .array_spread or inst.op == .array_append_hole)
+                break :runtime operation.lhs;
             return error.UnsupportedChunk;
         } else staged: {
             if (scratch_slots.* + input_count > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
@@ -466,7 +471,11 @@ fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimize
         node.kind == .instance_of or node.kind == .private_in or node.kind == .call or
         node.kind == .call_eval or node.kind == .call_method or node.kind == .call_spread or
         node.kind == .call_eval_spread or node.kind == .call_with_this_spread or
-        node.kind == .call_with_this or node.kind == .construct or node.kind == .construct_spread) and
+        node.kind == .call_with_this or node.kind == .construct or node.kind == .construct_spread or
+        node.kind == .new_object or node.kind == .new_array or node.kind == .init_prop or
+        node.kind == .init_proto or node.kind == .init_prop_computed or node.kind == .init_spread or
+        node.kind == .init_getter or node.kind == .init_setter or node.kind == .array_append or
+        node.kind == .array_spread or node.kind == .array_append_hole) and
         node.block == state.block and
         node.origin == state.origin)
     {
@@ -660,6 +669,43 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
+        .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+            var state: ?optimizer.FrameState = null;
+            for (graph.frame_states) |candidate| if (candidate.kind == .effect and
+                candidate.block == node.block and candidate.origin == node.origin)
+            {
+                if (state != null) return error.UnsupportedChunk;
+                state = candidate;
+            };
+            const effect_state = state orelse return error.UnsupportedChunk;
+            if (node.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+            const input_count = optimizer.nativeOperationInputCount(chunk.code.items[node.origin]) orelse
+                return error.UnsupportedChunk;
+            if (input_count > effect_state.stack_count or
+                scratch_slots + input_count > jit.numeric_scratch_capacity)
+                return error.UnsupportedChunk;
+            const first_input = scratch_slots;
+            const stack_start: usize = effect_state.first_value + effect_state.local_count;
+            const source_start = stack_start + effect_state.stack_count - input_count;
+            for (0..input_count) |input| {
+                const source = try resolveAlias(graph.frame_state_values[source_start + input], aliases);
+                try operations.append(allocator, .{
+                    .kind = .copy,
+                    .destination = @intCast(scratch_slots),
+                    .block = node.block,
+                    .lhs = @intCast(source),
+                });
+                scratch_slots += 1;
+            }
+            types[node.id] = .other;
+            try operations.append(allocator, .{
+                .kind = .runtime_operation,
+                .destination = @intCast(node.id),
+                .block = node.block,
+                .lhs = @intCast(first_input),
+                .immediate = node.origin,
+            });
+        },
         .call, .call_eval, .call_method, .call_spread, .call_eval_spread, .call_with_this_spread, .call_with_this, .construct, .construct_spread => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .call and
@@ -838,7 +884,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
         native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or
-            inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method)
+            inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
+            inst.op == .init_prop)
         name: {
             if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
             break :name chunk.names.items[inst.a];
@@ -2629,9 +2676,9 @@ fn emitRuntimeOperation(
 ) !void {
     if (operation.immediate >= program.native_operations.len) return error.UnsupportedChunk;
     const descriptor = program.native_operations[operation.immediate];
-    if (descriptor.first_input != operation.lhs or descriptor.input_count == 0 or
-        descriptor.step_delta == 0 or (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
-        descriptor.exceptional_target >= program.native_exceptional_targets.len))
+    if (descriptor.first_input != operation.lhs or descriptor.step_delta == 0 or
+        (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
+            descriptor.exceptional_target >= program.native_exceptional_targets.len))
         return error.UnsupportedChunk;
 
     try assembler.movImmediate64(9, descriptor.origin);
@@ -3810,6 +3857,60 @@ test "optimizer lowering publishes executable invocation forms" {
     }
 }
 
+test "optimizer lowering publishes executable object and array construction effects" {
+    const Case = struct {
+        op: bc.Op,
+        inputs: u32,
+        name: ?[]const u8 = null,
+    };
+    const cases = [_]Case{
+        .{ .op = .new_object, .inputs = 0 },
+        .{ .op = .new_array, .inputs = 0 },
+        .{ .op = .init_prop, .inputs = 2, .name = "value" },
+        .{ .op = .init_proto, .inputs = 2 },
+        .{ .op = .init_prop_computed, .inputs = 3 },
+        .{ .op = .init_spread, .inputs = 2 },
+        .{ .op = .init_getter, .inputs = 3 },
+        .{ .op = .init_setter, .inputs = 3 },
+        .{ .op = .array_append, .inputs = 2 },
+        .{ .op = .array_spread, .inputs = 2 },
+        .{ .op = .array_append_hole, .inputs = 1 },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var chunk = bc.Chunk.init(arena.allocator());
+        chunk.param_count = case.inputs;
+        chunk.local_count = case.inputs;
+        for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
+        const operand = if (case.name) |name| try chunk.addName(name) else 0;
+        _ = try chunk.emit(case.op, operand);
+        _ = try chunk.emit(.ret, 0);
+        var plan = try optimizer.build(&chunk, std.testing.allocator);
+        defer plan.deinit();
+        var program = try lower(&chunk, &plan, std.testing.allocator);
+        defer program.deinit();
+
+        try std.testing.expect(program.side_exit == null);
+        try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+        const operation = program.native_operations[0];
+        try std.testing.expectEqual(@as(u16, @backingInt(case.op)), operation.bytecode_op);
+        try std.testing.expectEqual(@as(u16, @intCast(case.inputs)), operation.input_count);
+        if (case.name) |name|
+            try std.testing.expectEqualStrings(name, program.native_operation_names[0].?)
+        else
+            try std.testing.expect(program.native_operation_names[0] == null);
+        var roots: u64 = 0;
+        for (operation.first_input..operation.first_input + operation.input_count) |slot|
+            roots |= @as(u64, 1) << @intCast(slot);
+        try std.testing.expectEqual(
+            roots,
+            program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots,
+        );
+    }
+}
+
 test "optimizer lowering publishes rooted interpreter-owned side exits" {
     const Case = struct {
         op: bc.Op,
@@ -3825,15 +3926,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .bind_pattern, .inputs = 1, .kind = .effect },
         .{ .op = .store_upval, .inputs = 1, .kind = .effect },
         .{ .op = .name_anon, .inputs = 1, .kind = .effect },
-        .{ .op = .init_prop, .inputs = 2, .kind = .effect },
-        .{ .op = .init_proto, .inputs = 2, .kind = .effect },
-        .{ .op = .init_prop_computed, .inputs = 3, .kind = .effect },
-        .{ .op = .init_spread, .inputs = 2, .kind = .effect },
-        .{ .op = .init_getter, .inputs = 3, .kind = .effect },
-        .{ .op = .init_setter, .inputs = 3, .kind = .effect },
-        .{ .op = .array_append, .inputs = 2, .kind = .effect },
-        .{ .op = .array_spread, .inputs = 2, .kind = .effect },
-        .{ .op = .array_append_hole, .inputs = 1, .kind = .effect },
         .{ .op = .super_get_index, .inputs = 1, .kind = .effect },
         .{ .op = .enter_with, .inputs = 1, .kind = .effect },
         .{ .op = .register_disposable, .inputs = 1, .kind = .effect },
@@ -3886,8 +3978,6 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         .{ .op = .load_upval },
         .{ .op = .load_this },
         .{ .op = .load_new_target },
-        .{ .op = .new_object },
-        .{ .op = .new_array },
         .{ .op = .super_get },
         .{ .op = .enter_block },
         .{ .op = .exit_block },

@@ -3733,6 +3733,69 @@ fn tailCallMethodValue(vm: *Interpreter, receiver: Value, name: []const u8, args
     return tailCallValue(vm, try vm.getProperty(receiver, name), args, receiver);
 }
 
+fn literalObjectTarget(vm: *Interpreter, target: Value) EvalError!*value.Object {
+    if (!target.isObject() or target.asObj().is_symbol or target.asObj().is_bigint)
+        return vm.throwError("TypeError", "internal literal target is not an object");
+    return target.asObj();
+}
+
+fn literalArrayTarget(vm: *Interpreter, target: Value) EvalError!*value.Object {
+    const object = try literalObjectTarget(vm, target);
+    if (!object.is_array) return vm.throwError("TypeError", "internal literal target is not an array");
+    return object;
+}
+
+fn nativeInitProperty(vm: *Interpreter, target: Value, name: []const u8, stored: Value) EvalError!Value {
+    const object = try literalObjectTarget(vm, target);
+    if (Interpreter.funcOf(stored)) |function| if (function.is_method) function.home_object = object;
+    try vm.defineLiteralDataProp(object, name, stored);
+    return target;
+}
+
+fn nativeInitPrototype(vm: *Interpreter, target: Value, prototype: Value) EvalError!Value {
+    const object = try literalObjectTarget(vm, target);
+    if (prototype.isObject() and !prototype.asObj().is_symbol and !prototype.asObj().is_bigint)
+        object.setProtoAtomic(prototype.asObj())
+    else if (prototype.isNull())
+        object.setProtoAtomic(null);
+    return target;
+}
+
+fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, stored: Value) EvalError!Value {
+    const object = try literalObjectTarget(vm, target);
+    if (Interpreter.funcOf(stored)) |function| if (function.is_method) function.home_object = object;
+    try vm.defineLiteralDataProp(object, try propKey(vm, key), stored);
+    return target;
+}
+
+fn nativeInitSpread(vm: *Interpreter, target: Value, source: Value) EvalError!Value {
+    _ = try literalObjectTarget(vm, target);
+    try vm.spreadDataProps(target, source);
+    return target;
+}
+
+fn nativeInitAccessor(vm: *Interpreter, target: Value, key: Value, function: Value, is_getter: bool) EvalError!Value {
+    _ = try literalObjectTarget(vm, target);
+    try vm.vmInitAccessor(target, key, function, is_getter);
+    return target;
+}
+
+fn nativeArrayAppend(vm: *Interpreter, target: Value, stored: Value) EvalError!Value {
+    try (try literalArrayTarget(vm, target)).appendElement(vm.arena, stored);
+    return target;
+}
+
+fn nativeArrayAppendHole(vm: *Interpreter, target: Value) EvalError!Value {
+    try (try literalArrayTarget(vm, target)).appendArrayHole(vm.arena);
+    return target;
+}
+
+fn nativeArraySpread(vm: *Interpreter, target: Value, iterable: Value) EvalError!Value {
+    const array = try literalArrayTarget(vm, target);
+    try vm.spreadInto(try array.ensureElementsList(vm.arena), iterable);
+    return target;
+}
+
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
         return @intFromEnum(jit.NativeOperationStatus.host_trap)));
@@ -3853,6 +3916,76 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativePrivateIn(vm, name, Value.fromRawBits(inputs[0])),
         );
     }
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_object) and inputs.len == 0)
+        return finishNativeOperation(frame, vm, operation_id, vm.newObject());
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_array) and inputs.len == 0)
+        return finishNativeOperation(frame, vm, operation_id, vm.newArray());
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_prop) and inputs.len == 2) {
+        const name = metadata.nameFor(operation_id) orelse
+            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInitProperty(vm, Value.fromRawBits(inputs[0]), name, Value.fromRawBits(inputs[1])),
+        );
+    }
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_proto) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInitPrototype(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_prop_computed) and inputs.len == 3)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInitComputedProperty(
+                vm,
+                Value.fromRawBits(inputs[0]),
+                Value.fromRawBits(inputs[1]),
+                Value.fromRawBits(inputs[2]),
+            ),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_spread) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInitSpread(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
+    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.init_getter) or
+        descriptor.bytecode_op == @intFromEnum(bc.Op.init_setter)) and inputs.len == 3)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeInitAccessor(
+                vm,
+                Value.fromRawBits(inputs[0]),
+                Value.fromRawBits(inputs[1]),
+                Value.fromRawBits(inputs[2]),
+                descriptor.bytecode_op == @intFromEnum(bc.Op.init_getter),
+            ),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeArrayAppend(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append_hole) and inputs.len == 1)
+        return finishNativeOperation(frame, vm, operation_id, nativeArrayAppendHole(vm, Value.fromRawBits(inputs[0])));
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_spread) and inputs.len == 2)
+        return finishNativeOperation(
+            frame,
+            vm,
+            operation_id,
+            nativeArraySpread(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
+        );
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) or
         descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) or
@@ -4234,6 +4367,17 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         @intFromEnum(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.new_object);
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
+    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.init_prop);
+    metadata.descriptors[0].input_count = 2;
+    try std.testing.expectEqual(
+        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        nativeOperationDispatch(&frame, 0),
+    );
     metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.get_prop);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
@@ -4451,6 +4595,115 @@ test "vm: native operation dispatcher executes invocation forms including tail c
         (try Dispatch.run(&machine, .call_eval_spread, &.{ eval, Value.obj(&eval_spread) }, null)).asNum(),
     );
     try std.testing.expect(!machine.direct_eval_call);
+}
+
+test "vm: native operation dispatcher executes object and array construction effects" {
+    const Native = struct {
+        fn getter(ctx: *anyopaque, this_value: Value, args: []const Value) value.HostError!Value {
+            _ = ctx;
+            _ = this_value;
+            _ = args;
+            return Value.num(42);
+        }
+    };
+    const Dispatch = struct {
+        fn run(
+            machine: *Interpreter,
+            op: bc.Op,
+            inputs: []const Value,
+            name: ?[]const u8,
+        ) !Value {
+            const descriptor = jit.NativeOperationDescriptor{
+                .bytecode_op = @intFromEnum(op),
+                .first_input = 0,
+                .input_count = @intCast(inputs.len),
+                .deopt_index = 0,
+                .step_delta = 1,
+                .origin = 9,
+            };
+            const names = [_]?[]const u8{name};
+            const metadata = try jit.NativeOperationMetadata.createWithNames(
+                std.testing.allocator,
+                &.{descriptor},
+                &.{},
+                &names,
+            );
+            defer metadata.destroy();
+            var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
+            for (inputs, 0..) |input, index| scratch[index] = input.rawBits();
+            var frame = jit.NativeFrame{
+                .scratch = &scratch,
+                .runtime_context = machine,
+                .operation_context = metadata,
+                .exit_ip = 9,
+                .deopt_index = 0,
+            };
+            try std.testing.expectEqual(
+                @intFromEnum(jit.NativeOperationStatus.value),
+                nativeOperationDispatch(&frame, 0),
+            );
+            return Value.fromRawBits(frame.operation_value_bits);
+        }
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    const object = try Dispatch.run(&machine, .new_object, &.{}, null);
+    try std.testing.expect(object.isObject());
+    try std.testing.expectEqual(
+        object.rawBits(),
+        (try Dispatch.run(&machine, .init_prop, &.{ object, Value.num(7) }, "value")).rawBits(),
+    );
+    try std.testing.expectEqual(@as(f64, 7), (try machine.getProperty(object, "value")).asNum());
+    _ = try Dispatch.run(
+        &machine,
+        .init_prop_computed,
+        &.{ object, Value.str("computed"), Value.num(8) },
+        null,
+    );
+    try std.testing.expectEqual(@as(f64, 8), (try machine.getProperty(object, "computed")).asNum());
+
+    const prototype = try machine.newObject();
+    _ = try Dispatch.run(&machine, .init_proto, &.{ object, prototype }, null);
+    try std.testing.expect(object.asObj().protoAtomic() == prototype.asObj());
+
+    const source = try machine.newObject();
+    try machine.setProp(source.asObj(), "spread", Value.num(9));
+    _ = try Dispatch.run(&machine, .init_spread, &.{ object, source }, null);
+    try std.testing.expectEqual(@as(f64, 9), (try machine.getProperty(object, "spread")).asNum());
+
+    var getter = value.Object{ .native = Native.getter };
+    _ = try Dispatch.run(
+        &machine,
+        .init_getter,
+        &.{ object, Value.str("answer"), Value.obj(&getter) },
+        null,
+    );
+    try std.testing.expectEqual(@as(f64, 42), (try machine.getProperty(object, "answer")).asNum());
+    _ = try Dispatch.run(
+        &machine,
+        .init_setter,
+        &.{ object, Value.str("answer"), Value.obj(&getter) },
+        null,
+    );
+
+    const array = try Dispatch.run(&machine, .new_array, &.{}, null);
+    _ = try Dispatch.run(&machine, .array_append, &.{ array, Value.num(1) }, null);
+    _ = try Dispatch.run(&machine, .array_append_hole, &.{array}, null);
+    const spread = try machine.newArray();
+    try spread.asObj().appendElement(allocator, Value.num(2));
+    try spread.asObj().appendElement(allocator, Value.num(3));
+    _ = try Dispatch.run(&machine, .array_spread, &.{ array, spread }, null);
+    try std.testing.expectEqual(@as(usize, 4), array.asObj().arrayLength());
+    try std.testing.expect(array.asObj().atomicDenseElementLoad(1) == null);
+    try std.testing.expectEqual(@as(f64, 2), array.asObj().atomicDenseElementLoad(2).?.asNum());
+    try std.testing.expectEqual(@as(f64, 3), array.asObj().atomicDenseElementLoad(3).?.asNum());
 }
 
 fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots: []Value, exec: ?*Exec) EvalError!NativeRunOutcome {
@@ -8523,6 +8776,106 @@ test "vm: optimizer native tail call replaces the current activation" {
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer executes native object and array construction effects" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\"use strict";
+        \\function make(value) {
+        \\  const object = { value: value, ["other"]: value + 1 };
+        \\  const array = [value, , value + 2];
+        \\  return object.value + object.other + array[0] + array[2] + array.length;
+        \\}
+        \\make(0); make(1); make(2); make(3); make(4);
+        \\make(5); make(6); make(7); make(8); make(9)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const hits_before = optimizer_native_hits.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    const first_steps = machine.steps;
+    const make_chunk = root.fns.items[0].chunk.?;
+    const artifact = make_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_new_object = false;
+    var saw_init_prop = false;
+    var saw_init_computed = false;
+    var saw_new_array = false;
+    var saw_array_append = false;
+    var saw_array_hole = false;
+    for (operations.descriptors) |descriptor| {
+        const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
+        saw_new_object = saw_new_object or op == .new_object;
+        saw_init_prop = saw_init_prop or op == .init_prop;
+        saw_init_computed = saw_init_computed or op == .init_prop_computed;
+        saw_new_array = saw_new_array or op == .new_array;
+        saw_array_append = saw_array_append or op == .array_append;
+        saw_array_hole = saw_array_hole or op == .array_append_hole;
+    }
+    try std.testing.expect(saw_new_object and saw_init_prop and saw_init_computed);
+    try std.testing.expect(saw_new_array and saw_array_append and saw_array_hole);
+    try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
+
+    const second_start = machine.steps;
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer object and array construction resumes a spread throw once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\let calls = 0;
+        \\let bad = { [Symbol.iterator]: function () {
+        \\  return { next: function () {
+        \\    calls = calls + 1;
+        \\    if (calls === 1) return { value: 7, done: false };
+        \\    throw 91;
+        \\  } };
+        \\} };
+        \\function collect(source) { "use strict"; try { return [...source].length; } catch (error) { return error + calls; } }
+        \\collect([1]); collect([1]); collect([1]); collect([1]); collect([1]);
+        \\collect([1]); collect([1]); collect([1]); collect([1]); collect(bad)
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    try std.testing.expectEqual(@as(f64, 93), (try run(&machine, root, null)).asNum());
+    const collect_chunk = Interpreter.funcOf(env.get("collect").?).?.chunk.?;
+    const artifact = collect_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var spread_operation: ?jit.NativeOperationDescriptor = null;
+    for (operations.descriptors) |descriptor| {
+        if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_spread)) spread_operation = descriptor;
+    }
+    const descriptor = spread_operation orelse return error.TestUnexpectedResult;
+    try std.testing.expect(descriptor.exceptional_target != jit.NativeOperationDescriptor.none);
+    try std.testing.expectEqual(
+        jit.NativeExceptionalTargetKind.catch_,
+        operations.exceptional_targets[descriptor.exceptional_target].kind,
+    );
+    try std.testing.expectEqual(@as(f64, 2), env.get("calls").?.asNum());
 }
 
 test "vm: optimizer native call resumes an exact caught exception" {
