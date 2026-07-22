@@ -254,7 +254,20 @@ pub const Tier = struct {
     }
 };
 
-pub const ExitStatus = enum(u32) { complete, side_exit, throw, stop, invalidated, operation_trap, operation_exception };
+pub const ExitStatus = enum(u32) {
+    complete,
+    side_exit,
+    throw,
+    stop,
+    invalidated,
+    operation_trap,
+    operation_exception,
+    finally_normal,
+    finally_throw,
+    finally_return,
+    finally_break,
+    finally_continue,
+};
 
 /// Result of one runtime-backed operation requested by optimized code. Unlike
 /// `ExitStatus`, this preserves why the operation could not produce a value so

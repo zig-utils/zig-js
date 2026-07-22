@@ -3747,7 +3747,9 @@ fn literalArrayTarget(vm: *Interpreter, target: Value) EvalError!*value.Object {
 
 fn nativeInitProperty(vm: *Interpreter, target: Value, name: []const u8, stored: Value) EvalError!Value {
     const object = try literalObjectTarget(vm, target);
-    if (Interpreter.funcOf(stored)) |function| if (function.is_method) function.home_object = object;
+    if (Interpreter.funcOf(stored)) |function| {
+        if (function.is_method) function.home_object = object;
+    }
     try vm.defineLiteralDataProp(object, name, stored);
     return target;
 }
@@ -3763,7 +3765,9 @@ fn nativeInitPrototype(vm: *Interpreter, target: Value, prototype: Value) EvalEr
 
 fn nativeInitComputedProperty(vm: *Interpreter, target: Value, key: Value, stored: Value) EvalError!Value {
     const object = try literalObjectTarget(vm, target);
-    if (Interpreter.funcOf(stored)) |function| if (function.is_method) function.home_object = object;
+    if (Interpreter.funcOf(stored)) |function| {
+        if (function.is_method) function.home_object = object;
+    }
     try vm.defineLiteralDataProp(object, try propKey(vm, key), stored);
     return target;
 }
@@ -4222,6 +4226,191 @@ fn reconstructNativeOperationException(
     for (recovered_handlers[0..target.handler_count]) |handler| exec.handlers.appendAssumeCapacity(handler);
     exec.ip = target.target_ip;
     return true;
+}
+
+fn resumeNativeFinallyDispatch(
+    vm: *Interpreter,
+    native: *const jit.CompiledCode,
+    native_frame: *const jit.NativeFrame,
+    slots: []Value,
+    scratch: []const u64,
+    exec: *Exec,
+    status: jit.ExitStatus,
+) EvalError!NativeRunOutcome {
+    const metadata = native.deopt orelse return error.OutOfMemory;
+    if (!try reconstructNativeSideExit(metadata, native_frame, slots, scratch, exec, vm.arena))
+        return error.OutOfMemory;
+    if (native_frame.deopt_index >= metadata.points.len or
+        metadata.points[native_frame.deopt_index].kind != .finally_dispatch or exec.stack.items.len < 2)
+        return error.OutOfMemory;
+    const kind = completionKindBelowTop(&exec.stack) orelse return error.OutOfMemory;
+    const expected: jit.ExitStatus = switch (kind) {
+        .normal => .finally_normal,
+        .throw => .finally_throw,
+        .ret => .finally_return,
+        .break_ => .finally_break,
+        .continue_ => .finally_continue,
+    };
+    if (status != expected) return error.OutOfMemory;
+    _ = exec.stack.pop().?;
+    const completion_value = exec.stack.pop().?;
+    if (completion_value.rawBits() != native_frame.result_bits) return error.OutOfMemory;
+
+    switch (kind) {
+        .normal => {
+            exec.ip = native_frame.exit_ip + 1;
+            return .deoptimized;
+        },
+        .throw => {
+            vm.exception = completion_value;
+            if (exec.handlers.items.len > 0) {
+                const handler = exec.handlers.pop().?;
+                exec.stack.shrinkRetainingCapacity(handler.stack_depth);
+                if (handler.catch_pc != Handler.none) {
+                    try exec.stack.append(vm.arena, completion_value);
+                    exec.ip = handler.catch_pc;
+                } else {
+                    try exec.stack.append(vm.arena, completion_value);
+                    try exec.stack.append(vm.arena, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+                    exec.ip = handler.finally_pc;
+                }
+                return .deoptimized;
+            }
+            return error.Throw;
+        },
+        .ret => {
+            if (try unwindToFinally(vm, null, exec, completion_value, .ret)) |finally_ip| {
+                exec.ip = finally_ip;
+                return .deoptimized;
+            }
+            return .{ .complete = completion_value };
+        },
+        .break_, .continue_ => {
+            if (try unwindToFinally(vm, null, exec, completion_value, kind)) |finally_ip| {
+                exec.ip = finally_ip;
+                return .deoptimized;
+            }
+            if (!completion_value.isNumber()) return error.OutOfMemory;
+            const target = completion_value.asNum();
+            if (!std.math.isFinite(target) or @trunc(target) != target or target < 0 or
+                target > @as(f64, @floatFromInt(std.math.maxInt(usize))))
+                return error.OutOfMemory;
+            exec.ip = @intFromFloat(target);
+            return .deoptimized;
+        },
+    }
+}
+
+test "vm: native finally dispatch resumes every completion exactly once" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const cases = [_]struct { kind: Completion, value: f64 }{
+        .{ .kind = .normal, .value = 40 },
+        .{ .kind = .throw, .value = 41 },
+        .{ .kind = .ret, .value = 42 },
+        .{ .kind = .break_, .value = 43 },
+        .{ .kind = .continue_, .value = 44 },
+    };
+
+    for (cases) |case| {
+        var chunk = bc.Chunk.init(allocator);
+        const value_constant = try chunk.addConst(Value.num(case.value));
+        const kind_constant = try chunk.addConst(Value.num(@floatFromInt(@intFromEnum(case.kind))));
+        _ = try chunk.emit(.load_const, value_constant);
+        _ = try chunk.emit(.load_const, kind_constant);
+        _ = try chunk.emit(.end_finally, 0);
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        var slots: [0]Value = .{};
+        var exec = Exec{};
+        defer exec.stack.deinit(allocator);
+        defer exec.handlers.deinit(allocator);
+
+        if (case.kind == .throw) {
+            try std.testing.expectError(error.Throw, tryRunManagedNative(&machine, &compiled, &slots, &exec));
+            try std.testing.expectEqual(Value.num(case.value).rawBits(), machine.exception.rawBits());
+            try std.testing.expectEqual(@as(usize, 0), exec.stack.items.len);
+            continue;
+        }
+        const outcome = try tryRunManagedNative(&machine, &compiled, &slots, &exec);
+        switch (case.kind) {
+            .normal => {
+                try std.testing.expectEqual(NativeRunOutcome.deoptimized, outcome);
+                try std.testing.expectEqual(@as(usize, 3), exec.ip);
+            },
+            .ret => switch (outcome) {
+                .complete => |result| try std.testing.expectEqual(Value.num(case.value).rawBits(), result.rawBits()),
+                else => return error.TestUnexpectedResult,
+            },
+            .break_, .continue_ => {
+                try std.testing.expectEqual(NativeRunOutcome.deoptimized, outcome);
+                try std.testing.expectEqual(@as(usize, @intFromFloat(case.value)), exec.ip);
+            },
+            .throw => unreachable,
+        }
+        try std.testing.expectEqual(@as(usize, 0), exec.stack.items.len);
+    }
+
+    var malformed_chunk = bc.Chunk.init(allocator);
+    const malformed_value = try malformed_chunk.addConst(Value.num(45));
+    const malformed_kind = try malformed_chunk.addConst(Value.num(9));
+    _ = try malformed_chunk.emit(.load_const, malformed_value);
+    _ = try malformed_chunk.emit(.load_const, malformed_kind);
+    _ = try malformed_chunk.emit(.end_finally, 0);
+    var malformed = try optimizer_compiler.compile(&malformed_chunk);
+    defer malformed.deinit();
+    var malformed_slots: [0]Value = .{};
+    var malformed_exec = Exec{};
+    defer malformed_exec.stack.deinit(allocator);
+    defer malformed_exec.handlers.deinit(allocator);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        tryRunManagedNative(&machine, &malformed, &malformed_slots, &malformed_exec),
+    );
+}
+
+test "vm: native finally abrupt completions continue through an outer finally" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    for ([_]Completion{ .ret, .break_, .continue_ }) |kind| {
+        var chunk = bc.Chunk.init(allocator);
+        const completion_value = Value.num(47 + @as(f64, @floatFromInt(@intFromEnum(kind))));
+        const value_constant = try chunk.addConst(completion_value);
+        const kind_value = Value.num(@floatFromInt(@intFromEnum(kind)));
+        const kind_constant = try chunk.addConst(kind_value);
+        _ = try chunk.emitAB(.push_handler, Handler.none, 4);
+        _ = try chunk.emit(.load_const, value_constant);
+        _ = try chunk.emit(.load_const, kind_constant);
+        _ = try chunk.emit(.end_finally, 0);
+        _ = try chunk.emit(.push_completion, @intFromEnum(Completion.normal));
+        _ = try chunk.emit(.end_finally, 0);
+        var compiled = try optimizer_compiler.compile(&chunk);
+        defer compiled.deinit();
+        var slots: [0]Value = .{};
+        var exec = Exec{};
+        defer exec.stack.deinit(allocator);
+        defer exec.handlers.deinit(allocator);
+
+        try std.testing.expectEqual(
+            NativeRunOutcome.deoptimized,
+            try tryRunManagedNative(&machine, &compiled, &slots, &exec),
+        );
+        try std.testing.expectEqual(@as(usize, 4), exec.ip);
+        try std.testing.expectEqual(@as(usize, 0), exec.handlers.items.len);
+        try std.testing.expectEqual(@as(usize, 2), exec.stack.items.len);
+        try std.testing.expectEqual(completion_value.rawBits(), exec.stack.items[0].rawBits());
+        try std.testing.expectEqual(kind_value.rawBits(), exec.stack.items[1].rawBits());
+    }
 }
 
 test "vm: deoptimization reconstructs nested handlers transactionally" {
@@ -4750,6 +4939,10 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
             )) return error.OutOfMemory;
             break :operation_exception .deoptimized;
         },
+        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
+            const target = exec orelse return error.OutOfMemory;
+            return resumeNativeFinallyDispatch(vm, native, &native_frame, live_slots, &scratch, target, status);
+        },
         .side_exit => side_exit: {
             std.debug.assert(native.has_side_exits);
             const target = exec orelse break :side_exit .miss;
@@ -4816,6 +5009,9 @@ fn tryRunOsrNative(
                 vm.arena,
             )) return error.OutOfMemory;
             break :operation_exception .deoptimized;
+        },
+        .finally_normal, .finally_throw, .finally_return, .finally_break, .finally_continue => |status| {
+            return resumeNativeFinallyDispatch(vm, native, &native_frame, slots, &scratch, exec, status);
         },
         .side_exit => side_exit: {
             const deopt = native.deopt orelse return error.OutOfMemory;
