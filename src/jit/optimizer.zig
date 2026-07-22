@@ -55,6 +55,8 @@ pub const ValueKind = enum {
     call,
     call_with_this,
     construct,
+    get_prop,
+    get_index,
 };
 
 pub const ValueNode = struct {
@@ -152,7 +154,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .init_setter,
         .array_append,
         .array_spread,
-        .get_prop,
         .super_get,
         .super_get_index,
         .enter_block,
@@ -164,7 +165,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .register_disposable,
         .array_append_hole,
         .import_call,
-        .get_index,
         .set_prop,
         .set_index,
         .instance_of,
@@ -522,6 +522,7 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
         .end_finally => .{ .required = 2, .removed = 2, .added = 0 },
         .store_var, .store_local, .store_upval, .name_anon, .assert_iter_result, .array_append_hole => .{ .required = 1, .removed = 0, .added = 0 },
         .dup => .{ .required = 1, .removed = 0, .added = 1 },
+        .swap => .{ .required = 2, .removed = 0, .added = 0 },
         .def_var, .def_lex, .bind_pattern, .enter_with, .register_disposable, .iter_close => .{ .required = 1, .removed = 1, .added = 0 },
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => .{ .required = 2, .removed = 2, .added = 1 },
         .jump, .ret_undef, .push_handler, .pop_handler, .abrupt_break, .abrupt_continue, .enter_block, .exit_block, .exit_with => .{ .required = 0, .removed = 0, .added = 0 },
@@ -551,7 +552,8 @@ fn depthEffect(inst: bc.Inst) DepthEffect {
 }
 
 pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
-    if (inst.op == .to_numeric or inst.op == .call or inst.op == .call_with_this or inst.op == .new_call)
+    if (inst.op == .to_numeric or inst.op == .get_prop or inst.op == .get_index or inst.op == .call or
+        inst.op == .call_with_this or inst.op == .new_call)
         return depthEffect(inst).required;
     const kind = terminalFrameStateKind(inst.op) orelse return null;
     if (kind != .call and kind != .effect) return null;
@@ -936,6 +938,10 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 stack[depth] = stack[depth - 1];
                 depth += 1;
             },
+            .swap => {
+                if (depth < 2) return error.InvalidControlFlow;
+                std.mem.swap(ValueId, &stack[depth - 1], &stack[depth - 2]);
+            },
             .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
                 if (depth < 2) return error.InvalidControlFlow;
                 const rhs = stack[depth - 1];
@@ -954,6 +960,42 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                     .origin = @intCast(origin),
                     .kind = .to_numeric,
                     .lhs = input,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
+            .get_prop => {
+                if (depth == 0 or inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const input = stack[depth - 1];
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .get_prop,
+                    .lhs = input,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth - 1] = result;
+            },
+            .get_index => {
+                if (depth < 2) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const object = stack[depth - 2];
+                const key = stack[depth - 1];
+                depth -= 1;
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .get_index,
+                    .lhs = object,
+                    .rhs = key,
                     .may_have_effect = true,
                 });
                 try builder.roots.append(allocator, result);
@@ -1281,6 +1323,7 @@ fn supports(op: bc.Op) bool {
         .load_false,
         .pop,
         .dup,
+        .swap,
         .load_local,
         .store_local,
         .add,
@@ -1304,6 +1347,8 @@ fn supports(op: bc.Op) bool {
         .pop_handler,
         .push_completion,
         .to_numeric,
+        .get_prop,
+        .get_index,
         .call,
         .call_with_this,
         .new_call,
@@ -1604,6 +1649,29 @@ test "optimizer models to_numeric as an effectful value with normal flow" {
     try std.testing.expectEqual(@as(usize, 0), plan.graph.exceptional_targets.len);
 }
 
+test "optimizer models a named read through dup and swap with normal flow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.dup, 0);
+    _ = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.swap, 0);
+    _ = try chunk.emit(.pop, 0);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.graph.returns.len);
+    const result = plan.graph.returns[0].value;
+    try std.testing.expectEqual(ValueKind.get_prop, plan.graph.nodes[result].kind);
+    try std.testing.expectEqual(@as(u64, name), plan.graph.nodes[result].immediate);
+    try std.testing.expect(plan.graph.nodes[result].may_have_effect);
+}
+
 test "optimizer records exact exceptional targets for interpreter-owned effects" {
     const Case = struct { op: bc.Op, inputs: u32, a: u32 = 0, b: u32 = 0 };
     const cases = [_]Case{
@@ -1611,6 +1679,7 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         .{ .op = .call_with_this, .inputs = 3, .a = 1 },
         .{ .op = .new_call, .inputs = 2, .a = 1 },
         .{ .op = .get_prop, .inputs = 1 },
+        .{ .op = .get_index, .inputs = 2 },
         .{ .op = .to_numeric, .inputs = 1 },
     };
     for (cases) |case| {
@@ -1622,7 +1691,8 @@ test "optimizer records exact exceptional targets for interpreter-owned effects"
         const catch_ip = case.inputs + 3;
         _ = try chunk.emitAB(.push_handler, catch_ip, std.math.maxInt(u32));
         for (0..case.inputs) |slot| _ = try chunk.emit(.load_local, @intCast(slot));
-        _ = try chunk.emitAB(case.op, case.a, case.b);
+        const operand_a = if (case.op == .get_prop) try chunk.addName("value") else case.a;
+        _ = try chunk.emitAB(case.op, operand_a, case.b);
         _ = try chunk.emit(.ret_undef, 0);
         _ = try chunk.emit(.ret_undef, 0);
 
@@ -1702,7 +1772,7 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
-    _ = try chunk.emit(.swap, 0);
+    _ = try chunk.emit(.nop, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
 

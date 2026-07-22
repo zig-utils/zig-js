@@ -149,6 +149,7 @@ pub const Program = struct {
     stack_maps: []jit.StackMap,
     native_operations: []jit.NativeOperationDescriptor = &.{},
     native_exceptional_targets: []jit.NativeExceptionalTarget = &.{},
+    native_operation_names: []?[]const u8 = &.{},
     osr: ?*jit.OsrMetadata = null,
     execution_block: u32 = 0,
     entry_enabled: bool = true,
@@ -163,6 +164,7 @@ pub const Program = struct {
         self.allocator.free(self.stack_maps);
         if (self.native_operations.len != 0) self.allocator.free(self.native_operations);
         if (self.native_exceptional_targets.len != 0) self.allocator.free(self.native_exceptional_targets);
+        if (self.native_operation_names.len != 0) self.allocator.free(self.native_operation_names);
         if (self.loop_exit_guards.len != 0) self.allocator.free(self.loop_exit_guards);
         if (self.loop_latch_guards.len != 0) self.allocator.free(self.loop_latch_guards);
         if (self.loop_branches.len != 0) self.allocator.free(self.loop_branches);
@@ -292,12 +294,13 @@ fn stageNativeOperationDescriptors(
             runtime_operation = operation;
         }
         const first_input: usize = if (runtime_operation) |operation| runtime: {
-            if (inst.op == .to_numeric) {
+            if (inst.op == .to_numeric or inst.op == .get_prop) {
                 if (input_count != 1) return error.UnsupportedChunk;
                 const source = try resolveAlias(graph.frame_state_values[source_start], aliases);
                 if (source != operation.lhs) return error.UnsupportedChunk;
                 break :runtime source;
             }
+            if (inst.op == .get_index and input_count == 2) break :runtime operation.lhs;
             if (inst.op == .call or inst.op == .call_with_this or inst.op == .new_call) {
                 const receiver_words: u32 = if (inst.op == .call_with_this) 2 else 1;
                 const expected = std.math.add(u32, inst.a, receiver_words) catch return error.UnsupportedChunk;
@@ -413,7 +416,7 @@ fn deterministicPathSteps(
 
 fn frameStateHasRuntimeValue(graph: *const optimizer.ValueGraph, state: optimizer.FrameState) bool {
     if (state.kind != .effect and state.kind != .call) return false;
-    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .call or
+    for (graph.nodes) |node| if ((node.kind == .to_numeric or node.kind == .get_prop or node.kind == .get_index or node.kind == .call or
         node.kind == .call_with_this or node.kind == .construct) and node.block == state.block and
         node.origin == state.origin)
     {
@@ -540,7 +543,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .rhs = @intCast(rhs),
             });
         },
-        .to_numeric => {
+        .to_numeric, .get_prop => {
             const input = try resolveAlias(node.lhs, aliases);
             types[node.id] = .other;
             try operations.append(allocator, .{
@@ -548,6 +551,28 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .destination = @intCast(node.id),
                 .block = node.block,
                 .lhs = @intCast(input),
+                .immediate = node.origin,
+            });
+        },
+        .get_index => {
+            if (scratch_slots + 2 > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
+            const first_input = scratch_slots;
+            for ([_]optimizer.ValueId{ node.lhs, node.rhs }) |input| {
+                const source = try resolveAlias(input, aliases);
+                try operations.append(allocator, .{
+                    .kind = .copy,
+                    .destination = @intCast(scratch_slots),
+                    .block = node.block,
+                    .lhs = @intCast(source),
+                });
+                scratch_slots += 1;
+            }
+            types[node.id] = .other;
+            try operations.append(allocator, .{
+                .kind = .runtime_operation,
+                .destination = @intCast(node.id),
+                .block = node.block,
+                .lhs = @intCast(first_input),
                 .immediate = node.origin,
             });
         },
@@ -724,6 +749,16 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         &scratch_slots,
     );
     errdefer if (native_operations.len != 0) allocator.free(native_operations);
+    const native_operation_names = try allocator.alloc(?[]const u8, native_operations.len);
+    errdefer if (native_operation_names.len != 0) allocator.free(native_operation_names);
+    for (native_operations, 0..) |descriptor, index| {
+        if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
+        const inst = chunk.code.items[descriptor.origin];
+        native_operation_names[index] = if (inst.op == .get_prop) name: {
+            if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
+            break :name chunk.names.items[inst.a];
+        } else null;
+    }
     const native_exceptional_targets = try lowerNativeExceptionalTargets(plan, allocator);
     errdefer if (native_exceptional_targets.len != 0) allocator.free(native_exceptional_targets);
     const owned_operations = try operations.toOwnedSlice(allocator);
@@ -773,6 +808,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .stack_maps = stack_maps,
         .native_operations = native_operations,
         .native_exceptional_targets = native_exceptional_targets,
+        .native_operation_names = native_operation_names,
         .deterministic_path = deterministic_path,
     };
 }
@@ -2404,10 +2440,11 @@ fn compileAarch64(program: *const Program) !jit.CompiledCode {
     const stack_maps = try jit.StackMapMetadata.create(std.heap.page_allocator, program.stack_maps);
     errdefer stack_maps.destroy();
     const native_operations = if (program.native_operations.len != 0)
-        try jit.NativeOperationMetadata.create(
+        try jit.NativeOperationMetadata.createWithNames(
             std.heap.page_allocator,
             program.native_operations,
             program.native_exceptional_targets,
+            program.native_operation_names,
         )
     else
         null;
@@ -3260,7 +3297,7 @@ test "optimizer lowering publishes an exact pre-tail-call side exit" {
     try std.testing.expectEqual(@as(u64, 0b11), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
 }
 
-test "optimizer lowering publishes an exact pre-property-effect side exit" {
+test "optimizer lowering publishes an executable named property read" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     var chunk = bc.Chunk.init(arena.allocator());
@@ -3275,12 +3312,57 @@ test "optimizer lowering publishes an exact pre-property-effect side exit" {
     var program = try lower(&chunk, &plan, std.testing.allocator);
     defer program.deinit();
 
-    const side_exit = program.side_exit orelse return error.TestUnexpectedResult;
-    const point = program.deopt_points[side_exit.deopt_index];
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operation_names.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 1), operation.input_count);
+    try std.testing.expectEqualStrings("value", program.native_operation_names[0].?);
+    const point = program.deopt_points[operation.deopt_index];
     try std.testing.expectEqual(jit.DeoptPointKind.effect, point.kind);
     try std.testing.expectEqual(@as(u32, 1), point.exit_ip);
     try std.testing.expectEqual(@as(u16, 1), point.stack_count);
-    try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
+    try std.testing.expectEqual(@as(u64, 1), program.stack_maps[operation.deopt_index].frame_pointer_slots);
+    try std.testing.expect(program.stack_maps[operation.deopt_index].scratch_pointer_slots &
+        (@as(u64, 1) << @intCast(operation.first_input)) != 0);
+
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        var compiled = try compile(&chunk);
+        defer compiled.deinit();
+        const metadata = compiled.native_operations orelse return error.TestUnexpectedResult;
+        const owned_name = metadata.nameFor(0) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("value", owned_name);
+        try std.testing.expect(owned_name.ptr != chunk.names.items[name].ptr);
+    }
+}
+
+test "optimizer lowering publishes an executable computed property read" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 2;
+    chunk.local_count = 2;
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.load_local, 1);
+    _ = try chunk.emit(.get_index, 0);
+    _ = try chunk.emit(.ret, 0);
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+
+    try std.testing.expect(program.side_exit == null);
+    try std.testing.expectEqual(@as(usize, 1), program.native_operations.len);
+    const operation = program.native_operations[0];
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_index)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, 2), operation.input_count);
+    const roots = (@as(u64, 1) << @intCast(operation.first_input)) |
+        (@as(u64, 1) << @intCast(operation.first_input + 1));
+    try std.testing.expectEqual(
+        roots,
+        program.stack_maps[operation.deopt_index].scratch_pointer_slots & roots,
+    );
 }
 
 test "optimizer lowering publishes an executable construction" {
@@ -3354,7 +3436,6 @@ test "optimizer lowering publishes rooted interpreter-owned side exits" {
         .{ .op = .tail_call_eval, .a = 1, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_method, .b = 1, .inputs = 2, .kind = .call },
         .{ .op = .tail_call_with_this, .a = 1, .inputs = 3, .kind = .call },
-        .{ .op = .get_index, .inputs = 2, .kind = .effect },
         .{ .op = .set_prop, .inputs = 2, .kind = .effect },
         .{ .op = .set_index, .inputs = 3, .kind = .effect },
         .{ .op = .instance_of, .inputs = 2, .kind = .effect },

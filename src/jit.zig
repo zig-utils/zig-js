@@ -305,28 +305,60 @@ pub const NativeOperationMetadata = struct {
     allocator: std.mem.Allocator,
     descriptors: []NativeOperationDescriptor,
     exceptional_targets: []NativeExceptionalTarget,
+    operation_names: []?[]const u8,
 
     pub fn create(
         allocator: std.mem.Allocator,
         descriptors: []const NativeOperationDescriptor,
         exceptional_targets: []const NativeExceptionalTarget,
     ) std.mem.Allocator.Error!*NativeOperationMetadata {
+        return createWithNames(allocator, descriptors, exceptional_targets, &.{});
+    }
+
+    pub fn createWithNames(
+        allocator: std.mem.Allocator,
+        descriptors: []const NativeOperationDescriptor,
+        exceptional_targets: []const NativeExceptionalTarget,
+        operation_names: []const ?[]const u8,
+    ) std.mem.Allocator.Error!*NativeOperationMetadata {
+        std.debug.assert(operation_names.len == 0 or operation_names.len == descriptors.len);
         const metadata = try allocator.create(NativeOperationMetadata);
         errdefer allocator.destroy(metadata);
         const owned_descriptors = try allocator.dupe(NativeOperationDescriptor, descriptors);
         errdefer allocator.free(owned_descriptors);
+        const owned_targets = try allocator.dupe(NativeExceptionalTarget, exceptional_targets);
+        errdefer allocator.free(owned_targets);
+        const owned_names = try allocator.alloc(?[]const u8, operation_names.len);
+        var owned_name_count: usize = 0;
+        errdefer {
+            for (owned_names[0..owned_name_count]) |name| if (name) |bytes| allocator.free(bytes);
+            if (owned_names.len != 0) allocator.free(owned_names);
+        }
+        for (operation_names, 0..) |name, index| {
+            owned_names[index] = if (name) |bytes| try allocator.dupe(u8, bytes) else null;
+            owned_name_count += 1;
+        }
         metadata.* = .{
             .allocator = allocator,
             .descriptors = owned_descriptors,
-            .exceptional_targets = try allocator.dupe(NativeExceptionalTarget, exceptional_targets),
+            .exceptional_targets = owned_targets,
+            .operation_names = owned_names,
         };
         return metadata;
+    }
+
+    pub fn nameFor(self: *const NativeOperationMetadata, operation_id: usize) ?[]const u8 {
+        if (self.operation_names.len != self.descriptors.len or operation_id >= self.operation_names.len)
+            return null;
+        return self.operation_names[operation_id];
     }
 
     pub fn destroy(self: *NativeOperationMetadata) void {
         const allocator = self.allocator;
         allocator.free(self.descriptors);
         allocator.free(self.exceptional_targets);
+        for (self.operation_names) |name| if (name) |bytes| allocator.free(bytes);
+        if (self.operation_names.len != 0) allocator.free(self.operation_names);
         allocator.destroy(self);
     }
 };
