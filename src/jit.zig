@@ -479,6 +479,9 @@ pub const NativeFrame = extern struct {
     /// guards prove an existing inline data slot. The raw object/value words
     /// remain rooted in optimizer scratch for the entire callback.
     property_write_barrier: ?*const fn (object_bits: u64, value_bits: u64) callconv(.c) void = null,
+    /// Read-only semantic guard for generated in-capacity dense appends. The
+    /// generated path owns the barrier and mutation after this returns true.
+    array_append_guard: ?*const fn (runtime_context: ?*anyopaque, object_bits: u64, callee_bits: u64) callconv(.c) bool = null,
 };
 
 pub const NativeEntry = *const fn (*NativeFrame) callconv(.c) u32;

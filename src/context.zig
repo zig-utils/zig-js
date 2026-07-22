@@ -15747,10 +15747,10 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
         \\  }
         \\  return target.length + target[n - 1].marker;
         \\}
-        \\function optimizerArrayBuild(n) {
+        \\function optimizerArrayBuild(n, held) {
         \\  var i = 0; var total = 0;
         \\  while (i < n) {
-        \\    if (i >= 0) { var pair = [i, i + 1]; total = total + pair[1]; }
+        \\    if (i >= 0) { var pair = [i, held]; total = total + i; }
         \\    i = i + 1;
         \\  }
         \\  return total;
@@ -15759,7 +15759,7 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
         \\globalThis.optimizerArrayTarget = [];
         \\for (var warm = 0; warm < 10; warm = warm + 1) {
         \\  optimizerArrayGrow(4, [], optimizerArrayHeld);
-        \\  optimizerArrayBuild(4);
+        \\  optimizerArrayBuild(4, optimizerArrayHeld);
         \\}
         \\optimizerArrayDiscard = null;
     ;
@@ -15821,10 +15821,14 @@ test "optimizer allocating array loops match bytecode and survive moving GC" {
     try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
     try std.testing.expectEqual(grow_artifact, grow_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
 
-    const native_build = try native_ctx.evaluate("optimizerArrayBuild(2000)");
-    const bytecode_build = try bytecode_ctx.evaluate("optimizerArrayBuild(2000)");
+    const append_stats_before = vm.optimizerNativeArrayAppendStatsForTesting();
+    const native_build = try native_ctx.evaluate("optimizerArrayBuild(2000, optimizerArrayHeld)");
+    const bytecode_build = try bytecode_ctx.evaluate("optimizerArrayBuild(2000, optimizerArrayHeld)");
     try std.testing.expectEqual(bytecode_build.rawBits(), native_build.rawBits());
-    try std.testing.expectEqual(@as(f64, 2001000), native_build.asNum());
+    try std.testing.expectEqual(@as(f64, 1999000), native_build.asNum());
+    const append_stats_after = vm.optimizerNativeArrayAppendStatsForTesting();
+    try std.testing.expect(append_stats_after.direct > append_stats_before.direct);
+    try std.testing.expect(append_stats_after.callbacks > append_stats_before.callbacks);
     try std.testing.expectEqual(build_artifact, build_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
 }
 

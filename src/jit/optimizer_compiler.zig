@@ -1802,7 +1802,10 @@ fn lowerRegionOsr(
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop) name: {
+        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or
+            inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
+            inst.op == .init_prop)
+        name: {
             if (inst.a >= chunk.names.items.len) return error.UnsupportedChunk;
             break :name chunk.names.items[inst.a];
         } else null;
@@ -3158,7 +3161,7 @@ fn emitOperation(assembler: *aarch64.Assembler, program: *const Program, operati
 const DirectRuntimeAccess = struct {
     const Fallback = struct { branch: usize, compare: bool };
 
-    fallbacks: [20]Fallback = undefined,
+    fallbacks: [32]Fallback = undefined,
     fallback_count: usize = 0,
     completions: [4]usize = undefined,
     completion_count: usize = 0,
@@ -3340,10 +3343,12 @@ fn objectElementsByteOffset(comptime field: []const u8) !u15 {
     ) orelse error.UnsupportedChunk;
 }
 
-fn emitDirectDenseArrayElementAddress(
+fn emitDirectDenseArrayGuards(
     assembler: *aarch64.Assembler,
     direct: *DirectRuntimeAccess,
     descriptor: jit.NativeOperationDescriptor,
+    receiver_input: u16,
+    comptime has_index: bool,
 ) !void {
     comptime {
         std.debug.assert(@sizeOf(DenseListLayout) == @sizeOf(std.ArrayListUnmanaged(Value)));
@@ -3357,24 +3362,26 @@ fn emitDirectDenseArrayElementAddress(
     try assembler.load8(10, 10, 0);
     try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
 
-    // ToPropertyKey(Number) is an array index only for an exactly represented
-    // uint32 below 2^32-1. Round-trip the hardware conversion so fractional,
-    // negative, NaN, infinite, and overflowing keys all miss before mutation.
-    try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 1));
-    try assembler.movImmediate64(11, Value.number_box_mask);
-    try assembler.andRegister64(9, 10, 11);
-    try assembler.compareRegister64(9, 11);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
-    try assembler.moveFloatFromRegister64(0, 10);
-    try assembler.convertFloat64ToUnsigned32(0, 0);
-    try assembler.convertUnsigned32ToFloat64(1, 0);
-    try assembler.compareFloat64(0, 1);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
-    try assembler.movImmediate64(11, std.math.maxInt(u32));
-    try assembler.compareRegister64(0, 11);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    if (has_index) {
+        // ToPropertyKey(Number) is an array index only for an exactly
+        // represented uint32 below 2^32-1. Round-trip the hardware conversion
+        // so fractional, negative, NaN, infinite, and overflowing keys miss.
+        try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 1));
+        try assembler.movImmediate64(11, Value.number_box_mask);
+        try assembler.andRegister64(9, 10, 11);
+        try assembler.compareRegister64(9, 11);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+        try assembler.moveFloatFromRegister64(0, 10);
+        try assembler.convertFloat64ToUnsigned32(0, 0);
+        try assembler.convertUnsigned32ToFloat64(1, 0);
+        try assembler.compareFloat64(0, 1);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        try assembler.movImmediate64(11, std.math.maxInt(u32));
+        try assembler.compareRegister64(0, 11);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    }
 
-    try assembler.load64(9, 14, try slotOffset(descriptor.first_input));
+    try assembler.load64(9, 14, try slotOffset(receiver_input));
     try assembler.movImmediate64(10, Value.boxed_kind_mask);
     try assembler.andRegister64(11, 9, 10);
     try assembler.movImmediate64(10, Value.object_kind_bits);
@@ -3405,14 +3412,13 @@ fn emitDirectDenseArrayElementAddress(
     try assembler.load64(10, 10, try objectStorageByteOffset("elements"));
     try assembler.compareImmediate64(10, 0);
     try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+}
 
-    try assembler.load64(11, 10, try objectElementsByteOffset("len"));
-    try assembler.compareRegister64(0, 11);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+fn emitDenseArrayElementAddress(assembler: *aarch64.Assembler, index_register: u5) !void {
     try assembler.load64(11, 10, try objectElementsByteOffset("items"));
-    try assembler.movImmediate64(10, @sizeOf(Value));
-    try assembler.multiply64(10, 0, 10);
-    try assembler.addRegister64(11, 11, 10);
+    try assembler.movImmediate64(17, @sizeOf(Value));
+    try assembler.multiply64(17, index_register, 17);
+    try assembler.addRegister64(11, 11, 17);
 }
 
 fn emitDirectDenseArrayRead(
@@ -3423,11 +3429,99 @@ fn emitDirectDenseArrayRead(
     if (descriptor.bytecode_op != @backingInt(bc.Op.get_index) or descriptor.input_count != 2)
         return null;
     var direct = DirectRuntimeAccess{};
-    try emitDirectDenseArrayElementAddress(assembler, &direct, descriptor);
+    try emitDirectDenseArrayGuards(assembler, &direct, descriptor, descriptor.first_input, true);
+    try assembler.load64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.compareRegister64(0, 16);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+    try emitDenseArrayElementAddress(assembler, 0);
     try assembler.load64(10, 11, 0);
     try assembler.store64(10, 14, try slotOffset(operation.destination));
     try direct.addCompletion(try assembler.branchPlaceholder());
     return direct;
+}
+
+fn emitDenseArrayWriteBarrier(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+    object_input: u16,
+    value_input: u16,
+) !void {
+    try assembler.load64(17, 12, frameOffset("property_write_barrier"));
+    try assembler.compareImmediate64(17, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.pushPair(9, 10);
+    try assembler.pushPair(11, 0);
+    try assembler.load64(0, 14, try slotOffset(object_input));
+    try assembler.load64(1, 14, try slotOffset(value_input));
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(11, 0);
+    try assembler.popPair(9, 10);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+}
+
+fn emitDenseArrayAppendMutation(
+    assembler: *aarch64.Assembler,
+    direct: *DirectRuntimeAccess,
+    operation: Operation,
+    object_input: u16,
+    value_input: u16,
+    callee_input: ?u16,
+    result_kind: enum { target, value, length },
+) !void {
+    try assembler.load64(17, 12, frameOffset("array_append_guard"));
+    try assembler.compareImmediate64(17, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+    // Prove the barrier exists before the semantic guard records a direct hit.
+    try assembler.load64(11, 12, frameOffset("property_write_barrier"));
+    try assembler.compareImmediate64(11, 0);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+
+    try assembler.pushPair(8, 12);
+    try assembler.pushPair(13, 14);
+    try assembler.pushPair(15, 16);
+    try assembler.pushPair(17, 30);
+    try assembler.pushPair(9, 10);
+    try assembler.load64(0, 12, frameOffset("runtime_context"));
+    try assembler.load64(1, 14, try slotOffset(object_input));
+    if (callee_input) |input| {
+        try assembler.load64(2, 14, try slotOffset(input));
+    } else {
+        try assembler.movImmediate64(2, Value.undef().rawBits());
+    }
+    try assembler.branchLinkRegister(17);
+    try assembler.popPair(9, 10);
+    try assembler.popPair(17, 30);
+    try assembler.popPair(15, 16);
+    try assembler.popPair(13, 14);
+    try assembler.popPair(8, 12);
+    try direct.addFallback(try assembler.branchZero32Placeholder(0), true);
+
+    try emitDenseArrayWriteBarrier(assembler, direct, object_input, value_input);
+    try emitDenseArrayElementAddress(assembler, 16);
+    try assembler.load64(17, 14, try slotOffset(value_input));
+    try assembler.store64(17, 11, 0);
+    try assembler.addImmediate64(16, 16, 1);
+    try assembler.store64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.addImmediate64(11, 9, try objectByteOffset("indexed_own_seen"));
+    try assembler.movImmediate32(17, 1);
+    try assembler.storeRelease8(17, 11);
+    switch (result_kind) {
+        .target => try assembler.load64(17, 14, try slotOffset(object_input)),
+        .value => try assembler.load64(17, 14, try slotOffset(value_input)),
+        .length => {
+            try assembler.convertUnsigned64ToFloat64(0, 16);
+            try assembler.moveRegisterFromFloat64(17, 0);
+        },
+    }
+    try assembler.store64(17, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
 }
 
 fn emitDirectDenseArrayWrite(
@@ -3438,29 +3532,82 @@ fn emitDirectDenseArrayWrite(
     if (descriptor.bytecode_op != @backingInt(bc.Op.set_index) or descriptor.input_count != 3)
         return null;
     var direct = DirectRuntimeAccess{};
-    try emitDirectDenseArrayElementAddress(assembler, &direct, descriptor);
+    try emitDirectDenseArrayGuards(assembler, &direct, descriptor, descriptor.first_input, true);
+    try assembler.load64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.compareRegister64(0, 16);
+    const existing = try assembler.branchConditionPlaceholder(.lo);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+    try assembler.load64(11, 10, try objectElementsByteOffset("capacity"));
+    try assembler.compareRegister64(16, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+    try emitDenseArrayAppendMutation(
+        assembler,
+        &direct,
+        operation,
+        descriptor.first_input,
+        descriptor.first_input + 2,
+        null,
+        .value,
+    );
 
-    try assembler.load64(17, 12, frameOffset("property_write_barrier"));
-    try assembler.compareImmediate64(17, 0);
-    try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
-    try assembler.pushPair(8, 12);
-    try assembler.pushPair(13, 14);
-    try assembler.pushPair(15, 16);
-    try assembler.pushPair(17, 30);
-    try assembler.pushPair(9, 11);
-    try assembler.load64(0, 14, try slotOffset(descriptor.first_input));
-    try assembler.load64(1, 14, try slotOffset(descriptor.first_input + 2));
-    try assembler.branchLinkRegister(17);
-    try assembler.popPair(9, 11);
-    try assembler.popPair(17, 30);
-    try assembler.popPair(15, 16);
-    try assembler.popPair(13, 14);
-    try assembler.popPair(8, 12);
-
+    try assembler.patchConditionBranch(existing, assembler.position());
+    try emitDenseArrayWriteBarrier(assembler, &direct, descriptor.first_input, descriptor.first_input + 2);
+    try emitDenseArrayElementAddress(assembler, 0);
     try assembler.load64(10, 14, try slotOffset(descriptor.first_input + 2));
     try assembler.store64(10, 11, 0);
     try assembler.store64(10, 14, try slotOffset(operation.destination));
     try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
+fn emitDirectDenseArrayAppend(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.array_append) or descriptor.input_count != 2)
+        return null;
+    var direct = DirectRuntimeAccess{};
+    try emitDirectDenseArrayGuards(assembler, &direct, descriptor, descriptor.first_input, false);
+    try assembler.load64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.load64(11, 10, try objectElementsByteOffset("capacity"));
+    try assembler.compareRegister64(16, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+    try emitDenseArrayAppendMutation(
+        assembler,
+        &direct,
+        operation,
+        descriptor.first_input,
+        descriptor.first_input + 1,
+        null,
+        .target,
+    );
+    return direct;
+}
+
+fn emitDirectDenseArrayPush(
+    assembler: *aarch64.Assembler,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.call_with_this) or descriptor.input_count != 3)
+        return null;
+    const receiver_input = descriptor.first_input + 1;
+    var direct = DirectRuntimeAccess{};
+    try emitDirectDenseArrayGuards(assembler, &direct, descriptor, receiver_input, false);
+    try assembler.load64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.load64(11, 10, try objectElementsByteOffset("capacity"));
+    try assembler.compareRegister64(16, 11);
+    try direct.addFallback(try assembler.branchConditionPlaceholder(.hs), false);
+    try emitDenseArrayAppendMutation(
+        assembler,
+        &direct,
+        operation,
+        receiver_input,
+        descriptor.first_input + 2,
+        descriptor.first_input,
+        .length,
+    );
     return direct;
 }
 
@@ -3513,7 +3660,9 @@ fn emitRuntimeOperation(
     const direct_runtime_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
-        try emitDirectDenseArrayWrite(assembler, operation, descriptor);
+        (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
+        (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
+        try emitDirectDenseArrayPush(assembler, operation, descriptor);
     const callback_position = assembler.position();
     if (direct_runtime_access) |direct| try direct.patchFallbacks(assembler, callback_position);
 

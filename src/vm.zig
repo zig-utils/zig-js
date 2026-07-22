@@ -915,6 +915,8 @@ var optimizer_native_property_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_index_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_index_write_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_array_append_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_array_append_direct: std.atomic.Value(u64) = .init(0);
 var optimizer_osr_entries: std.atomic.Value(u64) = .init(0);
 
 pub fn nativeDirectCallHitsForTesting() u64 {
@@ -945,6 +947,19 @@ pub fn optimizerNativeIndexStatsForTesting() OptimizerNativeIndexStats {
     return .{
         .read_callbacks = optimizer_native_index_read_callbacks.load(.monotonic),
         .write_callbacks = optimizer_native_index_write_callbacks.load(.monotonic),
+    };
+}
+
+pub const OptimizerNativeArrayAppendStats = struct {
+    callbacks: u64,
+    direct: u64,
+};
+
+pub fn optimizerNativeArrayAppendStatsForTesting() OptimizerNativeArrayAppendStats {
+    std.debug.assert(builtin.is_test);
+    return .{
+        .callbacks = optimizer_native_array_append_callbacks.load(.monotonic),
+        .direct = optimizer_native_array_append_direct.load(.monotonic),
     };
 }
 
@@ -3599,6 +3614,21 @@ fn nativePropertyWriteBarrier(object_bits: u64, value_bits: u64) callconv(.c) vo
     gc_mod.barrierValueFrom(Value.fromRawBits(object_bits).asObj(), Value.fromRawBits(value_bits));
 }
 
+fn nativeArrayAppendGuard(runtime_context: ?*anyopaque, object_bits: u64, callee_bits: u64) callconv(.c) bool {
+    const vm: *Interpreter = @ptrCast(@alignCast(runtime_context orelse return false));
+    const target = Value.fromRawBits(object_bits);
+    const callee = Value.fromRawBits(callee_bits);
+    if (!target.isObject()) return false;
+    if (!callee.isUndefined() and !Interpreter.isIntrinsicArrayPush(callee)) return false;
+    const object = target.asObj();
+    if (!object.is_array or object.is_arguments or object.proxyHandler() != null or object.proxy_revoked or
+        object.typedArray() != null or object.accessorsMap() != null or object.attrsMap() != null or
+        object.has_indexed_property.load(.monotonic) or !object.isExtensible() or
+        object.restrictionOwner() != 0 or !vm.arrayProtoChainCleanForDenseAppend(object)) return false;
+    if (builtin.is_test) _ = optimizer_native_array_append_direct.fetchAdd(1, .monotonic);
+    return true;
+}
+
 fn isExactUnsigned32(value_: Value) bool {
     if (!value_.isNumber()) return false;
     const number = value_.asNum();
@@ -4087,13 +4117,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 descriptor.bytecode_op == @intFromEnum(bc.Op.init_getter),
             ),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append) and inputs.len == 2)
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append) and inputs.len == 2) {
+        if (builtin.is_test) _ = optimizer_native_array_append_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeArrayAppend(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
+    }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append_hole) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, nativeArrayAppendHole(vm, Value.fromRawBits(inputs[0])));
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_spread) and inputs.len == 2)
@@ -4118,6 +4150,9 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
         descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_with_this))
     {
         const values: []const Value = @ptrCast(inputs);
+        if (builtin.is_test and descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) and
+            values.len == 3 and Interpreter.isIntrinsicArrayPush(values[0]))
+            _ = optimizer_native_array_append_callbacks.fetchAdd(1, .monotonic);
         const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and values.len >= 1)
             callValue(vm, values[0], values[1..], Value.undef())
         else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) and values.len >= 1)
@@ -5030,6 +5065,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .property_write_barrier = nativePropertyWriteBarrier,
+        .array_append_guard = nativeArrayAppendGuard,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -5103,6 +5139,7 @@ fn tryRunOsrNative(
         .moving_safepoint = if (vm.gc_safepoint_fn != null) nativeMovingSafepoint else null,
         .remainder = nativeRemainder,
         .property_write_barrier = nativePropertyWriteBarrier,
+        .array_append_guard = nativeArrayAppendGuard,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
         .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
@@ -9597,7 +9634,11 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     const allocator = arena.allocator();
     var env = Environment{ .arena = allocator, .fn_scope = true };
     const root_shape = try Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+    const array_ctor = env.get("Array") orelse return error.TestUnexpectedResult;
+    const array_proto = try machine.getProperty(array_ctor, "prototype");
+    const intrinsic_push = try machine.getProperty(array_proto, "push");
 
     var read_chunk = bc.Chunk.init(allocator);
     read_chunk.param_count = 2;
@@ -9613,6 +9654,8 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     const packed_array = try machine.newArray();
     try packed_array.asObj().appendElement(allocator, Value.num(10));
     try packed_array.asObj().appendElement(allocator, Value.num(20));
+    const packed_elements = try packed_array.asObj().ensureElementsList(allocator);
+    try packed_elements.ensureTotalCapacity(packed_array.asObj().elementsAllocator(allocator), 4);
     var read_slots = [_]Value{ packed_array, Value.num(1) };
     const reads_before = optimizer_native_index_read_callbacks.load(.monotonic);
     const packed_outcome = try tryRunManagedNative(&machine, &read_compiled, &read_slots, null);
@@ -9691,6 +9734,7 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     try std.testing.expectEqual(writes_before, optimizer_native_index_write_callbacks.load(.monotonic));
 
     write_slots = .{ packed_array, Value.num(2), Value.num(30) };
+    const append_stats_before = optimizerNativeArrayAppendStatsForTesting();
     const growth_outcome = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
     const growth_result = switch (growth_outcome) {
         .complete => |value_word| value_word,
@@ -9698,7 +9742,141 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     };
     try std.testing.expectEqual(@as(f64, 30), growth_result.asNum());
     try std.testing.expectEqual(@as(usize, 3), packed_array.asObj().arrayLength());
+    try std.testing.expectEqual(writes_before, optimizer_native_index_write_callbacks.load(.monotonic));
+    try std.testing.expectEqual(append_stats_before.direct + 1, optimizer_native_array_append_direct.load(.monotonic));
+    try std.testing.expect(packed_array.asObj().indexed_own_seen.load(.acquire));
+
+    const full_array = try machine.newArray();
+    try full_array.asObj().appendElement(allocator, Value.num(1));
+    const full_elements = try full_array.asObj().ensureElementsList(allocator);
+    while (full_elements.items.len < full_elements.capacity)
+        try full_array.asObj().appendElement(allocator, Value.num(2));
+    const full_len = full_elements.items.len;
+    write_slots = .{ full_array, Value.num(@floatFromInt(full_len)), Value.num(40) };
+    const full_outcome = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    const full_result = switch (full_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 40), full_result.asNum());
+    try std.testing.expectEqual(full_len + 1, full_array.asObj().arrayLength());
     try std.testing.expectEqual(writes_before + 1, optimizer_native_index_write_callbacks.load(.monotonic));
+
+    const holey_append = try machine.newArray();
+    try holey_append.asObj().appendElement(allocator, Value.num(1));
+    try holey_append.asObj().appendArrayHole(allocator);
+    write_slots = .{ holey_append, Value.num(2), Value.num(50) };
+    _ = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    try std.testing.expectEqual(writes_before + 2, optimizer_native_index_write_callbacks.load(.monotonic));
+
+    const shared_append = try machine.newArray();
+    try shared_append.asObj().appendElement(allocator, Value.num(1));
+    const shared_elements = try shared_append.asObj().ensureElementsList(allocator);
+    try shared_elements.ensureTotalCapacity(shared_append.asObj().elementsAllocator(allocator), 2);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    write_slots = .{ shared_append, Value.num(1), Value.num(60) };
+    _ = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    try std.testing.expectEqual(writes_before + 3, optimizer_native_index_write_callbacks.load(.monotonic));
+
+    var append_chunk = bc.Chunk.init(allocator);
+    append_chunk.param_count = 2;
+    append_chunk.local_count = 2;
+    _ = try append_chunk.emit(.load_local, 0);
+    _ = try append_chunk.emit(.load_local, 1);
+    _ = try append_chunk.emit(.array_append, 0);
+    _ = try append_chunk.emit(.ret, 0);
+    try append_chunk.finalize();
+    var append_compiled = try optimizer_compiler.compile(&append_chunk);
+    defer append_compiled.deinit();
+
+    const literal_array = try machine.newArray();
+    try literal_array.asObj().appendElement(allocator, Value.num(1));
+    const literal_elements = try literal_array.asObj().ensureElementsList(allocator);
+    try literal_elements.ensureTotalCapacity(literal_array.asObj().elementsAllocator(allocator), 2);
+    var append_slots = [_]Value{ literal_array, retained };
+    const literal_stats_before = optimizerNativeArrayAppendStatsForTesting();
+    const literal_outcome = try tryRunManagedNative(&machine, &append_compiled, &append_slots, null);
+    const literal_result = switch (literal_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(literal_array.rawBits(), literal_result.rawBits());
+    try std.testing.expectEqual(retained.rawBits(), literal_array.asObj().atomicDenseElementLoad(1).?.rawBits());
+    const literal_stats_after = optimizerNativeArrayAppendStatsForTesting();
+    try std.testing.expectEqual(literal_stats_before.callbacks, literal_stats_after.callbacks);
+    try std.testing.expectEqual(literal_stats_before.direct + 1, literal_stats_after.direct);
+
+    while (literal_elements.items.len < literal_elements.capacity)
+        try literal_array.asObj().appendElement(allocator, Value.num(3));
+    append_slots = .{ literal_array, Value.num(70) };
+    _ = try tryRunManagedNative(&machine, &append_compiled, &append_slots, null);
+    const full_literal_stats = optimizerNativeArrayAppendStatsForTesting();
+    try std.testing.expectEqual(literal_stats_after.callbacks + 1, full_literal_stats.callbacks);
+
+    var push_chunk = bc.Chunk.init(allocator);
+    push_chunk.param_count = 3;
+    push_chunk.local_count = 3;
+    _ = try push_chunk.emit(.load_local, 0);
+    _ = try push_chunk.emit(.load_local, 1);
+    _ = try push_chunk.emit(.load_local, 2);
+    _ = try push_chunk.emit(.call_with_this, 1);
+    _ = try push_chunk.emit(.ret, 0);
+    try push_chunk.finalize();
+    var push_compiled = try optimizer_compiler.compile(&push_chunk);
+    defer push_compiled.deinit();
+
+    const pushed_array = try machine.newArray();
+    try pushed_array.asObj().appendElement(allocator, Value.num(1));
+    const pushed_elements = try pushed_array.asObj().ensureElementsList(allocator);
+    try pushed_elements.ensureTotalCapacity(pushed_array.asObj().elementsAllocator(allocator), 2);
+    var push_slots = [_]Value{ intrinsic_push, pushed_array, retained };
+    const push_stats_before = optimizerNativeArrayAppendStatsForTesting();
+    const push_outcome = try tryRunManagedNative(&machine, &push_compiled, &push_slots, null);
+    const push_result = switch (push_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 2), push_result.asNum());
+    try std.testing.expectEqual(retained.rawBits(), pushed_array.asObj().atomicDenseElementLoad(1).?.rawBits());
+    const push_stats_after = optimizerNativeArrayAppendStatsForTesting();
+    try std.testing.expectEqual(push_stats_before.callbacks, push_stats_after.callbacks);
+    try std.testing.expectEqual(push_stats_before.direct + 1, push_stats_after.direct);
+
+    while (pushed_elements.items.len < pushed_elements.capacity)
+        try pushed_array.asObj().appendElement(allocator, Value.num(4));
+    push_slots = .{ intrinsic_push, pushed_array, Value.num(100) };
+    const pushed_full_len = pushed_elements.items.len;
+    const full_push_outcome = try tryRunManagedNative(&machine, &push_compiled, &push_slots, null);
+    const full_push_result = switch (full_push_outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, @floatFromInt(pushed_full_len + 1)), full_push_result.asNum());
+    try std.testing.expectEqual(push_stats_after.callbacks + 1, optimizer_native_array_append_callbacks.load(.monotonic));
+
+    const shared_push_array = try machine.newArray();
+    try shared_push_array.asObj().appendElement(allocator, Value.num(1));
+    const shared_push_elements = try shared_push_array.asObj().ensureElementsList(allocator);
+    try shared_push_elements.ensureTotalCapacity(shared_push_array.asObj().elementsAllocator(allocator), 2);
+    bc.ic_seqlock_enabled.store(true, .monotonic);
+    push_slots = .{ intrinsic_push, shared_push_array, Value.num(110) };
+    _ = try tryRunManagedNative(&machine, &push_compiled, &push_slots, null);
+    bc.ic_seqlock_enabled.store(false, .monotonic);
+    try std.testing.expectEqual(push_stats_after.callbacks + 2, optimizer_native_array_append_callbacks.load(.monotonic));
+
+    const guarded_array = try machine.newArray();
+    try guarded_array.asObj().appendElement(allocator, Value.num(1));
+    const guarded_elements = try guarded_array.asObj().ensureElementsList(allocator);
+    try guarded_elements.ensureTotalCapacity(guarded_array.asObj().elementsAllocator(allocator), 2);
+    const indexed_proto = try machine.newArray();
+    try indexed_proto.asObj().appendArrayHole(allocator);
+    try indexed_proto.asObj().appendElement(allocator, Value.num(80));
+    guarded_array.asObj().setProtoAtomic(indexed_proto.asObj());
+    write_slots = .{ guarded_array, Value.num(1), Value.num(90) };
+    _ = try tryRunManagedNative(&machine, &write_compiled, &write_slots, null);
+    try std.testing.expectEqual(writes_before + 4, optimizer_native_index_write_callbacks.load(.monotonic));
+    try std.testing.expectEqual(@as(f64, 90), guarded_array.asObj().atomicDenseElementLoad(1).?.asNum());
 
     var invalidation_generation: std.atomic.Value(u64) = .init(1);
     write_compiled.invalidation_generation = &invalidation_generation;

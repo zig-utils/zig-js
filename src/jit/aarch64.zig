@@ -149,6 +149,11 @@ pub const Assembler = struct {
         try self.emit32(0xc89f_fc00 | (@as(u32, xn) << 5) | xt);
     }
 
+    /// `stlrb wt, [xn]`, publishing one byte with release ordering.
+    pub fn storeRelease8(self: *Assembler, wt: u5, xn: u5) error{NoSpace}!void {
+        try self.emit32(0x089f_fc00 | (@as(u32, xn) << 5) | wt);
+    }
+
     pub fn moveFloatFromRegister64(self: *Assembler, fd: u5, rn: u5) error{NoSpace}!void {
         try self.emit32(0x9e67_0000 | (@as(u32, rn) << 5) | fd);
     }
@@ -384,10 +389,12 @@ test "AArch64 numeric tier instruction encodings" {
 }
 
 test "AArch64 release-store encoding" {
-    var storage: [4]u8 = undefined;
+    var storage: [8]u8 = undefined;
     var assembler = Assembler.init(&storage);
     try assembler.storeRelease64(9, 17);
     try std.testing.expectEqual(@as(u32, 0xc89f_fe29), std.mem.readInt(u32, assembler.bytes()[0..4], .little));
+    try assembler.storeRelease8(10, 16);
+    try std.testing.expectEqual(@as(u32, 0x089f_fe0a), std.mem.readInt(u32, assembler.bytes()[4..8], .little));
 }
 
 test "AArch64 guarded unsigned remainder encodings" {

@@ -6867,7 +6867,7 @@ pub const Interpreter = struct {
         return true;
     }
 
-    fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
+    pub fn arrayProtoChainCleanForDenseAppend(self: *Interpreter, o: *value.Object) bool {
         var cur = self.effectiveProto(o);
         while (cur) |c| {
             if (c.proxyHandler() != null or c.proxy_revoked or c.typedArray() != null or c.has_indexed_property.load(.monotonic))
@@ -6894,10 +6894,14 @@ pub const Interpreter = struct {
     /// whose indexed writes cannot observe a descriptor or prototype hook are
     /// mutated here; every generic/observable case returns null for normal
     /// native dispatch.
+    pub fn isIntrinsicArrayPush(callee: Value) bool {
+        if (!callee.isObject()) return false;
+        const native = callee.asObj().native orelse return false;
+        return native == arrayProtoMethod("push");
+    }
+
     pub fn tryFastArrayPush(self: *Interpreter, callee: Value, this: Value, args: []const Value) EvalError!?Value {
-        if (!callee.isObject()) return null;
-        const native = callee.asObj().native orelse return null;
-        if (native != arrayProtoMethod("push")) return null;
+        if (!isIntrinsicArrayPush(callee)) return null;
         if (!this.isObject()) return null;
         const o = this.asObj();
         try self.checkRestricted(o);
