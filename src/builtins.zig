@@ -2566,7 +2566,7 @@ pub fn stringRaw(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         const key = try std.fmt.allocPrint(self.arena, "{d}", .{i});
         // ToString of each cooked segment and substitution runs valueOf/toString
         // (and throws for a Symbol), propagating any abrupt completion.
-        try buf.appendSlice(self.arena, try self.toStringV(try self.getProperty(raw, key)));
+        try buf.appendSlice(self.arena, try self.toStringWtf8(try self.getProperty(raw, key)));
         if (i + 1 == segs) break;
         if (i < subs.len) try buf.appendSlice(self.arena, try self.toStringV(subs[i]));
     }

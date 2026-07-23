@@ -6163,7 +6163,7 @@ pub const Interpreter = struct {
             const prim = try self.toPrimitive(args[msg_i], .string);
             if (prim.isObject() and prim.asObj().is_symbol)
                 return self.throwError("TypeError", "Cannot convert a Symbol value to a string");
-            break :blk try prim.toString(self.arena);
+            break :blk if (prim.isString()) try prim.asWtf8(self.arena) else try prim.toString(self.arena);
         } else "";
         const err = try self.makeErrorWithProto(name, msg, proto);
         if (has_msg and msg.len == 0) {
@@ -13783,7 +13783,7 @@ pub const Interpreter = struct {
         if (eq(name, "join")) {
             // The separator and each element coerce via ToString (which runs a
             // custom toString/valueOf), not raw formatting.
-            const sep = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else ",";
+            const sep = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else ",";
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             // Walk the logical length: a hole reads as `undefined` (via [[Get]])
             // and — like `undefined`/`null` — renders as the empty string.
@@ -13793,7 +13793,7 @@ pub const Interpreter = struct {
                 const el = try self.arrIndexGet(o, i);
                 switch (el.kind()) {
                     .undefined, .null => {},
-                    else => try buf.appendSlice(self.arena, try self.toStringV(el)),
+                    else => try buf.appendSlice(self.arena, try self.toStringWtf8(el)),
                 }
             }
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
@@ -14881,7 +14881,7 @@ pub const Interpreter = struct {
             const target = toLen(try self.toNumberV(arg0(args)));
             const len = utf16LenOfStringA(s, s_ascii);
             if (len >= target) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
-            const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else " ";
+            const pad = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else " ";
             const pad_units = utf16LenOfString(pad);
             if (pad_units == 0) return try Value.strOwned(self.arena, try self.arena.dupe(u8, s));
             var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -17664,9 +17664,9 @@ fn errorToStringFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
     // ToString(name)/ToString(message) run ToPrimitive (throwing for a Symbol and
     // propagating an abrupt valueOf/toString).
     const name_v = try self.getProperty(this, "name");
-    const name = if (name_v.isUndefined()) "Error" else try self.toStringV(name_v);
+    const name = if (name_v.isUndefined()) "Error" else try self.toStringWtf8(name_v);
     const msg_v = try self.getProperty(this, "message");
-    const msg = if (msg_v.isUndefined()) "" else try self.toStringV(msg_v);
+    const msg = if (msg_v.isUndefined()) "" else try self.toStringWtf8(msg_v);
     if (name.len == 0) return try Value.strAlloc(self.arena, msg);
     if (msg.len == 0) return try Value.strAlloc(self.arena, name);
     return try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ name, ": ", msg }));
@@ -30780,7 +30780,7 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
     const matcher = o.getOwn("__re") orelse
         return self.throwError("TypeError", "next called on an incompatible receiver");
     if (o.getOwn("__done")) |d| if (d.toBoolean()) return self.iterResultObj(Value.undef(), true);
-    const s = (o.getOwn("__str") orelse Value.str("")).asStr();
+    const s = try (o.getOwn("__str") orelse Value.str("")).asWtf8(self.arena);
     const global = (o.getOwn("__g") orelse Value.boolVal(false)).toBoolean();
     const unicode = (o.getOwn("__u") orelse Value.boolVal(false)).toBoolean();
     const match = try self.regexpExecGeneric(matcher, s);
@@ -30794,7 +30794,7 @@ fn regexpStringIterNext(ctx: *anyopaque, this: Value, args: []const Value) value
     }
     // Global: a zero-length match would otherwise stall lastIndex; bump it past
     // the current position (honouring surrogate pairs under the `u`/`v` flag).
-    const match_str = try self.toStringV(try self.getProperty(match, "0"));
+    const match_str = try self.toStringWtf8(try self.getProperty(match, "0"));
     if (match_str.len == 0) {
         const this_index = toLen(try self.toNumberV(try self.getProperty(matcher, "lastIndex")));
         const next_index = Interpreter.advanceStringIndex(s, this_index, unicode);
