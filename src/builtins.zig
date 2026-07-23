@@ -816,7 +816,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
         } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString())
             // A String wrapper exposes only its char indices as enumerable own keys.
-            (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfString(o.boxedPrimitive().?.asStr()))
+            (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfValue(o.boxedPrimitive().?))
         else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
@@ -890,7 +890,7 @@ pub fn objectAssign(ctx: *anyopaque, this: Value, args: []const Value) HostError
             } else if (from.boxedPrimitive() != null and from.boxedPrimitive().?.isString())
                 // A String wrapper's only enumerable own keys are its char indices
                 // ("length" and inherited methods are non-enumerable).
-                (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfString(from.boxedPrimitive().?.asStr()))
+                (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfValue(from.boxedPrimitive().?))
             else if ((from.is_array or from.typedArray() != null) and std.mem.eql(u8, k, "length"))
                 false
             else
@@ -1650,7 +1650,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             if (arrayIndexOf(key)) |i| {
                 if (i < p.asStr().len) {
                     const attr: value.PropAttr = .{ .writable = false, .enumerable = true, .configurable = false };
-                    const ch: Value = try Value.strOwned(self.arena, try self.arena.dupe(u8, p.asStr()[i .. i + 1]));
+                    const ch: Value = try Value.strOwned(self.arena, try self.arena.dupe(u8, (try p.asWtf8(self.arena))[i .. i + 1]));
                     return compatibleRedefine(attr, ch, null, d);
                 }
             }
@@ -2361,7 +2361,7 @@ pub fn objectGetOwnPropertyDescriptor(ctx: *anyopaque, this: Value, args: []cons
                 return dataDescriptor(self, Value.num(@floatFromInt(p.asStr().len)), .{ .writable = false, .enumerable = false, .configurable = false });
             if (arrayIndexOf(key)) |i| {
                 if (i < p.asStr().len)
-                    return dataDescriptor(self, try Value.strOwned(self.arena, try self.arena.dupe(u8, p.asStr()[i .. i + 1])), .{ .writable = false, .enumerable = true, .configurable = false });
+                    return dataDescriptor(self, try Value.strOwned(self.arena, try self.arena.dupe(u8, (try p.asWtf8(self.arena))[i .. i + 1])), .{ .writable = false, .enumerable = true, .configurable = false });
             }
         }
     }
@@ -2652,7 +2652,10 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
             @memset(sp, ' ');
             st.gap = sp;
         },
-        .string => st.gap = space.asStr()[0..@min(space.asStr().len, 10)],
+        .string => {
+            const sp = try space.asWtf8(a);
+            st.gap = sp[0..@min(sp.len, 10)];
+        },
         else => {},
     }
 

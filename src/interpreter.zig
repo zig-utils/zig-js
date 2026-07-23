@@ -22524,7 +22524,7 @@ fn uint8FromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     const opts = try getOptionsObject(self, arg(args, 1));
     const url = std.mem.eql(u8, try getStringOption(self, opts, "alphabet", &.{ "base64", "base64url" }, "base64"), "base64url");
     const lch = lastChunkFromName(try getStringOption(self, opts, "lastChunkHandling", &.{ "loose", "strict", "stop-before-partial" }, "loose"));
-    const r = try decodeBase64(self, sv.asStr(), url, lch, std.math.maxInt(usize));
+    const r = try decodeBase64(self, try sv.asWtf8(self.arena), url, lch, std.math.maxInt(usize));
     if (r.err) return self.throwError("SyntaxError", "invalid base64-encoded string");
     const o = try newTypedArray(self, .u8, r.bytes.len);
     @memcpy(o.typedArray().?.buffer.arrayBuffer().?.bytes()[0..r.bytes.len], r.bytes);
@@ -22579,7 +22579,7 @@ fn uint8SetFromBase64Fn(ctx: *anyopaque, this: Value, args: []const Value) value
     // Bound the decode by the current writable length (racy read, re-clamped
     // under the lock below); `decodeBase64` allocates `r.bytes` OUTSIDE the lock.
     const cap = (uint8ArrayBytes(o) orelse return self.throwError("TypeError", "Uint8Array buffer is detached")).len;
-    const r = try decodeBase64(self, sv.asStr(), url, lch, cap);
+    const r = try decodeBase64(self, try sv.asWtf8(self.arena), url, lch, cap);
     // Write into the live buffer under the lock so a peer resize()+free can't
     // dangle the target mid-copy (UAF); re-resolve + clamp to the live length.
     {

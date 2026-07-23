@@ -15463,9 +15463,12 @@ fn privateErrorCodeForName(name: []const u8) PrivateJSErrorCode {
     return .error_;
 }
 
-fn privateDirectString(object: *Object, name: []const u8) ?[]const u8 {
+fn privateDirectString(object: *Object, arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error!?[]const u8 {
     const property = object.getOwn(name) orelse return null;
-    return if (property.isString()) property.asStr() else null;
+    // WTF-8 view: the result is copied by privateSetProjectedString ->
+    // privateOwnedWTF8String, so a transient arena transcode of a flat cell is
+    // safe (and a no-op borrow for WTF-8/ASCII cells).
+    return if (property.isString()) try property.asWtf8(arena) else null;
 }
 
 fn privateDirectInt(object: *Object, name: []const u8) ?i32 {
@@ -15502,9 +15505,9 @@ fn privateProjectExceptionValue(
 
     if (input.isObject()) {
         const object = input.asObj();
-        const name = privateDirectString(object, "name") orelse if (object.behavior.is_error) object.errorName() else "Error";
-        const message = privateDirectString(object, "message") orelse if (object.behavior.is_error)
-            (privateDirectString(object, "\x00dommsg") orelse "")
+        const name = (privateDirectString(object, context.arena(), "name") catch return false) orelse if (object.behavior.is_error) object.errorName() else "Error";
+        const message = (privateDirectString(object, context.arena(), "message") catch return false) orelse if (object.behavior.is_error)
+            ((privateDirectString(object, context.arena(), "\x00dommsg") catch return false) orelse "")
         else
             "";
         output.type = privateErrorCodeForName(name);
@@ -15512,16 +15515,16 @@ fn privateProjectExceptionValue(
         if (!privateSetProjectedString(&output.message, message)) return false;
 
         if (object.getOwn("cause")) |cause| output.runtime_type = privateRuntimeTypeForValue(cause);
-        if (privateDirectString(object, "syscall")) |text|
+        if (privateDirectString(object, context.arena(), "syscall") catch return false) |text|
             if (!privateSetProjectedString(&output.syscall, text)) return false;
         if (object.getOwn("code")) |code| {
-            const text = if (code.isString()) code.asStr() else if (code.isNumber())
+            const text = if (code.isString()) (code.asWtf8(context.arena()) catch return false) else if (code.isNumber())
                 code.toString(context.arena()) catch return false
             else
                 "";
             if (!privateSetProjectedString(&output.system_code, text)) return false;
         }
-        if (privateDirectString(object, "path")) |text|
+        if (privateDirectString(object, context.arena(), "path") catch return false) |text|
             if (!privateSetProjectedString(&output.path, text)) return false;
         output.errno = privateDirectInt(object, "errno") orelse 0;
         output.fd = privateDirectInt(object, "fd") orelse -1;
@@ -18122,7 +18125,7 @@ fn inspectorRemote(state: *CInspectorState, session: *CInspectorSession, id: u64
     return null;
 }
 
-fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
+fn inspectorRemoteValue(arena: std.mem.Allocator, raw: Value) std.mem.Allocator.Error!InspectorRemoteValue {
     return switch (raw.kind()) {
         .undefined => .{ .type = "undefined", .description = "undefined" },
         .null => .{ .type = "object", .value = .null, .description = "null" },
@@ -18136,10 +18139,15 @@ fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
             .value = if (std.math.isFinite(raw.asNum())) .{ .float = raw.asNum() } else null,
             .description = "number",
         },
-        .string => .{
-            .type = "string",
-            .value = .{ .string = @constCast(raw.asStr()) },
-            .description = raw.asStr(),
+        .string => blk: {
+            // WTF-8 view (long-lived arena alloc for a flat cell) shared by the
+            // protocol value and description fields.
+            const w = try raw.asWtf8(arena);
+            break :blk .{
+                .type = "string",
+                .value = .{ .string = @constCast(w) },
+                .description = w,
+            };
         },
         .object => blk: {
             const object = raw.asObj();
@@ -18152,7 +18160,7 @@ fn inspectorRemoteValue(raw: Value) InspectorRemoteValue {
 }
 
 fn inspectorRemoteValueForSession(session: *CInspectorSession, raw: Value, group: []const u8, pause_only: bool) !InspectorRemoteValue {
-    var remote = inspectorRemoteValue(raw);
+    var remote = try inspectorRemoteValue(session.state.context.arena(), raw);
     if (raw.kind() == .object) {
         const value_ref = box(session.state.context, raw) orelse return error.OutOfMemory;
         remote.objectId = try registerInspectorRemote(session, .{ .value = value_ref }, group, pause_only);
