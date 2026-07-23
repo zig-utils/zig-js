@@ -3767,6 +3767,31 @@ fn nativePropertyCacheSlot(cache: ?*const jit.NativePropertyCache, object: *cons
     return slot;
 }
 
+fn nativeInheritedPropertyCacheValue(
+    cache: ?*const jit.NativePropertyCache,
+    receiver: *const value.Object,
+    name: []const u8,
+) ?Value {
+    const property_cache = cache orelse return null;
+    const receiver_shape_token = if (receiver.shape) |shape|
+        @intFromPtr(shape)
+    else
+        jit.NativePropertyCache.empty_receiver_shape_token;
+    if (receiver.shape) |shape| if (shape.lookup(name) != null) return null;
+    const holder = receiver.protoAtomic() orelse return null;
+    holder.lockProperties();
+    defer holder.unlockProperties();
+    if (holder.is_array or holder.is_arguments or holder.is_symbol or holder.is_bigint or
+        holder.proxyHandler() != null or holder.proxy_revoked or holder.accessorsMap() != null or
+        holder.attrsMap() != null)
+        return null;
+    const holder_shape = holder.shape orelse return null;
+    const cached = property_cache.lookupInherited(receiver_shape_token, @intFromPtr(holder_shape)) orelse return null;
+    const slot = std.math.cast(usize, cached) orelse return null;
+    if (slot >= holder.slotsItems().len or holder_shape.lookup(name) != cached) return null;
+    return holder.slotsItems()[slot];
+}
+
 fn nativeGetProperty(
     vm: *Interpreter,
     cache: ?*const jit.NativePropertyCache,
@@ -3785,6 +3810,10 @@ fn nativeGetProperty(
             if (nativePropertyCacheSlot(cache, object)) |slot| {
                 if (builtin.is_test) _ = optimizer_native_property_read_cache_hits.fetchAdd(1, .monotonic);
                 return object.slotsItems()[slot];
+            }
+            if (nativeInheritedPropertyCacheValue(cache, object, name)) |inherited| {
+                if (builtin.is_test) _ = optimizer_native_property_read_cache_hits.fetchAdd(1, .monotonic);
+                return inherited;
             }
         }
     }
@@ -6169,7 +6198,15 @@ fn runChunk(
                         // own miss → fall through to full [[Get]] (prototype walk
                         // + `.constructor` fallback), not a bare undefined.
                     }
-                    result = try vm.getProperty(obj, name); // arrays, strings, proto chain, null/undefined
+                    var inherited_observation: ?interp.InheritedPropertyObservation = null;
+                    result = try vm.getPropertyObserved(obj, name, &inherited_observation); // arrays, strings, proto chain, null/undefined
+                    if (inherited_observation) |observation|
+                        chunk.ics[ip - 1].recordInheritedMode(
+                            observation.receiver_shape,
+                            observation.holder_shape,
+                            observation.slot,
+                            parallel_sync,
+                        );
                 }
                 optimizer_delta.observeValue(optimizerProfileKind(result));
                 try stack.append(stack_alloc, result);

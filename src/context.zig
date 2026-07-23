@@ -15703,20 +15703,21 @@ test "parallel_js named property mutation fires Class-A invalidation" {
     });
     defer ctx.destroy();
     _ = try ctx.evaluate(
-        \\globalThis.classAObject = { y: 1 };
-        \\function classARead(o) { return o.y; }
+        \\globalThis.classAProto = { y: 1 };
+        \\globalThis.classAObject = Object.create(classAProto);
+        \\function classARead(o) { return o.y + 1; }
         \\for (let warm = 0; warm < 64; warm = warm + 1) classARead(classAObject);
     );
     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
     try std.testing.expect(owner.hasPublishedArtifacts());
     const generation_before = owner.invalidation_generation.load(.acquire);
 
-    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("classARead(classAObject)")).asNum());
-    _ = try ctx.evaluate("classAObject.y = 4");
+    try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    _ = try ctx.evaluate("classAProto.y = 4");
 
     try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
-    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
 test "optimizer live safepoint relocates a recovery-only object local" {

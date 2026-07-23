@@ -306,8 +306,13 @@ pub const NativeOperationDescriptor = extern struct {
 /// cache. Shape identities are arena-stable non-GC tokens; every use must still
 /// guard the receiver's live shape and slot range before touching storage.
 pub const NativePropertyCache = extern struct {
+    pub const empty_receiver_shape_token: usize = 1;
+
     shape_tokens: [4]usize = @splat(0),
     slots: [4]u32 = @splat(0),
+    inherited_receiver_shape_token: usize = 0,
+    inherited_holder_shape_token: usize = 0,
+    inherited_slot: u32 = 0,
 
     pub fn lookup(self: *const NativePropertyCache, shape_token: usize) ?u32 {
         if (shape_token == 0) return null;
@@ -315,6 +320,18 @@ pub const NativePropertyCache = extern struct {
             if (candidate == shape_token) return slot;
         }
         return null;
+    }
+
+    pub fn lookupInherited(
+        self: *const NativePropertyCache,
+        receiver_shape_token: usize,
+        holder_shape_token: usize,
+    ) ?u32 {
+        if (receiver_shape_token == 0 or holder_shape_token == 0) return null;
+        if (self.inherited_receiver_shape_token != receiver_shape_token or
+            self.inherited_holder_shape_token != holder_shape_token)
+            return null;
+        return self.inherited_slot;
     }
 };
 

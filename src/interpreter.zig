@@ -1077,6 +1077,12 @@ const RegExpLegacy = struct {
     groups: [9][]const u8 = .{ "", "", "", "", "", "", "", "", "" },
 };
 
+pub const InheritedPropertyObservation = struct {
+    receiver_shape: ?*Shape,
+    holder_shape: *Shape,
+    slot: u32,
+};
+
 /// Tree-walking evaluator. Evaluating a program/block returns the completion
 /// value of the last statement, which is what `JSEvaluateScript` hands back.
 pub const Interpreter = struct {
@@ -10862,7 +10868,18 @@ pub const Interpreter = struct {
 
     pub fn getProperty(self: *Interpreter, recv: Value, key: []const u8) EvalError!Value {
         if (recv.isObject()) try self.checkRestricted(recv.asObj());
-        return self.getPropertyWithReceiver(recv, key, recv);
+        return self.getPropertyWithReceiverFound(recv, key, recv, null, null);
+    }
+
+    pub fn getPropertyObserved(
+        self: *Interpreter,
+        recv: Value,
+        key: []const u8,
+        observation: *?InheritedPropertyObservation,
+    ) EvalError!Value {
+        observation.* = null;
+        if (recv.isObject()) try self.checkRestricted(recv.asObj());
+        return self.getPropertyWithReceiverFound(recv, key, recv, null, observation);
     }
 
     /// PrivateGet (`this.#x` read). Resolves the PrivateElement on the receiver's
@@ -10933,7 +10950,7 @@ pub const Interpreter = struct {
     /// lookup starts. Reflect.get and Proxy forwarding rely on this when an
     /// inherited accessor observes `this`.
     pub fn getPropertyWithReceiver(self: *Interpreter, recv: Value, key: []const u8, receiver: Value) EvalError!Value {
-        return self.getPropertyWithReceiverFound(recv, key, receiver, null);
+        return self.getPropertyWithReceiverFound(recv, key, receiver, null, null);
     }
 
     /// Ordinary [[Get]] while retaining the PropertySlot-style distinction
@@ -10942,7 +10959,7 @@ pub const Interpreter = struct {
     /// would add an observable `has` trap before a Proxy's `get` trap.
     pub fn getPropertyIfExists(self: *Interpreter, recv: Value, key: []const u8) EvalError!?Value {
         var found = true;
-        const result = try self.getPropertyWithReceiverFound(recv, key, recv, &found);
+        const result = try self.getPropertyWithReceiverFound(recv, key, recv, &found, null);
         return if (found) result else null;
     }
 
@@ -10975,6 +10992,7 @@ pub const Interpreter = struct {
         key: []const u8,
         receiver: Value,
         found: ?*bool,
+        inherited_observation: ?*?InheritedPropertyObservation,
     ) EvalError!Value {
         if (found) |slot| slot.* = true;
         // PrivateGet is not OrdinaryGet: it resolves the PrivateElement directly
@@ -11116,6 +11134,7 @@ pub const Interpreter = struct {
                 // %Function.prototype% — so `fn.constructor`, `fn.call` as a
                 // value, etc. resolve).
                 var cur: ?*value.Object = o;
+                var prototype_depth: usize = 0;
                 while (cur) |c| {
                     if (c.proxyHandler() != null or c.proxy_revoked)
                         return self.proxyGet(c, key, receiver);
@@ -11164,7 +11183,18 @@ pub const Interpreter = struct {
                             }
                         }
                     }
-                    if (c.getOwn(key)) |v| return v;
+                    if (c.getOwn(key)) |v| {
+                        if (prototype_depth == 1) if (inherited_observation) |observation| {
+                            if (c.shape) |holder_shape| if (holder_shape.lookup(key)) |slot| {
+                                observation.* = .{
+                                    .receiver_shape = o.shape,
+                                    .holder_shape = holder_shape,
+                                    .slot = slot,
+                                };
+                            };
+                        };
+                        return v;
+                    }
                     if (c.hostClassHooks()) |hooks| if (hooks.get) |get| {
                         switch (try get(@ptrCast(self), c, key)) {
                             .unhandled => {},
@@ -11172,6 +11202,7 @@ pub const Interpreter = struct {
                         }
                     };
                     cur = self.effectiveProto(c);
+                    prototype_depth += 1;
                 }
                 // On the global object, an absent own property falls back to the
                 // global lexical bindings, so `globalThis.Math`, `this.parseInt`,

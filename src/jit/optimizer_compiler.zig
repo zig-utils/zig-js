@@ -973,6 +973,18 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
             property_cache.shape_tokens[cache_index] = @intFromPtr(shape);
             property_cache.slots[cache_index] = slot;
         }
+        if (instruction.op == .get_prop) if (snapshot.inherited_holder_shape) |holder_shape| {
+            if (holder_shape.lookup(name) == snapshot.inherited_slot) {
+                property_cache.inherited_receiver_shape_token = if (snapshot.inherited_receiver_shape) |shape|
+                    @intFromPtr(shape)
+                else if (snapshot.inherited_receiver_shape_is_null)
+                    jit.NativePropertyCache.empty_receiver_shape_token
+                else
+                    0;
+                property_cache.inherited_holder_shape_token = @intFromPtr(holder_shape);
+                property_cache.inherited_slot = snapshot.inherited_slot;
+            }
+        };
     }
     const native_exceptional_targets = try lowerNativeExceptionalTargets(plan, allocator);
     errdefer if (native_exceptional_targets.len != 0) allocator.free(native_exceptional_targets);
@@ -1827,6 +1839,18 @@ fn lowerRegionOsr(
             property_cache.shape_tokens[cache_index] = @intFromPtr(shape);
             property_cache.slots[cache_index] = slot;
         }
+        if (instruction.op == .get_prop) if (snapshot.inherited_holder_shape) |holder_shape| {
+            if (holder_shape.lookup(name) == snapshot.inherited_slot) {
+                property_cache.inherited_receiver_shape_token = if (snapshot.inherited_receiver_shape) |shape|
+                    @intFromPtr(shape)
+                else if (snapshot.inherited_receiver_shape_is_null)
+                    jit.NativePropertyCache.empty_receiver_shape_token
+                else
+                    0;
+                property_cache.inherited_holder_shape_token = @intFromPtr(holder_shape);
+                property_cache.inherited_slot = snapshot.inherited_slot;
+            }
+        };
     }
     const native_exceptional_targets = try lowerNativeExceptionalTargets(plan, allocator);
     errdefer if (native_exceptional_targets.len != 0) allocator.free(native_exceptional_targets);
@@ -3255,7 +3279,10 @@ fn emitDirectNamedPropertyRead(
         if (shape_token != 0 and slot < @as(u32, Object.inline_slot_capacity)) {
             usable_entries += 1;
         };
-    if (usable_entries == 0) return null;
+    const inherited_usable = cache.inherited_receiver_shape_token != 0 and
+        cache.inherited_holder_shape_token != 0 and
+        cache.inherited_slot < @as(u32, Object.inline_slot_capacity);
+    if (usable_entries == 0 and !inherited_usable) return null;
 
     var direct = DirectRuntimeAccess{};
     try emitDirectPropertyGuards(assembler, &direct, descriptor);
@@ -3269,6 +3296,40 @@ fn emitDirectNamedPropertyRead(
         try assembler.store64(10, 14, try slotOffset(operation.destination));
         try direct.addCompletion(try assembler.branchPlaceholder());
         try assembler.patchConditionBranch(next_shape, assembler.position());
+    }
+    if (inherited_usable) {
+        if (cache.inherited_receiver_shape_token == jit.NativePropertyCache.empty_receiver_shape_token) {
+            try assembler.compareImmediate64(11, 0);
+        } else {
+            try assembler.movImmediate64(10, cache.inherited_receiver_shape_token);
+            try assembler.compareRegister64(11, 10);
+        }
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        try assembler.load64(9, 9, try objectByteOffset("proto"));
+        try assembler.compareImmediate64(9, 0);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.eq), false);
+        try assembler.load64(10, 9, try objectByteOffset("storage"));
+        try assembler.compareImmediate64(10, 0);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        try assembler.load16(10, 9, try objectByteOffset("behavior"));
+        try direct.addFallback(try assembler.branchNotZero32Placeholder(10), true);
+        try emitZeroByteGuard(assembler, &direct, "is_symbol");
+        try emitZeroByteGuard(assembler, &direct, "is_bigint");
+        try emitZeroByteGuard(assembler, &direct, "is_array");
+        try emitZeroByteGuard(assembler, &direct, "is_arguments");
+        try emitZeroByteGuard(assembler, &direct, "proxy_revoked");
+        try assembler.load64(10, 9, try objectByteOffset("private_data"));
+        try assembler.compareImmediate64(10, 0);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        try assembler.load64(11, 9, try objectByteOffset("shape"));
+        try assembler.movImmediate64(10, cache.inherited_holder_shape_token);
+        try assembler.compareRegister64(11, 10);
+        try direct.addFallback(try assembler.branchConditionPlaceholder(.ne), false);
+        const value_offset = @offsetOf(Object, "inline_slots") +
+            @as(usize, @intCast(cache.inherited_slot)) * @sizeOf(Value);
+        try assembler.load64(10, 9, std.math.cast(u15, value_offset) orelse return error.UnsupportedChunk);
+        try assembler.store64(10, 14, try slotOffset(operation.destination));
+        try direct.addCompletion(try assembler.branchPlaceholder());
     }
     return direct;
 }

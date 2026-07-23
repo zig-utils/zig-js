@@ -42,6 +42,10 @@ pub const InlineCache = struct {
     pub const Snapshot = struct {
         shapes: [4]?*Shape = @splat(null),
         slots: [4]u32 = @splat(0),
+        inherited_receiver_shape: ?*Shape = null,
+        inherited_receiver_shape_is_null: bool = false,
+        inherited_holder_shape: ?*Shape = null,
+        inherited_slot: u32 = 0,
     };
 
     shape: ?*Shape = null,
@@ -49,6 +53,13 @@ pub const InlineCache = struct {
     secondary_shapes: [3]?*Shape = .{ null, null, null },
     secondary_slots: [3]u32 = .{ 0, 0, 0 },
     next_secondary: u32 = 0,
+    /// One advisory one-hop prototype-chain observation. The holder shape is
+    /// the presence bit; the separate bool represents a receiver with no own
+    /// shape, which is distinct from an empty observation.
+    inherited_receiver_shape: ?*Shape = null,
+    inherited_receiver_shape_is_null: bool = false,
+    inherited_holder_shape: ?*Shape = null,
+    inherited_slot: u32 = 0,
     /// Seqlock version for the parallel protocol: even = stable, odd = a writer
     /// is mid-update. Untouched on the default (GIL-serialized) path.
     version: std.atomic.Value(u32) = .init(0),
@@ -81,7 +92,28 @@ pub const InlineCache = struct {
         return .{
             .shapes = .{ ic.shape, ic.secondary_shapes[0], ic.secondary_shapes[1], ic.secondary_shapes[2] },
             .slots = .{ ic.slot, ic.secondary_slots[0], ic.secondary_slots[1], ic.secondary_slots[2] },
+            .inherited_receiver_shape = ic.inherited_receiver_shape,
+            .inherited_receiver_shape_is_null = ic.inherited_receiver_shape_is_null,
+            .inherited_holder_shape = ic.inherited_holder_shape,
+            .inherited_slot = ic.inherited_slot,
         };
+    }
+
+    pub inline fn recordInheritedMode(
+        ic: *InlineCache,
+        receiver_shape: ?*Shape,
+        holder_shape: *Shape,
+        slot: u32,
+        parallel: bool,
+    ) void {
+        if (parallel) {
+            ic.tryStoreInherited(receiver_shape, holder_shape, slot);
+            return;
+        }
+        ic.inherited_receiver_shape = receiver_shape;
+        ic.inherited_receiver_shape_is_null = receiver_shape == null;
+        ic.inherited_slot = slot;
+        ic.inherited_holder_shape = holder_shape;
     }
 
     /// `init_prop` stores the immutable child shape instead of the predecessor:
@@ -173,8 +205,23 @@ pub const InlineCache = struct {
             snapshot.shapes[index + 1] = @atomicLoad(?*Shape, &ic.secondary_shapes[index], .seq_cst);
             snapshot.slots[index + 1] = @atomicLoad(u32, &ic.secondary_slots[index], .seq_cst);
         }
+        snapshot.inherited_receiver_shape = @atomicLoad(?*Shape, &ic.inherited_receiver_shape, .seq_cst);
+        snapshot.inherited_receiver_shape_is_null = @atomicLoad(bool, &ic.inherited_receiver_shape_is_null, .seq_cst);
+        snapshot.inherited_holder_shape = @atomicLoad(?*Shape, &ic.inherited_holder_shape, .seq_cst);
+        snapshot.inherited_slot = @atomicLoad(u32, &ic.inherited_slot, .seq_cst);
         if (ic.version.load(.seq_cst) != v1) return null;
         return snapshot;
+    }
+
+    fn tryStoreInherited(ic: *InlineCache, receiver_shape: ?*Shape, holder_shape: *Shape, slot: u32) void {
+        const v = ic.version.load(.seq_cst);
+        if (v & 1 != 0) return;
+        if (ic.version.cmpxchgStrong(v, v +% 1, .seq_cst, .seq_cst) != null) return;
+        @atomicStore(?*Shape, &ic.inherited_receiver_shape, receiver_shape, .seq_cst);
+        @atomicStore(bool, &ic.inherited_receiver_shape_is_null, receiver_shape == null, .seq_cst);
+        @atomicStore(u32, &ic.inherited_slot, slot, .seq_cst);
+        @atomicStore(?*Shape, &ic.inherited_holder_shape, holder_shape, .seq_cst);
+        ic.version.store(v +% 2, .seq_cst);
     }
 
     fn store(ic: *InlineCache, sh: *Shape, slot: u32) void {
