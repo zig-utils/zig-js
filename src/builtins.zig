@@ -2712,7 +2712,7 @@ const Stringifier = struct {
                     v = Value.num(n);
                 },
                 .string => {
-                    const s = try self.toStringV(v);
+                    const s = try self.toStringWtf8(v);
                     v = try Value.strAlloc(self.arena, s);
                 },
                 else => v = p,
@@ -2729,7 +2729,7 @@ const Stringifier = struct {
                 const n = v.asNum();
                 try buf.appendSlice(a, if (std.math.isNan(n) or std.math.isInf(n)) "null" else try value.numberToString(a, n));
             },
-            .string => try writeJsonString(a, buf, v.asStr()),
+            .string => try writeJsonString(a, buf, try v.asWtf8(a)),
             .object => {
                 const o = v.asObj();
                 if (o.isCallableObject() or o.is_symbol) return false; // functions/symbols omitted
@@ -3307,7 +3307,7 @@ fn appendUriEscapedCodePoint(arena: std.mem.Allocator, buf: *std.ArrayListUnmana
 /// Encode (24.5.2.1): ToString, then percent-escape every byte not in the
 /// `unescaped` set. `component` excludes the reserved set (encodeURIComponent).
 fn uriEncode(self: *Interpreter, v: Value, comptime component: bool) HostError!Value {
-    const s = try self.toStringV(v);
+    const s = try self.toStringWtf8(v);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
@@ -3345,7 +3345,7 @@ fn uriEncode(self: *Interpreter, v: Value, comptime component: bool) HostError!V
 /// runs are decoded and validated. `full` (decodeURIComponent) has no reserved
 /// set. A malformed escape/sequence is a URIError.
 fn uriDecode(self: *Interpreter, v: Value, comptime full: bool) HostError!Value {
-    const s = try self.toStringV(v);
+    const s = try self.toStringWtf8(v);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {

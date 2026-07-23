@@ -8276,7 +8276,7 @@ pub const Interpreter = struct {
                     try self.setMember(target, k, try self.getProperty(src, k));
                 }
             },
-            .string => for (src.asStr(), 0..) |ch, i| {
+            .string => for (try src.asWtf8(self.arena), 0..) |ch, i| {
                 try self.setMember(target, try std.fmt.allocPrint(self.arena, "{d}", .{i}), try Value.strOwned(self.arena, try self.arena.dupe(u8, &.{ch})));
             },
             else => {}, // null/undefined/number/boolean spread → no own enumerable props
@@ -22409,7 +22409,7 @@ fn encodeBase64(self: *Interpreter, bytes: []const u8, url: bool, omit_padding: 
 fn btoaFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const s = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const s = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     var bytes: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
@@ -41295,7 +41295,7 @@ fn textEncoderEncodingGet(ctx: *anyopaque, this: Value, args: []const Value) val
 fn textEncoderEncodeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringV(args[0]) else "";
+    const s = if (args.len > 0 and !args[0].isUndefined()) try self.toStringWtf8(args[0]) else "";
     const bytes = try wtf8ToUtf8Bytes(self.arena, s);
     const o = try newTypedArray(self, .u8, bytes.len);
     if (bytes.len > 0) @memcpy(o.typedArray().?.buffer.arrayBuffer().?.bytes()[0..bytes.len], bytes);
