@@ -5167,7 +5167,7 @@ const PrivateDiagnosticInspector = struct {
             false,
         );
         if (result.isString()) {
-            try self.append(result.asStr());
+            try self.append(try result.asWtf8(self.allocator));
         } else {
             try self.formatValue(result);
         }
@@ -5460,7 +5460,7 @@ const PrivateDiagnosticInspector = struct {
             .null => try self.append("null"),
             .boolean => try self.append(if (input.asBool()) "true" else "false"),
             .number => try self.formatNumber(input.asNum()),
-            .string => try self.formatString(input.asStr()),
+            .string => try self.formatString(try input.asWtf8(self.allocator)),
             .object => {
                 const object = input.asObj();
                 if (object.is_symbol)
@@ -5517,7 +5517,9 @@ fn privateDetermineSpecificTypeBytes(
             if (input.asBool()) "type boolean (true)" else "type boolean (false)",
         ),
         .string => {
-            const units = try privateWTF8ToUTF16(allocator, input.asStr());
+            const w = try input.asWtf8Owned(allocator);
+            defer allocator.free(w);
+            const units = try privateWTF8ToUTF16(allocator, w);
             defer allocator.free(units);
             const needs_ellipsis = units.len > 28;
             const preview = if (needs_ellipsis) units[0..25] else units;
@@ -6570,7 +6572,12 @@ export fn JSC__JSString__toZigString(
     if (group.pending_exception != null) return;
     const boxed = privateStringBoxFromCell(cell) orelse return;
     if (boxed.owner.c_api_group != context.c_api_group) return;
-    output.* = privateBorrowedZigStringView(group, boxed.value.asStr()) catch |err| {
+    const w = boxed.value.asWtf8Owned(gpa) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+    defer gpa.free(w);
+    output.* = privateBorrowedZigStringView(group, w) catch |err| {
         privatePublishBunStringError(context, err);
         return;
     };
@@ -6591,7 +6598,12 @@ export fn JSC__JSString__iterator(
     if (iterator.stop != 0) return;
     const boxed = privateStringBoxFromCell(cell) orelse return;
     if (boxed.owner.c_api_group != context.c_api_group) return;
-    const view = privateBorrowedZigStringView(group, boxed.value.asStr()) catch |err| {
+    const w = boxed.value.asWtf8Owned(gpa) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+    defer gpa.free(w);
+    const view = privateBorrowedZigStringView(group, w) catch |err| {
         privatePublishBunStringError(context, err);
         return;
     };
@@ -8089,7 +8101,7 @@ fn privatePropertyIteratorVMInquiry(object: *Object, key: []const u8) ?Value {
         // Pure virtual own data properties represented outside the shape.
         if (std.mem.eql(u8, key, "length")) {
             if (candidate.boxedPrimitive()) |primitive|
-                if (primitive.isString()) return Value.num(@floatFromInt(interp.Interpreter.utf16LenOfString(primitive.asStr())));
+                if (primitive.isString()) return Value.num(@floatFromInt(interp.Interpreter.utf16LenOfValue(primitive)));
             if (candidate.is_array and !candidate.is_arguments)
                 return Value.num(@floatFromInt(candidate.arrayLength()));
         }
@@ -8308,7 +8320,12 @@ export fn JSC__JSValue__symbolKeyFor(
     if (!symbol.isObject() or !symbol.asObj().is_symbol) return false;
     const registry_key = symbol.asObj().getOwn("\x00forKey") orelse return false;
     if (!registry_key.isString()) return false;
-    output.* = privateBorrowedZigStringView(group, registry_key.asStr()) catch |err| {
+    const w = registry_key.asWtf8Owned(gpa) catch |err| {
+        privatePublishBunStringError(context, err);
+        return false;
+    };
+    defer gpa.free(w);
+    output.* = privateBorrowedZigStringView(group, w) catch |err| {
         privatePublishBunStringError(context, err);
         return false;
     };
@@ -8813,7 +8830,7 @@ export fn JSC__JSValue__getLengthIfPropertyExistsInternal(
     const group: *CContextGroup = @ptrCast(@alignCast(opaque_group));
     if (group.pending_exception != null) return 0;
     const internal = privateValueFrom(global, encoded) orelse return 0;
-    if (internal.isString()) return @floatFromInt(interp.Interpreter.utf16LenOfString(internal.asStr()));
+    if (internal.isString()) return @floatFromInt(interp.Interpreter.utf16LenOfValue(internal));
     if (!internal.isObject()) return 0;
 
     const object = internal.asObj();
@@ -9113,8 +9130,11 @@ fn privateNameProperty(
             return false;
         };
         if (tag) |candidate| {
-            if (candidate.isString() and candidate.asStr().len > 0)
-                return privateWriteBorrowedName(context, candidate.asStr(), output);
+            if (candidate.isString() and candidate.asStr().len > 0) {
+                const w = candidate.asWtf8Owned(gpa) catch return false;
+                defer gpa.free(w);
+                return privateWriteBorrowedName(context, w, output);
+            }
         }
     }
 
@@ -9430,7 +9450,12 @@ fn privateJSONStringify(
         output.* = PrivateBunString.empty();
         return;
     }
-    output.* = privateOwnedWTF8String(rendered.asStr()) catch |err| {
+    const w = rendered.asWtf8Owned(gpa) catch |err| {
+        privatePublishBunStringError(context, err);
+        return;
+    };
+    defer gpa.free(w);
+    output.* = privateOwnedWTF8String(w) catch |err| {
         privatePublishBunStringError(context, err);
         return;
     };
@@ -11027,7 +11052,7 @@ export fn JSC__JSString__is8Bit(cell: ?*anyopaque) callconv(.c) bool {
 
 export fn JSC__JSString__length(cell: ?*anyopaque) callconv(.c) usize {
     const boxed = privateStringBoxFromCell(cell) orelse return 0;
-    return interp.Interpreter.utf16LenOfString(boxed.value.asStr());
+    return interp.Interpreter.utf16LenOfValue(boxed.value);
 }
 
 export fn JSC__JSString__toObject(cell: ?*anyopaque, global: JSContextRef) callconv(.c) JSObjectRef {
@@ -11567,7 +11592,12 @@ export fn DOMFormData__forEach(
         const entry = (interp.formDataEntryAt(&machine, form, index) catch return) orelse continue;
         const name_view = privateBorrowedZigStringView(group, entry.name) catch return;
         if (entry.value.isString()) {
-            const string_view = privateBorrowedZigStringView(group, entry.value.asStr()) catch return;
+            const w = entry.value.asWtf8Owned(gpa) catch return;
+            const string_view = privateBorrowedZigStringView(group, w) catch {
+                gpa.free(w);
+                return;
+            };
+            gpa.free(w); // the view copies into the group store; input not retained
             cb(callback_context, &name_view, @ptrCast(@constCast(&string_view)), null, 0);
             continue;
         }
@@ -19540,7 +19570,12 @@ export fn JSValueCreateJSONString(
         return null;
     };
     if (!rendered.isString()) return null;
-    const result = JsString.create(gpa, rendered.asStr()) catch {
+    const w = rendered.asWtf8Owned(gpa) catch {
+        setException(c, exception, "OutOfMemory");
+        return null;
+    };
+    defer gpa.free(w);
+    const result = JsString.create(gpa, w) catch {
         setException(c, exception, "OutOfMemory");
         return null;
     };
@@ -28148,7 +28183,9 @@ test "private StringBuilder preserves UTF-16 formatting quoting and overflow" {
     const first_value = privateValueFrom(global, first) orelse return error.ValueInitFailed;
     const second_value = privateValueFrom(global, second) orelse return error.ValueInitFailed;
     try std.testing.expect(value.strictEquals(first_value, second_value));
-    const actual_units = try privateWTF8ToUTF16(std.testing.allocator, first_value.asStr());
+    const first_wtf8 = try first_value.asWtf8Owned(std.testing.allocator);
+    defer std.testing.allocator.free(first_wtf8);
+    const actual_units = try privateWTF8ToUTF16(std.testing.allocator, first_wtf8);
     defer std.testing.allocator.free(actual_units);
     const expected_units = [_]u16{ 'A', 0xe9, 0xd83d, 0xde00, 0xd800, 'Z', 0xd83d, 0xde00, '!', 0x03a9 };
     try std.testing.expectEqualSlices(u16, &expected_units, actual_units);
@@ -28187,7 +28224,9 @@ test "private StringBuilder preserves UTF-16 formatting quoting and overflow" {
     };
     StringBuilder__appendQuotedJsonString(&storage, quoted_input);
     const quoted = privateValueFrom(global, StringBuilder__toString(&storage, global)) orelse return error.ValueInitFailed;
-    const quoted_units = try privateWTF8ToUTF16(std.testing.allocator, quoted.asStr());
+    const quoted_wtf8 = try quoted.asWtf8Owned(std.testing.allocator);
+    defer std.testing.allocator.free(quoted_wtf8);
+    const quoted_units = try privateWTF8ToUTF16(std.testing.allocator, quoted_wtf8);
     defer std.testing.allocator.free(quoted_units);
     const expected_quoted = [_]u16{
         '"',    'q',    '\\', '"', '\\', '\\', '\\', 'n', '\\', 'u', '0', '0', '0', 'b',

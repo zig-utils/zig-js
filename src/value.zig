@@ -4492,6 +4492,16 @@ pub const Value = struct {
     pub inline fn strIsFlatLatin1(self: Value) bool {
         return strcell.isFlatLatin1(self.asStringCell().hash);
     }
+    /// Like `asWtf8` but ALWAYS returns a freshly-allocated buffer the caller
+    /// owns and must free. For ABI-boundary converters (c_api) whose ownership
+    /// is uniform: they read the WTF-8 only during the call (producing their own
+    /// owned UTF-16/latin1 copy, or a content-keyed intern), so the returned
+    /// bytes need only outlive that call. Caller has checked `isString()`.
+    pub fn asWtf8Owned(self: Value, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        const cell = self.asStringCell();
+        if (strcell.isFlatLatin1(cell.hash)) return strcell.latin1FlatToWtf8(allocator, cell.bytes);
+        return allocator.dupe(u8, cell.bytes);
+    }
     pub inline fn asObj(self: Value) *Object {
         return @ptrFromInt(self.bits & payload_mask);
     }
