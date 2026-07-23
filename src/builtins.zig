@@ -70,7 +70,7 @@ pub fn stringFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
         // valueOf and throwing for a Symbol under `new String(sym)`).
         if (ip.new_target.isUndefined() and args[0].isObject() and args[0].asObj().is_symbol)
             break :blk try std.fmt.allocPrint(ip.arena, "Symbol({s})", .{args[0].asObj().symbolDescription() orelse ""});
-        break :blk try ip.toStringV(args[0]);
+        break :blk try ip.toStringWtf8(args[0]);
     };
     if (!ip.new_target.isUndefined()) return ip.makeWrapper(try Value.strAlloc(ip.arena, s));
     return try Value.strAlloc(ip.arena, s);

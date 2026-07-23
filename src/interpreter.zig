@@ -7089,8 +7089,12 @@ pub const Interpreter = struct {
         if (k.isObject()) {
             const prim = try self.toPrimitive(k, .string);
             if (prim.isObject() and prim.asObj().is_symbol) return self.registerSymbol(prim.asObj());
+            // Property keys are canonical WTF-8 (compared by bytes, read by JSON /
+            // enumeration), so re-encode a flat-latin1 string key.
+            if (prim.isString()) return prim.asWtf8(self.arena);
             return prim.toString(self.arena);
         }
+        if (k.isString()) return k.asWtf8(self.arena);
         return k.toString(self.arena);
     }
 
@@ -9173,7 +9177,7 @@ pub const Interpreter = struct {
             if (result.isNull()) return if (arr.asObj().elementsLen() == 0) Value.nul() else arr;
 
             const match_v = try self.getProperty(result, "0");
-            const match_s = try self.toStringV(match_v);
+            const match_s = try self.toStringWtf8(match_v);
             try arr.asObj().appendElement(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, match_s)));
 
             if (match_s.len == 0) {
@@ -14901,7 +14905,7 @@ pub const Interpreter = struct {
                 const ro = arg0(args).asObj();
                 const g = all or std.mem.indexOfScalar(u8, ro.regexFlags(), 'g') != null;
                 const re = try self.compileRegex(ro);
-                const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
+                const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
                 var last: usize = 0; // end of the last copied region
                 var search: usize = 0; // absolute scan cursor
                 while (search <= s.len) {
@@ -14931,7 +14935,7 @@ pub const Interpreter = struct {
 
             // String pattern: replace the first occurrence (or all for replaceAll).
             const pat = try self.toStringV(arg0(args));
-            const template: []const u8 = if (is_func) "" else try self.toStringV(repl_val);
+            const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
             var from: usize = 0;
             while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
                 const idx = std.mem.indexOfPos(u8, s, from, pat) orelse break;
@@ -15353,7 +15357,7 @@ pub const Interpreter = struct {
                         }
                     }
                     if (idx >= 1 and idx <= captures.len) {
-                        if (!captures[idx - 1].isUndefined()) try self.appendStringSlice(buf, captures[idx - 1].asStr());
+                        if (!captures[idx - 1].isUndefined()) try self.appendStringSlice(buf, try captures[idx - 1].asWtf8(self.arena));
                         i += consumed;
                     } else {
                         try self.appendStringByte(buf, '$');
@@ -15504,7 +15508,7 @@ pub const Interpreter = struct {
             .typeof => try Value.strAlloc(self.arena, v.typeOf()),
             .bit_not => Value.num(@floatFromInt(~Value.num(try self.toNumberV(nv)).toInt32())),
             .void_op => Value.undef(),
-            .to_string => try Value.strAlloc(self.arena, try self.toStringV(v)), // template-substitution ToString
+            .to_string => try Value.strAlloc(self.arena, try self.toStringWtf8(v)), // template-substitution ToString
         };
     }
 
@@ -31710,7 +31714,7 @@ fn regexProtoMethod(comptime name: []const u8) value.NativeFn {
                 // fast-path guard). Otherwise honor the overridden exec via generic.
                 if (self.regexpHasBuiltinExec(this))
                     return Value.boolVal(try self.regexpTestBuiltin(this.asObj(), str_src));
-                const r = try self.regexpExecGeneric(this, try self.toStringV(str_src));
+                const r = try self.regexpExecGeneric(this, try self.toStringWtf8(str_src));
                 return Value.boolVal(!r.isNull());
             }
             if (!this.isObject() or !this.asObj().behavior.is_regex) {
