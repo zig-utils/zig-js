@@ -8055,7 +8055,7 @@ pub const Interpreter = struct {
                 return self.makeBigInt(@intFromFloat(n));
             },
             .string => {
-                const s = v.asStr();
+                const s = try v.asWtf8(self.arena);
                 // StringToBigInt: trim whitespace; empty → 0n; otherwise a decimal
                 // (optional sign) or a `0x`/`0o`/`0b` literal (no sign).
                 const t = std.mem.trim(u8, s, " \t\r\n\x0b\x0c\u{00a0}\u{feff}");
@@ -16007,7 +16007,7 @@ pub const Interpreter = struct {
     /// operand goes through ToNumber and an exact BigInt-vs-Number compare.
     fn bigVsOther(self: *Interpreter, big: *std.math.big.int.Managed, other: Value) EvalError!?std.math.Order {
         if (other.isString()) {
-            var ny = (try stringToBigIntManaged(self.arena, other.asStr())) orelse return null;
+            var ny = (try stringToBigIntManaged(self.arena, try other.asWtf8(self.arena))) orelse return null;
             return big.toConst().order(ny.toConst());
         }
         const n = other.toNumber();
@@ -22438,7 +22438,7 @@ fn btoaFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Val
 fn atobFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const s = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const s = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const res = try decodeBase64(self, s, false, .loose, std.math.maxInt(usize));
     if (res.err) return self.throwDOMException("InvalidCharacterError", "The string to be decoded is not correctly encoded.");
     var out: std.ArrayListUnmanaged(u8) = .empty;
@@ -31558,7 +31558,7 @@ fn regexpEscapeFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0 or !args[0].isString())
         return self.throwError("TypeError", "RegExp.escape requires a string");
-    const s = args[0].asStr();
+    const s = try args[0].asWtf8(self.arena);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     var i: usize = 0;
     var first = true;
@@ -43663,19 +43663,19 @@ fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (init.isObject() and init.asObj().is_array) {
         for (try init.asObj().internalElementsSnapshot(self.arena)) |entry| {
             if (!entry.isObject()) return self.throwError("TypeError", "URLSearchParams init sequence entry must be a pair");
-            const k = try self.toStringV(if (entry.asObj().elementAt(0)) |x| x else Value.undef());
-            const v = try self.toStringV(if (entry.asObj().elementAt(1)) |x| x else Value.undef());
+            const k = try self.toStringWtf8(if (entry.asObj().elementAt(0)) |x| x else Value.undef());
+            const v = try self.toStringWtf8(if (entry.asObj().elementAt(1)) |x| x else Value.undef());
             try uspPush(self, pairs, k, v);
         }
     } else if (init.isObject() and !init.asObj().is_symbol) {
         for (try self.objectOwnKeysList(init.asObj())) |k| {
             if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
             if (!objectHasOwn(init.asObj(), k) or !init.asObj().getAttr(k).enumerable) continue;
-            const v = try self.toStringV(try self.getProperty(init, k));
+            const v = try self.toStringWtf8(try self.getProperty(init, k));
             try uspPush(self, pairs, k, v);
         }
     } else if (!init.isUndefined()) {
-        try uspParseString(self, pairs, try self.toStringV(init));
+        try uspParseString(self, pairs, try self.toStringWtf8(init));
     }
     return Value.obj(allocation.obj);
 }
@@ -43693,7 +43693,7 @@ fn uspToString(self: *Interpreter, this: Value) EvalError![]const u8 {
 }
 fn uspGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
         const kv = uspPairKV(pair);
         if (std.mem.eql(u8, kv.k, name)) return try Value.strAlloc(self.arena, kv.v);
@@ -43702,7 +43702,7 @@ fn uspGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 }
 fn uspGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const res = (try self.newArray()).asObj();
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
         const kv = uspPairKV(pair);
@@ -43712,9 +43712,9 @@ fn uspGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
 }
 fn uspHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const check_val = args.len > 1 and !args[1].isUndefined();
-    const val = if (check_val) try self.toStringV(args[1]) else "";
+    const val = if (check_val) try self.toStringWtf8(args[1]) else "";
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
         const kv = uspPairKV(pair);
         if (std.mem.eql(u8, kv.k, name) and (!check_val or std.mem.eql(u8, kv.v, val))) return Value.boolVal(true);
@@ -43723,8 +43723,8 @@ fn uspHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
 }
 fn uspAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     try uspPush(self, try uspPairs(self, this), name, val);
     try uspSyncToUrl(self, this);
     return Value.undef();
@@ -43767,15 +43767,15 @@ fn uspRebuild(self: *Interpreter, this: Value, name: []const u8, set_value: ?[]c
 }
 fn uspSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const val = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const val = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     try uspRebuild(self, this, name, val, null);
     return Value.undef();
 }
 fn uspDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const dv: ?[]const u8 = if (args.len > 1 and !args[1].isUndefined()) try self.toStringV(args[1]) else null;
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const dv: ?[]const u8 = if (args.len > 1 and !args[1].isUndefined()) try self.toStringWtf8(args[1]) else null;
     try uspRebuild(self, this, name, null, dv);
     return Value.undef();
 }
