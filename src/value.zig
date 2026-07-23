@@ -4544,7 +4544,7 @@ pub const Value = struct {
             .null => 0,
             .boolean => if (self.asBool()) 1 else 0,
             .number => self.asNum(),
-            .string => stringToNumber(self.asStr()),
+            .string => stringToNumber(self.asStr(), self.strIsFlatLatin1()),
             // A BigInt's mathematical value (explicit `Number(1n) === 1`); other
             // objects coerce to NaN here (proper ToPrimitive is `Interpreter`-level).
             .object => if (self.asObj().is_bigint) bigIntToNumber(self.asObj()) else std.math.nan(f64),
@@ -4806,7 +4806,19 @@ fn isStringNumberWhitespace(cp: u21) bool {
     };
 }
 
-fn trimStringNumberWhitespace(s: []const u8) []const u8 {
+fn trimStringNumberWhitespace(s: []const u8, flat: bool) []const u8 {
+    if (flat) {
+        // Flat latin1 storage: 1 raw byte per code unit, and the bytes are not
+        // valid UTF-8 (a 0xA0 NBSP byte is a bare continuation), so trim the
+        // StrWhiteSpace code points directly by byte. Only U+00A0 (NBSP) fits in
+        // latin1 beyond ASCII whitespace — every other StrWhiteSpace code point
+        // is > 0xFF and therefore never present in a latin1 image.
+        var start: usize = 0;
+        var end: usize = s.len;
+        while (start < end and isStringNumberWhitespace(s[start])) start += 1;
+        while (end > start and isStringNumberWhitespace(s[end - 1])) end -= 1;
+        return s[start..end];
+    }
     var view = std.unicode.Utf8View.initUnchecked(s);
     var it = view.iterator();
     var start: usize = 0;
@@ -4829,9 +4841,9 @@ fn trimStringNumberWhitespace(s: []const u8) []const u8 {
 
 /// Parse a string to a number per ToNumber(string): trims ECMAScript
 /// StrWhiteSpace, empty string is 0, otherwise float parse or NaN.
-pub fn stringToNumber(s: []const u8) f64 {
+pub fn stringToNumber(s: []const u8, flat: bool) f64 {
     const nan = std.math.nan(f64);
-    const trimmed = trimStringNumberWhitespace(s);
+    const trimmed = trimStringNumberWhitespace(s, flat);
     if (trimmed.len == 0) return 0;
     // Numeric separators (`_`) are a *source* lexical feature and never valid in
     // a runtime ToNumber(String) — `Number("1_0")` is NaN, not 10. (Zig's
@@ -5406,4 +5418,18 @@ test "FinalizationRegistry unregister stable-compacts matching records" {
     try std.testing.expect(o.finRecordUnregister(@ptrCast(&token_b)));
     try std.testing.expectEqual(@as(usize, 1), records.items.len);
     try std.testing.expectEqual(@as(f64, 4), records.items[0].held.asNum());
+}
+
+test "stringToNumber flat-latin1 trims NBSP by byte, matching the WTF-8 path" {
+    // "  5 " (NBSP, space, '5', space). Flat latin1 image is 1 byte/unit:
+    // A0 20 35 20; the equivalent WTF-8 image encodes NBSP as C2 A0.
+    try std.testing.expectEqual(@as(f64, 5), stringToNumber("\xa0\x20\x35\x20", true));
+    try std.testing.expectEqual(@as(f64, 5), stringToNumber("\xc2\xa0\x20\x35\x20", false));
+    // NBSP-wrapped decimal, flat.
+    try std.testing.expectEqual(@as(f64, 0.5), stringToNumber("\xa00.5\xa0", true));
+    // Pure ASCII is identical under either flag.
+    try std.testing.expectEqual(@as(f64, 42), stringToNumber("  42  ", false));
+    try std.testing.expectEqual(@as(f64, 42), stringToNumber("  42  ", true));
+    // A non-numeric flat latin1 byte (é = 0xE9) is NaN, not a spurious parse.
+    try std.testing.expect(std.math.isNan(stringToNumber("\xe9", true)));
 }

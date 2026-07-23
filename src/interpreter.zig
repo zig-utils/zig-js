@@ -47157,7 +47157,7 @@ pub fn canonicalNumericIndexString(key: []const u8) ?f64 {
     // A key must start like a number for this to ever match (cheap reject).
     const c0 = key[0];
     if ((c0 < '0' or c0 > '9') and c0 != '-' and c0 != '.' and c0 != 'I' and c0 != 'N') return null;
-    const n = value.stringToNumber(key);
+    const n = value.stringToNumber(key, false);
     var buf: [512]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
     const s = value.numberToString(fba.allocator(), n) catch return null;

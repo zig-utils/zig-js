@@ -116,7 +116,7 @@ pub const ValueNB = struct {
             .null => 0,
             .boolean => if (self.asBool()) 1 else 0,
             .number => self.asNum(),
-            .string => value.stringToNumber(self.asStr()),
+            .string => value.stringToNumber(self.asStr(), false),
             .object => if (self.asObj().is_bigint) value.bigIntToNumber(self.asObj()) else std.math.nan(f64),
         };
     }
