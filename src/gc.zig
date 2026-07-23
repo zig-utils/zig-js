@@ -3964,12 +3964,14 @@ pub fn setActiveMachineContext(machine: *interp.Interpreter) ActiveContextState 
 
 fn finishManagedString(heap: *Heap, bytes: []u8) std.mem.Allocator.Error!*StringCell {
     const realm = active_realm_context orelse heap.ctx.context;
-    errdefer realm.gpa.free(bytes);
-    strcell.debugAssertWtf8(bytes);
+    strcell.debugAssertWtf8(bytes); // tripwire on the WTF-8 input
+    const h = strcell.contentHash(bytes);
+    const stored = try strcell.storedImage(realm.gpa, bytes, h); // consumes bytes
+    errdefer realm.gpa.free(stored);
     const cell = try heap.create(StringCell, .string);
-    cell.* = .{ .bytes = bytes, .hash = strcell.contentHash(bytes) };
+    cell.* = .{ .bytes = stored, .hash = h };
     cell.setGcManaged(true);
-    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, bytes.len, .monotonic);
+    _ = @atomicRmw(usize, &realm.gc_string_bytes_live, .Add, stored.len, .monotonic);
     return cell;
 }
 

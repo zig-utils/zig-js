@@ -15269,7 +15269,7 @@ pub const Interpreter = struct {
                         continue;
                     };
                     const gv = groups.?.getOwn(template[i + 2 .. close]) orelse Value.undef();
-                    if (gv.isString()) try self.appendStringSlice(buf, gv.asStr());
+                    if (gv.isString()) try self.appendStringSlice(buf, try gv.asWtf8(self.arena));
                     i = close;
                 },
                 '0'...'9' => {
@@ -15796,8 +15796,8 @@ pub const Interpreter = struct {
             .add => blk: {
                 // String concatenation if either operand is a string.
                 if (l.isString() or r.isString()) {
-                    const ls = try self.toStringV(l);
-                    const rs = try self.toStringV(r);
+                    const ls = try self.toStringWtf8(l);
+                    const rs = try self.toStringWtf8(r);
                     break :blk try Value.strOwned(self.arena, try std.mem.concat(self.arena, u8, &.{ ls, rs }));
                 }
                 // Numeric `+`: both operands were already ToPrimitive'd (default
@@ -18349,7 +18349,7 @@ fn srWrapValue(self: *Interpreter, wrap_env: *Environment, error_env: *Environme
         try w.setAttr(self.arena, "length", ro_attr);
         const name_v = self.getProperty(Value.obj(o), "name") catch
             return throwErrorInRealm(self, error_env, "TypeError", "ShadowRealm: wrapped function name is not accessible");
-        try w.setOwn(self.arena, self.root_shape, "name", if (name_v.isString()) try Value.strAlloc(self.arena, name_v.asStr()) else Value.str(""));
+        try w.setOwn(self.arena, self.root_shape, "name", if (name_v.isString()) try Value.strAlloc(self.arena, try name_v.asWtf8(self.arena)) else Value.str(""));
         try w.setAttr(self.arena, "name", ro_attr);
         return Value.obj(w);
     }
@@ -28744,7 +28744,7 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                     if (ug.isBoolean()) {
                         grouping = Value.boolVal(ug.asBool());
                     } else if (ug.isString()) {
-                        grouping = try Value.strAlloc(self.arena, ug.asStr());
+                        grouping = try Value.strAlloc(self.arena, try ug.asWtf8(self.arena));
                     } else if (std.mem.eql(u8, notation, "compact")) {
                         grouping = Value.str("min2"); // compact default
                     }
@@ -28888,11 +28888,11 @@ fn intlResolvedOptionsFn(comptime service: []const u8) value.NativeFn {
                 // computed at construction.
                 if (get(self, ro, "\x00rloc")) |rl| try self.setProp(o, "locale", rl);
                 const cal = get(self, ro, "calendar");
-                try self.setProp(o, "calendar", if (cal) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("gregory"));
+                try self.setProp(o, "calendar", if (cal) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("gregory"));
                 const ns = get(self, ro, "numberingSystem");
-                try self.setProp(o, "numberingSystem", if (ns) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("latn"));
+                try self.setProp(o, "numberingSystem", if (ns) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("latn"));
                 const tz = get(self, ro, "timeZone");
-                try self.setProp(o, "timeZone", if (tz) |c| try Value.strAlloc(self.arena, c.asStr()) else Value.str("UTC"));
+                try self.setProp(o, "timeZone", if (tz) |c| try Value.strAlloc(self.arena, try c.asWtf8(self.arena)) else Value.str("UTC"));
                 // Component / style fields are reflected only when set, in order.
                 const has_style = get(self, ro, "dateStyle") != null or get(self, ro, "timeStyle") != null;
                 const has_time = get(self, ro, "hour") != null or has_style;
@@ -45511,7 +45511,7 @@ fn rscBufferSourceDetached(input: Value) bool {
 }
 
 fn rscNormalizeChunk(self: *Interpreter, input: Value) EvalError!Value {
-    if (input.isString()) return try Value.strAlloc(self.arena, input.asStr());
+    if (input.isString()) return try Value.strAlloc(self.arena, try input.asWtf8(self.arena));
     if (rscBufferSourceDetached(input)) return self.throwError("TypeError", "ReadableStream chunk views a detached ArrayBuffer");
     if (bufferSourceBytes(input)) |bytes| {
         const copy = try self.makeArrayBuffer(bytes.len);

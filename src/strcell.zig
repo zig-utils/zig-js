@@ -207,8 +207,40 @@ pub const StringCell = struct {
 /// etc.) use `createCell` / `InternTable.intern` with their in-scope allocator.
 pub fn staticCell(comptime s: []const u8) *const StringCell {
     return &struct {
-        const cell = StringCell{ .bytes = s, .hash = contentHash(s) };
+        const h = contentHash(s);
+        // Match the runtime constructors' storage so an internal literal and a
+        // computed string of equal content share one representation (and compare
+        // equal): a latin1-but-not-ASCII literal is stored flat when the master
+        // switch is on.
+        const stored = comptimeStored(s, h);
+        const cell = StringCell{ .bytes = stored, .hash = h };
     }.cell;
+}
+
+/// Compile-time counterpart of `storedImage`: folds a latin1-but-not-ASCII WTF-8
+/// literal to its flat latin1 image in a comptime array; ASCII and non-latin1
+/// literals (and everything, while `flat_storage_active` is off) are unchanged.
+fn comptimeStored(comptime s: []const u8, comptime h: u64) []const u8 {
+    if (!isFlatLatin1(h)) return s;
+    comptime {
+        var units: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (units += 1) i += if (s[i] < 0x80) @as(usize, 1) else 2;
+        var buf: [units]u8 = undefined;
+        var j: usize = 0;
+        i = 0;
+        while (i < s.len) : (j += 1) {
+            if (s[i] < 0x80) {
+                buf[j] = s[i];
+                i += 1;
+            } else {
+                buf[j] = (@as(u8, s[i] & 0x1F) << 6) | (s[i + 1] & 0x3F);
+                i += 2;
+            }
+        }
+        const final = buf;
+        return &final;
+    }
 }
 
 /// Combine any adjacent WTF-8 high+low surrogate pair into its 4-byte astral
@@ -277,6 +309,48 @@ pub fn latin1FlatToWtf8(allocator: std.mem.Allocator, flat: []const u8) std.mem.
     return out;
 }
 
+/// Transcode canonical WTF-8 that is KNOWN to be latin1 (every code unit ≤ 0xFF
+/// — only ASCII bytes plus 0xC2/0xC3 two-byte sequences, exactly what
+/// `latin1_flag` marks) into the flat-latin1 image (1 raw byte per code unit),
+/// returning an owned copy. Inverse of `latin1FlatToWtf8`; the **construction**
+/// transform that shrinks a latin1-but-not-ASCII string to 1 byte/unit at
+/// storage. Caller MUST guarantee latin1 input (asserted in debug).
+pub fn wtf8ToLatin1Flat(allocator: std.mem.Allocator, wtf8: []const u8) std.mem.Allocator.Error![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacityPrecise(allocator, wtf8.len); // latin1 WTF-8 only shrinks
+    var i: usize = 0;
+    while (i < wtf8.len) {
+        const b = wtf8[i];
+        if (b < 0x80) {
+            out.appendAssumeCapacity(b);
+            i += 1;
+        } else {
+            std.debug.assert(b == 0xC2 or b == 0xC3);
+            out.appendAssumeCapacity((@as(u8, b & 0x1F) << 6) | (wtf8[i + 1] & 0x3F));
+            i += 2;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// Choose the STORED byte image for canonical WTF-8 `canon` (content hash `h`):
+/// the flat-latin1 image when `isFlatLatin1(h)` (latin1-but-not-ASCII AND the
+/// `flat_storage_active` master switch is on), otherwise `canon` unchanged.
+/// **Takes ownership of `canon`** — the flat path frees it (even on an allocation
+/// failure); the WTF-8 path returns it verbatim. The stored image is a
+/// deterministic function of content, so equal strings share one image within a
+/// representation; cross-representation collisions (a flat latin1 image equal to
+/// some non-latin1 WTF-8 image of different content) are separated by the content
+/// hash — computed over `canon`, never the stored image — see `StringCell.eql`.
+pub fn storedImage(allocator: std.mem.Allocator, canon: []u8, h: u64) std.mem.Allocator.Error![]u8 {
+    if (isFlatLatin1(h)) {
+        defer allocator.free(canon);
+        return wtf8ToLatin1Flat(allocator, canon);
+    }
+    return canon;
+}
+
 /// Debug-only tripwire: a StringCell's stored image must be well-formed WTF-8
 /// (UTF-8 extended so a lone surrogate U+D800..U+DFFF is a legal 3-byte `ED xx
 /// xx`). Every construction path runs this on the exact bytes it is about to
@@ -318,10 +392,12 @@ pub fn createCell(allocator: std.mem.Allocator, bytes: []const u8) std.mem.Alloc
     if (active_managed_factory) |factory|
         return factory.create(factory.context, allocator, bytes);
     const owned = try canonicalizeSurrogates(allocator, bytes);
-    errdefer allocator.free(owned);
-    debugAssertWtf8(owned);
+    debugAssertWtf8(owned); // tripwire on the WTF-8 INPUT (catches a flat byte leaking in)
+    const h = contentHash(owned);
+    const stored = try storedImage(allocator, owned, h); // consumes owned
+    errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = owned, .hash = contentHash(owned) };
+    cell.* = .{ .bytes = stored, .hash = h };
     return cell;
 }
 
@@ -340,11 +416,13 @@ pub fn createCellOwned(allocator: std.mem.Allocator, owned: []u8) std.mem.Alloca
         owns_original = false;
         break :blk canonical;
     };
-    owns_original = false;
-    errdefer allocator.free(bytes);
-    debugAssertWtf8(bytes);
+    owns_original = false; // ownership of `bytes` passes to storedImage
+    debugAssertWtf8(bytes); // tripwire on the WTF-8 INPUT
+    const h = contentHash(bytes);
+    const stored = try storedImage(allocator, bytes, h); // consumes bytes
+    errdefer allocator.free(stored);
     const cell = try allocator.create(StringCell);
-    cell.* = .{ .bytes = bytes, .hash = contentHash(bytes) };
+    cell.* = .{ .bytes = stored, .hash = h };
     return cell;
 }
 
@@ -403,6 +481,9 @@ pub const InternTable = struct {
         for (&self.shards) |*shard| {
             var it = shard.map.iterator();
             while (it.next()) |entry| {
+                // Key (WTF-8 content) and cell.bytes (stored image, possibly flat
+                // latin1) are separate allocations — free both.
+                self.allocator.free(entry.key_ptr.*);
                 self.allocator.free(entry.value_ptr.*.bytes);
                 self.allocator.destroy(entry.value_ptr.*);
             }
@@ -419,17 +500,23 @@ pub const InternTable = struct {
         shard.acquire();
         defer shard.releaseLock();
 
+        // Look up by the WTF-8 CONTENT `bytes` (not the stored image): a flat
+        // latin1 image can collide byte-for-byte with a different string's WTF-8.
         if (shard.map.get(bytes)) |existing| return existing;
 
-        // Miss: allocate an owned copy + cell, key the map by the owned bytes
-        // (so the key outlives the caller's slice).
-        const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
-        debugAssertWtf8(owned);
+        // Miss: the map key is an owned copy of the WTF-8 content (collision-free
+        // canonical key); the cell stores the representation-selected image
+        // (flat latin1 when applicable), a separate allocation.
+        debugAssertWtf8(bytes);
+        const key = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(key);
+        const canon = try self.allocator.dupe(u8, bytes);
+        const stored = try storedImage(self.allocator, canon, h); // consumes canon
+        errdefer self.allocator.free(stored);
         const cell = try self.allocator.create(StringCell);
         errdefer self.allocator.destroy(cell);
-        cell.* = .{ .bytes = owned, .hash = h };
-        try shard.map.put(self.allocator, owned, cell);
+        cell.* = .{ .bytes = stored, .hash = h };
+        try shard.map.put(self.allocator, key, cell);
         return cell;
     }
 
