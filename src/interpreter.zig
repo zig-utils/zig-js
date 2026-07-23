@@ -42234,10 +42234,10 @@ fn urlConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'URL': Please use the 'new' operator");
-    const input = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const input = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     var base: ?UrlParts = null;
     if (args.len > 1 and !args[1].isUndefined()) {
-        const bs = try self.toStringV(args[1]);
+        const bs = try self.toStringWtf8(args[1]);
         base = (try urlParse(self.arena, bs, null)) orelse return self.throwError("TypeError", "Invalid base URL");
     }
     const parts = (try urlParse(self.arena, input, base)) orelse return self.throwError("TypeError", "Invalid URL");
@@ -42314,7 +42314,7 @@ fn urlHashSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject()) return Value.undef();
     var p = urlLoad(this.asObj());
-    var v = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    var v = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     if (v.len > 0 and v[0] == '#') v = v[1..];
     if (v.len == 0) {
         p.fragment = null;
@@ -42350,7 +42350,7 @@ fn urlSetter(comptime which: []const u8) value.NativeFn {
             if (!this.isObject()) return Value.undef();
             const o = this.asObj();
             var p = urlLoad(o);
-            const val = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+            const val = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
             const special = urlIsSpecialScheme(p.scheme);
             const enc = struct {
                 fn f(s: *Interpreter, in: []const u8, set: UrlEncSet) EvalError![]const u8 {
@@ -42436,10 +42436,10 @@ fn urlSetter(comptime which: []const u8) value.NativeFn {
 fn urlCanParseFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const input = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const input = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     var base: ?UrlParts = null;
     if (args.len > 1 and !args[1].isUndefined()) {
-        base = (try urlParse(self.arena, try self.toStringV(args[1]), null)) orelse return Value.boolVal(false);
+        base = (try urlParse(self.arena, try self.toStringWtf8(args[1]), null)) orelse return Value.boolVal(false);
     }
     return Value.boolVal((try urlParse(self.arena, input, base)) != null);
 }
@@ -44135,7 +44135,7 @@ fn fdAllocate(self: *Interpreter) EvalError!FormDataAllocation {
 }
 
 fn fdUSVString(self: *Interpreter, input: Value) EvalError![]const u8 {
-    return wtf8ToUtf8Bytes(self.arena, try self.toStringV(input));
+    return wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(input));
 }
 
 fn fdPair(pair: Value) struct { name: []const u8, value: Value } {
@@ -44380,7 +44380,7 @@ pub fn formDataSerialize(self: *Interpreter, form: Value) EvalError![]const u8 {
         first = false;
         try out.appendSlice(self.arena, try formUrlEncode(self, entry.name));
         try out.append(self.arena, '=');
-        try out.appendSlice(self.arena, try formUrlEncode(self, entry.value.asStr()));
+        try out.appendSlice(self.arena, try formUrlEncode(self, try entry.value.asWtf8(self.arena)));
     }
     return out.items;
 }
@@ -44470,7 +44470,7 @@ fn blobConcatParts(self: *Interpreter, parts_v: Value) EvalError![]u8 {
         } else if (bufferSourceBytes(part)) |b| {
             try out.appendSlice(self.arena, b);
         } else {
-            try out.appendSlice(self.arena, try wtf8ToUtf8Bytes(self.arena, try self.toStringV(part)));
+            try out.appendSlice(self.arena, try wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(part)));
         }
     }
     return out.items;
@@ -44607,7 +44607,7 @@ fn fileConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Ho
     if (self.new_target.isUndefined()) return self.throwError("TypeError", "Failed to construct 'File': Please use the 'new' operator");
     if (args.len < 2) return self.throwError("TypeError", "Failed to construct 'File': 2 arguments required");
     const bytes = try blobConcatParts(self, args[0]);
-    const name = try wtf8ToUtf8Bytes(self.arena, try self.toStringV(args[1]));
+    const name = try wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(args[1]));
     var ty: []const u8 = "";
     var last_mod: f64 = 0;
     if (args.len > 2 and args[2].isObject()) {
@@ -45525,7 +45525,7 @@ fn rscMeasureBytes(self: *Interpreter, chunks: *value.Object) EvalError!usize {
     const items = try chunks.internalElementsSnapshot(self.arena);
     var total: usize = 0;
     for (items) |chunk| {
-        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, chunk.asStr()) else bufferSourceBytes(chunk) orelse
+        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, try chunk.asWtf8(self.arena)) else bufferSourceBytes(chunk) orelse
             return self.throwError("TypeError", "ReadableStream produced an invalid chunk");
         total = std.math.add(usize, total, bytes.len) catch return self.throwError("RangeError", "ReadableStream body is too large");
     }
@@ -45536,7 +45536,7 @@ fn rscWriteBytes(self: *Interpreter, chunks: *value.Object, output: []u8) EvalEr
     const items = try chunks.internalElementsSnapshot(self.arena);
     var offset: usize = 0;
     for (items) |chunk| {
-        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, chunk.asStr()) else bufferSourceBytes(chunk).?;
+        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, try chunk.asWtf8(self.arena)) else bufferSourceBytes(chunk).?;
         if (bytes.len != 0) @memcpy(output[offset .. offset + bytes.len], bytes);
         offset += bytes.len;
     }
@@ -45644,7 +45644,7 @@ fn rscContentType(self: *Interpreter, input: Value) EvalError![]const u8 {
     if (input.isUndefined() or input.isNull()) return "";
     if (rscBufferSourceDetached(input)) return self.throwError("TypeError", "FormData content type views a detached ArrayBuffer");
     if (bufferSourceBytes(input)) |bytes| return bytes;
-    return wtf8ToUtf8Bytes(self.arena, try self.toStringV(input));
+    return wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(input));
 }
 
 fn rscFinalize(self: *Interpreter, state: *value.Object) EvalError!Value {
@@ -45706,7 +45706,7 @@ fn rscReadFulfilled(self: *Interpreter, result: Value, state: *value.Object) Eva
     }
     const chunk = try rscNormalizeChunk(self, try self.getProperty(result, "value"));
     if (rscByteSink(state)) |sink| {
-        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, chunk.asStr()) else bufferSourceBytes(chunk) orelse
+        const bytes = if (chunk.isString()) try wtf8ToUtf8Bytes(self.arena, try chunk.asWtf8(self.arena)) else bufferSourceBytes(chunk) orelse
             return self.throwError("TypeError", "ReadableStream produced an invalid chunk");
         try sink.write(sink.context, self, bytes);
         try rscStep(self, state);
@@ -45826,7 +45826,7 @@ fn fetchExtractBody(self: *Interpreter, body_v: Value) EvalError!BodyExtract {
         return .{ .bytes = try uspToString(self, body_v), .ctype = "application/x-www-form-urlencoded;charset=UTF-8" };
     }
     if (bufferSourceBytes(body_v)) |b| return .{ .bytes = b, .ctype = null };
-    return .{ .bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringV(body_v)), .ctype = "text/plain;charset=UTF-8" };
+    return .{ .bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(body_v)), .ctype = "text/plain;charset=UTF-8" };
 }
 fn fetchMakeHeaders(self: *Interpreter, init_v: Value) EvalError!*value.Object {
     const created = try fetchHeadersCreateEmpty(self);
@@ -46095,7 +46095,7 @@ fn responseJsonStaticFn(ctx: *anyopaque, this: Value, args: []const Value) value
     const stringify = try self.getProperty(json, "stringify");
     const jstr = try self.callValue(stringify, &.{if (args.len > 0) args[0] else Value.undef()});
     if (jstr.isUndefined()) return self.throwError("TypeError", "The data is not JSON serializable");
-    const bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringV(jstr));
+    const bytes = try wtf8ToUtf8Bytes(self.arena, try self.toStringWtf8(jstr));
     var status: u32 = 200;
     var status_text: []const u8 = "";
     var headers_init: Value = Value.undef();
@@ -46153,7 +46153,7 @@ fn requestConstructorFn(ctx: *anyopaque, this: Value, args: []const Value) value
         inherited_body = fetchBodyValue(src);
         inherited_source = src;
     } else {
-        const parsed = (try urlParse(self.arena, try self.toStringV(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
+        const parsed = (try urlParse(self.arena, try self.toStringWtf8(input), null)) orelse return self.throwError("TypeError", "Failed to construct 'Request': Invalid URL");
         url = try urlSerialize(self.arena, parsed, false);
     }
     var cache: []const u8 = "default";
