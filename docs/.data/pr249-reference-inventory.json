@@ -36,13 +36,6 @@
         146,
         429
       ]
-    },
-    "shared-concurrent-gc": {
-      "description": "Concurrent shared-heap collection, stop coordination, and diagnostics",
-      "owner_issues": [
-        145,
-        429
-      ]
     }
   },
   "files": [
@@ -2016,17 +2009,8 @@
     {
       "bytes": 2247,
       "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
-      "dependencies": [
-        "optimizing-jit",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        145,
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
       "required_shell_hooks": [
         "global:gc",
@@ -2045,17 +2029,8 @@
     {
       "bytes": 3421,
       "case": "cve/mc-safe-gcwait-vs-classa-stop.js",
-      "dependencies": [
-        "optimizing-jit",
-        "shared-concurrent-gc"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        145,
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop.js",
       "required_shell_hooks": [
         "global:gc",
@@ -4305,12 +4280,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 10,
+    "blocked": 8,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 243,
+    "promoted": 245,
     "promoted_with_terminal_premises": 6,
     "terminal_disposition": 6
   }

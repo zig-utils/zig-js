@@ -277,6 +277,19 @@ const parallel_only_allowlist = [_][]const u8{
     // enabled while the SAB constructor is absent. Robust only in no-GIL mode
     // because the worker counter is a timing-capability witness.
     "cve/mc-spec-timer-capability.js",
+    // §A.3 Class-A stops ordered against shared-GC completion waits (#457).
+    // Both files declare themselves post-ungil only, and both do pass
+    // serialized — at ~121 s and ~126 s, because the GC-storm threads spend
+    // that run contending for the GIL. No-GIL is both the intended mode and
+    // two orders of magnitude cheaper.
+    //
+    // Promoted on measured optimizing-tier evidence rather than a green
+    // assertion: each run reports publications=18, invalidations=13 (the
+    // witness drives 12 mutation rounds), collections=1, identical under
+    // ThreadSanitizer with no reported race. That is the "both cooperative
+    // collection and Class-A invalidation occurred" gate #457 sets.
+    "cve/mc-safe-gcwait-vs-classa-stop.js",
+    "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
 };
 
 fn runsWithoutThreadGlobal(name: []const u8) bool {

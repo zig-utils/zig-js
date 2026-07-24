@@ -269,11 +269,6 @@ BLOCKED_DEPENDENCIES = {
     ),
     "cve/mc-dos-retired-artifact-churn.js": ("jit-artifact-lifetime", "optimizing-jit"),
     "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
-    "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js": (
-        "optimizing-jit",
-        "shared-concurrent-gc",
-    ),
-    "cve/mc-safe-gcwait-vs-classa-stop.js": ("optimizing-jit", "shared-concurrent-gc"),
     "cve/mc-val-fire-vs-link.js": ("optimizing-jit",),
     "jit/foreign-reify-getbyid-converges.js": ("optimizing-jit",),
     "jit/ic-publish-reset-loops.js": (
