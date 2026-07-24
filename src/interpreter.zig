@@ -1627,18 +1627,31 @@ pub const Interpreter = struct {
 
     // ---- exception helpers ------------------------------------------------
 
-    /// Set a named property on an object via its shape (see `Object.setOwn`).
+    /// Fire a Class-A stop for a named-property mutation of `obj`, unless no
+    /// published artifact speculates on its shape (#457). `obj` must be passed
+    /// *before* the store: adding a property transitions the object to a new
+    /// shape, while the assumption any optimized code guards on is the one it
+    /// still has here. A null `obj` (or a shapeless one) keeps the conservative
+    /// unconditional stop.
+    pub fn invalidateJitHeapFactsFor(self: *Interpreter, obj: ?*const value.Object) void {
+        const owner = self.jit_owner orelse return;
+        if (!owner.hasPublishedArtifacts()) return;
+        const shape_token = if (obj) |o|
+            if (o.shape) |shape| @intFromPtr(shape) else 0
+        else
+            0;
+        if (!owner.shapeMayInvalidate(shape_token)) return;
+        if (self.jit_invalidation_fn) |invalidate|
+            invalidate(self.jit_invalidation_ctx.?, self);
+    }
+
+    /// Mutation site with no object in hand: always conservative.
     pub fn invalidateJitHeapFacts(self: *Interpreter) void {
-        if (self.jit_owner) |owner| {
-            if (owner.hasPublishedArtifacts()) {
-                if (self.jit_invalidation_fn) |invalidate|
-                    invalidate(self.jit_invalidation_ctx.?, self);
-            }
-        }
+        self.invalidateJitHeapFactsFor(null);
     }
 
     pub fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
-        self.invalidateJitHeapFacts();
+        self.invalidateJitHeapFactsFor(obj);
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 

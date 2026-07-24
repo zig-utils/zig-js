@@ -902,6 +902,55 @@ pub const Owner = struct {
     retired_bytes: std.atomic.Value(usize) = .init(0),
     reclaimed_artifacts: std.atomic.Value(usize) = .init(0),
     reclaimed_bytes: std.atomic.Value(usize) = .init(0),
+    /// Shape tokens every published artifact speculates on, summarized as a
+    /// saturating bit filter (#457). A named-property mutation consults it
+    /// before firing a Class-A stop: a shape no artifact speculates on cannot
+    /// invalidate a published assumption, so jettisoning for it throws away
+    /// correct code and every warmed tier behind it for nothing. Membership
+    /// costs one relaxed load on the mutation path.
+    ///
+    /// The filter only ever over-approximates. A hash collision, an unknown
+    /// shape, and a shapeless receiver all report "may invalidate", which is
+    /// exactly today's unconditional behavior — there is no path that reports
+    /// "cannot invalidate" for a shape some artifact actually guards on.
+    ///
+    /// This is sound because published property caches are the optimizer's
+    /// whole shape-dependency surface: an operation whose cache stayed empty
+    /// goes through the runtime ABI and re-reads the live object, and call
+    /// links revalidate against the callee's tier generation rather than a
+    /// shape. Publishing a new kind of shape-dependent heap fact (#433's
+    /// property IC records) must register it in `watchPublishedShapes` too.
+    watched_shape_filter: [4]std.atomic.Value(u64) = @splat(.init(0)),
+
+    /// Shape identities are arena-stable pointers whose low bits are alignment
+    /// zeros, so fold the whole token before selecting a bit.
+    fn shapeFilterBit(token: usize) struct { word: usize, mask: u6 } {
+        var hash = token;
+        hash ^= hash >> 33;
+        hash *%= 0xff51afd7ed558ccd;
+        hash ^= hash >> 29;
+        return .{ .word = (hash >> 6) & 3, .mask = @intCast(hash & 63) };
+    }
+
+    /// Record one shape this owner's published code speculates on.
+    pub fn watchShapeToken(self: *Owner, token: usize) void {
+        if (token == 0) return;
+        const bit = shapeFilterBit(token);
+        _ = self.watched_shape_filter[bit.word].fetchOr(@as(u64, 1) << bit.mask, .release);
+    }
+
+    /// Whether mutating an object with this shape could invalidate a published
+    /// assumption. An absent shape reports true: a shapeless object cannot be
+    /// matched against the filter, so it must keep the conservative behavior.
+    pub fn shapeMayInvalidate(self: *const Owner, token: usize) bool {
+        if (token == 0) return true;
+        const bit = shapeFilterBit(token);
+        return (self.watched_shape_filter[bit.word].load(.acquire) & (@as(u64, 1) << bit.mask)) != 0;
+    }
+
+    fn clearWatchedShapes(self: *Owner) void {
+        for (&self.watched_shape_filter) |*word| word.store(0, .release);
+    }
 
     pub const AdoptError = std.mem.Allocator.Error || error{Invalidated};
 
@@ -1079,6 +1128,9 @@ pub const Owner = struct {
         self.tiers.clearRetainingCapacity();
         for (self.optimizer_tiers.items) |tier| tier.invalidate();
         self.optimizer_tiers.clearRetainingCapacity();
+        // Nothing speculates on any shape once every tier is jettisoned, so the
+        // filter starts empty again instead of carrying retired dependencies.
+        self.clearWatchedShapes();
         old_epoch.codes = self.codes;
         old_epoch.retired = true;
         self.codes = .empty;
@@ -1231,6 +1283,21 @@ pub const Owner = struct {
     fn accountPublished(self: *Owner, code: *const CompiledCode) void {
         _ = self.live_artifacts.fetchAdd(1, .monotonic);
         _ = self.live_bytes.fetchAdd(code.memory.mapping.len, .monotonic);
+        self.watchPublishedShapes(code);
+    }
+
+    /// Register every shape a freshly published artifact speculates on, so a
+    /// later mutation can tell whether it could invalidate this code (#457).
+    /// Property caches are the optimizer's whole heap-fact surface today; an
+    /// artifact without native operations simply speculates on no shape.
+    fn watchPublishedShapes(self: *Owner, code: *const CompiledCode) void {
+        const operations = code.native_operations orelse return;
+        for (operations.property_caches) |cache| {
+            for (cache.shape_tokens) |token| self.watchShapeToken(token);
+            if (cache.inherited_receiver_shape_token != NativePropertyCache.empty_receiver_shape_token)
+                self.watchShapeToken(cache.inherited_receiver_shape_token);
+            self.watchShapeToken(cache.inherited_holder_shape_token);
+        }
     }
 
     fn beginInvalidation(self: *Owner) void {

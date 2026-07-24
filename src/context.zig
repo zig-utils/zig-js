@@ -15848,6 +15848,40 @@ fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_cla
     try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
+test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.watchedProto = { y: 1 };
+        \\globalThis.watchedObject = Object.create(watchedProto);
+        \\globalThis.unrelated = { a: 1, b: 2, c: 3 };
+        \\function watchedRead(o) { return o.y; }
+        \\for (let warm = 0; warm < 64; warm = warm + 1) watchedRead(watchedObject);
+    );
+    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+    try std.testing.expect(owner.hasPublishedArtifacts());
+    const generation_before = owner.invalidation_generation.load(.acquire);
+
+    // No published artifact speculates on `unrelated`'s shape, so mutating it
+    // must not jettison the warmed tier (#457).
+    _ = try ctx.evaluate("unrelated.a = 99;");
+    try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
+    try std.testing.expect(owner.hasPublishedArtifacts());
+
+    // The watched holder still fires, so narrowing did not weaken the contract.
+    _ = try ctx.evaluate("watchedProto.y = 4;");
+    try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("watchedRead(watchedObject)")).asNum());
+}
+
 test "inherited named property assumption survives a holder mutation" {
     try verifyInheritedClassAInvalidation(.{
         .enable_gc = true,
