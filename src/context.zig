@@ -15809,33 +15809,62 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
     try std.testing.expect(ctx.jitGcConductor().wait_iterations.load(.acquire) != 0);
 }
 
-test "parallel_js named property mutation fires Class-A invalidation" {
-    if (builtin.single_threaded) return error.SkipZigTest;
-
-    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
-        .enable_threads = true,
-        .enable_gc = true,
-        .enable_jit = true,
-        .parallel_gc = true,
-        .parallel_js = true,
-    });
+/// A warmed *inherited* named read must publish an optimizer artifact, and a
+/// mutation of the holder — not the receiver — must fire Class-A invalidation
+/// and jettison it before the next read observes the new value (#457).
+///
+/// The read stands alone rather than feeding arithmetic: a property node is
+/// typed `.other`, so an `add` whose site profiles as purely numeric refuses to
+/// lower `o.y + 1` and the whole chunk goes uncompiled, which would make this
+/// test assert publication the optimizer cannot deliver. Typing a
+/// value-profiled property read under a guard is the next #457 slice; the
+/// inherited assumption and its invalidation are what this test owns.
+fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_class_a_stop: bool) !void {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
     _ = try ctx.evaluate(
         \\globalThis.classAProto = { y: 1 };
         \\globalThis.classAObject = Object.create(classAProto);
-        \\function classARead(o) { return o.y + 1; }
+        \\function classARead(o) { return o.y; }
         \\for (let warm = 0; warm < 64; warm = warm + 1) classARead(classAObject);
     );
     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
     try std.testing.expect(owner.hasPublishedArtifacts());
     const generation_before = owner.invalidation_generation.load(.acquire);
 
-    try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("classARead(classAObject)")).asNum());
     _ = try ctx.evaluate("classAProto.y = 4");
 
-    try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
-    try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
-    try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    if (expect_class_a_stop) {
+        try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
+    } else {
+        // Mutation-driven invalidation is wired through the shared conductor, so
+        // a serialized realm publishes no stop. The published assumption is a
+        // shape+slot pair, never a cached value, so the holder's new value is
+        // still what the next read observes.
+        try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
+    }
+    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("classARead(classAObject)")).asNum());
+}
+
+test "inherited named property assumption survives a holder mutation" {
+    try verifyInheritedClassAInvalidation(.{
+        .enable_gc = true,
+        .enable_jit = true,
+    }, false);
+}
+
+test "parallel_js named property mutation fires Class-A invalidation" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    try verifyInheritedClassAInvalidation(.{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    }, true);
 }
 
 test "optimizer live safepoint relocates a recovery-only object local" {

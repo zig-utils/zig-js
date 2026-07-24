@@ -9791,6 +9791,147 @@ test "vm: optimizer native property cache guards polymorphic shapes and malforme
     );
 }
 
+test "vm: optimizer inherited property cache serves a one-hop prototype read" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "value", Value.num(7));
+    const holder_shape = holder.asObj().shape orelse return error.TestUnexpectedResult;
+    const holder_slot = holder_shape.lookup("value") orelse return error.TestUnexpectedResult;
+
+    const receiver = try machine.newObject();
+    receiver.asObj().setProtoAtomic(holder.asObj());
+    chunk.ics[1].recordInheritedMode(receiver.asObj().shape, holder_shape, holder_slot, false);
+
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+    const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
+    const property_cache = operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@intFromPtr(holder_shape), property_cache.inherited_holder_shape_token);
+    try std.testing.expectEqual(holder_slot, property_cache.inherited_slot);
+
+    // The published assumption executes natively, with no runtime callback.
+    var slots = [_]Value{receiver};
+    const callbacks_before = optimizer_native_property_read_callbacks.load(.monotonic);
+    const outcome = try tryRunManagedNative(&machine, &compiled, &slots, null);
+    const result = switch (outcome) {
+        .complete => |value_word| value_word,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(f64, 7), result.asNum());
+    try std.testing.expectEqual(callbacks_before, optimizer_native_property_read_callbacks.load(.monotonic));
+}
+
+test "vm: optimizer inherited property cache yields to shadowing, chain edits, and exotic holders" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try Shape.createRoot(allocator);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
+
+    var chunk = bc.Chunk.init(allocator);
+    chunk.param_count = 1;
+    chunk.local_count = 1;
+    const name = try chunk.addName("value");
+    _ = try chunk.emit(.load_local, 0);
+    _ = try chunk.emit(.get_prop, name);
+    _ = try chunk.emit(.ret, 0);
+    try chunk.finalize();
+
+    const holder = try machine.newObject();
+    try machine.setProp(holder.asObj(), "value", Value.num(7));
+    const holder_shape = holder.asObj().shape orelse return error.TestUnexpectedResult;
+    const holder_slot = holder_shape.lookup("value") orelse return error.TestUnexpectedResult;
+
+    const receiver = try machine.newObject();
+    receiver.asObj().setProtoAtomic(holder.asObj());
+    chunk.ics[1].recordInheritedMode(receiver.asObj().shape, holder_shape, holder_slot, false);
+
+    var compiled = try optimizer_compiler.compile(&chunk);
+    defer compiled.deinit();
+
+    const Run = struct {
+        fn read(m: *Interpreter, code: *const jit.CompiledCode, recv: Value) !Value {
+            var run_slots = [_]Value{recv};
+            return switch (try tryRunManagedNative(m, code, &run_slots, null)) {
+                .complete => |value_word| value_word,
+                else => error.TestUnexpectedResult,
+            };
+        }
+    };
+
+    // Shadowing: an own property added to the receiver changes its shape, so the
+    // published receiver guard must fail and the own value must win.
+    const shadowing = try machine.newObject();
+    shadowing.asObj().setProtoAtomic(holder.asObj());
+    try machine.setProp(shadowing.asObj(), "value", Value.num(11));
+    try std.testing.expectEqual(@as(f64, 11), (try Run.read(&machine, &compiled, shadowing)).asNum());
+
+    // Prototype replacement: a different holder shape must not be served from
+    // the published holder slot.
+    const other_holder = try machine.newObject();
+    try machine.setProp(other_holder.asObj(), "other", Value.num(1));
+    try machine.setProp(other_holder.asObj(), "value", Value.num(23));
+    const replaced = try machine.newObject();
+    replaced.asObj().setProtoAtomic(other_holder.asObj());
+    try std.testing.expectEqual(@as(f64, 23), (try Run.read(&machine, &compiled, replaced)).asNum());
+
+    // A missing holder property resolves to `undefined` through the canonical
+    // walk rather than reading a stale slot.
+    const bare_holder = try machine.newObject();
+    const missing = try machine.newObject();
+    missing.asObj().setProtoAtomic(bare_holder.asObj());
+    try std.testing.expect((try Run.read(&machine, &compiled, missing)).isUndefined());
+
+    // A null prototype has no holder at all.
+    const orphan = try machine.newObject();
+    orphan.asObj().setProtoAtomic(null);
+    try std.testing.expect((try Run.read(&machine, &compiled, orphan)).isUndefined());
+
+    // A holder carrying a property-attribute map is no longer a plain slot
+    // holder, so the guard must reject it and let the canonical walk decide.
+    const attributed_holder = try machine.newObject();
+    try machine.setProp(attributed_holder.asObj(), "value", Value.num(31));
+    try attributed_holder.asObj().setAttr(allocator, "value", .{ .writable = false, .enumerable = true, .configurable = true });
+    const attributed_receiver = try machine.newObject();
+    attributed_receiver.asObj().setProtoAtomic(attributed_holder.asObj());
+    try std.testing.expectEqual(@as(f64, 31), (try Run.read(&machine, &compiled, attributed_receiver)).asNum());
+
+    // An exotic (array) holder takes the canonical path.
+    const array_holder = try machine.newArray();
+    try machine.setProp(array_holder.asObj(), "value", Value.num(41));
+    const array_receiver = try machine.newObject();
+    array_receiver.asObj().setProtoAtomic(array_holder.asObj());
+    try std.testing.expectEqual(@as(f64, 41), (try Run.read(&machine, &compiled, array_receiver)).asNum());
+
+    // The original assumption still holds and still reads the live holder value,
+    // including after the holder's slot is rewritten in place.
+    try std.testing.expectEqual(@as(f64, 7), (try Run.read(&machine, &compiled, receiver)).asNum());
+    try machine.setProp(holder.asObj(), "value", Value.num(9));
+    try std.testing.expectEqual(@as(f64, 9), (try Run.read(&machine, &compiled, receiver)).asNum());
+}
+
 test "vm: optimizer packed index guards direct existing-index reads and writes" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
