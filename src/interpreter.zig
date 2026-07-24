@@ -28142,7 +28142,7 @@ fn segmenterGranularity(seg_obj: *value.Object) []const u8 {
 fn intlSegmenterSegmentFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "Segmenter")) return self.throwError("TypeError", "Intl.Segmenter.prototype.segment on incompatible receiver");
-    const str = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const str = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     var gran: []const u8 = "grapheme";
     if (this.asObj().getOwn("\x00opts")) |ov| if (ov.isObject()) {
         if (ov.asObj().getOwn("granularity")) |g| if (g.isString()) {
@@ -28168,7 +28168,7 @@ fn segmentsBrandOk(this: Value) bool {
 fn intlSegmentsContainingFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!segmentsBrandOk(this)) return self.throwError("TypeError", "Segments.prototype.containing on incompatible receiver");
-    const str = this.asObj().getOwn("\x00segstr").?.asStr();
+    const str = try this.asObj().getOwn("\x00segstr").?.asWtf8(self.arena);
     const gran = segmenterGranularity(this.asObj());
     const nf = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
     const n: f64 = if (std.math.isNan(nf)) 0 else @trunc(nf);
@@ -28208,7 +28208,7 @@ fn intlSegmentIterNextFn(ctx: *anyopaque, this: Value, args: []const Value) valu
     _ = args;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!this.isObject() or this.asObj().getOwn("\x00pos") == null) return self.throwError("TypeError", "Segment Iterator next on incompatible receiver");
-    const str = this.asObj().getOwn("\x00segstr").?.asStr();
+    const str = try this.asObj().getOwn("\x00segstr").?.asWtf8(self.arena);
     const gran = segmenterGranularity(this.asObj());
     const pos: usize = @intFromFloat(this.asObj().getOwn("\x00pos").?.asNum());
     if (pos >= str.len) return self.iterResultObj(Value.undef(), true);
@@ -28297,7 +28297,7 @@ fn dnLanguageName(self: *Interpreter, canon_tag: []const u8, dialect: bool, want
 fn intlDisplayNamesOfFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "DisplayNames")) return self.throwError("TypeError", "Intl.DisplayNames.prototype.of on incompatible receiver");
-    const code = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const code = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     var typ: []const u8 = "language";
     var fallback: []const u8 = "code";
     var language_display: []const u8 = "dialect";
@@ -28537,7 +28537,7 @@ fn rtfPolishUnitName(unit: []const u8, style: []const u8, category: []const u8) 
 fn rtfCompute(self: *Interpreter, this: Value, args: []const Value) value.HostError!RtfResult {
     const valnum = try self.toNumberV(if (args.len > 0) args[0] else Value.undef());
     if (!std.math.isFinite(valnum)) return self.throwError("RangeError", "value must be finite");
-    const unit_s = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const unit_s = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     const info = rtfUnitInfo(unit_s) orelse return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid unit '{s}'", .{unit_s}));
 
     var numeric: []const u8 = "always";
