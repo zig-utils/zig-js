@@ -267,6 +267,20 @@ Issue #1 remains the umbrella status page.
   specific to sibling threads allocating against a near-exhausted shared cap.
   Reproduce with `zig build threads-test-bin` and a runner whose
   `heapLimitBytesForCase` returns `6 * 1024 * 1024` for that case.
+- **Allowlisted case failing on macOS.** `sync/atomics-futex-lock.js` is
+  promoted and runs in the default serialized gate, but fails deterministically
+  on macOS — 8 of 8 standalone — at the fourth ping-pong round:
+  `main woken by round-4 worker: expected "ok" but got "not-equal"`. A
+  `not-equal` return means `turn.v` was no longer `"worker"` when main reached
+  its `Atomics.wait`, so the spawned worker ran before main parked. The file's
+  own comment assumes a runtime where "the worker only starts once main is
+  parked"; our step-checkpoint GIL yield can hand the lock over between main's
+  `Atomics.store` and its `Atomics.wait`, and the round it first bites is
+  fixed because the step counter crosses the checkpoint at the same place
+  every run. It reproduces at `55ac8a09`, so it predates the July 24 JIT and
+  array work, and CI stays green because CI runs ubuntu-latest. Recorded in
+  the published [serialized execution inventory](../.data/pr249-execution-serialized.json)
+  as the single non-passing case of 241.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
