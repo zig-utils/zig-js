@@ -1349,6 +1349,13 @@ pub fn build(b: *std.Build) void {
     const threads_parallel_js = b.option(bool, "threads-parallel-js", "Run threaded PR-249 cases with the test-only parallel_js GIL-removal mode") orelse false;
     const threads_shard_index = b.option(usize, "threads-shard-index", "Run only this zero-based threads-test shard index") orelse null;
     const threads_shard_count = b.option(usize, "threads-shard-count", "Split threads-test cases across this many shards") orelse null;
+    // Machine-readable per-case execution record for #430: what a run actually
+    // did with each file (mode, result, duration, optimizing-tier evidence), as
+    // distinct from what `pr249-reference-inventory.json` says each file *is*.
+    const threads_inventory = b.option([]const u8, "threads-inventory", "Write a per-case PR-249 execution inventory to this JSON path") orelse null;
+    if (threads_inventory) |path| {
+        run_threads_test.addArgs(&.{ "inventory", path });
+    }
     if (threads_parallel_js) {
         run_threads_test.addArg("parallel-js");
     }

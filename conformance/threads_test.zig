@@ -413,6 +413,69 @@ fn heapLimitBytesForCase(name: []const u8) ?usize {
     return null;
 }
 
+/// One executed case, for the machine-readable execution inventory (#430).
+/// The classification inventory in `docs/.data/pr249-reference-inventory.json`
+/// records what each file *is*; this records what a run actually *did* with it,
+/// which is the half a release gate cannot infer.
+const ExecutionRecord = struct {
+    name: []const u8,
+    mode: []const u8,
+    result: []const u8,
+    ms: u64,
+    optimizer_publications: u64,
+    optimizer_invalidations: u64,
+};
+
+/// Emit the execution inventory as JSON. Written only when a path is requested,
+/// so ordinary runs stay byte-identical. Keys are sorted per record so a diff
+/// between two runs shows behavior changes rather than field reordering.
+fn writeExecutionInventory(
+    io: std.Io,
+    path: []const u8,
+    records: []const ExecutionRecord,
+    parallel_js: bool,
+) !void {
+    const gpa = std.heap.page_allocator;
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
+    defer buffer.deinit(gpa);
+    const Emit = struct {
+        fn print(out: *std.ArrayListUnmanaged(u8), a: std.mem.Allocator, comptime fmt: []const u8, args: anytype) !void {
+            const chunk = try std.fmt.allocPrint(a, fmt, args);
+            defer a.free(chunk);
+            try out.appendSlice(a, chunk);
+        }
+    };
+    var passed: usize = 0;
+    var failed: usize = 0;
+    var skipped: usize = 0;
+    var total_ms: u64 = 0;
+    for (records) |record| {
+        total_ms += record.ms;
+        if (std.mem.eql(u8, record.result, "pass")) passed += 1;
+        if (std.mem.eql(u8, record.result, "fail")) failed += 1;
+        if (std.mem.eql(u8, record.result, "skip")) skipped += 1;
+    }
+    try Emit.print(&buffer, gpa,
+        "{{\n  \"mode\": \"{s}\",\n  \"summary\": {{ \"cases\": {d}, \"passed\": {d}, \"failed\": {d}, \"skipped\": {d}, \"total_ms\": {d} }},\n  \"cases\": [\n",
+        .{ if (parallel_js) "parallel-js" else "serialized", records.len, passed, failed, skipped, total_ms },
+    );
+    for (records, 0..) |record, index| {
+        try Emit.print(&buffer, gpa,
+            "    {{ \"case\": \"{s}\", \"mode\": \"{s}\", \"ms\": {d}, \"optimizer_invalidations\": {d}, \"optimizer_publications\": {d}, \"result\": \"{s}\" }}{s}\n",
+            .{
+                record.name,          record.mode,
+                record.ms,            record.optimizer_invalidations,
+                record.optimizer_publications, record.result,
+                if (index + 1 == records.len) "" else ",",
+            },
+        );
+    }
+    try buffer.appendSlice(gpa, "  ]\n}\n");
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, buffer.items);
+}
+
 /// Describe an exception without running JavaScript and without allocating.
 /// `Error.prototype.toString` is a JS call that builds a fresh string, so it is
 /// precisely what fails when a case dies under a heap cap — and the failing
@@ -449,10 +512,12 @@ fn printExceptionWithoutJs(e: js.Value) void {
 /// per case makes the promotion decision reviewable instead of a judgement
 /// call. Silent for cases that never reached the tier, so the corpus log stays
 /// readable.
-fn printOptimizerEvidence(ctx: *js.Context) void {
+fn printOptimizerEvidence(ctx: *js.Context, out_publications: *u64, out_invalidations: *u64) void {
     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
     const publications = owner.optimizerPublications();
     const invalidations = owner.invalidation_generation.load(.acquire);
+    out_publications.* = publications;
+    out_invalidations.* = invalidations;
     if (publications == 0 and invalidations == 0) return;
     const collections: usize = if (ctx.gc) |heap| heap.full_collections + heap.minor_collections else 0;
     // Retirement and reclamation are the artifact-lifetime half of the
@@ -607,6 +672,7 @@ pub fn main(init: std.process.Init) !void {
     var sweep = false;
     var list_mode = false;
     var one: ?[]const u8 = null;
+    var inventory_path: ?[]const u8 = null;
     var shard_index: ?usize = null;
     var shard_count: ?usize = null;
     var args = std.process.Args.Iterator.init(init.minimal.args);
@@ -619,6 +685,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
         if (std.mem.eql(u8, a, "list")) list_mode = true;
         if (std.mem.eql(u8, a, "one")) one = args.next();
+        if (std.mem.eql(u8, a, "inventory")) inventory_path = args.next();
         if (std.mem.eql(u8, a, "shard")) {
             const raw_index = args.next() orelse {
                 std.debug.print("threads-test: shard requires <index> <count>\n", .{});
@@ -735,12 +802,38 @@ pub fn main(init: std.process.Init) !void {
     var failed: usize = 0;
     var skipped: usize = 0;
     var completed: usize = 0;
+    var execution_records: std.ArrayListUnmanaged(ExecutionRecord) = .empty;
+    defer execution_records.deinit(gpa);
+    var case_optimizer_publications: u64 = 0;
+    var case_optimizer_invalidations: u64 = 0;
     var shard_started_ns: i96 = 0;
     var slowest = [_]CaseTiming{ .{}, .{}, .{}, .{}, .{}, .{}, .{}, .{} };
     if (shard_count != null) shard_started_ns = nowNs(io);
     for (names.items, 0..) |name, case_index| {
         if (shard_assignments[case_index] != shard_i) continue;
         const case_started_ns = nowNs(io);
+        // Classify by counter delta in a loop-scoped defer rather than at each
+        // of the dozen result sites: every `continue` path is covered, and the
+        // printed outcome cannot drift from the recorded one (#430).
+        const failed_before = failed;
+        const skipped_before = skipped;
+        defer if (inventory_path != null) {
+            execution_records.append(gpa, .{
+                .name = name,
+                .mode = if (parallel_js) "parallel-js" else "serialized",
+                .result = if (skipped != skipped_before)
+                    "skip"
+                else if (failed != failed_before)
+                    "fail"
+                else
+                    "pass",
+                .ms = elapsedMs(case_started_ns, nowNs(io)),
+                .optimizer_publications = case_optimizer_publications,
+                .optimizer_invalidations = case_optimizer_invalidations,
+            }) catch {};
+            case_optimizer_publications = 0;
+            case_optimizer_invalidations = 0;
+        };
         completed += 1;
         std.debug.print("  RUN   {d}/{d} {s}\n", .{ completed, selected_total, name });
         if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
@@ -897,7 +990,7 @@ pub fn main(init: std.process.Init) !void {
                 recordSlowCase(&slowest, name, case_ms);
                 if (balanced) {
                     std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
-                    printOptimizerEvidence(ctx);
+                    printOptimizerEvidence(ctx, &case_optimizer_publications, &case_optimizer_invalidations);
                 } else {
                     const progress = ctx.evaluate("String(__asyncPassed) + '/' + String(__asyncExpected)") catch js.Value.undef();
                     const progress_s = if (progress.isString()) progress.asStr() else "?/?";
@@ -992,6 +1085,13 @@ pub fn main(init: std.process.Init) !void {
             if (entry.name.len == 0) break;
             std.debug.print("  {d} ms  {s}\n", .{ entry.ms, entry.name });
         }
+    }
+    if (inventory_path) |path| {
+        writeExecutionInventory(io, path, execution_records.items, parallel_js) catch |err| {
+            std.debug.print("threads-test: could not write execution inventory to {s}: {s}\n", .{ path, @errorName(err) });
+            return err;
+        };
+        std.debug.print("threads-test: execution inventory written to {s} ({d} cases)\n", .{ path, execution_records.items.len });
     }
     std.debug.print("------------------------\n{d}/{d} corpus files passed", .{ selected_total - failed - skipped, selected_total });
     if (skipped != 0) std.debug.print(" ({d} skipped)", .{skipped});
