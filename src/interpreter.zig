@@ -17294,6 +17294,25 @@ fn noInlineFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     return if (args.len > 0) args[0] else Value.undef();
 }
 
+/// `numberOfDFGCompiles(fn)` — how many times the optimizing tier has installed
+/// code for that function's chunk.
+///
+/// PR-249 convergence witnesses assert a real lower *and* upper bound on this
+/// (`>= 1` proves the function tiered up, `<= 4` proves it did not sit in a
+/// recompile loop). Reporting anything not tied to actual publications would be
+/// the fake tier counter #429 refuses to promote on, so this reads the tier's
+/// own `installed_compiles`. A non-function argument, or a function with no
+/// compiled chunk, is 0 — never having compiled is a real answer, not an error.
+fn numberOfDFGCompilesFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
+    _ = ctx;
+    _ = this;
+    if (args.len == 0 or !args[0].isObject()) return Value.num(0);
+    const raw = args[0].asObj().jsFunction() orelse return Value.num(0);
+    const func: *Function = @ptrCast(@alignCast(raw));
+    const chunk = func.chunk orelse return Value.num(0);
+    return Value.num(@floatFromInt(chunk.optimizer_tier.compileCount()));
+}
+
 /// Test-shell compatibility for PR-249 object-model/GC stress files. The M1
 /// collector is precise and only sound at quiescent points, so in GC-enabled
 /// contexts this requests collection for the next safe entry instead of tracing
@@ -30045,6 +30064,7 @@ pub fn installGlobalsInner(env: *Environment, root_shape: *Shape, parent_symbol:
     try defineGlobalFn(env, root_shape, "$drainRunLoop", 0, drainRunLoopFn);
     try defineGlobalFn(env, root_shape, "$drainFinalizationCleanup", 0, drainFinalizationCleanupFn);
     try defineGlobalFn(env, root_shape, "noInline", 1, noInlineFn);
+    try defineGlobalFn(env, root_shape, "numberOfDFGCompiles", 1, numberOfDFGCompilesFn);
     try defineGlobalFn(env, root_shape, "gc", 0, gcFn);
     try defineGlobalFn(env, root_shape, "quit", 0, quitFn);
     try defineGlobalFnC(env, root_shape, "RegExp", 2, true, builtins.regExpFn);
