@@ -43626,11 +43626,16 @@ fn uspParseString(self: *Interpreter, pairs: *value.Object, input: []const u8) E
         try uspPush(self, pairs, try formUrlDecode(self, k), try formUrlDecode(self, v));
     }
 }
-fn uspPairKV(pair: Value) struct { k: []const u8, v: []const u8 } {
+/// Read a stored `[key, value]` pair back as WTF-8. The pair cells were built
+/// by `strAlloc`, so under the flat-string model a latin1 key/value is stored
+/// 1-byte/unit; every consumer here byte-compares (`mem.eql`/`mem.order`),
+/// percent-encodes (`formUrlEncode`), or rebuilds (`strAlloc`) these bytes as
+/// WTF-8, so the read must route through `asWtf8` (no-op when the flag is off).
+fn uspPairKV(self: *Interpreter, pair: Value) EvalError!struct { k: []const u8, v: []const u8 } {
     if (!pair.isObject()) return .{ .k = "", .v = "" };
     const kv = pair.asObj();
-    const k = if (kv.elementAt(0)) |x| (if (x.isString()) x.asStr() else "") else "";
-    const v = if (kv.elementAt(1)) |x| (if (x.isString()) x.asStr() else "") else "";
+    const k = if (kv.elementAt(0)) |x| (if (x.isString()) try x.asWtf8(self.arena) else "") else "";
+    const v = if (kv.elementAt(1)) |x| (if (x.isString()) try x.asWtf8(self.arena) else "") else "";
     return .{ .k = k, .v = v };
 }
 const UspAllocation = struct { obj: *value.Object, pairs: *value.Object };
@@ -43691,7 +43696,7 @@ fn uspToString(self: *Interpreter, this: Value) EvalError![]const u8 {
     const pairs = try uspPairs(self, this);
     var out: std.ArrayListUnmanaged(u8) = .empty;
     for (try pairs.internalElementsSnapshot(self.arena), 0..) |pair, idx| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         if (idx != 0) try out.append(self.arena, '&');
         try out.appendSlice(self.arena, try formUrlEncode(self, kv.k));
         try out.append(self.arena, '=');
@@ -43703,7 +43708,7 @@ fn uspGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         if (std.mem.eql(u8, kv.k, name)) return try Value.strAlloc(self.arena, kv.v);
     }
     return Value.nul();
@@ -43713,7 +43718,7 @@ fn uspGetAllFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const res = (try self.newArray()).asObj();
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         if (std.mem.eql(u8, kv.k, name)) try res.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v));
     }
     return Value.obj(res);
@@ -43724,7 +43729,7 @@ fn uspHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     const check_val = args.len > 1 and !args[1].isUndefined();
     const val = if (check_val) try self.toStringWtf8(args[1]) else "";
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         if (std.mem.eql(u8, kv.k, name) and (!check_val or std.mem.eql(u8, kv.v, val))) return Value.boolVal(true);
     }
     return Value.boolVal(false);
@@ -43754,7 +43759,7 @@ fn uspRebuild(self: *Interpreter, this: Value, name: []const u8, set_value: ?[]c
     const fresh = (try self.newArray()).asObj();
     var placed = false;
     for (try old.internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         if (std.mem.eql(u8, kv.k, name)) {
             if (set_value) |sv| {
                 if (!placed) {
@@ -43792,15 +43797,21 @@ fn uspSortFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const pairs = try uspPairs(self, this);
     const items = try pairs.internalElementsSnapshot(self.arena);
+    // Precompute each pair's WTF-8 key so the comparator stays allocation-free
+    // and total (`asWtf8` can allocate under the flat-string model), and the
+    // per-comparison decode collapses to a single pass.
+    const Keyed = struct { key: []const u8, pair: Value };
+    const keyed = try self.arena.alloc(Keyed, items.len);
+    for (items, 0..) |p, i| keyed[i] = .{ .key = (try uspPairKV(self, p)).k, .pair = p };
     // Stable sort by key (code-unit order — the keys are already UTF-8/code-point
     // ordered for the common ASCII case).
-    std.mem.sort(Value, items, {}, struct {
-        fn lt(_: void, x: Value, y: Value) bool {
-            return std.mem.order(u8, uspPairKV(x).k, uspPairKV(y).k) == .lt;
+    std.mem.sort(Keyed, keyed, {}, struct {
+        fn lt(_: void, x: Keyed, y: Keyed) bool {
+            return std.mem.order(u8, x.key, y.key) == .lt;
         }
     }.lt);
     const fresh = (try self.newArray()).asObj();
-    for (items) |p| try fresh.appendElement(self.arena, p);
+    for (keyed) |k| try fresh.appendElement(self.arena, k.pair);
     try this.asObj().setOwn(self.arena, self.root_shape, "\x00usp", Value.obj(fresh));
     try uspSyncToUrl(self, this);
     return Value.undef();
@@ -43821,7 +43832,7 @@ fn uspForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErr
     if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "URLSearchParams.forEach callback is not a function");
     const this_arg = if (args.len > 1) args[1] else Value.undef();
     for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
     }
     return Value.undef();
@@ -43835,7 +43846,7 @@ fn uspIterFn(comptime which: enum { entries, keys, values }) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const snap = (try self.newArray()).asObj();
             for (try (try uspPairs(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-                const kv = uspPairKV(pair);
+                const kv = try uspPairKV(self, pair);
                 switch (which) {
                     .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
                     .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
@@ -43943,8 +43954,8 @@ pub fn fetchHeadersAppendBytes(self: *Interpreter, this: Value, name: []const u8
 }
 
 fn headersAppendRaw(self: *Interpreter, this: Value, name_v: Value, value_v: Value) EvalError!void {
-    const name = try self.toStringV(name_v);
-    const header_value = try self.toStringV(value_v);
+    const name = try self.toStringWtf8(name_v);
+    const header_value = try self.toStringWtf8(value_v);
     try fetchHeadersAppendBytes(self, this, name, header_value);
 }
 fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -43954,28 +43965,28 @@ fn headersAppendFn(ctx: *anyopaque, this: Value, args: []const Value) value.Host
 }
 fn headersSetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const header_value = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const header_value = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     const record = try headersRecord(self, this);
     record.set(name, header_value) catch |err| return headersThrow(self, err);
     return Value.undef();
 }
 fn headersGetFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
     const result = record.getCopy(self.arena, name) catch |err| return headersThrow(self, err);
     return if (result) |bytes| try Value.strAlloc(self.arena, bytes) else Value.nul();
 }
 fn headersHasFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
     return Value.boolVal(record.has(name) catch |err| return headersThrow(self, err));
 }
 fn headersDeleteFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
-    const name = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
+    const name = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
     const record = try headersRecord(self, this);
     record.remove(name) catch |err| return headersThrow(self, err);
     return Value.undef();
@@ -44009,7 +44020,7 @@ fn headersForEachFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     if (!cb.isObject() or !cb.asObj().isCallableObject()) return self.throwError("TypeError", "Headers.forEach callback is not a function");
     const this_arg = if (args.len > 1) args[1] else Value.undef();
     for (try (try headersSortedEntries(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-        const kv = uspPairKV(pair);
+        const kv = try uspPairKV(self, pair);
         _ = try self.callValueWithThis(cb, &.{ try Value.strAlloc(self.arena, kv.v), try Value.strAlloc(self.arena, kv.k), this }, this_arg);
     }
     return Value.undef();
@@ -44021,7 +44032,7 @@ fn headersIterFn(comptime which: enum { entries, keys, values }) value.NativeFn 
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             const snap = (try self.newArray()).asObj();
             for (try (try headersSortedEntries(self, this)).internalElementsSnapshot(self.arena)) |pair| {
-                const kv = uspPairKV(pair);
+                const kv = try uspPairKV(self, pair);
                 switch (which) {
                     .keys => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.k)),
                     .values => try snap.appendElement(self.arena, try Value.strAlloc(self.arena, kv.v)),
