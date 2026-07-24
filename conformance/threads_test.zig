@@ -393,6 +393,45 @@ fn heapLimitBytesForCase(name: []const u8) ?usize {
     return null;
 }
 
+/// Describe an exception without running JavaScript and without allocating.
+/// `Error.prototype.toString` is a JS call that builds a fresh string, so it is
+/// precisely what fails when a case dies under a heap cap — and the failing
+/// `shouldBe`/`shouldBeTrue` description goes with it (#100). These are the same
+/// slots the Error constructor filled in, read directly.
+fn printExceptionWithoutJs(e: js.Value) void {
+    if (!e.isObject()) {
+        if (e.isString()) {
+            std.debug.print("exception=string \"{s}\"", .{e.asStr()});
+        } else {
+            std.debug.print("exception={s}", .{e.typeOf()});
+        }
+        return;
+    }
+    const obj = e.asObj();
+    const kind = if (obj.behavior.is_error and obj.errorName().len != 0)
+        obj.errorName()
+    else
+        e.typeOf();
+    std.debug.print("exception={s}", .{kind});
+    const message = obj.getOwn("message") orelse return;
+    if (!message.isString()) return;
+    // Borrowed bytes, not `asWtf8`: producing an owned canonical copy allocates,
+    // which is the one thing this path cannot do. Corpus assertion text is
+    // ASCII, whose bytes are identical in every string storage; a non-ASCII
+    // message can render as its raw storage image instead.
+    std.debug.print(": {s}", .{message.asStr()});
+}
+
+/// Heap-cap accounting for a failing case. "Was the cap actually exhausted?" is
+/// the first question for any heap-limited witness and cannot be recovered from
+/// the exception alone (#100). No-op for cases that run without a cap.
+fn printHeapBudget(ctx: *js.Context) void {
+    const stats = ctx.heapBudgetStats() orelse return;
+    std.debug.print("  heap budget: used {d} / limit {d} bytes (peak {d})\n", .{
+        stats.used_bytes, stats.limit_bytes, stats.peak_bytes,
+    });
+}
+
 const CaseTiming = struct {
     name: []const u8 = "",
     ms: u64 = 0,
@@ -882,22 +921,23 @@ pub fn main(init: std.process.Init) !void {
                             name, case_ms, @errorName(eval_err), msg,
                         });
                     } else |stringify_err| {
-                        const exception_kind = if (e.isObject() and e.asObj().behavior.is_error and e.asObj().errorName().len != 0)
-                            e.asObj().errorName()
-                        else
-                            e.typeOf();
-                        // This fallback is allocation-free and does not invoke
-                        // user JavaScript, so it remains useful under the exact
-                        // heap pressure that made ToString fail.
-                        std.debug.print("  FAIL  {s} ({d} ms, {s}): exception={s}, stringify={s}\n", .{
-                            name, case_ms, @errorName(eval_err), exception_kind, @errorName(stringify_err),
+                        // This fallback runs no user JavaScript and allocates
+                        // nothing, so it stays useful under the exact heap
+                        // pressure that made ToString fail (#100). It reads the
+                        // error's own `name`/`message` slots, which is where the
+                        // failing assertion's text actually lives.
+                        std.debug.print("  FAIL  {s} ({d} ms, {s}): ", .{
+                            name, case_ms, @errorName(eval_err),
                         });
+                        printExceptionWithoutJs(e);
+                        std.debug.print(" (stringify={s})\n", .{@errorName(stringify_err)});
                     }
                 } else {
                     std.debug.print("  FAIL  {s} ({d} ms, {s}): exception=<missing>\n", .{
                         name, case_ms, @errorName(eval_err),
                     });
                 }
+                printHeapBudget(ctx);
             }
         }
     }
