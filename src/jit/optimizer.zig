@@ -95,6 +95,17 @@ pub const ValueKind = enum {
     in_op,
     instance_of,
     private_in,
+    /// A value produced by an interpreter-owned operation the graph does not
+    /// model — environment loads (`load_var`), `this`, `new.target`, regex
+    /// literals, and the rest of the terminal-frame-state set.
+    ///
+    /// Those operations used to bump the operand-stack depth without writing
+    /// the slot, so the next consumer read an undefined `ValueId` and wired it
+    /// in as an input. It only escaped notice because the fresh page-backed
+    /// stack reads as zero, aliasing node 0. Pushing an explicit opaque node
+    /// keeps the graph well defined; it carries no data flow, so consumers must
+    /// treat it as unknown rather than speculate on it.
+    interpreter_value,
 };
 
 pub const ValueNode = struct {
@@ -1438,7 +1449,21 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
                 // environment access, iteration, and other effects execute once.
                 try builder.appendFrameState(kind, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                 try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
-                depth = depth - @as(usize, @intCast(effect.removed)) + effect.added;
+                depth -= @as(usize, @intCast(effect.removed));
+                // Give every value this operation pushes an explicit opaque
+                // node. Bumping `depth` alone left the slot holding whatever
+                // the uninitialized stack buffer contained, and the next
+                // consumer read it as a real input.
+                for (0..effect.added) |_| {
+                    stack[depth] = try builder.appendNode(.{
+                        .id = undefined,
+                        .block = @intCast(block_id),
+                        .origin = @intCast(origin),
+                        .kind = .interpreter_value,
+                        .may_have_effect = true,
+                    });
+                    depth += 1;
+                }
             },
         };
 

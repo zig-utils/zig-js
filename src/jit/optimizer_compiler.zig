@@ -570,6 +570,14 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     };
     for (graph.nodes) |node| switch (node.kind) {
         .block_argument => {},
+        // A value from an interpreter-owned operation the graph does not model
+        // (an environment load, `this`, a regex literal). There is no data flow
+        // to lower and no zero-input runtime-operation descriptor shape to
+        // stage against, so refuse the chunk rather than speculate on an opaque
+        // value. This is what keeps a global-rooted function — the whole of
+        // `return typeof String.raw;` — out of the tier; modelling environment
+        // loads is the work that would let it compile (#431).
+        .interpreter_value => return error.UnsupportedChunk,
         .argument => {
             if (node.immediate >= chunk.param_count or node.immediate >= 64) return error.UnsupportedChunk;
             if (numeric_inputs[node.id]) required_numeric_slots |= @as(u64, 1) << @intCast(node.immediate);
