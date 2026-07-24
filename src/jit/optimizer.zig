@@ -756,6 +756,27 @@ const GraphBuilder = struct {
     }
 };
 
+/// Whether a binary must run through the runtime operation ABI because the
+/// straight-line lowering cannot type one of its operands.
+///
+/// That lowering proves Numbers for arguments (through the entry guard in
+/// `required_numeric_slots`), numeric constants, and arithmetic results. A
+/// property read is always typed `.other`, so a binary consuming one has no
+/// Number-specialized form. The graph must give such a binary an effect frame
+/// state, or `stageNativeOperationDescriptors` stages no descriptor for it and
+/// the lowering's runtime fallback has nothing to emit against — which used to
+/// leave the whole chunk uncompiled over a single `o.y + 1` (#457).
+///
+/// Both the graph and the lowering call this with the *unresolved* operand ids
+/// so the two decisions cannot drift apart through alias resolution.
+pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: ValueId) bool {
+    for ([_]ValueId{ lhs, rhs }) |operand| {
+        if (operand >= nodes.len) continue;
+        if (nodes[operand].kind == .get_prop) return true;
+    }
+    return false;
+}
+
 fn knownSafePrimitive(node: ValueNode) bool {
     return switch (node.kind) {
         .argument, .block_argument => false,
@@ -1014,13 +1035,14 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             },
             .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
                 if (depth < 2) return error.InvalidControlFlow;
-                const runtime_operation = chunk.optimizerBinaryRequiresRuntime(origin);
+                const rhs = stack[depth - 1];
+                const lhs = stack[depth - 2];
+                const runtime_operation = chunk.optimizerBinaryRequiresRuntime(origin) or
+                    binaryNeedsRuntimeOperands(builder.nodes.items, lhs, rhs);
                 if (runtime_operation) {
                     try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
                     try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
                 }
-                const rhs = stack[depth - 1];
-                const lhs = stack[depth - 2];
                 depth -= 1;
                 stack[depth - 1] = try builder.appendBinary(
                     @intCast(block_id),

@@ -621,7 +621,12 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
         .add, .sub, .mul, .div, .mod, .lt, .le, .gt, .ge, .eq, .neq, .eq_strict, .neq_strict => {
             const lhs = try resolveAlias(node.lhs, aliases);
             const rhs = try resolveAlias(node.rhs, aliases);
-            if (chunk.optimizerBinaryRequiresRuntime(node.origin)) {
+            // Mirrors the graph's own decision exactly — same helper, same
+            // unresolved operand ids — so a binary the graph gave an effect
+            // frame state always finds its staged descriptor here (#457).
+            if (chunk.optimizerBinaryRequiresRuntime(node.origin) or
+                optimizer.binaryNeedsRuntimeOperands(graph.nodes, node.lhs, node.rhs))
+            {
                 if (scratch_slots + 2 > jit.numeric_scratch_capacity) return error.UnsupportedChunk;
                 const first_input = scratch_slots;
                 for ([_]optimizer.ValueId{ lhs, rhs }) |source| {

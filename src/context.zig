@@ -15813,27 +15813,25 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
 /// mutation of the holder — not the receiver — must fire Class-A invalidation
 /// and jettison it before the next read observes the new value (#457).
 ///
-/// The read stands alone rather than feeding arithmetic. A property node is
-/// typed `.other`, and the graph only gives a binary an effect state when its
-/// per-site profile already demands the runtime ABI, so `o.y + 1` has neither a
-/// Number-specialized form nor a staged descriptor to fall back to and the
-/// whole chunk goes uncompiled — nothing published, nothing to invalidate.
-/// Closing that is its own slice; the inherited assumption and its
-/// invalidation are what this test owns.
+/// The read feeds arithmetic, matching the PR-249 witnesses' own shape. A
+/// property node is typed `.other`, so the `add` has no Number-specialized
+/// form and lowers through the runtime operation ABI while the rest of the
+/// function stays native — which is only possible because the graph now gives
+/// that binary an effect frame state to stage a descriptor against.
 fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_class_a_stop: bool) !void {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
     _ = try ctx.evaluate(
         \\globalThis.classAProto = { y: 1 };
         \\globalThis.classAObject = Object.create(classAProto);
-        \\function classARead(o) { return o.y; }
+        \\function classARead(o) { return o.y + 1; }
         \\for (let warm = 0; warm < 64; warm = warm + 1) classARead(classAObject);
     );
     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
     try std.testing.expect(owner.hasPublishedArtifacts());
     const generation_before = owner.invalidation_generation.load(.acquire);
 
-    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("classARead(classAObject)")).asNum());
     _ = try ctx.evaluate("classAProto.y = 4");
 
     if (expect_class_a_stop) {
@@ -15846,7 +15844,7 @@ fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_cla
         // still what the next read observes.
         try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
     }
-    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("classARead(classAObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
 test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
