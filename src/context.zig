@@ -4053,6 +4053,21 @@ pub const Context = struct {
                 try symbol.asObj().setOwn(self.arena(), self.root_shape, "\x00registry", registry);
     }
 
+    /// Name a heap-limit allocation failure that escaped a host entry without
+    /// an enclosing `try`. `Thread` bodies already publish the reserved
+    /// `OutOfMemoryError` as their completion value, but a top-level escape used
+    /// to return a bare `error.OutOfMemory` with `exception` left null, so hosts
+    /// and test runners could only report an anonymous failure (#100). The error
+    /// code is unchanged — embeddings that special-case `error.OutOfMemory` keep
+    /// working — but `exception` now identifies the exact failure. No-op without
+    /// a configured heap limit: there the failure is the host allocator's, not a
+    /// realm-visible one, and no reserved value exists to report.
+    fn surfaceEscapedOutOfMemory(self: *Context, err: anyerror) void {
+        if (err != error.OutOfMemory) return;
+        if (self.exception != null) return;
+        self.exception = self.reserved_thread_oom_error;
+    }
+
     fn createReservedThreadOomError(self: *Context) !Value {
         var machine = self.interpreter();
         const err = try machine.makeError("OutOfMemoryError", "Context heap limit exceeded");
@@ -6809,6 +6824,7 @@ pub const Context = struct {
         } else |err| {
             self.collectRequestedGarbage();
             if (err == error.Throw) self.exception = machine.exception;
+            self.surfaceEscapedOutOfMemory(err);
             return err;
         }
     }
@@ -6963,6 +6979,7 @@ pub const Context = struct {
         if (outcome) |_| machine.keepaliveTimers() else |_| {}
         outcome catch |err| {
             if (err == error.Throw) self.exception = machine.exception;
+            self.surfaceEscapedOutOfMemory(err);
             return err;
         };
         return Value.undef();
@@ -14920,6 +14937,107 @@ test "Context heap_limit_bytes fails closed on allocation pressure" {
     const failed_stats = ctx.heapBudgetStats().?;
     try std.testing.expect(failed_stats.peak_bytes <= failed_stats.limit_bytes);
     try std.testing.expectEqual(failed_stats.limit_bytes - failed_stats.used_bytes, failed_stats.remaining_bytes);
+}
+
+test "Context heap_limit_bytes names an escaping top-level OOM" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .heap_limit_bytes = 4 * 1024 * 1024 });
+    defer ctx.destroy();
+
+    // No enclosing `try`, so the failure escapes the host entry as an allocator
+    // error rather than a JS throw. It must still name itself: a runner that can
+    // only report "exception=<missing>" hides the exact semantic failure (#100).
+    try std.testing.expectError(error.OutOfMemory, ctx.evaluate(
+        \\var keep = [];
+        \\for (var i = 0; i < 20000; i = i + 1)
+        \\  keep.push({ i: i, nested: { j: i + 1 } });
+        \\keep.length;
+    ));
+    const exception = ctx.exception orelse return error.TestUnexpectedResult;
+    try std.testing.expect(exception.isObject());
+    const obj = exception.asObj();
+    try std.testing.expect(obj.behavior.is_error);
+    try std.testing.expectEqualStrings("OutOfMemoryError", obj.errorName());
+    const message = obj.getOwn("message") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(message.isString());
+    try std.testing.expectEqualStrings("Context heap limit exceeded", message.asStr());
+
+    // The reserved bootstrap object itself, not a fresh one: the failed path
+    // cannot allocate, which is the whole reason it is prebuilt.
+    try std.testing.expectEqual(ctx.reserved_thread_oom_error.?.bits, exception.bits);
+}
+
+test "Context heap_limit_bytes never publishes a torn object under recovery pressure" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 4 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    // A live hoard parks the budget at the recovery boundary, so every later
+    // allocation runs where `reserveWithRecovery` has to collect first. An
+    // allocation that survives that boundary must be complete: the PR-249 OOM
+    // witness fails outright on a successfully returned but torn object (#100).
+    // Every round at the boundary forces a recovery collection, so the counts
+    // stay small deliberately: this is a correctness witness, not a stress run.
+    const result = try ctx.evaluate(
+        \\const hoard = [];
+        \\try { for (let i = 0; i < 50000; ++i) hoard.push({ i: i, j: i + 1 }); } catch (e) {}
+        \\let torn = 0, made = 0, ooms = 0;
+        \\for (let r = 0; r < 500; ++r) {
+        \\  try {
+        \\    const o = { idx: r, arr: new Array(64).fill(r), s: "small_" + r };
+        \\    if (o.idx !== r || o.arr[63] !== r || o.s.length < 7) ++torn;
+        \\    ++made;
+        \\  } catch (e) { ++ooms; }
+        \\}
+        \\if (torn !== 0) throw new Error("torn " + torn + " of " + made + " (ooms " + ooms + ")");
+        \\ooms;
+    );
+    // The run is only meaningful if the cap actually bit.
+    try std.testing.expect(result.asNum() > 0);
+}
+
+test "Context whole-array fill leaves no unreclaimable per-element residue" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .heap_limit_bytes = 32 * 1024 * 1024,
+    });
+    defer ctx.destroy();
+
+    // One warm-up fill first, so one-off arena growth is already paid for and
+    // the delta below measures only per-round residue. Collect before reading
+    // the baseline, and again before the final reading, so the comparison is
+    // between two *reclaimed* heaps rather than between accumulated garbage.
+    _ = try ctx.evaluate("(function () { const a = new Array(1 << 16).fill(1); return a[0]; })(); gc();");
+    const before = ctx.heapBudgetStats().?.used_bytes;
+
+    // Each element of a whole-array `fill` used to leave a formatted index key
+    // in the realm arena, which is never reclaimed within a Context: ~64 Ki keys
+    // per round, retained forever, with no collection able to win them back.
+    // That is what makes a capped heap's OOM state sticky and breaks the PR-249
+    // OOM witness's post-storm allocation (#100). Every round's array is
+    // dropped, so the budget must come back to roughly where it started.
+    _ = try ctx.evaluate(
+        \\for (let round = 0; round < 12; ++round) {
+        \\  const a = new Array(1 << 16).fill(round);
+        \\  if (a[(1 << 16) - 1] !== round) throw new Error("fill did not cover the array");
+        \\}
+        \\gc();
+    );
+    const after = ctx.heapBudgetStats().?.used_bytes;
+    // Twelve rounds of retained keys ran to several megabytes that no collection
+    // could win back; the collected arrays themselves leave nothing behind.
+    try std.testing.expect(after -| before < 2 * 1024 * 1024);
+}
+
+test "Context without a heap limit leaves a host allocator failure unnamed" {
+    // Without a cap there is no realm-visible reserved error to report, and the
+    // failure belongs to the embedding allocator. Reporting a JS value there
+    // would invent one.
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+    ctx.surfaceEscapedOutOfMemory(error.OutOfMemory);
+    try std.testing.expect(ctx.exception == null);
 }
 
 test "Context heap_limit_bytes allocation pressure is catchable inside JS try" {

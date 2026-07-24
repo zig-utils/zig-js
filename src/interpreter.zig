@@ -13412,6 +13412,17 @@ pub const Interpreter = struct {
 
     /// Set(O, ToString(i), v, true) — SetPropertyOrThrow on an integer index.
     fn arrIndexSetOrThrow(self: *Interpreter, o: *value.Object, i: usize, v: Value) EvalError!void {
+        // Dense fast path, mirroring `arrIndexPresent`/`arrIndexGet` above: on a
+        // plain extensible array with no accessors/attributes and a clean
+        // prototype chain, [[Set]] of an integer index *is* the dense store, so
+        // no key is needed at all. The generic path below formats the index into
+        // the realm arena, whose memory is never reclaimed within a Context, so
+        // a whole-array `fill`/`copyWithin` burned one permanently-retained key
+        // per element. Under `heap_limit_bytes` that made a single
+        // `new Array(1 << 16).fill(2)` consume megabytes of budget that no
+        // collection could recover, turning a later ordinary allocation into an
+        // unrecoverable OOM (#100).
+        if (try self.setFastArrayNumericIndex(Value.obj(o), i, v)) return;
         const ks = try std.fmt.allocPrint(self.arena, "{d}", .{i});
         if (!try self.setMemberResult(Value.obj(o), ks, v, Value.obj(o)))
             return self.throwError("TypeError", "Cannot set array index");

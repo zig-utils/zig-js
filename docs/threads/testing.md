@@ -138,7 +138,12 @@ public `Context.Options.heap_limit_bytes` allocator-cap and
 `Context.heapBudgetStats()` pressure-diagnostic smoke coverage, plus the
 shared-realm `Thread` OOM survivor/recovery witnesses that keep a sibling
 joinable after one peer exhausts the context cap and prove GC-backed capped
-contexts can recover after unreachable pressure is collected. The focused
+contexts can recover after unreachable pressure is collected. A cap failure that
+escapes a host entry with no enclosing `try` is covered too: it still returns
+`error.OutOfMemory`, but `Context.exception` now holds the prebuilt reserved
+`OutOfMemoryError` instead of being absent, so an embedder or runner can always
+name the failure. Without a configured cap the failure stays unnamed, because
+there it belongs to the host allocator and no realm value describes it. The focused
 heap-cap witnesses also cover no-GIL `ArrayBuffer` byte-slab recovery while a
 real peer thread is running and publishing roots to the abort-safe parallel
 collector, plus the trace-sensitive realm task queue, property waiter tables,
