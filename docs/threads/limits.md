@@ -256,6 +256,17 @@ Issue #1 remains the umbrella status page.
   thread API, and pending-join locks all participate in that guard. Remaining
   emergency-recovery work is tracked in #30: lock-aware side-store pressure
   coverage under live no-GIL peers without deadlocking GC tracing.
+
+  One known defect remains at severe starvation. Running the PR-249 witness
+  `semantics/oom-one-thread.js` with the cap lowered to 6 MiB — small enough
+  that realm bootstrap alone consumes most of it — reproduces
+  `torn small allocation` on a sibling `Thread` in 3 of 3 runs: an object that
+  was returned successfully carries wrong contents, rather than the allocation
+  failing. The witness passes at every cap from 12 MiB up, and a
+  single-threaded equivalent at the recovery boundary is clean, so this is
+  specific to sibling threads allocating against a near-exhausted shared cap.
+  Reproduce with `zig build threads-test-bin` and a runner whose
+  `heapLimitBytesForCase` returns `6 * 1024 * 1024` for that case.
 - **Parallel scaling optimization.** Benchmarks show real speedup, but scaling
   is sub-linear. `zig build threads-profile` now provides a repeatable baseline
   against the `.gil = true` fallback for independent compute, shared object
