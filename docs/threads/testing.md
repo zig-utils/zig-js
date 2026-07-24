@@ -159,6 +159,25 @@ check that no-GIL allocation-failure recovery aborts instead of sweeping while
 parallel tracing has deferred mutable execution/helper buffers to a
 world-stopped finish.
 
+### PR-249 execution inventory
+
+`pr249-reference-inventory.json` records what each of the 339 files *is*.
+To record what a run actually *did* with them — mode, result, duration, and
+optimizing-tier publication/invalidation counts per case, plus run totals —
+ask for the execution inventory:
+
+```sh
+zig build threads-test -Dthreads-inventory=docs/.data/pr249-execution-serialized.json
+zig build threads-test -Dthreads-parallel-js=true -Dthreads-inventory=docs/.data/pr249-execution-nogil.json
+```
+
+Both are deliberate complete reproductions, not per-push gates: the serialized
+corpus alone runs for hours, which is why CI shards it. With no
+`-Dthreads-inventory` a run is byte-identical, so the artifact costs nothing
+until someone asks for it. Cases are classified by counter delta inside a
+loop-scoped `defer`, so every early-exit path is recorded and the written
+result cannot drift from the printed one.
+
 `zig build threads-test` runs the green WebKit PR-249 allowlist from
 `reference/webkit-249/threads-tests`. CI shards the serialized/GIL leg with
 `-Dthreads-shard-index=N -Dthreads-shard-count=4`; local full runs still use the
