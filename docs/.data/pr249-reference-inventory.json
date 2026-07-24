@@ -1459,16 +1459,8 @@
     {
       "bytes": 7974,
       "case": "cve/mc-dos-retired-artifact-churn.js",
-      "dependencies": [
-        "jit-artifact-lifetime",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-dos-retired-artifact-churn.js",
       "required_shell_hooks": [
         "global:MemoryFootprint",
@@ -4280,12 +4272,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 8,
+    "blocked": 7,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 245,
+    "promoted": 246,
     "promoted_with_terminal_premises": 6,
     "terminal_disposition": 6
   }

@@ -290,6 +290,13 @@ const parallel_only_allowlist = [_][]const u8{
     // collection and Class-A invalidation occurred" gate #457 sets.
     "cve/mc-safe-gcwait-vs-classa-stop.js",
     "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+    // Sustained retire-side pressure on the epoch facility (#433). Its
+    // assertion is bounded RSS at steady state, and the measured drain is what
+    // backs it: 83,081 optimizing-tier publications and 83,081 reclaimed with
+    // zero left retired, 9,526/9,526/0 under ThreadSanitizer with no race
+    // reported. The backlog empties rather than accumulating, which is the
+    // regression the file exists to catch.
+    "cve/mc-dos-retired-artifact-churn.js",
 };
 
 fn runsWithoutThreadGlobal(name: []const u8) bool {
@@ -448,9 +455,14 @@ fn printOptimizerEvidence(ctx: *js.Context) void {
     const invalidations = owner.invalidation_generation.load(.acquire);
     if (publications == 0 and invalidations == 0) return;
     const collections: usize = if (ctx.gc) |heap| heap.full_collections + heap.minor_collections else 0;
-    std.debug.print("        optimizer: publications={d} invalidations={d} collections={d}\n", .{
-        publications, invalidations, collections,
-    });
+    // Retirement and reclamation are the artifact-lifetime half of the
+    // evidence: the #433-owned cases turn on bounded epoch reclamation, and a
+    // run that jettisons without ever reclaiming has not exercised it.
+    const stats = owner.stats();
+    std.debug.print(
+        "        optimizer: publications={d} invalidations={d} collections={d} retired={d} reclaimed={d}\n",
+        .{ publications, invalidations, collections, stats.retired_artifacts, stats.reclaimed_artifacts },
+    );
 }
 
 /// Heap-cap accounting for a failing case. "Was the cap actually exhausted?" is

@@ -267,7 +267,6 @@ BLOCKED_DEPENDENCIES = {
         "jsc-shared-heap-shell",
         "optimizing-jit",
     ),
-    "cve/mc-dos-retired-artifact-churn.js": ("jit-artifact-lifetime", "optimizing-jit"),
     "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
     "cve/mc-val-fire-vs-link.js": ("optimizing-jit",),
     "jit/foreign-reify-getbyid-converges.js": ("optimizing-jit",),
