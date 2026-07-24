@@ -24107,7 +24107,7 @@ fn dtfWellFormedType(s: []const u8) bool {
 fn dtfGetStr(self: *Interpreter, opts: Value, name: []const u8, allowed: []const []const u8, fallback: ?[]const u8) EvalError!?[]const u8 {
     const v = try self.getProperty(opts, name);
     if (v.isUndefined()) return fallback;
-    const s = try self.toStringV(v);
+    const s = try self.toStringWtf8(v);
     for (allowed) |a| if (std.mem.eql(u8, s, a)) return a;
     return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value '{s}' for option {s}", .{ s, name }));
 }
@@ -24117,7 +24117,7 @@ fn dtfGetStr(self: *Interpreter, opts: Value, name: []const u8, allowed: []const
 fn dtfGetType(self: *Interpreter, opts: Value, name: []const u8) EvalError!?[]const u8 {
     const v = try self.getProperty(opts, name);
     if (v.isUndefined()) return null;
-    const s = try self.toStringV(v);
+    const s = try self.toStringWtf8(v);
     // The well-formedness check runs on the raw value (so a non-ASCII char like
     // U+0130 İ rejects); the canonical form is then ASCII-lowercased.
     if (!dtfWellFormedType(s)) return self.throwError("RangeError", try std.fmt.allocPrint(self.arena, "invalid value for option {s}", .{name}));
@@ -24301,7 +24301,7 @@ fn dtfProcessOptionsKind(self: *Interpreter, raw_in: Value, required: DtfRequire
         if (!h12v.isUndefined()) r.hour12 = h12v.toBoolean();
         if (try dtfGetStr(self, raw, "hourCycle", &.{ "h11", "h12", "h23", "h24" }, null)) |c| r.hour_cycle = c;
         const tzv = try self.getProperty(raw, "timeZone");
-        if (!tzv.isUndefined()) r.time_zone = try self.toStringV(tzv);
+        if (!tzv.isUndefined()) r.time_zone = try self.toStringWtf8(tzv);
         if (try dtfGetStr(self, raw, "weekday", &style3, null)) |c| r.weekday = c;
         if (try dtfGetStr(self, raw, "era", &style3, null)) |c| r.era = c;
         if (try dtfGetStr(self, raw, "year", &numeric2, null)) |c| r.year = c;
@@ -24574,7 +24574,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return null;
-            const sval = try s.toStringV(v);
+            const sval = try s.toStringWtf8(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
                 try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
@@ -24595,20 +24595,20 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     {
         const lm = try self.getProperty(raw, "localeMatcher");
         if (!lm.isUndefined()) {
-            const s = try self.toStringV(lm);
+            const s = try self.toStringWtf8(lm);
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
         }
     }
     const nsv = try self.getProperty(raw, "numberingSystem");
     if (!nsv.isUndefined()) {
-        const ns = try std.ascii.allocLowerString(self.arena, try self.toStringV(nsv));
+        const ns = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(nsv));
         if (!dtfWellFormedType(ns)) return self.throwError("RangeError", "invalid numberingSystem");
         try self.setProp(ro, "numberingSystem", try Value.strAlloc(self.arena, ns));
     }
     // SetNumberFormatUnitOptions: style, then currency*/unit* (all read).
     const style = (try H.str(self, raw, ro, "style", &.{ "decimal", "percent", "currency", "unit" })) orelse "decimal";
     const cv = try self.getProperty(raw, "currency");
-    const cur_code: ?[]const u8 = if (cv.isUndefined()) null else try self.toStringV(cv);
+    const cur_code: ?[]const u8 = if (cv.isUndefined()) null else try self.toStringWtf8(cv);
     // A present currency is validated regardless of style (IsWellFormedCurrencyCode
     // = exactly three ASCII letters).
     if (cur_code) |code| {
@@ -24617,7 +24617,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
     const cdisp = try H.str(self, raw, ro, "currencyDisplay", &.{ "code", "symbol", "narrowSymbol", "name" });
     const csign = try H.str(self, raw, ro, "currencySign", &.{ "standard", "accounting" });
     const uv = try self.getProperty(raw, "unit");
-    const unit: ?[]const u8 = if (uv.isUndefined()) null else try self.toStringV(uv);
+    const unit: ?[]const u8 = if (uv.isUndefined()) null else try self.toStringWtf8(uv);
     const udisp = try H.str(self, raw, ro, "unitDisplay", &.{ "short", "long", "narrow" });
     // A missing currency under style:"currency" is a TypeError (takes precedence
     // over the unit check); a present-but-malformed unit is a RangeError for any
@@ -24661,7 +24661,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
             if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
             const rp = try self.getProperty(raw, "roundingPriority");
             if (!rp.isUndefined()) {
-                const rps = try self.toStringV(rp);
+                const rps = try self.toStringWtf8(rp);
                 if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
                     return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
             }
@@ -24686,7 +24686,7 @@ fn nfProcessOptions(self: *Interpreter, raw_in: Value) EvalError!*value.Object {
         } else if (!ug.toBoolean()) {
             try self.setProp(ro, "useGrouping", Value.boolVal(false));
         } else {
-            const s = try self.toStringV(ug);
+            const s = try self.toStringWtf8(ug);
             if (std.mem.eql(u8, s, "true") or std.mem.eql(u8, s, "false")) {
                 // The strings "true"/"false" fall back to the default ("auto").
             } else if (std.mem.eql(u8, s, "min2") or std.mem.eql(u8, s, "auto") or std.mem.eql(u8, s, "always")) {
@@ -24710,7 +24710,7 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
         fn str(s: *Interpreter, opts: Value, dst: *value.Object, name: []const u8, allowed: []const []const u8) EvalError!?[]const u8 {
             const v = try s.getProperty(opts, name);
             if (v.isUndefined()) return null;
-            const sval = try s.toStringV(v);
+            const sval = try s.toStringWtf8(v);
             for (allowed) |a| if (std.mem.eql(u8, sval, a)) {
                 try s.setProp(dst, name, try Value.strAlloc(s.arena, a));
                 return a;
@@ -24755,7 +24755,7 @@ fn prProcessOptions(self: *Interpreter, raw: Value) EvalError!*value.Object {
             if (has_sd) return self.throwError("TypeError", "roundingIncrement is incompatible with significant-digits options");
             const rp = try self.getProperty(raw, "roundingPriority");
             if (!rp.isUndefined()) {
-                const rps = try self.toStringV(rp);
+                const rps = try self.toStringWtf8(rp);
                 if (std.mem.eql(u8, rps, "morePrecision") or std.mem.eql(u8, rps, "lessPrecision"))
                     return self.throwError("TypeError", "roundingIncrement is incompatible with roundingPriority");
             }
@@ -24902,7 +24902,7 @@ fn intlServiceConstructorFn(comptime service: []const u8) value.NativeFn {
                     // collation: a well-formed Unicode collation type, else RangeError.
                     const cov = try self.getProperty(raw, "collation");
                     if (!cov.isUndefined()) {
-                        const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(cov));
+                        const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(cov));
                         if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
                         try self.setProp(ro, "collation", try Value.strAlloc(self.arena, cstr));
                     }
@@ -26134,7 +26134,7 @@ fn collatorOptionsFrom(self: *Interpreter, locales: Value, options: Value) EvalE
         if (!ip.isUndefined()) opts.ignore_punctuation = ip.toBoolean();
         const collation = try self.getProperty(raw, "collation");
         if (!collation.isUndefined()) {
-            const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringV(collation));
+            const cstr = try std.ascii.allocLowerString(self.arena, try self.toStringWtf8(collation));
             if (!dtfWellFormedType(cstr)) return self.throwError("RangeError", "invalid collation");
             if (collatorCollationSupported(locale, cstr)) opts.collation = cstr;
         }
@@ -28995,7 +28995,7 @@ fn intlSupportedLocalesOfFn(ctx: *anyopaque, this: Value, args: []const Value) v
         const opts: Value = Value.obj(try self.toObject(args[1]));
         const lm = try self.getProperty(opts, "localeMatcher");
         if (!lm.isUndefined()) {
-            const s = try self.toStringV(lm);
+            const s = try self.toStringWtf8(lm);
             if (!std.mem.eql(u8, s, "lookup") and !std.mem.eql(u8, s, "best fit")) return self.throwError("RangeError", "invalid value for option localeMatcher");
         }
     }
