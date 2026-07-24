@@ -356,7 +356,7 @@ const Serializer = struct {
             },
             .string => {
                 try s.w.tag(.string);
-                try s.writeStr(v.asStr());
+                try s.writeStr(try v.asWtf8(s.self.arena));
             },
             .object => try s.serObject(v.asObj(), depth),
         }
@@ -499,7 +499,7 @@ const Serializer = struct {
             const msg = try s.self.getProperty(Value.obj(o), "message");
             if (msg.isString()) {
                 try s.w.byte(1);
-                try s.writeStr(msg.asStr());
+                try s.writeStr(try msg.asWtf8(s.self.arena));
             } else {
                 try s.w.byte(0);
             }

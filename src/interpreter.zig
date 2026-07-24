@@ -15054,7 +15054,7 @@ pub const Interpreter = struct {
             }
         }
         if (eq(name, "localeCompare")) {
-            const other = try self.toStringV(arg0(args));
+            const other = try self.toStringWtf8(arg0(args));
             const opts = try collatorOptionsFrom(self, if (args.len > 1) args[1] else Value.undef(), if (args.len > 2) args[2] else Value.undef());
             return Value.num(try collatorCompareStrings(self, s, other, opts));
         }
@@ -27595,8 +27595,8 @@ fn installIntlCompare(a: std.mem.Allocator, rs: *Shape, proto: *value.Object, im
 fn intlCollatorCompareFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!intlBrandOk(this, "Collator")) return self.throwError("TypeError", "Intl.Collator.prototype.compare on incompatible receiver");
-    const x = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
-    const y = try self.toStringV(if (args.len > 1) args[1] else Value.undef());
+    const x = try self.toStringWtf8(if (args.len > 0) args[0] else Value.undef());
+    const y = try self.toStringWtf8(if (args.len > 1) args[1] else Value.undef());
     const loc = if (this.asObj().getOwn("\x00locale")) |v| if (v.isString()) v.asStr() else "en" else "en";
     const ro = if (this.asObj().getOwn("\x00opts")) |v| v else Value.undef();
     const opts = try collatorOptionsFrom(self, try Value.strAlloc(self.arena, loc), ro);
@@ -27801,7 +27801,7 @@ fn lfBuildParts(self: *Interpreter, this: Value, args: []const Value) value.Host
             self.iteratorClose(it) catch {};
             return self.throwError("TypeError", "Intl.ListFormat: list items must be strings");
         }
-        try strs.append(self.arena, nv.asStr());
+        try strs.append(self.arena, try nv.asWtf8(self.arena));
     }
     const list = strs.items;
     var typ: []const u8 = "conjunction";
@@ -46929,7 +46929,7 @@ fn symbolFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!V
     // `description` is ToString'd (honoring a `{toString}`/`{valueOf}` object);
     // a Symbol description is a TypeError, and `undefined` means none.
     const desc: ?[]const u8 = if (args.len > 0 and !args[0].isUndefined())
-        try self.toStringV(args[0])
+        try self.toStringWtf8(args[0])
     else
         null;
     const sym = try makeSymbolObj(self.arena, self.root_shape, desc, symbolProto(self));
@@ -46972,7 +46972,7 @@ fn symbolForFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostErro
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     // `key` is ToString(arg) — honoring a `{toString}`/`{valueOf}` object and
     // throwing for a Symbol — not the raw default stringification.
-    const key = if (args.len > 0) try self.toStringV(args[0]) else "undefined";
+    const key = if (args.len > 0) try self.toStringWtf8(args[0]) else "undefined";
     return symbolForKey(self, key);
 }
 

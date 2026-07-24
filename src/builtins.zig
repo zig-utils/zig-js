@@ -3439,7 +3439,9 @@ fn escapeCodeUnit(arena: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), ke
 pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const s = try self.toStringV(arg(args, 0));
+    // WTF-8 view: the Utf8Iterator below would panic on a flat-latin1 cell's raw
+    // 1-byte-per-unit image (0x80–0xFF decodes as a truncated UTF-8 sequence).
+    const s = try self.toStringWtf8(arg(args, 0));
     const keep = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@*_+-./";
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var it = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
@@ -3464,7 +3466,7 @@ pub fn escapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
 pub fn unescapeFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Value {
     _ = this;
     const self = interp(ctx);
-    const s = try self.toStringV(arg(args, 0));
+    const s = try self.toStringWtf8(arg(args, 0));
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     var cpbuf: [4]u8 = undefined;
     var i: usize = 0;
