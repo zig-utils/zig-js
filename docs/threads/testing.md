@@ -165,9 +165,9 @@ world-stopped finish.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 243 promoted files out of 259 executable PR-249 files: 241 in the
-default `zig build threads-test` allowlist plus 2 `parallel_js`-only witnesses.
-Ten optimizing-tier files remain blocked by
+contains 246 promoted files out of 259 executable PR-249 files: 241 in the
+default `zig build threads-test` allowlist plus 5 `parallel_js`-only witnesses.
+Seven optimizing-tier files remain blocked by
 [#429](https://github.com/zig-utils/zig-js/issues/429); six JSC-private or
 intentionally incompatible premises have verifier-enforced terminal
 dispositions. The native unit suite checks WebAssembly validation, compilation,
@@ -894,7 +894,7 @@ collector synchronization.
 
 The 16 unpromoted executables are explicit:
 
-- 10 optimizing-tier cases are blocked by #146/#429.
+- 7 optimizing-tier cases are blocked by #146/#429.
 - 3 incompatible premises require spawned-thread Wasm refusal, suppress a
   specification-permitted `TypedArray.set` `RangeError`, or construct a view
   after transfer detaches its buffer.
