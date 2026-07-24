@@ -422,6 +422,24 @@ fn printExceptionWithoutJs(e: js.Value) void {
     std.debug.print(": {s}", .{message.asStr()});
 }
 
+/// Optimizing-tier evidence for one case. A green assertion does not show that
+/// a PR-249 optimizer witness exercised the optimizing tier — the same script
+/// can pass entirely through bytecode or baseline — and #429 refuses promotion
+/// without that proof. Printing publications, invalidations, and collections
+/// per case makes the promotion decision reviewable instead of a judgement
+/// call. Silent for cases that never reached the tier, so the corpus log stays
+/// readable.
+fn printOptimizerEvidence(ctx: *js.Context) void {
+    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+    const publications = owner.optimizerPublications();
+    const invalidations = owner.invalidation_generation.load(.acquire);
+    if (publications == 0 and invalidations == 0) return;
+    const collections: usize = if (ctx.gc) |heap| heap.full_collections + heap.minor_collections else 0;
+    std.debug.print("        optimizer: publications={d} invalidations={d} collections={d}\n", .{
+        publications, invalidations, collections,
+    });
+}
+
 /// Heap-cap accounting for a failing case. "Was the cap actually exhausted?" is
 /// the first question for any heap-limited witness and cannot be recovered from
 /// the exception alone (#100). No-op for cases that run without a cap.
@@ -854,6 +872,7 @@ pub fn main(init: std.process.Init) !void {
                 recordSlowCase(&slowest, name, case_ms);
                 if (balanced) {
                     std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
+                    printOptimizerEvidence(ctx);
                 } else {
                     const progress = ctx.evaluate("String(__asyncPassed) + '/' + String(__asyncExpected)") catch js.Value.undef();
                     const progress_s = if (progress.isString()) progress.asStr() else "?/?";

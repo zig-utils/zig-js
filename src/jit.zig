@@ -902,6 +902,13 @@ pub const Owner = struct {
     retired_bytes: std.atomic.Value(usize) = .init(0),
     reclaimed_artifacts: std.atomic.Value(usize) = .init(0),
     reclaimed_bytes: std.atomic.Value(usize) = .init(0),
+    /// Lifetime count of optimizing-tier publications, kept apart from
+    /// `live_artifacts` (which also counts baseline code) and never reset by
+    /// `clear`. Promotion evidence for a PR-249 case has to show the optimizing
+    /// tier actually ran, and a jettison would otherwise erase the proof — a
+    /// case that compiled and was immediately invalidated still exercised the
+    /// tier (#429).
+    optimizer_publications: std.atomic.Value(u64) = .init(0),
     /// Shape tokens every published artifact speculates on, summarized as a
     /// saturating bit filter (#457). A named-property mutation consults it
     /// before firing a Class-A stop: a shape no artifact speculates on cannot
@@ -1283,7 +1290,13 @@ pub const Owner = struct {
     fn accountPublished(self: *Owner, code: *const CompiledCode) void {
         _ = self.live_artifacts.fetchAdd(1, .monotonic);
         _ = self.live_bytes.fetchAdd(code.memory.mapping.len, .monotonic);
+        if (code.kind == .optimizer) _ = self.optimizer_publications.fetchAdd(1, .monotonic);
         self.watchPublishedShapes(code);
+    }
+
+    /// How many optimizing-tier artifacts this owner has ever published.
+    pub fn optimizerPublications(self: *const Owner) u64 {
+        return self.optimizer_publications.load(.acquire);
     }
 
     /// Register every shape a freshly published artifact speculates on, so a
