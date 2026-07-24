@@ -15813,12 +15813,13 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
 /// mutation of the holder — not the receiver — must fire Class-A invalidation
 /// and jettison it before the next read observes the new value (#457).
 ///
-/// The read stands alone rather than feeding arithmetic: a property node is
-/// typed `.other`, so an `add` whose site profiles as purely numeric refuses to
-/// lower `o.y + 1` and the whole chunk goes uncompiled, which would make this
-/// test assert publication the optimizer cannot deliver. Typing a
-/// value-profiled property read under a guard is the next #457 slice; the
-/// inherited assumption and its invalidation are what this test owns.
+/// The read stands alone rather than feeding arithmetic. A property node is
+/// typed `.other`, and the graph only gives a binary an effect state when its
+/// per-site profile already demands the runtime ABI, so `o.y + 1` has neither a
+/// Number-specialized form nor a staged descriptor to fall back to and the
+/// whole chunk goes uncompiled — nothing published, nothing to invalidate.
+/// Closing that is its own slice; the inherited assumption and its
+/// invalidation are what this test owns.
 fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_class_a_stop: bool) !void {
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
