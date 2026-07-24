@@ -1463,7 +1463,7 @@ pub fn regExpFn(ctx: *anyopaque, this: Value, args: []const Value) HostError!Val
     // SyntaxError from parsing the literal "undefined".
     const pattern: []const u8 = if (internal_pattern) |p| p else blk: {
         const pv = if (pattern_is_regexp) try self.getProperty(a0, "source") else a0;
-        break :blk if (pv.isUndefined()) "" else try self.toStringV(pv);
+        break :blk if (pv.isUndefined()) "" else try self.toStringWtf8(pv);
     };
     const flags: []const u8 = if (!flags_arg.isUndefined())
         try self.toStringV(flags_arg)
@@ -2968,8 +2968,9 @@ pub fn jsonParse(ctx: *anyopaque, this: Value, args: []const Value) HostError!Va
         self.env = env;
     };
     // ToString(text) — a value object's @@toPrimitive/toString/valueOf runs (and
-    // a Symbol throws) before parsing.
-    const text = try self.toStringV(arg(args, 0));
+    // a Symbol throws) before parsing. Read as WTF-8 so a flat-latin1 input cell
+    // is tokenized as canonical WTF-8 (parsed keys/values then store correctly).
+    const text = try self.toStringWtf8(arg(args, 0));
     var p = JsonParser{ .s = text, .i = 0, .interp = self };
     p.skipWs();
     const parsed = p.parseValue() catch return self.throwError("SyntaxError", "JSON.parse: invalid JSON");

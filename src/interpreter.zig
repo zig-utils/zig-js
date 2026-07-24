@@ -8492,7 +8492,9 @@ pub const Interpreter = struct {
         }
         if (eq(name, "exec")) {
             const src = arg0(args);
-            const input = try self.toStringV(src);
+            // The regex engine scans `input` as WTF-8, so a flat-latin1 subject
+            // cell must be re-encoded (not read as its raw 1-byte-per-unit image).
+            const input = try self.toStringWtf8(src);
             // ASCII input ⇒ byte offset == UTF-16 index, so the conversions below
             // are O(1) and this exec-in-a-loop stays O(n) overall (see isAscii).
             // The flag is cached on the source string's cell; a coerced non-string
@@ -8551,7 +8553,7 @@ pub const Interpreter = struct {
     }
 
     pub fn regexpTestBuiltin(self: *Interpreter, o: *value.Object, input_arg: Value) EvalError!bool {
-        const input = try self.toStringV(input_arg);
+        const input = try self.toStringWtf8(input_arg);
         const ascii = input_arg.isString() and input_arg.strIsAscii();
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
         const flags = o.regexFlags();
@@ -9245,7 +9247,7 @@ pub const Interpreter = struct {
         for (results.items) |result| {
             const length = toLen(try self.toNumberV(try self.getProperty(result, "length")));
             const captures_len = if (length == 0) 0 else length - 1;
-            const matched = try self.toStringV(try self.getProperty(result, "0"));
+            const matched = try self.toStringWtf8(try self.getProperty(result, "0"));
             const position = @min(toLen(try self.toNumberV(try self.getProperty(result, "index"))), string_len);
 
             var captures: std.ArrayListUnmanaged(Value) = .empty;
@@ -9256,7 +9258,7 @@ pub const Interpreter = struct {
                 if (capture.isUndefined()) {
                     try captures.append(self.arena, Value.undef());
                 } else {
-                    try captures.append(self.arena, try Value.strAlloc(self.arena, try self.toStringV(capture)));
+                    try captures.append(self.arena, try Value.strAlloc(self.arena, try self.toStringWtf8(capture)));
                 }
             }
             const named_captures = try self.getProperty(result, "groups");
@@ -9269,7 +9271,7 @@ pub const Interpreter = struct {
                 try call_args.append(self.arena, Value.num(@floatFromInt(position)));
                 try call_args.append(self.arena, try Value.strAlloc(self.arena, s));
                 if (!named_captures.isUndefined()) try call_args.append(self.arena, named_captures);
-                replacement = try self.toStringV(try self.callValue(replace_value, call_args.items));
+                replacement = try self.toStringWtf8(try self.callValue(replace_value, call_args.items));
             } else {
                 const substitution_groups: Value = if (named_captures.isUndefined())
                     Value.undef()
@@ -14676,7 +14678,7 @@ pub const Interpreter = struct {
             // ToString(searchString) precedes ToInteger(position), and each runs
             // the argument's valueOf/toString (so an abrupt completion in either
             // propagates in spec order).
-            const sub = try self.toStringV(arg0(args));
+            const sub = try self.toStringWtf8(arg0(args));
             // `position` and the returned index are UTF-16 code-unit offsets, not
             // byte offsets: clamp the position in code units, convert to a byte
             // offset for the (self-synchronizing WTF-8) byte search, then map the
@@ -14687,19 +14689,19 @@ pub const Interpreter = struct {
         }
         if (eq(name, "includes")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.includes must not be a regular expression");
-            const sub = try self.toStringV(arg0(args));
+            const sub = try self.toStringWtf8(arg0(args));
             const pos = try self.clampPos(arg(args, 1), s.len);
             return Value.boolVal(std.mem.indexOf(u8, s[pos..], sub) != null);
         }
         if (eq(name, "startsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.startsWith must not be a regular expression");
-            const sub = try self.toStringV(arg0(args));
+            const sub = try self.toStringWtf8(arg0(args));
             const pos = try self.clampPos(arg(args, 1), s.len);
             return Value.boolVal(std.mem.startsWith(u8, s[pos..], sub));
         }
         if (eq(name, "endsWith")) {
             if (try self.isRegExp(arg0(args))) return self.throwError("TypeError", "First argument to String.prototype.endsWith must not be a regular expression");
-            const sub = try self.toStringV(arg0(args));
+            const sub = try self.toStringWtf8(arg0(args));
             // `endPosition` defaults to the string length; the match ends there.
             const end_pos = if (args.len > 1 and !args[1].isUndefined()) try self.clampPos(args[1], s.len) else s.len;
             return Value.boolVal(std.mem.endsWith(u8, s[0..end_pos], sub));
@@ -14753,7 +14755,7 @@ pub const Interpreter = struct {
         if (eq(name, "concat")) {
             var buf: std.ArrayListUnmanaged(u8) = .empty;
             try buf.appendSlice(self.arena, s);
-            for (args) |a| try buf.appendSlice(self.arena, try self.toStringV(a));
+            for (args) |a| try buf.appendSlice(self.arena, try self.toStringWtf8(a));
             return try Value.strOwned(self.arena, try buf.toOwnedSlice(self.arena));
         }
         if (eq(name, "split")) {
@@ -14801,7 +14803,7 @@ pub const Interpreter = struct {
                 try out.append(self.arena, try Value.strOwned(self.arena, try self.arena.dupe(u8, s[p..])));
                 return result;
             }
-            const sep = try self.toStringV(args[0]);
+            const sep = try self.toStringWtf8(args[0]);
             if (lim == 0) return result;
             if (sep.len == 0) {
                 // Empty separator splits into individual UTF-16 code units (an
@@ -14920,7 +14922,7 @@ pub const Interpreter = struct {
                         try call_args.append(a, Value.num(@floatFromInt(mstart)));
                         try call_args.append(a, try Value.strAlloc(self.arena, s));
                         const r = try self.callValue(repl_val, call_args.items);
-                        try buf.appendSlice(a, try self.toStringV(r));
+                        try buf.appendSlice(a, try self.toStringWtf8(r));
                     } else {
                         const groups = try self.regexGroups(re, m);
                         try self.getSubstitution(&buf, template, m.slice, s, mstart, m.captures, groups);
@@ -14934,7 +14936,7 @@ pub const Interpreter = struct {
             }
 
             // String pattern: replace the first occurrence (or all for replaceAll).
-            const pat = try self.toStringV(arg0(args));
+            const pat = try self.toStringWtf8(arg0(args));
             const template: []const u8 = if (is_func) "" else try self.toStringWtf8(repl_val);
             var from: usize = 0;
             while (from <= s.len) { // `from` stays in-bounds so the search never reads past the end
@@ -14943,7 +14945,7 @@ pub const Interpreter = struct {
                 const position = utf16IndexFromByteOffset(s, idx);
                 if (is_func) {
                     const r = try self.callValue(repl_val, &.{ try Value.strAlloc(self.arena, pat), Value.num(@floatFromInt(position)), try Value.strAlloc(self.arena, s) });
-                    try buf.appendSlice(a, try self.toStringV(r));
+                    try buf.appendSlice(a, try self.toStringWtf8(r));
                 } else {
                     try self.getSubstitutionValues(&buf, template, pat, s, position, &.{}, Value.undef());
                 }
@@ -14980,7 +14982,7 @@ pub const Interpreter = struct {
             // ToString(searchString) then ToNumber(position): a NaN position
             // (incl. the default `undefined`) searches the whole string; otherwise
             // the match must start at or before the clamped position.
-            const sub = try self.toStringV(arg0(args));
+            const sub = try self.toStringWtf8(arg0(args));
             // `position` and the returned index are UTF-16 code-unit offsets.
             const cu_len = utf16LenOfStringA(s, s_ascii);
             const np = try self.toNumberV(arg(args, 1));
@@ -15120,7 +15122,7 @@ pub const Interpreter = struct {
             else if (regexp.isUndefined())
                 ""
             else
-                try self.toStringV(regexp);
+                try self.toStringWtf8(regexp);
             const rx = try self.makeRegex(src, "g");
             if (skey) |k| {
                 const m = try self.getProperty(rx, k);
@@ -15135,7 +15137,7 @@ pub const Interpreter = struct {
     /// becomes `new RegExp(String(v))`.
     fn toRegexObject(self: *Interpreter, v: Value) EvalError!*value.Object {
         if (v.isObject() and v.asObj().behavior.is_regex) return v.asObj();
-        const pat = if (v.isUndefined()) "" else try self.toStringV(v);
+        const pat = if (v.isUndefined()) "" else try self.toStringWtf8(v);
         return (try self.makeRegex(pat, "")).asObj();
     }
 
@@ -15343,7 +15345,7 @@ pub const Interpreter = struct {
                         continue;
                     };
                     const gv = try self.getProperty(groups, template[i + 2 .. close]);
-                    if (!gv.isUndefined()) try self.appendStringSlice(buf, try self.toStringV(gv));
+                    if (!gv.isUndefined()) try self.appendStringSlice(buf, try self.toStringWtf8(gv));
                     i = close;
                 },
                 '0'...'9' => {
@@ -17252,7 +17254,9 @@ fn printFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Va
     const buf = self.print_buffer orelse return Value.undef();
     for (args, 0..) |a, i| {
         if (i != 0) try buf.append(self.arena, ' ');
-        try buf.appendSlice(self.arena, try a.toString(self.arena));
+        // A flat-latin1 string arg must egress as canonical WTF-8, not its raw
+        // 1-byte-per-unit image; non-strings keep their existing coercion.
+        try buf.appendSlice(self.arena, if (a.isString()) try a.asWtf8(self.arena) else try a.toString(self.arena));
     }
     try buf.append(self.arena, '\n');
     return Value.undef();
@@ -30767,7 +30771,7 @@ fn stringIteratorFn(ctx: *anyopaque, this: Value, args: []const Value) value.Hos
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (this.isUndefined() or this.isNull())
         return self.throwError("TypeError", "String.prototype[Symbol.iterator] called on null or undefined");
-    return self.makeCursorIterator(try Value.strAlloc(self.arena, try self.toStringV(this)));
+    return self.makeCursorIterator(try Value.strAlloc(self.arena, try self.toStringWtf8(this)));
 }
 
 /// %RegExpStringIteratorPrototype%.next — lazily RegExpExec the matcher against
@@ -31091,7 +31095,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
             }
         },
         .string => {
-            const s = src.asStr();
+            const s = try src.asWtf8(self.arena);
             if (i < s.len) {
                 // A String iterator yields one JS code point, not one byte. That is
                 // normally one UTF-8 scalar, but can also be a WTF-8 surrogate pair
