@@ -836,7 +836,7 @@
       "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
       "mode": "parallel-js",
       "ms": 893196,
-      "note": "cause known: TypeError: Atomics.wait: object has no own data property, at 893,196 ms. Not a hang \u2014 it simply needs more than the max(600s, 4x serialized) the policy allots it (600s here against 148s serialized), so earlier passes recorded it as did-not-finish. The failure is in the property-mode Atomics path. Passes serialized.",
+      "note": "cause known: TypeError: Atomics.wait: object has no own data property at ~894,000 ms. Not a hang and not a TypedArray issue. Instrumenting the rejection shows the key is `0` on a non-array with no elements \u2014 i.e. harness.js sleepMs took its `else` branch, `Atomics.wait(lane, 0, 0, ms)`, on a lane built as `{v: 0}`. Both the lane's construction and that branch test `typeof Thread === \"function\"`, so the global resolved at startup and stopped resolving later. Shares a likely root cause with dw2-marklistset-storm.js: a binding that exists stops resolving under concurrent no-GIL execution.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
@@ -910,7 +910,7 @@
       "case": "dw2-marklistset-storm.js",
       "mode": "parallel-js",
       "ms": 1473547,
-      "note": "cause partly known: ReferenceError on `threads` at ~1.4e6 ms, not a concurrency assertion. Instrumenting the two ReferenceError paths separately identified it as the TREE-WALKER path with the binding ABSENT (not TDZ): both lookupIdent and globalProp returned null for a block-scoped const initialised two statements earlier, with main-thread GC pressure in between. A reduction of that shape PASSES (see unit test 'parallel_js: a block-scoped binding survives concurrent collection'), so scale or the corpus harness matters. Passes serialized.",
+      "note": "cause partly known: ReferenceError on `threads` at ~1.4e6 ms, not a concurrency assertion. Instrumenting the four ReferenceError sites separately identified the TREE-WALKER path with the binding ABSENT (not TDZ): a block-scoped const initialised two statements earlier, with main-thread GC pressure in between. A reduction of that shape PASSES (unit test 'parallel_js: a block-scoped binding survives concurrent collection'), so scale or the corpus harness matters. Shares a likely root cause with dw2-marklistset-storm.js: a binding that exists stops resolving under concurrent no-GIL execution.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
