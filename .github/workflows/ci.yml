@@ -75,6 +75,23 @@ jobs:
           # the bounded terminal-premise probes against the installed runner.
           - name: threads-reference-audit
             cmd: zig build threads-reference-audit threads-reference-probes
+          # Bounded witness for the #430 execution inventory. The complete
+          # artifact is a deliberate hours-long reproduction; this keeps the
+          # tooling that produces it from rotting silently, on every push.
+          - name: threads-execution-inventory-witness
+            cmd: |
+              zig build threads-test -Dthreads-case=smoke.js,jit/int-gate-epoch-reclaim.js -Dthreads-inventory="$RUNNER_TEMP/pr249-exec.json"
+              python3 - "$RUNNER_TEMP/pr249-exec.json" <<'PY'
+              import json, sys
+              d = json.load(open(sys.argv[1]))
+              assert d["summary"]["cases"] == 2, d
+              assert d["summary"]["failed"] == 0, d
+              assert d["mode"] == "serialized", d
+              for c in d["cases"]:
+                  for key in ("case", "mode", "ms", "result", "optimizer_publications", "optimizer_invalidations"):
+                      assert key in c, (key, c)
+              print("execution inventory witness ok:", d["summary"])
+              PY
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
           - name: wasm-feature-profiles
