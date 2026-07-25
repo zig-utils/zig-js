@@ -935,6 +935,11 @@ pub fn main(init: std.process.Init) !void {
             const options = js.Context.TestingOptions{
                 .enable_threads = enable_threads,
                 .enable_gc = heap_limit_bytes != null or parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
+                // No step ceiling: these are deliberately long stress scripts,
+                // and the JSC shell they were written against has none. A
+                // lifetime step cap fails them for running long rather than for
+                // being wrong (#429).
+                .step_budget = std.math.maxInt(u64),
                 .parallel_gc = parallel_js and enable_threads,
                 .parallel_js = parallel_js and enable_threads,
                 .main_can_block = !std.mem.endsWith(u8, name, "blocking-gate.js"),

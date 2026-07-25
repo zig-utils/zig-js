@@ -2399,8 +2399,10 @@ fn quickRecurrencePlan(chunk: *Chunk, parallel_sync: bool) ?*QuickRecurrencePlan
     return plan;
 }
 
-fn addRecurrenceSteps(first: u64, second: u64) u64 {
-    const cap = interp.max_steps + 1;
+/// Saturating step estimate for a recurrence node. `cap` is the caller's own
+/// budget ceiling plus one, so a saturated estimate still means "past budget"
+/// for an interpreter whose ceiling was lifted, not just for the default one.
+fn addRecurrenceSteps(cap: u64, first: u64, second: u64) u64 {
     const children = std.math.add(u64, first, second) catch return cap;
     return @min(std.math.add(u64, children, 16) catch cap, cap);
 }
@@ -2412,7 +2414,7 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
         const advance = @min(remaining, until_checkpoint);
         vm.steps += advance;
         remaining -= advance;
-        if (vm.steps > interp.max_steps)
+        if (vm.steps > vm.step_budget)
             return vm.throwError("RangeError", "evaluation step budget exceeded");
         if ((vm.steps & 1023) == 0) {
             if (vm.stop_flag) |flag| if (flag.load(.monotonic))
@@ -2426,7 +2428,7 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
 
 inline fn advanceQuickObservableSteps(vm: *Interpreter, requested: u64) EvalError!void {
     const end = std.math.add(u64, vm.steps, requested) catch return advanceQuickSteps(vm, requested);
-    if (end <= interp.max_steps and (vm.steps >> 10) == (end >> 10)) {
+    if (end <= vm.step_budget and (vm.steps >> 10) == (end >> 10)) {
         vm.steps = end;
         return;
     }
@@ -2573,7 +2575,7 @@ fn tryQuickNumericRecurrence(vm: *Interpreter, func: *Function, args: []const Va
                     const first = n - recurrence.first_delta;
                     const second = n - recurrence.second_delta;
                     results[n] = results[first] + results[second];
-                    steps[n] = addRecurrenceSteps(steps[first], steps[second]);
+                    steps[n] = addRecurrenceSteps(vm.step_budget +| 1, steps[first], steps[second]);
                 }
             }
             try advanceQuickSteps(vm, steps[input]);
@@ -3698,7 +3700,7 @@ fn unsigned32GuardsPass(slots: []const Value, required_mask: u64) bool {
 fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @intFromEnum(jit.ExitStatus.stop)));
     const steps = (frame.steps orelse return @intFromEnum(jit.ExitStatus.stop)).*;
-    if (steps > interp.max_steps) {
+    if (steps > vm.step_budget) {
         const abrupt = vm.catchableOutOfMemory(vm.throwError("RangeError", "evaluation step budget exceeded"));
         return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     }
@@ -5170,7 +5172,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         !nativeSlotGuardsPass(native, slots)) return .miss;
     if (native.has_side_exits or native.native_operations != null) {
         const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
-        if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
+        if (end_steps > vm.step_budget or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
     }
     const frame_slots: usize = @intCast(native.frame_slots);
     const live_slots = slots[0..frame_slots];
@@ -5190,7 +5192,7 @@ fn tryRunManagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slots:
         .array_append_guard = nativeArrayAppendGuard,
         .array_push_grow = nativeArrayPushGrow,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
-        .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+        .steps_until_budget = if (vm.steps <= vm.step_budget) vm.step_budget - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
@@ -5245,7 +5247,7 @@ fn tryRunOsrNative(
         exec.acc.rawBits(),
     ) orelse return .miss;
     const end_steps = std.math.add(u64, vm.steps, native.bytecode_steps) catch return .miss;
-    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
+    if (end_steps > vm.step_budget or (vm.steps >> 10) != (end_steps >> 10)) return .miss;
 
     var scratch: [jit.numeric_scratch_capacity]u64 = undefined;
     const frame_words: []const u64 = @ptrCast(slots);
@@ -5265,7 +5267,7 @@ fn tryRunOsrNative(
         .array_append_guard = nativeArrayAppendGuard,
         .array_push_grow = nativeArrayPushGrow,
         .steps_until_checkpoint = 1024 - (vm.steps & 1023),
-        .steps_until_budget = if (vm.steps <= interp.max_steps) interp.max_steps - vm.steps else 0,
+        .steps_until_budget = if (vm.steps <= vm.step_budget) vm.step_budget - vm.steps else 0,
         .invalidation_generation = native.invalidation_generation,
         .expected_invalidation_generation = native.expected_invalidation_generation,
     };
@@ -5307,7 +5309,7 @@ fn tryRunUnmanagedNative(vm: *Interpreter, native: *const jit.CompiledCode, slot
 
     const instruction_count: u64 = native.bytecode_steps;
     const end_steps = std.math.add(u64, vm.steps, instruction_count) catch return null;
-    if (end_steps > interp.max_steps or (vm.steps >> 10) != (end_steps >> 10)) return null;
+    if (end_steps > vm.step_budget or (vm.steps >> 10) != (end_steps >> 10)) return null;
     const saved_steps = vm.steps;
     vm.steps = end_steps;
 
@@ -5706,7 +5708,7 @@ fn runChunk(
                 serviceVmStackStatement(vm, node);
         };
         vm.steps += 1;
-        if (vm.steps > interp.max_steps) return vm.throwError("RangeError", "evaluation step budget exceeded");
+        if (vm.steps > vm.step_budget) return vm.throwError("RangeError", "evaluation step budget exceeded");
         if ((vm.steps & 1023) == 0) {
             if (vm.stop_flag) |sf| if (sf.load(.monotonic))
                 return vm.throwError("Error", "worker terminated");
@@ -5807,7 +5809,7 @@ fn runChunk(
                 if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_call_loop_candidate) != 0) {
                     if (quickCallLoopPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
-                        const steps_until_budget = interp.max_steps - vm.steps;
+                        const steps_until_budget = vm.step_budget - vm.steps;
                         const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                         if (try tryQuickNumericCallLoop(vm, chunk, plan, cf, start, max_extra_steps, parallel_sync)) |quick| {
                             vm.steps += quick.extra_steps;
@@ -5819,7 +5821,7 @@ fn runChunk(
                 if (!debug_execution and stack.items.len == 0 and (quick_loop_candidates & bc.quick_array_loop_candidate) != 0) {
                     if (quickArrayPlan(chunk, start, parallel_sync)) |plan| {
                         const steps_until_checkpoint = 1024 - (vm.steps & 1023);
-                        const steps_until_budget = interp.max_steps - vm.steps;
+                        const steps_until_budget = vm.step_budget - vm.steps;
                         // The fixed-shape allocation plan has no observable
                         // calls inside one guarded iteration. Let it finish at
                         // most one iteration across the internal checkpoint,
@@ -5901,7 +5903,7 @@ fn runChunk(
                     cf.unlockSlots(held);
                     if (!quick_property_base) break :property;
                     const steps_until_checkpoint = 1024 - (vm.steps & 1023);
-                    const steps_until_budget = interp.max_steps - vm.steps;
+                    const steps_until_budget = vm.step_budget - vm.steps;
                     const max_extra_steps = @min(steps_until_checkpoint - 1, steps_until_budget);
                     if (tryQuickPropertyKernel(chunk, cf, start, max_extra_steps, parallel_sync)) |quick| {
                         vm.steps += quick.extra_steps;

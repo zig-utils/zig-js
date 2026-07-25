@@ -2647,6 +2647,9 @@ pub const Context = struct {
     /// outlive the arena, GC backing, budget wrapper, JIT owner, and Context.
     host_allocator_lock: ?*SerializedAllocator = null,
     budget_allocator: ?*BudgetAllocator = null,
+    /// Runaway-step ceiling handed to every interpreter this realm creates.
+    /// See `TestingOptions.step_budget`.
+    step_budget: u64 = interp.max_steps,
     arena_state: *std.heap.ArenaAllocator,
     /// Thread-safe wrapper over `arena_state` installed when `enable_threads`
     /// (null otherwise → raw arena). Makes parallel shape/string/AST/binding
@@ -3200,6 +3203,11 @@ pub const Context = struct {
         /// Same resource-control knob as public `Options.heap_limit_bytes`, kept
         /// here so conformance/fuzzer drivers can exercise quota behavior.
         heap_limit_bytes: ?usize = null,
+        /// Per-interpreter runaway-step ceiling; null keeps `interp.max_steps`.
+        /// A harness that deliberately runs long stress scripts — the PR-249
+        /// corpus runner is ours, and JSC's shell has no step budget at all —
+        /// sets this rather than being failed for running too long.
+        step_budget: ?u64 = null,
         /// Test-shell flag model for PR-249 `--useSharedArrayBuffer=0`: leave
         /// property Atomics installed, but hide the global SAB constructor.
         enable_shared_array_buffer: bool = true,
@@ -3850,6 +3858,7 @@ pub const Context = struct {
             .gpa = context_gpa,
             .host_allocator_lock = host_allocator_lock,
             .budget_allocator = budget_allocator,
+            .step_budget = options.step_budget orelse interp.max_steps,
             .arena_state = arena_state,
             .locked_arena = locked_arena,
             .jit_owner = jit.Owner.init(context_gpa),
@@ -4109,6 +4118,7 @@ pub const Context = struct {
             .unhandled_rejections = &self.unhandled_rejections,
             .handled_rejections = &self.handled_rejections,
             .out_of_memory_exception = self.reserved_thread_oom_error orelse Value.undef(),
+            .step_budget = self.step_budget,
             // Only engage per-queue microtask locking in no-GIL mode;
             // single-threaded and `.gil = true` execution stay lock-free.
             .lock_microtasks = self.parallel_js,
@@ -14937,6 +14947,35 @@ test "Context heap_limit_bytes fails closed on allocation pressure" {
     const failed_stats = ctx.heapBudgetStats().?;
     try std.testing.expect(failed_stats.peak_bytes <= failed_stats.limit_bytes);
     try std.testing.expectEqual(failed_stats.limit_bytes - failed_stats.used_bytes, failed_stats.remaining_bytes);
+}
+
+test "Context step_budget keeps the default runaway guard and honours an override" {
+    // The guard still fires for an ordinary embedding: `evaluate` must return
+    // rather than spin forever on a runaway script.
+    {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{ .step_budget = 200_000 });
+        defer ctx.destroy();
+        try std.testing.expectError(error.Throw, ctx.evaluate("while (true) {}"));
+        const exception = ctx.exception orelse return error.TestUnexpectedResult;
+        try std.testing.expect(exception.isObject());
+        try std.testing.expectEqualStrings("RangeError", exception.asObj().errorName());
+    }
+    // A harness that deliberately runs long scripts can lift it. The PR-249
+    // corpus runner does exactly this, because the JSC shell those files were
+    // written against has no step budget at all — without it they fail for
+    // running long rather than for being wrong (#429).
+    {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .step_budget = std.math.maxInt(u64),
+        });
+        defer ctx.destroy();
+        const result = try ctx.evaluate(
+            \\let n = 0;
+            \\for (let i = 0; i < 400000; ++i) n += i;
+            \\n;
+        );
+        try std.testing.expectEqual(@as(f64, 79999800000), result.asNum());
+    }
 }
 
 test "Context heap_limit_bytes names an escaping top-level OOM" {

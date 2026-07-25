@@ -74,6 +74,10 @@ pub const max_call_depth: u32 = 16384;
 /// protect the thread (`!stack_scan.boundsKnown()`), so an unsupported platform
 /// can't overflow. Matches the old hard limit.
 const conservative_call_depth: u32 = 128;
+/// Default runaway guard for a host-entered interpreter. It is a safety valve
+/// for an embedder that called `evaluate` and expects it to return, not a
+/// semantic limit — see `Interpreter.step_budget` for why a spawned `Thread`
+/// does not get one.
 pub const max_steps: u64 = 500_000_000;
 
 /// Below this logical call depth, a chain can't have consumed enough native
@@ -1573,6 +1577,18 @@ pub const Interpreter = struct {
     /// Robustness counters: function call depth and total evaluation steps.
     depth: u32 = 0,
     steps: u64 = 0,
+    /// Runaway-guard ceiling for `steps`, per interpreter.
+    ///
+    /// A step count is only a meaningful runaway proxy for work whose duration
+    /// this interpreter controls. A spawned `Thread` spinning on
+    /// `Atomics.load(flag)` until a peer signals it accumulates steps at a rate
+    /// set by *another* thread, so a lifetime cap there fails a correct program
+    /// for running too long — and raising the constant only moves the failure.
+    /// Thread lifetime is already bounded by join, termination, and the
+    /// wall-clock watchdog, which are the right instruments. `threadMain`
+    /// therefore lifts the ceiling for spawned threads and the host entry keeps
+    /// it.
+    step_budget: u64 = max_steps,
     /// VM call trampoline (see `vm.runDriver`): true while an explicit
     /// activation-stack driver is running, so the `.call` family pushes a new
     /// JS-chunk activation instead of recursing natively — lifting deep JS→JS
@@ -2739,7 +2755,7 @@ pub const Interpreter = struct {
     pub fn eval(self: *Interpreter, node: *const Node) EvalError!Value {
         try self.serviceDebugStatement(node);
         self.steps += 1;
-        if (self.steps > max_steps) return self.throwError("RangeError", "evaluation step budget exceeded");
+        if (self.steps > self.step_budget) return self.throwError("RangeError", "evaluation step budget exceeded");
         if ((self.steps & 1023) == 0) {
             if (self.stop_flag) |sf| if (sf.load(.monotonic))
                 return self.throwError("Error", "worker terminated");

@@ -798,6 +798,13 @@ fn threadMain(rec: *ThreadRecord, fn_v: Value, args: []const Value) void {
     defer _ = gc_mod.setActiveInterpreter(ai_saved);
     machine.microtasks = microtasks;
     machine.async_waiters = &async_waiters;
+    // A spawned Thread gets no step ceiling. The count is a runaway proxy only
+    // for work whose duration this interpreter controls, and a worker parked or
+    // spinning on a peer's signal accumulates steps at a rate that peer sets —
+    // so a lifetime cap fails correct programs for running too long, and
+    // raising the constant only moves the failure. This thread is already
+    // bounded by join, termination, and the wall-clock watchdog.
+    machine.step_budget = std.math.maxInt(u64);
     defer machine.abandonTimers();
     var result: Value = Value.undef();
     var threw = false;
