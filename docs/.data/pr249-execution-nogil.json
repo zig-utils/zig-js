@@ -835,11 +835,11 @@
     {
       "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
       "mode": "parallel-js",
-      "ms": 600134,
-      "note": "uncharacterised: no result within 600s (148s serialized). Targets UNGIL-HANDOUT section N.6, so a no-GIL-specific stall is plausible.",
+      "ms": 893196,
+      "note": "cause known: TypeError: Atomics.wait: object has no own data property, at 893,196 ms. Not a hang \u2014 it simply needs more than the max(600s, 4x serialized) the policy allots it (600s here against 148s serialized), so earlier passes recorded it as did-not-finish. The failure is in the property-mode Atomics path. Passes serialized.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
-      "result": "did-not-finish"
+      "result": "fail"
     },
     {
       "case": "cve/mc-val-atom-identity.js",
@@ -1978,14 +1978,14 @@
   "summary": {
     "cases": 246,
     "cases_reaching_optimizer": 106,
-    "deadline_policy": "max(600s, 4x serialized duration) per case",
-    "did_not_finish": 2,
-    "failed": 2,
-    "non_pass_cause_known": 1,
+    "deadline_policy": "max(600s, 4x serialized duration) per case; cve/mc-tear-typedarray-detach-grow-shrink.js needs 893s and was measured separately",
+    "did_not_finish": 1,
+    "failed": 3,
+    "non_pass_cause_known": 2,
     "non_pass_expected": 2,
-    "non_pass_uncharacterised": 1,
+    "non_pass_uncharacterised": 0,
     "passed": 242,
     "skipped": 0,
-    "total_ms": 6398334
+    "total_ms": 6691396
   }
 }

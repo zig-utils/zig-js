@@ -195,8 +195,8 @@ zig build threads-test -Dthreads-parallel-js=true -Dthreads-inventory=docs/.data
 Both artifacts are checked in:
 [serialized](../.data/pr249-execution-serialized.json) (241 cases, 240 pass,
 1 fail, 110 reaching the optimizing tier) and
-[no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 242 pass, 2 fail,
-2 not finishing, 106 reaching the tier).
+[no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 242 pass, 3 fail,
+1 not finishing, 106 reaching the tier, and no non-pass left uncharacterised).
 
 Not every no-GIL non-pass is an engine defect, and the artifact says which
 are which: every non-passing case carries a `note`, and the summary splits them
@@ -212,8 +212,13 @@ statements earlier; the statement between them runs the worker on the main
 thread and drives GC, so a block binding going unresolvable across concurrent
 collection is the lead. Both pass serialized.
 
-That leaves one uncharacterised: `cve/mc-tear-typedarray-detach-grow-shrink.js`
-produces no result within 600s against 148s serialized.
+`cve/mc-tear-typedarray-detach-grow-shrink.js` fails with
+`TypeError: Atomics.wait: object has no own data property` after 893s. It is not
+a hang: the deadline policy allots it 600s, so earlier passes recorded it as
+did-not-finish, and it needs to be measured separately. The failure is in the
+property-mode Atomics path.
+
+No non-passing case is uncharacterised.
 
 The no-GIL half needs bounded per-case isolation rather than one process:
 several cases do not terminate there, and `timeout` alone will not stop them
