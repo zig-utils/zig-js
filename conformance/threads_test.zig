@@ -536,6 +536,16 @@ fn printOptimizerEvidence(ctx: *js.Context, out_publications: *u64, out_invalida
         "        optimizer: publications={d} invalidations={d} collections={d} retired={d} reclaimed={d}\n",
         .{ publications, invalidations, collections, stats.retired_artifacts, stats.reclaimed_artifacts },
     );
+    // Call linking is a separate premise from artifact lifetime: a case can
+    // publish and retire plenty of code while every call still goes through
+    // canonical dispatch, which is precisely the distinction the writer/writer
+    // witness turns on. Printed only when the facility was used at all.
+    const link_publications = owner.optimizerCallLinkPublications();
+    const link_resets = owner.optimizerCallLinkResets();
+    if (link_publications != 0 or link_resets != 0) std.debug.print(
+        "        optimizer: call-links published={d} reset={d}\n",
+        .{ link_publications, link_resets },
+    );
 }
 
 /// Heap-cap accounting for a failing case. "Was the cap actually exhausted?" is

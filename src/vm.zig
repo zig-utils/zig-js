@@ -4062,13 +4062,14 @@ fn tryLinkedNativeCall(
                 return tryRunNativeDirectCall(vm, function, args);
             }
         }
-        _ = link.reset();
+        if (link.reset()) if (vm.jit_owner) |owner| owner.recordCallLinkReset();
     }
 
     const result = try tryRunNativeDirectCall(vm, function, args);
     if (result != null) if (optimizerCallTarget(function)) |target| {
         if (link.publish(identity, target.generation, @intFromPtr(target.artifact))) {
             if (builtin.is_test) _ = optimizer_native_call_link_publications.fetchAdd(1, .monotonic);
+            if (vm.jit_owner) |owner| owner.recordCallLinkPublication();
         }
     };
     return result;
@@ -9281,11 +9282,28 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
     try std.testing.expect(optimizer_native_call_link_publications.load(.monotonic) > call_link_publications_before);
+    // The owner-scoped counter is what corpus evidence reads, so it has to
+    // track the same events as the test-only one (#429).
+    try std.testing.expectEqual(
+        optimizer_native_call_link_publications.load(.monotonic) - call_link_publications_before,
+        owner.optimizerCallLinkPublications(),
+    );
+    try std.testing.expectEqual(@as(u64, 0), owner.optimizerCallLinkResets());
 
     const second_start = machine.steps;
     try std.testing.expectEqual(@as(f64, 14), (try run(&machine, root, null)).asNum());
     try std.testing.expectEqual(first_steps, machine.steps - second_start);
     try std.testing.expect(optimizer_native_call_link_hits.load(.monotonic) > call_link_hits_before);
+    // A hit is not a republication.
+    try std.testing.expectEqual(
+        optimizer_native_call_link_publications.load(.monotonic) - call_link_publications_before,
+        owner.optimizerCallLinkPublications(),
+    );
+
+    // A link that stays valid must never reset. The reset counter is the
+    // stale-target half of the same telemetry, and a spurious reset would both
+    // cost the direct-call path and forge writer/writer evidence.
+    try std.testing.expectEqual(@as(u64, 0), owner.optimizerCallLinkResets());
 }
 
 test "vm: optimizer native tail call replaces the current activation" {

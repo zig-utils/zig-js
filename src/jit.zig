@@ -909,6 +909,15 @@ pub const Owner = struct {
     /// case that compiled and was immediately invalidated still exercised the
     /// tier (#429).
     optimizer_publications: std.atomic.Value(u64) = .init(0),
+    /// Lifetime counts of optimizer call-link publication and reset, on the
+    /// same footing and for the same reason as `optimizer_publications`: a
+    /// PR-249 witness whose premise is concurrent slow-path call linking cannot
+    /// be promoted on a green assertion, because the identical script passes
+    /// with every call going through canonical dispatch (#429). Both events are
+    /// per-link transitions, not per-call, so counting them costs nothing on
+    /// the hit path — the hit counter stays test-only for exactly that reason.
+    optimizer_call_link_publications: std.atomic.Value(u64) = .init(0),
+    optimizer_call_link_resets: std.atomic.Value(u64) = .init(0),
     /// Shape tokens every published artifact speculates on, summarized as a
     /// saturating bit filter (#457). A named-property mutation consults it
     /// before firing a Class-A stop: a shape no artifact speculates on cannot
@@ -1297,6 +1306,25 @@ pub const Owner = struct {
     /// How many optimizing-tier artifacts this owner has ever published.
     pub fn optimizerPublications(self: *const Owner) u64 {
         return self.optimizer_publications.load(.acquire);
+    }
+
+    /// A call-link tuple was published coherently for a still-current target.
+    pub fn recordCallLinkPublication(self: *Owner) void {
+        _ = self.optimizer_call_link_publications.fetchAdd(1, .monotonic);
+    }
+
+    /// A published tuple was rejected at revalidation and cleared, which is the
+    /// stale-target half of the writer/writer contract.
+    pub fn recordCallLinkReset(self: *Owner) void {
+        _ = self.optimizer_call_link_resets.fetchAdd(1, .monotonic);
+    }
+
+    pub fn optimizerCallLinkPublications(self: *const Owner) u64 {
+        return self.optimizer_call_link_publications.load(.acquire);
+    }
+
+    pub fn optimizerCallLinkResets(self: *const Owner) u64 {
+        return self.optimizer_call_link_resets.load(.acquire);
     }
 
     /// Register every shape a freshly published artifact speculates on, so a
