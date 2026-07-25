@@ -237,6 +237,14 @@ DEPENDENCY_CATALOG = {
         "owner_issues": [143],
         "resolution": "explicitly-incompatible: zig-js supports WebAssembly in shared-realm threads",
     },
+    "nogil-binding-resolution": {
+        "description": (
+            "A block-scoped binding that exists stops resolving under concurrent "
+            "no-GIL execution, raising ReferenceError with the binding absent "
+            "rather than in TDZ"
+        ),
+        "owner_issues": [430],
+    },
     "optimizing-jit": {
         "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
         "owner_issues": [146, 429],
@@ -257,9 +265,19 @@ DEPENDENCY_CATALOG = {
 
 BLOCKED_DEPENDENCIES = {
     "checktraps-invalidation.js": ("jit-trap-polling", "optimizing-jit"),
+    # Observed blocker is no longer the optimizing tier. In a ReleaseSafe build
+    # this fails no-GIL in 6,009 ms with `ReferenceError: b`, where `b` is the
+    # second element of `const [a, b] = readPair(o)` used two statements later —
+    # the exact block-scoped-const shape #430 records for
+    # dw2-marklistset-storm.js, with the binding absent rather than in TDZ. It
+    # is now the cheapest reproduction of that defect by roughly two orders of
+    # magnitude. The JIT dependencies stay listed because they still gate
+    # promotion once the binding defect is fixed and the case can run to its
+    # poll/resume assertions.
     "cve/mc-aint-poll-resume-stale-elided.js": (
         "jit-trap-polling",
         "jsc-shared-heap-shell",
+        "nogil-binding-resolution",
         "optimizing-jit",
     ),
     "cve/mc-code-calllink-writer-writer.js": (
