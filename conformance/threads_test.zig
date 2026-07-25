@@ -133,6 +133,14 @@ const allowlist = [_][]const u8{
     "gc-stress/zombie-uaf-canary.js",
     "jit/construction-shared-constructor.js",
     "jit/fires-per-sec.js",
+    // Convergence witness for a hot `get_by_id` on a worker-reified constructor
+    // static (#429). Its own bounds are the gate: `numberOfDFGCompiles >= 1`
+    // proves each function tiered up and `<= 4` proves it did not sit in a
+    // recompile loop. Promoted on measured optimizing-tier evidence — three
+    // publications for its three hot functions, one compile each, in every mode
+    // — not on a green assertion; before `daa49c21` it entered the tier zero
+    // times because a global-rooted body could not compile at all.
+    "jit/foreign-reify-getbyid-converges.js",
     "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
     "jit/ftl-osr-entry-catch-loop-amplifier.js",
     "jit/golden-disasm-corpus.js",
