@@ -911,7 +911,7 @@
       "case": "dw2-marklistset-storm.js",
       "mode": "parallel-js",
       "ms": 1422584,
-      "note": "cause partly known: ReferenceError: threads at 1,382,154 ms. `threads` is a block-scoped const initialised two statements earlier and read in the same block; the statement between them runs the worker on the main thread, spilling MarkedVectors and driving GC. A block binding going unresolvable across concurrent collection is the lead. Passes serialized.",
+      "note": "cause partly known: ReferenceError: threads at 1,382,154 ms, not a concurrency assertion. `threads` is a block-scoped const initialised two statements before the read, with main-thread GC pressure in between. A reduction of exactly that shape (block const + spawned peers + main-thread churn under parallel_js) PASSES, so an unrooted block Environment is not sufficient on its own \u2014 see the unit test 'parallel_js: a block-scoped binding survives concurrent collection'. Passes serialized.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
