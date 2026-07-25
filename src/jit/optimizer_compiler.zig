@@ -348,7 +348,8 @@ fn stageNativeOperationDescriptors(
                 inst.op == .tail_call_eval or inst.op == .tail_call_method or
                 inst.op == .tail_call_with_this)
                 break :runtime operation.lhs;
-            if (inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
+            if (inst.op == .load_var or
+                inst.op == .new_object or inst.op == .new_array or inst.op == .init_prop or
                 inst.op == .init_proto or inst.op == .init_prop_computed or inst.op == .init_spread or
                 inst.op == .init_getter or inst.op == .init_setter or inst.op == .array_append or
                 inst.op == .array_spread or inst.op == .array_append_hole)
@@ -571,12 +572,12 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     for (graph.nodes) |node| switch (node.kind) {
         .block_argument => {},
         // A value from an interpreter-owned operation the graph does not model
-        // (an environment load, `this`, a regex literal). There is no data flow
-        // to lower and no zero-input runtime-operation descriptor shape to
-        // stage against, so refuse the chunk rather than speculate on an opaque
-        // value. This is what keeps a global-rooted function — the whole of
-        // `return typeof String.raw;` — out of the tier; modelling environment
-        // loads is the work that would let it compile (#431).
+        // (`this`, `new.target`, a regex literal). There is no data flow to
+        // lower, so refuse the chunk rather than speculate on an opaque value.
+        // Global-scope identifier reads used to land here, which kept every
+        // global-rooted function — the whole of `return typeof String.raw;` —
+        // out of the tier; they are now modelled as `.load_var` and staged as
+        // zero-input runtime operations.
         .interpreter_value => return error.UnsupportedChunk,
         .argument => {
             if (node.immediate >= chunk.param_count or node.immediate >= 64) return error.UnsupportedChunk;
@@ -730,7 +731,7 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
                 .immediate = node.origin,
             });
         },
-        .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
+        .load_var, .new_object, .new_array, .init_prop, .init_proto, .init_prop_computed, .init_spread, .init_getter, .init_setter, .array_append, .array_spread, .array_append_hole => {
             var state: ?optimizer.FrameState = null;
             for (graph.frame_states) |candidate| if (candidate.kind == .effect and
                 candidate.block == node.block and candidate.origin == node.origin)
@@ -960,7 +961,8 @@ pub fn lower(chunk: *const bc.Chunk, plan: *const optimizer.Plan, allocator: std
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or
+        native_operation_names[index] = if (inst.op == .load_var or
+            inst.op == .get_prop or inst.op == .set_prop or
             inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
             inst.op == .init_prop)
         name: {
@@ -1827,7 +1829,8 @@ fn lowerRegionOsr(
     for (native_operations, 0..) |descriptor, index| {
         if (descriptor.origin >= chunk.code.items.len) return error.UnsupportedChunk;
         const inst = chunk.code.items[descriptor.origin];
-        native_operation_names[index] = if (inst.op == .get_prop or inst.op == .set_prop or
+        native_operation_names[index] = if (inst.op == .load_var or
+            inst.op == .get_prop or inst.op == .set_prop or
             inst.op == .private_in or inst.op == .call_method or inst.op == .tail_call_method or
             inst.op == .init_prop)
         name: {
@@ -5201,7 +5204,8 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
     };
     const cases = [_]Case{
         .{ .op = .load_bigint },
-        .{ .op = .load_var },
+        // `load_var` used to belong here; it is now a modelled zero-input
+        // runtime operation, covered below.
         .{ .op = .load_var_or_undef },
         .{ .op = .load_upval },
         .{ .op = .load_this },
@@ -5239,6 +5243,53 @@ test "optimizer lowering publishes zero-stack interpreter-owned side exits" {
         try std.testing.expectEqual(@as(u64, 1), program.stack_maps[side_exit.deopt_index].frame_pointer_slots);
         try std.testing.expectEqual(@as(u128, 0), program.stack_maps[side_exit.deopt_index].scratch_pointer_slots);
     }
+}
+
+test "optimizer lowering stages a zero-input environment load" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 0;
+    chunk.local_count = 0;
+    const name = try chunk.addName("Number");
+    _ = try chunk.emit(.load_var, name);
+    _ = try chunk.emit(.ret, 0);
+
+    var plan = try optimizer.build(&chunk, std.testing.allocator);
+    defer plan.deinit();
+    var saw_node = false;
+    for (plan.graph.nodes) |node| if (node.kind == .load_var) {
+        try std.testing.expectEqual(@as(u64, name), node.immediate);
+        try std.testing.expect(node.may_have_effect);
+        saw_node = true;
+    };
+    try std.testing.expect(saw_node);
+    // The load is a value, not a terminal effect: nothing may treat it as the
+    // end of the region the way an unmodelled interpreter operation would.
+    for (plan.graph.nodes) |node| try std.testing.expect(node.kind != .interpreter_value);
+
+    var program = try lower(&chunk, &plan, std.testing.allocator);
+    defer program.deinit();
+    var saw_descriptor = false;
+    for (program.native_operations) |descriptor| {
+        if (descriptor.bytecode_op != @intFromEnum(bc.Op.load_var)) continue;
+        try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
+        try std.testing.expectEqual(@as(u32, 0), descriptor.origin);
+        try std.testing.expect(descriptor.step_delta != 0);
+        saw_descriptor = true;
+    }
+    try std.testing.expect(saw_descriptor);
+}
+
+test "optimizer lowering rejects an environment load with an out-of-range name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var chunk = bc.Chunk.init(arena.allocator());
+    chunk.param_count = 0;
+    chunk.local_count = 0;
+    _ = try chunk.emit(.load_var, 7);
+    _ = try chunk.emit(.ret, 0);
+    try std.testing.expectError(error.InvalidControlFlow, optimizer.build(&chunk, std.testing.allocator));
 }
 
 test "optimizer compiler executes guarded parameter SSA" {

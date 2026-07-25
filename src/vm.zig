@@ -913,6 +913,7 @@ var optimizer_native_property_read_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_cache_hits: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_property_write_callbacks: std.atomic.Value(u64) = .init(0);
+var optimizer_native_environment_load_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_index_read_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_index_write_callbacks: std.atomic.Value(u64) = .init(0);
 var optimizer_native_array_append_callbacks: std.atomic.Value(u64) = .init(0);
@@ -939,6 +940,14 @@ pub fn optimizerNativePropertyStatsForTesting() OptimizerNativePropertyStats {
         .read_callbacks = optimizer_native_property_read_callbacks.load(.monotonic),
         .write_callbacks = optimizer_native_property_write_callbacks.load(.monotonic),
     };
+}
+
+/// How many times generated code resolved a global-scope identifier through the
+/// runtime ABI. A tier-up witness for a global-rooted function asserts on this:
+/// zero means the region side-exited before the load instead of executing it.
+pub fn optimizerNativeEnvironmentLoadCallbacksForTesting() u64 {
+    std.debug.assert(builtin.is_test);
+    return optimizer_native_environment_load_callbacks.load(.monotonic);
 }
 
 pub const OptimizerNativeIndexStats = struct {
@@ -3794,6 +3803,23 @@ fn nativeInheritedPropertyCacheValue(
     return holder.slotsItems()[slot];
 }
 
+/// Optimized `load_var`: a global-scope identifier read, resolved through the
+/// exact bytecode sequence. `lookupIdent` is `env.get` plus `with`-object
+/// resolution honoring `Symbol.unscopables`, so a name the compiler resolved to
+/// the global scope still observes an intervening `with` the same way.
+///
+/// This deliberately does not consult `quick_global_bindings`. That cache is
+/// keyed by bytecode instruction and is only recorded on the non-parallel path,
+/// and a native reader that hit it would be observing a binding snapshot no
+/// optimizer guard covers. Correct resolution first; a cache the optimizer
+/// actually owns is separate work.
+fn nativeLoadVar(vm: *Interpreter, name: []const u8) EvalError!Value {
+    if (builtin.is_test) _ = optimizer_native_environment_load_callbacks.fetchAdd(1, .monotonic);
+    return (try vm.lookupIdent(name)) orelse
+        (try vm.globalProp(name)) orelse
+        vm.throwError("ReferenceError", name);
+}
+
 fn nativeGetProperty(
     vm: *Interpreter,
     cache: ?*const jit.NativePropertyCache,
@@ -4109,6 +4135,11 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             operation_id,
             applyBinaryEffect(vm, op, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
+    }
+    if (descriptor.bytecode_op == @intFromEnum(bc.Op.load_var) and inputs.len == 0) {
+        const name = metadata.nameFor(operation_id) orelse
+            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return finishNativeOperation(frame, vm, operation_id, nativeLoadVar(vm, name));
     }
     if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop) and inputs.len == 1) {
         if (builtin.is_test) _ = optimizer_native_property_read_callbacks.fetchAdd(1, .monotonic);
@@ -9639,6 +9670,133 @@ test "vm: optimizer native named read composes with a caught downstream call" {
         property_callbacks_before,
         optimizer_native_property_read_callbacks.load(.monotonic),
     );
+}
+
+test "vm: optimizer executes a global environment load natively" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // The exact shape of `jit/foreign-reify-getbyid-converges.js`: a function
+    // rooted at a global constructor, with nothing else to compile. Before the
+    // graph modelled `load_var` this whole chunk was rejected.
+    const source =
+        \\function hot() { return typeof Number.parseFloat; }
+        \\let last = "";
+        \\for (let i = 0; i < 12; ++i) last = hot();
+        \\last
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    const first = try run(&machine, root, null);
+    try std.testing.expectEqualStrings("function", first.asStr());
+    const first_steps = machine.steps;
+
+    const hot_chunk = root.fns.items[0].chunk.?;
+    const artifact = hot_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
+    var saw_environment_load = false;
+    for (operations.descriptors, 0..) |descriptor, operation_id| {
+        if (descriptor.step_delta == 0) continue;
+        if (descriptor.bytecode_op != @intFromEnum(bc.Op.load_var)) continue;
+        // Zero inputs: the name is the whole operand, carried as artifact-owned
+        // metadata rather than a scratch value.
+        try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
+        try std.testing.expectEqualStrings("Number", operations.nameFor(operation_id).?);
+        saw_environment_load = true;
+    }
+    try std.testing.expect(saw_environment_load);
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
+    try std.testing.expect(optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before);
+    try std.testing.expect(hot_chunk.optimizer_tier.compileCount() >= 1);
+    try std.testing.expect(hot_chunk.optimizer_tier.compileCount() <= 4);
+
+    // Native-on and native-off agree on both the value and the exact step cost.
+    const second_start = machine.steps;
+    const second = try run(&machine, root, null);
+    try std.testing.expectEqualStrings("function", second.asStr());
+    try std.testing.expectEqual(first_steps, machine.steps - second_start);
+}
+
+test "vm: optimizer environment load observes a rebound global" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // The assumption a published `load_var` may make is "resolve this name",
+    // never "this name has this value". Rebinding between the warm-up and the
+    // measured read must be observed without an invalidation.
+    const source =
+        \\var target = 1;
+        \\function readTarget() { return target + 1; }
+        \\for (let i = 0; i < 12; ++i) readTarget();
+        \\target = 41;
+        \\readTarget()
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const loads_before = optimizer_native_environment_load_callbacks.load(.monotonic);
+
+    try std.testing.expectEqual(@as(f64, 42), (try run(&machine, root, null)).asNum());
+    try std.testing.expect(optimizer_native_environment_load_callbacks.load(.monotonic) > loads_before);
+    const read_chunk = root.fns.items[0].chunk.?;
+    try std.testing.expect(read_chunk.optimizer_tier.compileCount() >= 1);
+}
+
+test "vm: optimizer environment load resumes an exact ReferenceError" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    // An unresolvable name throws from inside the operation. The catch must run
+    // exactly once at the handler the frame state recorded, without replaying
+    // the load.
+    const source =
+        \\let attempts = 0;
+        \\function readMissing() {
+        \\  try { attempts += 1; return typeof missingGlobal.member; }
+        \\  catch (e) { return e instanceof ReferenceError ? "caught" : "wrong:" + e; }
+        \\}
+        \\let last = "";
+        \\for (let i = 0; i < 12; ++i) last = readMissing();
+        \\last + ":" + attempts
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+
+    const result = try run(&machine, root, null);
+    try std.testing.expectEqualStrings("caught:12", result.asStr());
 }
 
 test "vm: optimizer native property cache guards polymorphic shapes and malformed slots" {

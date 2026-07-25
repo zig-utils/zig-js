@@ -95,9 +95,16 @@ pub const ValueKind = enum {
     in_op,
     instance_of,
     private_in,
+    /// A global-scope identifier read. The compiler emits `load_var` only for a
+    /// name it resolved to the global scope, so this is the environment load
+    /// that roots every reference to a builtin constructor. It resolves through
+    /// the same `lookupIdent`/`globalProp`/ReferenceError sequence as bytecode,
+    /// which is why it carries an effect frame state and an exceptional target
+    /// rather than being treated as a pure leaf.
+    load_var,
     /// A value produced by an interpreter-owned operation the graph does not
-    /// model — environment loads (`load_var`), `this`, `new.target`, regex
-    /// literals, and the rest of the terminal-frame-state set.
+    /// model — `this`, `new.target`, regex literals, and the rest of the
+    /// terminal-frame-state set.
     ///
     /// Those operations used to bump the operand-stack depth without writing
     /// the slot, so the next consumer read an undefined `ValueId` and wired it
@@ -160,7 +167,6 @@ fn terminalFrameStateKind(op: bc.Op) ?FrameStateKind {
         .tail_call_with_this,
         => .call,
         .load_bigint,
-        .load_var,
         .load_var_or_undef,
         .store_var,
         .def_var,
@@ -577,6 +583,7 @@ pub fn nativeOperationInputCount(inst: bc.Inst) ?u32 {
         .bit_not,
         .to_string,
         .to_property_key,
+        .load_var,
         .get_prop,
         .get_index,
         .set_prop,
@@ -783,7 +790,12 @@ const GraphBuilder = struct {
 pub fn binaryNeedsRuntimeOperands(nodes: []const ValueNode, lhs: ValueId, rhs: ValueId) bool {
     for ([_]ValueId{ lhs, rhs }) |operand| {
         if (operand >= nodes.len) continue;
-        if (nodes[operand].kind == .get_prop) return true;
+        // Neither a property read nor an environment load carries a static
+        // type, so Number specialization would reject the whole chunk over one
+        // operand. Both stay narrowly listed rather than keying on
+        // `may_have_effect`, which is already true for any argument operand and
+        // would push all argument arithmetic through the runtime ABI.
+        if (nodes[operand].kind == .get_prop or nodes[operand].kind == .load_var) return true;
     }
     return false;
 }
@@ -1095,6 +1107,22 @@ fn buildValueGraph(chunk: *const bc.Chunk, blocks: []const Block, allocator: std
             .void_op => {
                 if (depth == 0) return error.InvalidControlFlow;
                 stack[depth - 1] = try builder.internLeaf(0, @intCast(origin), .undefined, 0);
+            },
+            .load_var => {
+                if (inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
+                try builder.appendFrameState(.effect, @intCast(block_id), @intCast(origin), locals, stack[0..depth], handlers.items);
+                try builder.appendExceptionalTarget(blocks, @intCast(block_id), @intCast(origin), handlers.items);
+                const result = try builder.appendNode(.{
+                    .id = undefined,
+                    .block = @intCast(block_id),
+                    .origin = @intCast(origin),
+                    .kind = .load_var,
+                    .immediate = inst.a,
+                    .may_have_effect = true,
+                });
+                try builder.roots.append(allocator, result);
+                stack[depth] = result;
+                depth += 1;
             },
             .get_prop => {
                 if (depth == 0 or inst.a >= chunk.names.items.len) return error.InvalidControlFlow;
@@ -1673,6 +1701,7 @@ fn supports(op: bc.Op) bool {
         .bit_not,
         .to_string,
         .to_property_key,
+        .load_var,
         .get_prop,
         .get_index,
         .set_prop,
