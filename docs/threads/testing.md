@@ -153,7 +153,14 @@ ungateable in Debug alone. Debug is kept rather than replaced because that
 allocator is what catches use-after-free on a corpus that exists partly to find
 memory bugs. Debug is the memory-safety signal; ReleaseSafe is the throughput
 one. **Measure locally in ReleaseSafe** — Debug timings are not the engine's,
-and its allocator frames bury real profiles.
+and its allocator frames bury real profiles. This is not a nicety: four of the
+five PR-249 cases still blocked on [#429](https://github.com/zig-utils/zig-js/issues/429)
+had recorded outcomes that were pure Debug artifacts, and three of them —
+`checktraps-invalidation.js`, `cve/mc-jit-stale-base-grow-oob.js`, and
+`jit/ic-publish-reset-loops.js` — pass outright in ReleaseSafe where all three
+were recorded as "no result". They stay unpromoted on tier evidence, not on
+liveness. Durations in the `docs/.data/` execution inventories were produced in
+Debug and should be read as such.
 
 A case the baseline records as passing that stops passing fails the build. A
 case the baseline already records as non-passing is reported and does not fail.
