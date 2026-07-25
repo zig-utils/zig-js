@@ -911,7 +911,7 @@
       "case": "dw2-marklistset-storm.js",
       "mode": "parallel-js",
       "ms": 1422584,
-      "note": "cause partly known: ReferenceError: threads at 1,382,154 ms, not a concurrency assertion. `threads` is a block-scoped const initialised two statements before the read, with main-thread GC pressure in between. A reduction of exactly that shape (block const + spawned peers + main-thread churn under parallel_js) PASSES, so an unrooted block Environment is not sufficient on its own \u2014 see the unit test 'parallel_js: a block-scoped binding survives concurrent collection'. Passes serialized.",
+      "note": "cause partly known: ReferenceError on `threads` at ~1.4e6 ms, not a concurrency assertion. Instrumenting the two ReferenceError paths separately identified it as the TREE-WALKER path with the binding ABSENT (not TDZ): both lookupIdent and globalProp returned null for a block-scoped const initialised two statements earlier, with main-thread GC pressure in between. A reduction of that shape PASSES (see unit test 'parallel_js: a block-scoped binding survives concurrent collection'), so scale or the corpus harness matters. Passes serialized.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
