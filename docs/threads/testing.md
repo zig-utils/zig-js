@@ -171,6 +171,20 @@ zig build threads-test -Dthreads-inventory=docs/.data/pr249-execution-serialized
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-inventory=docs/.data/pr249-execution-nogil.json
 ```
 
+Both artifacts are checked in:
+[serialized](../.data/pr249-execution-serialized.json) (241 cases, 240 pass,
+1 fail, 110 reaching the optimizing tier) and
+[no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 241 pass, 3 fail,
+2 not finishing, 106 reaching the tier).
+
+The no-GIL half needs bounded per-case isolation rather than one process:
+several cases do not terminate there, and `timeout` alone will not stop them
+because they survive SIGTERM. Give each case its own process, a SIGKILL
+deadline, and reap any survivor before the next case starts. Scale the
+deadline to the case — `max(600s, 4x serialized)` — because a flat budget
+cannot tell "expensive" from "hung": a flat 150s pass reported ten timeouts,
+of which six actually pass and two actually fail.
+
 Both are deliberate complete reproductions, not per-push gates: the serialized
 corpus alone runs for hours, which is why CI shards it. With no
 `-Dthreads-inventory` a run is byte-identical, so the artifact costs nothing
