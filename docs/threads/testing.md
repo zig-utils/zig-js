@@ -177,6 +177,14 @@ Both artifacts are checked in:
 [no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 241 pass, 3 fail,
 2 not finishing, 106 reaching the tier).
 
+Not every no-GIL non-pass is an engine defect, and the artifact says which
+are which. Of the five, two are expected and annotated with a `note`:
+`sync/condition-notify-all.js` states in its own header that it is written for
+the cooperative GIL scheduler with no preemption, so its single-parked-waiter
+wake count is not a no-GIL claim; and `dw1-sort-comparator-osr.js` is marked
+upstream as KNOWN RED GIL-OFF until K4.II.8, with a red run there explicitly
+not a regression. The remaining three are unexplained and carry no note.
+
 The no-GIL half needs bounded per-case isolation rather than one process:
 several cases do not terminate there, and `timeout` alone will not stop them
 because they survive SIGTERM. Give each case its own process, a SIGKILL

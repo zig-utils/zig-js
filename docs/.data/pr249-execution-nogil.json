@@ -900,6 +900,7 @@
       "case": "dw1-sort-comparator-osr.js",
       "mode": "parallel-js",
       "ms": 600043,
+      "note": "expected: upstream marks this KNOWN RED GIL-OFF until K4.II.8 lands; the header states a red run here is not a DW-1 regression",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "did-not-finish"
@@ -1828,6 +1829,7 @@
       "case": "sync/condition-notify-all.js",
       "mode": "parallel-js",
       "ms": 1301,
+      "note": "expected: the file states it is written for the cooperative GIL scheduler ('no preemption'), so its single-parked-waiter wake count is not a no-GIL claim",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
@@ -1977,6 +1979,8 @@
     "deadline_policy": "max(600s, 4x serialized duration) per case",
     "did_not_finish": 2,
     "failed": 3,
+    "non_pass_expected": 2,
+    "non_pass_unexplained": 3,
     "passed": 241,
     "skipped": 0,
     "total_ms": 6329619
