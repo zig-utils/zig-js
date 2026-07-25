@@ -3578,6 +3578,12 @@ pub const Context = struct {
         class_a_stops: std.atomic.Value(u64) = .init(0),
         wait_iterations: std.atomic.Value(u64) = .init(0),
         wait_iterations_max: std.atomic.Value(u64) = .init(0),
+        /// Thread currently holding `lock`, or 0. The gate is not reentrant, so
+        /// a same-thread re-entry would spin against its own lock forever; this
+        /// is what lets that case be recognized and declined. Written only by
+        /// the holder, between acquiring and releasing, so a plain atomic store
+        /// is enough.
+        holder_thread: std.atomic.Value(u64) = .init(0),
     };
 
     /// Heap, root binding, realm registry, and cell backing are allocated together so
@@ -5602,11 +5608,24 @@ pub const Context = struct {
         while (!self.tryEnterJitGcConductor()) : (waited += 1) {
             if ((waited & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
+        const conductor = self.jitGcConductor();
+        conductor.holder_thread.store(currentThreadId(), .release);
         if (waited != 0) {
-            const conductor = self.jitGcConductor();
             _ = conductor.wait_iterations.fetchAdd(waited, .monotonic);
             self.recordParallelGcMax(&conductor.wait_iterations_max, waited);
         }
+    }
+
+    fn currentThreadId() u64 {
+        return @intCast(std.Thread.getCurrentId());
+    }
+
+    /// Whether this thread is already inside the conductor. The gate is not
+    /// reentrant by design — a nested collection would run against a heap that
+    /// is mid-sweep — so the callers that a host callback can re-enter check
+    /// this and decline instead of spinning against their own lock.
+    fn holdsJitGcConductor(self: *Context) bool {
+        return self.jitGcConductor().holder_thread.load(.acquire) == currentThreadId();
     }
 
     /// A mutator waiting to fire Class-A invalidation must remain a GC
@@ -5633,7 +5652,12 @@ pub const Context = struct {
     }
 
     fn leaveJitGcConductor(self: *Context) void {
-        self.jitGcConductor().lock.unlock();
+        const conductor = self.jitGcConductor();
+        // Clear before unlocking: after the unlock the next holder owns the
+        // field, and a stale id there would make an unrelated thread believe
+        // it already holds the gate.
+        conductor.holder_thread.store(0, .release);
+        conductor.lock.unlock();
     }
 
     /// Class-A invalidation shares the collection conductor. The owner bumps
@@ -5675,6 +5699,18 @@ pub const Context = struct {
         if (self.gc_par_collector.load(.acquire) != null) {
             return;
         }
+        // A finalizer reached from a collection's own post-sweep drain may call
+        // back in — `runDeferredPostSweepCallbacks` documents that as
+        // supported, one C-API test is named for it, and the C API lets a
+        // `JSObjectMakeArrayBufferWithBytesNoCopy` deallocator call
+        // `JSGarbageCollect`. The conductor gate is not reentrant, so that
+        // nested request spun against the lock this same thread already held,
+        // forever. Decline it instead, on the same footing as the two checks
+        // above: a collection is already in flight on this thread and will
+        // sweep everything the nested one would have. This covers re-entry from
+        // any conductor holder, not just `collectGarbage`, because allocation-
+        // failure and quiescent collections run finalizers too.
+        if (self.holdsJitGcConductor()) return;
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
@@ -21160,6 +21196,32 @@ test "enable_gc: bulk destroy skips one backing free per finalized cell" {
 
     try std.testing.expect(stats.cells > 0);
     try std.testing.expectEqual(stats.cells, stats.bulk_cell_frees_skipped);
+}
+
+test "enable_gc: a collection re-entered from a finalizer is declined, not deadlocked" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+
+    // The JIT/GC conductor is a plain non-reentrant gate, and every collection
+    // takes it before running finalizers. A host finalizer that calls back into
+    // `collectGarbage` therefore used to spin against the lock its own thread
+    // already held — an infinite loop at 100% CPU, not a slow test. Two C-API
+    // finalizer tests hung on exactly this; the guard is pinned here so a
+    // future conductor change cannot quietly reintroduce it without a failure
+    // that names the cause.
+    try std.testing.expect(!ctx.holdsJitGcConductor());
+    ctx.enterJitGcConductor();
+    try std.testing.expect(ctx.holdsJitGcConductor());
+    // Re-entry must return immediately rather than wait for a lock this thread
+    // is holding. Reaching the next line at all is the assertion.
+    ctx.collectGarbage();
+    ctx.leaveJitGcConductor();
+
+    // The gate is released and ownership cleared, so an ordinary collection
+    // still runs afterwards.
+    try std.testing.expect(!ctx.holdsJitGcConductor());
+    ctx.collectGarbage();
+    try std.testing.expect(!ctx.holdsJitGcConductor());
 }
 
 test "enable_gc: runtime StringCells are traced and finalized" {
