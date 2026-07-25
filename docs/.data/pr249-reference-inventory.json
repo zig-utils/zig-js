@@ -2200,15 +2200,8 @@
     {
       "bytes": 4062,
       "case": "cve/mc-val-fire-vs-link.js",
-      "dependencies": [
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-val-fire-vs-link.js",
       "required_shell_hooks": [
         "global:load",
@@ -4265,12 +4258,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 6,
+    "blocked": 5,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 247,
+    "promoted": 248,
     "promoted_with_terminal_premises": 6,
     "terminal_disposition": 6
   }

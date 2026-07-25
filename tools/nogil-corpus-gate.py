@@ -19,7 +19,21 @@ inheriting an exemption by being absent from the file.
 A case that starts passing is reported too. It is not a failure, but it means the
 baseline is stale and should be refreshed.
 
+Build mode is part of the expectation. Debug's allocator captures a stack trace
+per allocation, so the same case can be ~10x more expensive there — measured on
+`cve/mc-val-fire-vs-link.js`, 32.3 s Debug against 3.3 s ReleaseSafe. Against a
+fixed per-case deadline that multiplier decides whether a case is gateable at
+all, so a case can be genuinely correct and still not fit in Debug.
+
+A baseline entry may therefore carry a `modes` map keyed by build mode, and
+`--build-mode` selects which expectation applies. A mode with no entry falls
+back to the case's top-level `result`, so existing entries keep working
+unchanged. This is deliberately not a blanket exemption: the expectation still
+has to be written down per mode, and a mode that says `pass` still fails if the
+case does not.
+
 Usage: nogil-corpus-gate.py --shard N --shards M [--deadline S] [--binary PATH]
+                            [--build-mode debug|releasesafe]
 """
 import argparse
 import json
@@ -40,9 +54,26 @@ def main() -> int:
     ap.add_argument("--deadline", type=int, default=600,
                     help="per-case SIGKILL deadline in seconds")
     ap.add_argument("--binary", default="./zig-out/bin/threads-test")
+    ap.add_argument("--build-mode", default="debug", choices=("debug", "releasesafe"),
+                    help="which per-mode baseline expectation applies")
     args = ap.parse_args()
 
     baseline = {c["case"]: c for c in json.loads(BASELINE.read_text())["cases"]}
+
+    def expects_pass(name: str) -> bool:
+        """Whether this build mode expects `name` to pass.
+
+        An absent case must pass — that is what makes a newly promoted case earn
+        its place. A `modes` map overrides the top-level result for the selected
+        build only; without one, every mode shares the same expectation.
+        """
+        entry = baseline.get(name)
+        if entry is None:
+            return True
+        modes = entry.get("modes")
+        if isinstance(modes, dict) and args.build_mode in modes:
+            return modes[args.build_mode].get("result") == "pass"
+        return entry.get("result", "pass") == "pass"
 
     listing = subprocess.run([args.binary, "parallel-js", "list"],
                              capture_output=True, text=True)
@@ -53,7 +84,7 @@ def main() -> int:
         return 2
     mine = [c for i, c in enumerate(cases) if i % args.shards == args.shard]
     print(f"shard {args.shard}/{args.shards}: {len(mine)} of {len(cases)} cases, "
-          f"{args.deadline}s deadline", flush=True)
+          f"{args.deadline}s deadline, {args.build_mode} expectations", flush=True)
 
     regressions, known, improved, passed = [], [], [], 0
     for name in mine:
@@ -79,7 +110,7 @@ def main() -> int:
             proc.communicate()
         elapsed = int(time.time() - started)
 
-        expected_pass = baseline.get(name, {}).get("result", "pass") == "pass"
+        expected_pass = expects_pass(name)
         if ok:
             passed += 1
             if not expected_pass:
@@ -91,7 +122,10 @@ def main() -> int:
 
     print(f"\npassed {passed}/{len(mine)}")
     for name in known:
-        print(f"::notice::known non-passing under no-GIL: {name}")
+        note = (baseline.get(name, {}).get("modes", {}) or {}).get(args.build_mode, {})
+        why = note.get("note") or baseline.get(name, {}).get("note", "")
+        detail = f" — {why}" if why else ""
+        print(f"::notice::known non-passing under no-GIL ({args.build_mode}): {name}{detail}")
     for name in improved:
         print(f"::notice::now passes, baseline is stale: {name}")
     for name, elapsed in regressions:

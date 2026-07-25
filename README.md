@@ -72,7 +72,7 @@ Run `zig build --help` for the full command list.
 
 ## What Is Not Implemented
 
-- 6 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
+- 5 optimizing-JIT PR-249 cases remain blocked; 6 JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json));
 - automatic shared-realm compaction ([#446](https://github.com/zig-utils/zig-js/issues/446)) and a moving nursery ([#447](https://github.com/zig-utils/zig-js/issues/447));
 - additional native optimizer architecture backends. AArch64 executes guarded arithmetic, property/array access, rooted calls and allocation effects, atomic call links, mutation-driven Class-A invalidation, exact completion dispatch, and GC-ordered epoch retirement; see [optimizer status](docs/optimizing-jit.md).
 

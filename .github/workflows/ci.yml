@@ -553,7 +553,7 @@ jobs:
         run: zig build threads-test-bin
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600
+        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode debug
 
   nogil-corpus-releasesafe:
     name: nogil-corpus-releasesafe (shard ${{ matrix.shard }}/4)
@@ -598,7 +598,7 @@ jobs:
         run: zig build threads-test-bin -Doptimize=ReleaseSafe
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600
+        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode releasesafe
 
   nightly-threadfuzz-tsan:
     name: nightly-threadfuzz-tsan (${{ matrix.name }})

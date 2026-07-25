@@ -850,6 +850,25 @@
       "result": "pass"
     },
     {
+      "case": "cve/mc-val-fire-vs-link.js",
+      "mode": "parallel-js",
+      "modes": {
+        "debug": {
+          "note": "exceeds the 600 s deadline in Debug only; ReleaseSafe passes in 43,002 ms and the ReleaseSafe leg gates it",
+          "result": "did-not-finish"
+        },
+        "releasesafe": {
+          "ms": 43002,
+          "result": "pass"
+        }
+      },
+      "ms": 43002,
+      "note": "Passes no-GIL in 43,002 ms at ReleaseSafe with publications=271244 invalidations=271244 collections=1. Does not finish inside the 600 s deadline at Debug, whose allocator captures a stack trace per allocation (32.3 s vs 3.3 s serialized on this case), so the Debug leg carries an explicit non-pass expectation and the ReleaseSafe leg enforces the pass. The counters name a real defect rather than excusing it: 271,244 compile/jettison rounds where the workload needs 40, because Class-A invalidation jettisons every tier instead of the artifacts speculating on the mutated shape. Owned by #49.",
+      "optimizer_invalidations": 271244,
+      "optimizer_publications": 271244,
+      "result": "pass"
+    },
+    {
       "case": "cve/mc-val-llint-cache-storm.js",
       "mode": "parallel-js",
       "ms": 70532,
@@ -1976,7 +1995,8 @@
   "isolation": "per-case",
   "mode": "parallel-js",
   "summary": {
-    "cases": 246,
+    "build_mode_scoped": 1,
+    "cases": 247,
     "cases_reaching_optimizer": 106,
     "deadline_policy": "max(600s, 4x serialized duration) per case; cve/mc-tear-typedarray-detach-grow-shrink.js needs 893s and was measured separately",
     "did_not_finish": 1,
@@ -1984,7 +2004,7 @@
     "non_pass_cause_known": 2,
     "non_pass_expected": 2,
     "non_pass_uncharacterised": 0,
-    "passed": 242,
+    "passed": 243,
     "skipped": 0,
     "total_ms": 6691396
   }

@@ -264,9 +264,9 @@ result cannot drift from the printed one.
 plain command, while a stuck shard prints the active `RUN` case before executing
 it. The required matrix gate is also bounded so a true hang becomes an archived,
 diagnosable failed job instead of an opaque spinner. The current coverage
-contains 247 promoted files out of 259 executable PR-249 files: 242 in the
+contains 248 promoted files out of 259 executable PR-249 files: 243 in the
 default `zig build threads-test` allowlist plus 5 `parallel_js`-only witnesses.
-Six optimizing-tier files remain blocked by
+Five optimizing-tier files remain blocked by
 [#429](https://github.com/zig-utils/zig-js/issues/429); six JSC-private or
 intentionally incompatible premises have verifier-enforced terminal
 dispositions. The native unit suite checks WebAssembly validation, compilation,
@@ -1014,10 +1014,10 @@ storm, and the sort/apply marker-pressure storm. `$vm.createGlobalObject()` is
 a real child-realm constructor with fresh intrinsics, VM-shared symbols, and
 collector synchronization.
 
-The 12 unpromoted executables are explicit — 6 blocked plus the 6 terminal
+The 11 unpromoted executables are explicit — 5 blocked plus the 6 terminal
 dispositions the bullets below enumerate:
 
-- 6 optimizing-tier cases are blocked by #146/#429.
+- 5 optimizing-tier cases are blocked by #146/#429.
 - 3 incompatible premises require spawned-thread Wasm refusal, suppress a
   specification-permitted `TypedArray.set` `RangeError`, or construct a view
   after transfer detaches its buffer.

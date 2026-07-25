@@ -4,7 +4,7 @@ The core JavaScript multithreading architecture for issue #1 is implemented:
 isolated agents/workers, shared memory, structured clone, Workers, and
 shared-realm `Thread`s are all present, and shared-realm threads run
 true-parallel by default. The remaining work is production hardening:
-performance, documentation, stress breadth, and the 6 optimizing-tier PR-249
+performance, documentation, stress breadth, and the 5 optimizing-tier PR-249
 cases tracked by #429.
 
 ## Supported Today
@@ -733,7 +733,7 @@ Issue #1 remains the umbrella status page.
   race-gated while deeper sanitizer expansion continues. Keep extending it
   toward more teardown ordering, broader cross-realm scheduling, and richer
   cleanup/finalization interleavings.
-- **PR-249 tail.** The exact inventory has 247 promoted files, 6
+- **PR-249 tail.** The exact inventory has 248 promoted files, 5
   optimizing-tier blockers owned by #429, and 6 terminal JSC-private or
   intentionally incompatible premises. Run
   `zig build threads-reference-audit threads-reference-probes`; use

@@ -268,7 +268,6 @@ BLOCKED_DEPENDENCIES = {
         "optimizing-jit",
     ),
     "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
-    "cve/mc-val-fire-vs-link.js": ("optimizing-jit",),
     "jit/ic-publish-reset-loops.js": (
         "jsc-shared-heap-shell",
         "optimizing-jit",

@@ -123,6 +123,15 @@ const allowlist = [_][]const u8{
     "cve/mc-tear-rope-resolve-race.js",
     "cve/mc-tear-typedarray-detach-grow-shrink.js",
     "cve/mc-val-atom-identity.js",
+    // Fresh optimizer generation per round racing a foreign-transition storm
+    // (#429). Its oracle is the value relation `o.x + o.y === 3 * o.x` across
+    // 800,000 hot calls, which only means something if the optimizer actually
+    // compiled the site: 40 publications against its 40
+    // `Function("o", "return o.x + o.y;")` generations serialized, one per
+    // round, normal and under ThreadSanitizer. Measured ReleaseSafe; the
+    // no-GIL leg gates it there because Debug's per-allocation stack capture
+    // costs ~10x and does not fit the deadline.
+    "cve/mc-val-fire-vs-link.js",
     "cve/mc-val-llint-cache-storm.js",
     "cve/mc-val-multislot-clone.js",
     "cve/mc-val-tid-reissue-false-owner.js", // PR #249 @3a14f2a8
@@ -602,6 +611,7 @@ fn estimatedSerializedShardMs(name: []const u8) u64 {
     if (std.mem.eql(u8, name, "cve/mc-df-segmented-length.js")) return 71_910;
     if (std.mem.eql(u8, name, "cve/mc-val-multislot-clone.js")) return 60_102;
     if (std.mem.eql(u8, name, "races/counter-lock.js")) return 40_418;
+    if (std.mem.eql(u8, name, "cve/mc-val-fire-vs-link.js")) return 32_275;
     if (std.mem.eql(u8, name, "scaling/richards-like.js")) return 39_083;
     if (std.mem.eql(u8, name, "dw1-sort-comparator-iterator-host.js")) return 36_761;
     if (std.mem.eql(u8, name, "bench/array-element-write.js")) return 32_636;
