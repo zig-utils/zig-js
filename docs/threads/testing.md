@@ -120,10 +120,24 @@ process to avoid TSan shadow-memory growth across a single long run. Its gate is
 `races == 0` only: a case that fails functionally or times out is surfaced as a
 warning and does not fail the leg, because TSan's roughly ten-fold slowdown
 makes those signals unreliable. So the sweep is a race gate, not a functional
-no-GIL gate — the checked-in
-[no-GIL execution inventory](../.data/pr249-execution-nogil.json), produced
-without TSan and with deadlines scaled to each case, is the functional
-baseline, and its `non_pass_unexplained` count is the number to watch. CI also
+no-GIL gate.
+
+The `nogil-corpus-functional` leg supplies that half. It runs the same corpus
+sharded four ways without TSan, so timings are meaningful, and diffs every case
+against the checked-in
+[no-GIL execution inventory](../.data/pr249-execution-nogil.json) via
+`tools/nogil-corpus-gate.py`:
+
+```sh
+python3 tools/nogil-corpus-gate.py --shard 0 --shards 4 --deadline 600
+```
+
+A case the baseline records as passing that stops passing fails the build. A
+case the baseline already records as non-passing is reported and does not fail.
+A case the baseline does not mention must pass — so a newly promoted case earns
+its place rather than inheriting an exemption by being absent. A case that
+starts passing is reported as a stale baseline, which is the signal to refresh
+the artifact. CI also
 runs TSan smoke seeds for the specialized mid-script-GC and lifecycle fuzzer
 profiles, so their hidden-root, parked-waiter, Worker, cleanup, termination,
 and async-join paths are covered by sanitizer instead of only by non-TSan
