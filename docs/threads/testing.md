@@ -116,7 +116,14 @@ counts without changing the scheduled defaults. Use the
 for #13 before promoting a larger depth into the nightly schedule.
 
 The corpus TSan sweep is sharded in CI and runs each allowlisted case in its own
-process to avoid TSan shadow-memory growth across a single long run. CI also
+process to avoid TSan shadow-memory growth across a single long run. Its gate is
+`races == 0` only: a case that fails functionally or times out is surfaced as a
+warning and does not fail the leg, because TSan's roughly ten-fold slowdown
+makes those signals unreliable. So the sweep is a race gate, not a functional
+no-GIL gate — the checked-in
+[no-GIL execution inventory](../.data/pr249-execution-nogil.json), produced
+without TSan and with deadlines scaled to each case, is the functional
+baseline, and its `non_pass_unexplained` count is the number to watch. CI also
 runs TSan smoke seeds for the specialized mid-script-GC and lifecycle fuzzer
 profiles, so their hidden-root, parked-waiter, Worker, cleanup, termination,
 and async-join paths are covered by sanitizer instead of only by non-TSan
