@@ -181,7 +181,7 @@ zig build threads-test -Dthreads-parallel-js=true -Dthreads-inventory=docs/.data
 Both artifacts are checked in:
 [serialized](../.data/pr249-execution-serialized.json) (241 cases, 240 pass,
 1 fail, 110 reaching the optimizing tier) and
-[no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 241 pass, 3 fail,
+[no-GIL](../.data/pr249-execution-nogil.json) (246 cases, 242 pass, 2 fail,
 2 not finishing, 106 reaching the tier).
 
 Not every no-GIL non-pass is an engine defect, and the artifact says which
@@ -192,10 +192,7 @@ into `non_pass_expected`, `non_pass_cause_known`, and
 the cooperative GIL scheduler with no preemption, so its single-parked-waiter
 wake count is not a no-GIL claim; and `dw1-sort-comparator-osr.js` is marked
 upstream as KNOWN RED GIL-OFF until K4.II.8, with a red run there explicitly
-not a regression. Two more have a known cause. `cve/mc-df-ta-sort-inplace.js` hits
-`RangeError: evaluation step budget exceeded` — `interp.max_steps` is a runaway
-guard rather than a semantic limit, the same false positive
-`checktraps-invalidation.js` hits. `dw2-marklistset-storm.js` throws
+not a regression. One more has a known cause. `dw2-marklistset-storm.js` throws
 `ReferenceError: threads` on a block-scoped `const` that was initialised two
 statements earlier; the statement between them runs the worker on the main
 thread and drives GC, so a block binding going unresolvable across concurrent

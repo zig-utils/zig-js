@@ -451,11 +451,10 @@
     {
       "case": "cve/mc-df-ta-sort-inplace.js",
       "mode": "parallel-js",
-      "ms": 385549,
-      "note": "cause known: RangeError: evaluation step budget exceeded at 275,680 ms. interp.max_steps is an engine runaway guard, not a semantic limit; same false positive as checktraps-invalidation.js. Passes serialized in 21.5s.",
+      "ms": 403286,
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
-      "result": "fail"
+      "result": "pass"
     },
     {
       "case": "cve/mc-df-wasm-compile-race.js",
@@ -836,7 +835,7 @@
     {
       "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
       "mode": "parallel-js",
-      "ms": 600145,
+      "ms": 600134,
       "note": "uncharacterised: no result within 600s (148s serialized). Targets UNGIL-HANDOUT section N.6, so a no-GIL-specific stall is plausible.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
@@ -901,7 +900,7 @@
     {
       "case": "dw1-sort-comparator-osr.js",
       "mode": "parallel-js",
-      "ms": 600043,
+      "ms": 600042,
       "note": "expected: upstream marks this KNOWN RED GIL-OFF until K4.II.8 lands; the header states a red run here is not a DW-1 regression",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
@@ -910,7 +909,7 @@
     {
       "case": "dw2-marklistset-storm.js",
       "mode": "parallel-js",
-      "ms": 1422584,
+      "ms": 1473547,
       "note": "cause partly known: ReferenceError on `threads` at ~1.4e6 ms, not a concurrency assertion. Instrumenting the two ReferenceError paths separately identified it as the TREE-WALKER path with the binding ABSENT (not TDZ): both lookupIdent and globalProp returned null for a block-scoped const initialised two statements earlier, with main-thread GC pressure in between. A reduction of that shape PASSES (see unit test 'parallel_js: a block-scoped binding survives concurrent collection'), so scale or the corpus harness matters. Passes serialized.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
@@ -1831,7 +1830,7 @@
     {
       "case": "sync/condition-notify-all.js",
       "mode": "parallel-js",
-      "ms": 1301,
+      "ms": 1328,
       "note": "expected: the file states it is written for the cooperative GIL scheduler ('no preemption'), so its single-parked-waiter wake count is not a no-GIL claim",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
@@ -1981,12 +1980,12 @@
     "cases_reaching_optimizer": 106,
     "deadline_policy": "max(600s, 4x serialized duration) per case",
     "did_not_finish": 2,
-    "failed": 3,
-    "non_pass_cause_known": 2,
+    "failed": 2,
+    "non_pass_cause_known": 1,
     "non_pass_expected": 2,
     "non_pass_uncharacterised": 1,
-    "passed": 241,
+    "passed": 242,
     "skipped": 0,
-    "total_ms": 6329619
+    "total_ms": 6398334
   }
 }
