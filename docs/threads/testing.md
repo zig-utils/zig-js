@@ -143,6 +143,18 @@ against the checked-in
 python3 tools/nogil-corpus-gate.py --shard 0 --shards 4 --deadline 600
 ```
 
+That leg runs at the default Debug. A second leg, `nogil-corpus-releasesafe`,
+runs the same corpus and the same gate built `-Doptimize=ReleaseSafe`, and both
+must be green. The split exists because Debug's allocator captures a stack trace
+per allocation: on `cve/mc-val-fire-vs-link.js` the same case is 32.3 s Debug
+against 3.3 s ReleaseSafe, and a ~10x cost multiplier decides whether a case
+fits the deadline at all — a case can be genuinely correct and still be
+ungateable in Debug alone. Debug is kept rather than replaced because that
+allocator is what catches use-after-free on a corpus that exists partly to find
+memory bugs. Debug is the memory-safety signal; ReleaseSafe is the throughput
+one. **Measure locally in ReleaseSafe** — Debug timings are not the engine's,
+and its allocator frames bury real profiles.
+
 A case the baseline records as passing that stops passing fails the build. A
 case the baseline already records as non-passing is reported and does not fail.
 A case the baseline does not mention must pass — so a newly promoted case earns

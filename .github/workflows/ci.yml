@@ -555,6 +555,51 @@ jobs:
         working-directory: zig-js
         run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600
 
+  nogil-corpus-releasesafe:
+    name: nogil-corpus-releasesafe (shard ${{ matrix.shard }}/4)
+    # Same corpus and same gate as nogil-corpus-functional, built ReleaseSafe.
+    #
+    # That leg runs at the default Debug, where the allocator captures a stack
+    # trace per allocation; measured on cve/mc-val-fire-vs-link.js the same case
+    # is 32.3 s Debug against 3.3 s ReleaseSafe. Debug is kept because its
+    # allocator is what catches use-after-free on a corpus that exists partly to
+    # find memory bugs. This leg exists because a ~10x cost multiplier decides
+    # whether a case fits the deadline at all, so a case can be genuinely
+    # correct and still be ungateable in Debug alone.
+    #
+    # Both legs must be green. This one is the throughput signal; the Debug leg
+    # remains the memory-safety one.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: zig-js
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: zig-regex
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: zig-gc
+      - uses: pantry-pm/pantry/packages/action@main
+        continue-on-error: true
+        with:
+          packages: zig@0.17.0-dev
+      - name: Ensure Zig is available
+        run: python3 zig-js/tools/ensure-zig-ci.py
+      - name: Build the threads-test binary (ReleaseSafe)
+        working-directory: zig-js
+        run: zig build threads-test-bin -Doptimize=ReleaseSafe
+      - name: Gate this shard against the published no-GIL baseline
+        working-directory: zig-js
+        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600
+
   nightly-threadfuzz-tsan:
     name: nightly-threadfuzz-tsan (${{ matrix.name }})
     # Higher-iteration sanitizer expansion for issue #1's remaining roadmap.
