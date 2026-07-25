@@ -7,6 +7,13 @@
 //! starts/finishes, and lets CI split the suite with:
 //!
 //!   UNIT_SHARD_INDEX=<zero-based> UNIT_SHARD_COUNT=<positive>
+//!
+//! Every test also reports its own wall time, and the run ends with the ten
+//! slowest. A single unsharded run of this suite takes hours, and without
+//! per-test timing there was no way to tell a pathologically slow test from a
+//! suite that is merely large — the whole thing just looked like one opaque
+//! wait. `zig build test-parallel` fans shards across cores; the timings are
+//! what let you rebalance them or fix the outlier.
 
 const builtin = @import("builtin");
 const std = @import("std");
@@ -49,6 +56,8 @@ pub fn main(init: std.process.Init.Minimal) void {
     var fail_count: usize = 0;
     var leak_count: usize = 0;
     var seen: usize = 0;
+    var slowest: [slowest_reported]SlowTest = @splat(.{});
+    var total_ns: u64 = 0;
 
     for (test_fns, 0..) |test_fn, i| {
         if (i % shard_count != shard_index) continue;
@@ -74,6 +83,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             test_fn.name,
         });
 
+        const started_ns = nowNs();
         const status: enum { ok, skip, fail } = if (test_fn.func()) |_|
             .ok
         else |err| switch (err) {
@@ -87,13 +97,19 @@ pub fn main(init: std.process.Init.Minimal) void {
             },
         };
 
+        // Read the clock before `io_instance.deinit()`, which is what owns it.
+        const elapsed_ns = elapsedNs(started_ns, nowNs());
+        total_ns +|= elapsed_ns;
+        recordSlow(&slowest, test_fn.name, elapsed_ns);
+
         std.testing.io_instance.deinit();
         const leaks = std.testing.allocator_instance.deinit();
 
+        const elapsed_ms = elapsed_ns / std.time.ns_per_ms;
         switch (status) {
             .ok => {
                 ok_count += 1;
-                std.debug.print("OK\n", .{});
+                std.debug.print("OK ({d} ms)\n", .{elapsed_ms});
             },
             .skip => {
                 skip_count += 1;
@@ -101,7 +117,7 @@ pub fn main(init: std.process.Init.Minimal) void {
             },
             .fail => {
                 fail_count += 1;
-                std.debug.print("FAIL\n", .{});
+                std.debug.print("FAIL ({d} ms)\n", .{elapsed_ms});
             },
         }
         if (log_err_count != 0) {
@@ -113,15 +129,68 @@ pub fn main(init: std.process.Init.Minimal) void {
         }
     }
 
-    std.debug.print("zig-js unit tests: shard {d}/{d} summary: {d} passed; {d} skipped; {d} failed; {d} leaked\n", .{
+    for (slowest) |entry| {
+        const name = entry.name orelse continue;
+        // Only tests worth acting on. A filtered run where everything is
+        // instant should not print a "slowest" list at all.
+        if (entry.ns < slow_threshold_ns) continue;
+        std.debug.print("zig-js unit tests: shard {d}/{d} slow: {d} ms {s}\n", .{
+            shard_index,
+            shard_count,
+            entry.ns / std.time.ns_per_ms,
+            name,
+        });
+    }
+    std.debug.print("zig-js unit tests: shard {d}/{d} summary: {d} passed; {d} skipped; {d} failed; {d} leaked; {d} ms\n", .{
         shard_index,
         shard_count,
         ok_count,
         skip_count,
         fail_count,
         leak_count,
+        total_ns / std.time.ns_per_ms,
     });
     if (fail_count != 0 or leak_count != 0) std.process.exit(1);
+}
+
+/// Awake-clock nanoseconds from the per-test `Io`. Valid only between that
+/// instance's `init` and `deinit`, which brackets every use here.
+fn nowNs() i96 {
+    @disableInstrumentation();
+    return std.Io.Clock.awake.now(std.testing.io_instance.io()).nanoseconds;
+}
+
+fn elapsedNs(start_ns: i96, end_ns: i96) u64 {
+    @disableInstrumentation();
+    if (end_ns <= start_ns) return 0;
+    return @intCast(end_ns - start_ns);
+}
+
+const slowest_reported = 10;
+const slow_threshold_ns = 1 * std.time.ns_per_s;
+
+const SlowTest = struct {
+    name: ?[]const u8 = null,
+    ns: u64 = 0,
+};
+
+/// Keep the slowest `slowest_reported` tests seen so far, most expensive first.
+/// A plain insertion sort over ten entries is cheaper than sorting the whole
+/// suite and needs no allocator, which matters because this runs between the
+/// per-test allocator teardown and the next test's setup.
+fn recordSlow(slowest: []SlowTest, name: []const u8, ns: u64) void {
+    @disableInstrumentation();
+    var at: ?usize = null;
+    for (slowest, 0..) |entry, i| {
+        if (ns > entry.ns) {
+            at = i;
+            break;
+        }
+    }
+    const index = at orelse return;
+    var i = slowest.len - 1;
+    while (i > index) : (i -= 1) slowest[i] = slowest[i - 1];
+    slowest[index] = .{ .name = name, .ns = ns };
 }
 
 fn readShardEnv(init: std.process.Init.Minimal, comptime name: []const u8, default: usize) usize {

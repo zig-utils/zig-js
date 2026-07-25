@@ -8,7 +8,7 @@ Thread support is verified with Zig `0.17-dev`. The package declares this in
 Run the fast local gates before changing thread behavior or docs:
 
 ```sh
-zig build test
+zig build test-parallel   # sharded across cores; prefer this locally
 zig build threads-test
 zig build threads-test -Dthreads-shard-index=0 -Dthreads-shard-count=4
 zig build threads-test -Dthreads-case=atomics/property-waitasync-timeout.js
@@ -25,6 +25,17 @@ zig build threadfuzz -Dfuzz-lifecycle=true -Dfuzz-iters=20
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
 bun run docs:build
 ```
+
+`zig build test-parallel` builds the test binary once and then runs it as N
+concurrent shards against that same binary, defaulting to one fewer than the
+host's core count. `zig build test` is the identical suite in a single
+process — correct, but single-threaded, so on this suite it is hours on one
+core while every other core idles. Use `-Dunit-jobs=N` to pick the shard count;
+changing it costs no relink because the shards share the built binary. Per-shard
+logs land in `.zig-cache/unit-shards/`, and both the driver and each shard print
+their slowest tests, which is how a pathologically slow test gets separated from
+a suite that is merely large. CI legs that already shard themselves keep using
+`zig build test` with `-Dunit-shard-index`/`-Dunit-shard-count`.
 
 For performance work, also run:
 
@@ -248,6 +259,29 @@ Six optimizing-tier files remain blocked by
 intentionally incompatible premises have verifier-enforced terminal
 dispositions. The native unit suite checks WebAssembly validation, compilation,
 instantiation, and execution from a Thread in both GIL modes.
+
+A passing optimizer case also prints its optimizing-tier evidence, because a
+green assertion does not show that the case reached the tier — the same script
+can pass entirely through bytecode or baseline, and [#429](https://github.com/zig-utils/zig-js/issues/429)
+refuses promotion without proof:
+
+```
+  PASS  cve/mc-val-fire-vs-link.js (32275 ms)
+        optimizer: publications=40 invalidations=0 collections=0 retired=0 reclaimed=0
+        optimizer: call-links published=12 reset=1
+```
+
+Publications are lifetime optimizing-tier installs and survive `clear`, so a
+compile that is immediately jettisoned still counts. The call-link line appears
+only when the linker was used at all, since artifact lifetime and call linking
+are separate premises: a case can publish and retire plenty of code while every
+call still goes through canonical dispatch. Both lines are **silent** when the
+tier was never reached, and that silence is the verdict — it is how
+`cve/mc-code-calllink-writer-writer.js` is known to pass without ever compiling
+its per-round call site.
+
+Promotion also commits a case to the no-GIL gate below, which requires any case
+absent from the baseline to pass there. Measure both modes before adding one.
 It covers:
 
 - `api/` and `lifecycle/`: constructor shape, lifecycle, ids, constructor

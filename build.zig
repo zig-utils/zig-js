@@ -1105,6 +1105,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run zig-js unit tests");
     test_step.dependOn(&run_tests.step);
 
+    // `zig build test` runs the whole suite in one single-threaded process,
+    // which on this suite is hours on one core while every other core idles.
+    // The runner has always accepted UNIT_SHARD_INDEX/UNIT_SHARD_COUNT; this
+    // step is what actually spends the cores. Shards share the one built
+    // binary, so changing `-Dunit-jobs` costs no relink. The serial step stays
+    // as-is for CI legs that already shard themselves.
+    const parallel_tests = b.addSystemCommand(&.{ "python3", "tools/unit-test-parallel.py" });
+    parallel_tests.addFileArg(tests.getEmittedBin());
+    if (b.option(usize, "unit-jobs", "Parallel shard count for `zig build test-parallel`")) |jobs| {
+        parallel_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
+    }
+    parallel_tests.has_side_effects = true;
+    const parallel_test_step = b.step("test-parallel", "Run zig-js unit tests as parallel shards");
+    parallel_test_step.dependOn(&parallel_tests.step);
+
     // Small production JIT test root for tight development loops. Unlike
     // `-Dtest-filter` on the full root, distinct filters here do not relink the
     // Context/C-API/Worker/world-sized integration artifact (#53). It uses the
