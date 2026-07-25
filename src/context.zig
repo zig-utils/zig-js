@@ -15847,6 +15847,54 @@ fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_cla
     try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
+test "parallel_js: a block-scoped binding survives concurrent collection" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    // Attempted reduction of the `dw2-marklistset-storm.js` no-GIL failure,
+    // which throws `ReferenceError: threads` on a block-scoped `const`
+    // initialised two statements earlier, with allocation-heavy main-thread
+    // work in between.
+    //
+    // This shape does NOT reproduce it — recorded deliberately, because the
+    // obvious explanation (a block Environment going unrooted across a
+    // mid-script parallel collection) is therefore not sufficient on its own,
+    // and the next person should not spend the same hour rediscovering that.
+    // Whatever dw2 needs is more than a block binding plus peers plus GC
+    // pressure. The invariant is still worth pinning, so this stays as
+    // coverage.
+    const result = try ctx.evaluate(
+        \\function churn(seed) {
+        \\  let sum = 0;
+        \\  for (let i = 0; i < 60000; ++i) {
+        \\    const cell = { a: i, b: [i, i + 1], c: { d: i } };
+        \\    sum += cell.a + cell.b[0] + cell.c.d;
+        \\  }
+        \\  return sum + seed;
+        \\}
+        \\let outcome = "unset";
+        \\{
+        \\  const peers = [];
+        \\  for (let i = 0; i < 3; ++i) peers.push(new Thread(churn, i));
+        \\  const mainCheck = churn(99);
+        \\  let joined = 0;
+        \\  for (const p of peers) joined += p.join();
+        \\  outcome = (typeof peers === "undefined") ? "binding-lost"
+        \\    : (joined > 0 && mainCheck > 0 ? "ok" : "bad-values");
+        \\}
+        \\outcome;
+    );
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("ok", result.asStr());
+}
+
 test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
