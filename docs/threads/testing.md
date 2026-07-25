@@ -185,12 +185,24 @@ Both artifacts are checked in:
 2 not finishing, 106 reaching the tier).
 
 Not every no-GIL non-pass is an engine defect, and the artifact says which
-are which. Of the five, two are expected and annotated with a `note`:
+are which: every non-passing case carries a `note`, and the summary splits them
+into `non_pass_expected`, `non_pass_cause_known`, and
+`non_pass_uncharacterised`. Two are expected:
 `sync/condition-notify-all.js` states in its own header that it is written for
 the cooperative GIL scheduler with no preemption, so its single-parked-waiter
 wake count is not a no-GIL claim; and `dw1-sort-comparator-osr.js` is marked
 upstream as KNOWN RED GIL-OFF until K4.II.8, with a red run there explicitly
-not a regression. The remaining three are unexplained and carry no note.
+not a regression. Two more have a known cause. `cve/mc-df-ta-sort-inplace.js` hits
+`RangeError: evaluation step budget exceeded` — `interp.max_steps` is a runaway
+guard rather than a semantic limit, the same false positive
+`checktraps-invalidation.js` hits. `dw2-marklistset-storm.js` throws
+`ReferenceError: threads` on a block-scoped `const` that was initialised two
+statements earlier; the statement between them runs the worker on the main
+thread and drives GC, so a block binding going unresolvable across concurrent
+collection is the lead. Both pass serialized.
+
+That leaves one uncharacterised: `cve/mc-tear-typedarray-detach-grow-shrink.js`
+produces no result within 600s against 148s serialized.
 
 The no-GIL half needs bounded per-case isolation rather than one process:
 several cases do not terminate there, and `timeout` alone will not stop them

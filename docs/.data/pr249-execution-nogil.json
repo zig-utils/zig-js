@@ -452,6 +452,7 @@
       "case": "cve/mc-df-ta-sort-inplace.js",
       "mode": "parallel-js",
       "ms": 385549,
+      "note": "cause known: RangeError: evaluation step budget exceeded at 275,680 ms. interp.max_steps is an engine runaway guard, not a semantic limit; same false positive as checktraps-invalidation.js. Passes serialized in 21.5s.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
@@ -836,6 +837,7 @@
       "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
       "mode": "parallel-js",
       "ms": 600145,
+      "note": "uncharacterised: no result within 600s (148s serialized). Targets UNGIL-HANDOUT section N.6, so a no-GIL-specific stall is plausible.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "did-not-finish"
@@ -909,6 +911,7 @@
       "case": "dw2-marklistset-storm.js",
       "mode": "parallel-js",
       "ms": 1422584,
+      "note": "cause partly known: ReferenceError: threads at 1,382,154 ms. `threads` is a block-scoped const initialised two statements earlier and read in the same block; the statement between them runs the worker on the main thread, spilling MarkedVectors and driving GC. A block binding going unresolvable across concurrent collection is the lead. Passes serialized.",
       "optimizer_invalidations": 0,
       "optimizer_publications": 0,
       "result": "fail"
@@ -1979,8 +1982,9 @@
     "deadline_policy": "max(600s, 4x serialized duration) per case",
     "did_not_finish": 2,
     "failed": 3,
+    "non_pass_cause_known": 2,
     "non_pass_expected": 2,
-    "non_pass_unexplained": 3,
+    "non_pass_uncharacterised": 1,
     "passed": 241,
     "skipped": 0,
     "total_ms": 6329619
