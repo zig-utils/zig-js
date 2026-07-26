@@ -90,4 +90,4 @@ For casual chit-chat with others using this package:
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Used by [home-lang/craft](https://github.com/home-lang/craft).
+MIT — see [LICENSE](LICENSE).
