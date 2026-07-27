@@ -8562,10 +8562,10 @@ pub const Interpreter = struct {
                 recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
                 const arr = try self.newArray();
                 try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-                for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
+                for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input));
                 try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(utf16IndexForByteOffsetA(search_input, mstart, ascii))));
                 try self.setProp(arr.asObj(), "input", if (src.isString()) src else try Value.strAlloc(self.arena, input));
-                const groups = try self.regexGroups(re, m);
+                const groups = try self.regexGroupsSpan(re, m, input, search_input);
                 try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
                 // The `d` (hasIndices) flag adds a parallel match-indices array.
                 if (std.mem.indexOfScalar(u8, flags, 'd') != null)
@@ -9017,10 +9017,10 @@ pub const Interpreter = struct {
             recordRegexpLegacyBorrowed(self, search_input, mstart, mend, m.captures);
             const arr = try self.newArray();
             try arr.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, mstart, mend)));
-            for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureVal(m, i));
+            for (0..m.captures.len) |i| try arr.asObj().appendElement(self.arena, try self.captureValSpan(m, i, input, search_input));
             try self.setProp(arr.asObj(), "index", Value.num(@floatFromInt(mstart_units)));
             try self.setProp(arr.asObj(), "input", input_value); // shared cell (no per-match re-copy)
-            const groups = try self.regexGroups(re, m);
+            const groups = try self.regexGroupsSpan(re, m, input, search_input);
             try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
             if (std.mem.indexOfScalar(u8, flags, 'd') != null)
                 try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
@@ -15198,6 +15198,38 @@ pub const Interpreter = struct {
         for (re.named_capture_list) |entry| {
             const v: Value = if (re.getNamedCapture(&m, entry.name)) |capture|
                 try Value.strOwned(self.arena, try self.arena.dupe(u8, capture))
+            else
+                Value.undef();
+            try self.setProp(o, entry.name, v);
+        }
+        return o;
+    }
+
+    /// Like `captureVal`, but extract capture `i` from its search_input byte SPAN
+    /// remapped onto `input` — the same path `result[0]` takes via
+    /// `stringSliceFromSearchSpan`. In a non-`u` match the engine scans a
+    /// surrogate-re-encoded `search_input`, so a group can land on ONE half of an
+    /// astral code point; the raw `m.captures[i]` slice is then a mid-sequence
+    /// byte fragment (a lone `0xED…` lead → malformed WTF-8), whereas the span
+    /// remap rebuilds the proper lone-surrogate WTF-8. No-astral case: `search_
+    /// input` IS `input` and this is byte-identical to `m.captures[i]`.
+    fn captureValSpan(self: *Interpreter, m: regex.Match, i: usize, input: []const u8, search_input: []const u8) EvalError!Value {
+        if (i < m.captures_present.len and !m.captures_present[i]) return Value.undef();
+        if (i >= m.capture_spans.len) return try Value.strOwned(self.arena, try self.arena.dupe(u8, m.captures[i]));
+        const span = m.capture_spans[i];
+        return try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1]));
+    }
+
+    /// `regexGroups` but each named capture's value comes from its byte SPAN via
+    /// `stringSliceFromSearchSpan` (see `captureValSpan`), so astral/lone-surrogate
+    /// named captures in a non-`u` match are correct rather than malformed.
+    fn regexGroupsSpan(self: *Interpreter, re: *regex.Regex, m: regex.Match, input: []const u8, search_input: []const u8) EvalError!?*value.Object {
+        if (re.named_capture_list.len == 0) return null;
+        const o = (try self.newObject()).asObj();
+        o.setProtoAtomic(null); // RegExpBuiltinExec: the groups object is ObjectCreate(null)
+        for (re.named_capture_list) |entry| {
+            const v: Value = if (namedCaptureSpan(re, m, entry.name)) |span|
+                try Value.strAlloc(self.arena, try self.stringSliceFromSearchSpan(input, search_input, span[0], span[1]))
             else
                 Value.undef();
             try self.setProp(o, entry.name, v);
