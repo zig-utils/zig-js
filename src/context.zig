@@ -12820,6 +12820,32 @@ test "async/await: suspendable runtime with spec ordering" {
     }
 }
 
+test "using declarations dispose sync function resources and keep classic-for bindings immutable" {
+    try std.testing.expect((try evalIn(
+        \\class MyError extends Error {}
+        \\var first = false;
+        \\try {
+        \\  (function () {
+        \\    using _1 = { [Symbol.dispose]() { throw new MyError(); } };
+        \\    using _2 = { [Symbol.dispose]() {} };
+        \\  })();
+        \\} catch (e) {
+        \\  first = e instanceof MyError;
+        \\}
+        \\first
+    )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\var threw = false;
+        \\try {
+        \\  for (using i = null; i === null; i = { [Symbol.dispose]() {} }) {}
+        \\} catch (e) {
+        \\  threw = e instanceof TypeError;
+        \\}
+        \\threw
+    )).asBool());
+}
+
 test "async generators: yield* captures sync iterator next once" {
     const ctx = try Context.create(std.testing.allocator);
     defer ctx.destroy();

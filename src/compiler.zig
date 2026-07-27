@@ -473,6 +473,7 @@ fn functionHasBlockNestedFuncDecl(fnode: *const ast.FunctionNode) bool {
 fn stmtHasDisposableDecl(node: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => |d| d.dispose != 0,
+        .block => |stmts| stmtListHasDisposableDecl(stmts),
         .decl_group => |stmts| stmtListHasDisposableDecl(stmts),
         else => false,
     };
@@ -824,6 +825,10 @@ pub const Compiler = struct {
 
     pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
         if (fnode.is_generator or fnode.is_async) return error.Unsupported;
+        // Function-scope `using` resources are disposed at function exit. The
+        // frame-mode VM only emits block-level DisposeResources today, so keep
+        // these bodies on the tree-walker until function-exit disposal is lowered.
+        if (!fnode.is_expr_body and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         // A function declaration nested in a block needs the tree-walker in BOTH
         // modes: strict scopes it to the block (a binding the flat slot model
         // can't isolate), and sloppy gives it Annex B.3.3 dual bindings — a block
@@ -1302,6 +1307,7 @@ pub const Compiler = struct {
         // lowering below reuses one slot, so bail such loops to the tree-walker,
         // which binds per iteration. Uncaptured lexical (and all `var`) loops keep
         // the fast VM path.
+        if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
         if (init_node) |ini| if (forLoopCapturesLexical(ini, body)) return error.Unsupported;
         if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
@@ -2596,6 +2602,7 @@ pub const Compiler = struct {
         // function to the tree-walker, where those locals live in the Environment.
         // (An env-mode enclosing scope — self.scope == null — captures correctly.)
         if (fnode.is_generator and self.scope != null) return error.Unsupported;
+        if (!fnode.is_generator and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // The flat slot model can't represent a lexical binding shadowing another
         // same-named binding (incl. a param shadowed by a block `let`), and it has

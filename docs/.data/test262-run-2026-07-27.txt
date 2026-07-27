@@ -119,7 +119,7 @@ root: test262
   test/language/statements/switch: valid 36/36 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 75/75
   test/language/statements/throw: valid 14/14 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/language/statements/try: valid 174/174 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 27/27
-  test/language/statements/using: valid 47/49 (95.9%)  [parse-fail 0 · runtime-fail 2 · host-fail 0]  neg 29/29
+  test/language/statements/using: valid 49/49 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 29/29
   test/language/statements/variable: valid 130/130 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 48/48
   test/language/statements/while: valid 22/22 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 16/16
   test/language/statements/with: valid 165/165 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 16/16
@@ -186,7 +186,7 @@ root: test262
   test/intl402/TypedArray: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   (worker timed out for test/staging at 361: sm/regress/regress-610026.js)
   (worker timed out for test/staging at 687: sm/extensions/recursion.js)
-  test/staging: valid 1467/1476 (99.4%)  [parse-fail 0 · runtime-fail 7 · host-fail 2]  neg 7/7
+  test/staging: valid 1468/1476 (99.5%)  [parse-fail 0 · runtime-fail 6 · host-fail 2]  neg 7/7
   test/built-ins/AbstractModuleSource: valid 8/8 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/AggregateError: valid 25/25 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/Array: valid 3081/3081 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -286,6 +286,6 @@ root: test262
   test/built-ins/WeakRef: valid 29/29 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/WeakSet: valid 85/85 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
 ----------------------------------------------
-VALID (can we run it):  48491/48506 (100.0%)   parse-fail 0 · runtime-fail 13 · host-fail 2
+VALID (can we run it):  48494/48506 (100.0%)   parse-fail 0 · runtime-fail 10 · host-fail 2
 NEGATIVE (strictness):  4669/4669 (100.0%)   [early-error rejection — mostly unimplemented]
 skipped (unsupported harness/path metadata): 0
