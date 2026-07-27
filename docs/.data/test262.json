@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 48494,
+    "passing": 48498,
     "total": 48506,
     "percentage": 99.98,
     "parseFail": 0,
-    "runtimeFail": 10,
+    "runtimeFail": 6,
     "hostFail": 2
   },
   "negative": {
@@ -1161,11 +1161,11 @@
     },
     {
       "name": "intl402/Collator",
-      "passing": 64,
+      "passing": 65,
       "total": 65,
-      "percentage": 98.46,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 1,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -1269,11 +1269,11 @@
     },
     {
       "name": "intl402/Intl",
-      "passing": 65,
+      "passing": 66,
       "total": 66,
-      "percentage": 98.48,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 1,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -1377,11 +1377,11 @@
     },
     {
       "name": "intl402/String",
-      "passing": 18,
+      "passing": 19,
       "total": 19,
-      "percentage": 94.74,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 1,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {
@@ -2475,11 +2475,11 @@
     },
     {
       "name": "built-ins/Temporal",
-      "passing": 4602,
+      "passing": 4603,
       "total": 4603,
-      "percentage": 99.98,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 1,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {

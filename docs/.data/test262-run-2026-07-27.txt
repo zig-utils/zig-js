@@ -128,7 +128,7 @@ root: test262
   test/annexB: valid 1071/1071 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 15/15
   test/intl402/Array: valid 2/2 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/BigInt: valid 11/11 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
-  test/intl402/Collator: valid 64/65 (98.5%)  [parse-fail 0 · runtime-fail 1 · host-fail 0]  neg 0/0
+  test/intl402/Collator: valid 65/65 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/constructors-string-and-single-element-array.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/constructors-taint-Object-prototype-2.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/constructors-taint-Object-prototype.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -140,7 +140,7 @@ root: test262
   test/intl402/DurationFormat: valid 110/110 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/fallback-locales-are-supported.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/FallbackSymbol: valid 2/2 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
-  test/intl402/Intl: valid 65/66 (98.5%)  [parse-fail 0 · runtime-fail 1 · host-fail 0]  neg 0/0
+  test/intl402/Intl: valid 66/66 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/language-tags-canonicalized.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/language-tags-invalid.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/language-tags-valid.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -152,7 +152,7 @@ root: test262
   test/intl402/PluralRules: valid 53/53 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/RelativeTimeFormat: valid 80/80 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/Segmenter: valid 79/79 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
-  test/intl402/String: valid 18/19 (94.7%)  [parse-fail 0 · runtime-fail 1 · host-fail 0]  neg 0/0
+  test/intl402/String: valid 19/19 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/supportedLocalesOf-consistent-with-resolvedOptions.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/supportedLocalesOf-default-locale-and-zxx-locale.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/intl402/supportedLocalesOf-duplicate-elements-removed.js: valid 1/1 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -276,7 +276,7 @@ root: test262
   test/built-ins/StringIteratorPrototype: valid 7/7 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/SuppressedError: valid 22/22 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/Symbol: valid 98/98 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
-  test/built-ins/Temporal: valid 4602/4603 (100.0%)  [parse-fail 0 · runtime-fail 1 · host-fail 0]  neg 0/0
+  test/built-ins/Temporal: valid 4603/4603 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/ThrowTypeError: valid 14/14 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/TypedArray: valid 1446/1446 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/TypedArrayConstructors: valid 738/738 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
@@ -286,6 +286,6 @@ root: test262
   test/built-ins/WeakRef: valid 29/29 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
   test/built-ins/WeakSet: valid 85/85 (100.0%)  [parse-fail 0 · runtime-fail 0 · host-fail 0]  neg 0/0
 ----------------------------------------------
-VALID (can we run it):  48494/48506 (100.0%)   parse-fail 0 · runtime-fail 10 · host-fail 2
+VALID (can we run it):  48498/48506 (100.0%)   parse-fail 0 · runtime-fail 6 · host-fail 2
 NEGATIVE (strictness):  4669/4669 (100.0%)   [early-error rejection — mostly unimplemented]
 skipped (unsupported harness/path metadata): 0

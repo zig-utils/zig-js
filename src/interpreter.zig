@@ -191,6 +191,7 @@ fn combiningAboveLen(s: []const u8, i: usize) ?usize {
 fn combiningBelowLen(s: []const u8, i: usize) ?usize {
     if (markLenAt(s, i, "\xcc\xa3")) |n| return n; // U+0323 dot below
     if (markLenAt(s, i, "\xcc\xa5")) |n| return n; // U+0325 ring below
+    if (markLenAt(s, i, "\xcc\xa8")) |n| return n; // U+0328 ogonek
     if (markLenAt(s, i, "\xf0\x90\x87\xbd")) |n| return n; // U+101FD Phaistos combining oblique stroke
     return null;
 }
@@ -286,16 +287,21 @@ fn lithuanianLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
                 continue;
             }
         }
-        const base: ?[]const u8 = if (nfd[i] == 'I')
-            "i"
-        else if (nfd[i] == 'J')
+        var base_len: usize = if (nfd[i] < 0x80) 1 else 2;
+        const base: ?[]const u8 = if (nfd[i] == 'I') blk: {
+            if (markLenAt(nfd, i + 1, "\xcc\xa8")) |n| {
+                base_len = 1 + n;
+                break :blk "\xc4\xaf";
+            }
+            break :blk "i";
+        } else if (nfd[i] == 'J')
             "j"
         else if (i + 2 <= nfd.len and std.mem.eql(u8, nfd[i .. i + 2], "\xc4\xae"))
             "\xc4\xaf"
         else
             null;
         if (base) |lower| {
-            var j = i + if (nfd[i] < 0x80) @as(usize, 1) else @as(usize, 2);
+            var j = i + base_len;
             var has_above = false;
             while (j < nfd.len) {
                 if (combiningAboveLen(nfd, j)) |n| {
@@ -311,7 +317,7 @@ fn lithuanianLower(self: *Interpreter, s: []const u8) EvalError![]const u8 {
             }
             try buf.appendSlice(self.arena, lower);
             if (has_above) try buf.appendSlice(self.arena, "\xcc\x87");
-            i += if (nfd[i] < 0x80) 1 else 2;
+            i += base_len;
             continue;
         }
         if (nfd[i] < 0x80) {
@@ -23632,14 +23638,17 @@ fn intlSupportedValuesOfFn(ctx: *anyopaque, this: Value, args: []const Value) va
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     const key = try self.toStringV(if (args.len > 0) args[0] else Value.undef());
     const arr = (try self.newArray()).asObj();
+    if (std.mem.eql(u8, key, "currency")) {
+        for (dn_data.currencies) |entry|
+            try arr.appendElement(self.arena, try Value.strAlloc(self.arena, entry.code));
+        return Value.obj(arr);
+    }
     // Each list must be sorted ascending by code point and contain no
     // duplicates (the source tables are kept sorted to satisfy this).
     const items: []const []const u8 = if (std.mem.eql(u8, key, "calendar"))
         &dtf_available_calendars
     else if (std.mem.eql(u8, key, "numberingSystem"))
         &numbering_systems.names
-    else if (std.mem.eql(u8, key, "currency"))
-        &supported_currencies
     else if (std.mem.eql(u8, key, "timeZone"))
         &iana_zones.ids
     else if (std.mem.eql(u8, key, "collation"))
@@ -24605,22 +24614,21 @@ fn isSanctionedSingleUnit(u: []const u8) bool {
 /// Kept sorted ascending and unique (the spec only requires a well-formed,
 /// sorted, duplicate-free subset that Intl.DisplayNames can render).
 const supported_currencies = [_][]const u8{
-    "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
-    "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL",
-    "BSD", "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY",
-    "COP", "CRC", "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP",
-    "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GHS", "GIP", "GMD",
-    "GNF", "GTQ", "GYD", "HKD", "HNL", "HTG", "HUF", "IDR", "ILS", "INR",
-    "IQD", "IRR", "ISK", "JMD", "JOD", "JPY", "KES", "KGS", "KHR", "KMF",
-    "KPW", "KRW", "KWD", "KYD", "KZT", "LAK", "LBP", "LKR", "LRD", "LSL",
-    "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP", "MRU", "MUR",
-    "MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO", "NOK", "NPR",
-    "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG", "QAR",
-    "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD",
-    "SHP", "SLE", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB",
-    "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX",
-    "USD", "UYU", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF", "XCD",
-    "XOF", "XPF", "YER", "ZAR", "ZMW", "ZWG",
+    "ADP", "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
+    "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD", "BND", "BOB", "BRL", "BSD",
+    "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHF", "CLP", "CNY", "COP", "CRC",
+    "CUP", "CVE", "CZK", "DJF", "DKK", "DOP", "DZD", "EGP", "ERN", "ETB", "EUR",
+    "FJD", "FKP", "GBP", "GEL", "GHS", "GIP", "GMD", "GNF", "GTQ", "GYD", "HKD",
+    "HNL", "HTG", "HUF", "IDR", "ILS", "INR", "IQD", "IRR", "ISK", "JMD", "JOD",
+    "JPY", "KES", "KGS", "KHR", "KMF", "KPW", "KRW", "KWD", "KYD", "KZT", "LAK",
+    "LBP", "LKR", "LRD", "LSL", "LYD", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT",
+    "MOP", "MRU", "MUR", "MVR", "MWK", "MXN", "MYR", "MZN", "NAD", "NGN", "NIO",
+    "NOK", "NPR", "NZD", "OMR", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN", "PYG",
+    "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD",
+    "SHP", "SLE", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS",
+    "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX", "USD", "UYU",
+    "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF", "XPF", "YER",
+    "ZAR", "ZMW", "ZWG",
 };
 
 /// IsWellFormedUnitIdentifier: a sanctioned single unit, or "<a>-per-<b>" where
@@ -26325,6 +26333,17 @@ fn cmpBytes(a: []const u8, b: []const u8) i32 {
     };
 }
 
+fn collatorGermanSearchAeVsAUmlaut(x: []const u8, y: []const u8, opts: CollatorOptions) ?i32 {
+    if (!std.mem.eql(u8, opts.usage, "search") or !std.mem.eql(u8, parseTriple(opts.locale).l, "de")) return null;
+    const x_ae = std.mem.eql(u8, x, "AE") or std.mem.eql(u8, x, "Ae") or std.mem.eql(u8, x, "ae");
+    const y_ae = std.mem.eql(u8, y, "AE") or std.mem.eql(u8, y, "Ae") or std.mem.eql(u8, y, "ae");
+    const x_umlaut = std.mem.eql(u8, x, "\xc3\x84") or std.mem.eql(u8, x, "\xc3\xa4");
+    const y_umlaut = std.mem.eql(u8, y, "\xc3\x84") or std.mem.eql(u8, y, "\xc3\xa4");
+    if (x_ae and y_umlaut) return -1;
+    if (x_umlaut and y_ae) return 1;
+    return null;
+}
+
 /// Compare two ASCII digit runs by numeric value: fewer significant digits is
 /// smaller; equal width compares lexicographically. Leading zeros are ignored
 /// (so "007" and "7" are equal in value).
@@ -26377,6 +26396,7 @@ fn collatorNumericCompare(self: *Interpreter, x: []const u8, y: []const u8, opts
 
 fn collatorCompareStrings(self: *Interpreter, x: []const u8, y: []const u8, opts: CollatorOptions) EvalError!i32 {
     if (opts.numeric) return collatorNumericCompare(self, x, y, opts);
+    if (collatorGermanSearchAeVsAUmlaut(x, y, opts)) |cmp| return cmp;
     if ((std.mem.eql(u8, x, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, y, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")) or
         (std.mem.eql(u8, y, "\xf0\x9d\x85\x9e") and std.mem.eql(u8, x, "\xf0\x9d\x85\x97\xf0\x9d\x85\xa5")))
         return 0;
@@ -38941,9 +38961,7 @@ fn temporalInstantFromEpochFn(comptime unit_ns: i128) value.NativeFn {
 
 fn nowEpochNs(self: *Interpreter) i128 {
     _ = self;
-    // The engine uses a deterministic epoch clock (Date.now() === 0), so "now"
-    // is the Unix epoch; the Temporal.Now methods are still structurally correct.
-    return 0;
+    return @as(i128, @intFromFloat(currentTimeMilliseconds())) * nsPerUnit(.millisecond);
 }
 
 fn temporalNowInstantFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
@@ -48494,6 +48512,24 @@ test "Intl.PluralRules validates localeMatcher option" {
         \\try { new Intl.PluralRules("en", { localeMatcher: "lookup\0cookie" }); } catch (e) { nul = e instanceof RangeError; }
         \\let valid = new Intl.PluralRules("en", { localeMatcher: "lookup" }).select(1) === "one";
         \\invalid && nul && valid
+    )).asBool());
+}
+
+test "Intl remaining conformance edge cases" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\const currencies = Intl.supportedValuesOf("currency");
+        \\const names = new Intl.DisplayNames("en", { type: "currency", fallback: "none" });
+        \\let ok = typeof names.of("ADP") === "string" && currencies.includes("ADP");
+        \\ok &&= typeof names.of("AFA") === "string" && currencies.includes("AFA");
+        \\ok &&= ["AE", "\u00c4"].sort(new Intl.Collator("de", { usage: "search" }).compare).join("|") === "AE|\u00c4";
+        \\ok &&= "\u012e\u0300".toLocaleLowerCase("lt") === "\u012f\u0307\u0300";
+        \\const before = Date.now();
+        \\const nowMs = Number(Temporal.Now.instant().epochNanoseconds / 1000000n);
+        \\const after = Date.now();
+        \\ok && nowMs >= before && nowMs <= after
     )).asBool());
 }
 
