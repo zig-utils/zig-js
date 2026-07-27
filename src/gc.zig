@@ -3086,11 +3086,15 @@ pub const Binding = struct {
         if (ctx.gc_scan_native_stack) {
             _ = stack_scan.scan(v);
             // Plus every parked peer thread's published range (the multi-thread
-            // safepoint protocol): their stacks are frozen. Skipped under a
-            // *parallel* collection: there, a parked peer is traced precisely via
-            // `gc_parked` (below), and its park record's `beginPark`/`endPark`
-            // flip too fast to scan race-free without the GIL it doesn't hold.
-            if (par == null and ctx.gc_scan_parked_stacks) if (ctx.gil) |g| {
+            // safepoint protocol): their stacks are frozen. Cooperative no-GIL
+            // collection also opts in here after every peer has entered
+            // `joinCooperativeGcRequest`; that path keeps `beginPark` active
+            // until the request closes, so tree-walker locals hidden beneath a
+            // nested VM call remain roots even though precise interpreter state
+            // names only the callee environment. The non-blocking parallel
+            // collector leaves `gc_scan_parked_stacks` false and continues to
+            // use precise publication/direct parked-interpreter tracing below.
+            if (ctx.gc_scan_parked_stacks) if (ctx.gil) |g| {
                 const me = stack_scan.parkRecord();
                 for (g.park_records.items) |rec| {
                     if (rec == me) continue;
@@ -3803,7 +3807,7 @@ comptime {
     if (Heap.cellAllocationBytes(Object) > 512)
         @compileError("Object payload no longer fits the 512-byte GC slab");
     for (@typeInfo(CellKind).@"enum".field_values) |raw_kind| {
-        const Cell = managedCellType(@enumFromInt(raw_kind));
+        const Cell = managedCellType(@fromBackingInt(@intCast(raw_kind)));
         if (!ContextMod.GcCellBacking.usesCellSlab(Heap.cellAllocationBytes(Cell)))
             @compileError("GC cell exceeds owned slab storage: " ++ @typeName(Cell));
     }

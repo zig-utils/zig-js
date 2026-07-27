@@ -787,7 +787,15 @@ pub const Compiler = struct {
                 if (t.catch_block) |cb| if (try tdzScanStmt(arena, cb, m, declared)) return true;
                 if (t.finally_block) |fb| if (try tdzScanStmt(arena, fb, m, declared)) return true;
             },
-            .func_decl => {}, // hoisted; not a read site here
+            .func_decl => |fnode| {
+                // Function declarations are hoisted, so the declaration itself
+                // is not a read site, but the function can be called before a
+                // later lexical declaration initializes. The slot VM has no TDZ
+                // sentinel for captured locals, so keep that enclosing function
+                // on the tree-walker when a hoisted function body closes over a
+                // still-pending lexical.
+                if (tdzRefsPending(fnode.body, m, declared)) return true;
+            },
             else => return tdzRefsPending(node, m, declared), // unknown node: sound fallback
         }
         return false;
@@ -2792,4 +2800,18 @@ test "compiler preserves a first-statement debugger checkpoint" {
     try std.testing.expectEqual(bc.Op.nop, chunk.code.items[0].op);
     try std.testing.expect(chunk.debug_nodes[0] != null);
     try std.testing.expect(chunk.debug_nodes[0].?.* == .debugger_stmt);
+}
+
+test "compiler rejects hoisted function closure over later lexical TDZ" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = try @import("parser.zig").Parser.init(
+        arena.allocator(),
+        "function outer(){ function f(){ return x; } f(); let x; }",
+    );
+    const program = try parser.parseProgram();
+    const outer = program.program[0].func_decl;
+
+    try std.testing.expectError(error.Unsupported, Compiler.compilePlainFunction(arena.allocator(), outer));
 }

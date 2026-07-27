@@ -1267,7 +1267,7 @@
       ]
     },
     {
-      "bytes": 10704,
+      "bytes": 10892,
       "case": "cve/mc-aint-poll-resume-stale-elided.js",
       "dependencies": [
         "jit-trap-polling",
@@ -1297,7 +1297,7 @@
         "option:--useThreadGILOffUnsafe=1",
         "option:--useVMLite=1"
       ],
-      "sha256": "6cf1fb09eaea282decec4d687d78b7acdce799c4ed1d64f6a1420128e83e4017"
+      "sha256": "7bef349d44d70bf76f429687e5051b491ab999e04924827be4484bfa9761e2ec"
     },
     {
       "bytes": 3986,

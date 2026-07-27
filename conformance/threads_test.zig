@@ -472,17 +472,21 @@ fn writeExecutionInventory(
         if (std.mem.eql(u8, record.result, "fail")) failed += 1;
         if (std.mem.eql(u8, record.result, "skip")) skipped += 1;
     }
-    try Emit.print(&buffer, gpa,
+    try Emit.print(
+        &buffer,
+        gpa,
         "{{\n  \"mode\": \"{s}\",\n  \"summary\": {{ \"cases\": {d}, \"passed\": {d}, \"failed\": {d}, \"skipped\": {d}, \"total_ms\": {d} }},\n  \"cases\": [\n",
         .{ if (parallel_js) "parallel-js" else "serialized", records.len, passed, failed, skipped, total_ms },
     );
     for (records, 0..) |record, index| {
-        try Emit.print(&buffer, gpa,
+        try Emit.print(
+            &buffer,
+            gpa,
             "    {{ \"case\": \"{s}\", \"mode\": \"{s}\", \"ms\": {d}, \"optimizer_invalidations\": {d}, \"optimizer_publications\": {d}, \"result\": \"{s}\" }}{s}\n",
             .{
-                record.name,          record.mode,
-                record.ms,            record.optimizer_invalidations,
-                record.optimizer_publications, record.result,
+                record.name,                               record.mode,
+                record.ms,                                 record.optimizer_invalidations,
+                record.optimizer_publications,             record.result,
                 if (index + 1 == records.len) "" else ",",
             },
         );
@@ -565,6 +569,43 @@ fn printHeapBudget(ctx: *js.Context) void {
     std.debug.print("  heap budget: used {d} / limit {d} bytes (peak {d})\n", .{
         stats.used_bytes, stats.limit_bytes, stats.peak_bytes,
     });
+}
+
+fn printParallelGcEvidence(ctx: *js.Context) void {
+    if (ctx.parallelGcStats()) |stats| {
+        if (stats.attempts != 0) std.debug.print(
+            "  parallel GC: attempts={d} collections={d} aborts={d} " ++
+                "(publication={d}, rounds={d}) generations={d} publications={d} " ++
+                "finish-retries={d} born-growth={d} deferred={d}/{d}\n",
+            .{
+                stats.attempts,
+                stats.collections,
+                stats.aborts,
+                stats.publication_timeout_aborts,
+                stats.round_limit_aborts,
+                stats.generations,
+                stats.peer_publications,
+                stats.finish_retries,
+                stats.born_growth_rounds,
+                stats.deferred_rounds,
+                stats.deferred_aborts,
+            },
+        );
+    }
+    if (ctx.cooperativeGcProfile()) |profile| {
+        if (profile.attempts != 0) std.debug.print(
+            "  cooperative GC: attempts={d} collections={d} timeouts={d} " ++
+                "peer-parks={d} exit-cleanups={d} bytes-reset={d}\n",
+            .{
+                profile.attempts,
+                profile.collections,
+                profile.timeouts,
+                profile.peer_parks,
+                profile.exit_cleanups,
+                profile.bytes_reset_total,
+            },
+        );
+    }
 }
 
 const CaseTiming = struct {
@@ -697,6 +738,7 @@ pub fn main(init: std.process.Init) !void {
     // directory file instead of the green allowlist (a panicking file kills the run — use
     // `-Dthreads-case=<path>` to probe a single file safely).
     var parallel_js = false;
+    var force_no_jit = false;
     var sweep = false;
     var list_mode = false;
     var one: ?[]const u8 = null;
@@ -708,6 +750,10 @@ pub fn main(init: std.process.Init) !void {
     while (args.next()) |a| {
         if (std.mem.eql(u8, a, "parallel-js")) {
             parallel_js = true;
+            continue;
+        }
+        if (std.mem.eql(u8, a, "no-jit")) {
+            force_no_jit = true;
             continue;
         }
         if (std.mem.eql(u8, a, "sweep")) sweep = true;
@@ -961,6 +1007,7 @@ pub fn main(init: std.process.Init) !void {
             const enable_threads = !runsWithoutThreadGlobal(name);
             const heap_limit_bytes = heapLimitBytesForCase(name);
             const options = js.Context.TestingOptions{
+                .enable_jit = !force_no_jit and std.mem.indexOf(u8, directive, "--useJIT=0") == null,
                 .enable_threads = enable_threads,
                 .enable_gc = heap_limit_bytes != null or parallel_js or std.mem.indexOf(u8, test_src, "gc()") != null,
                 // No step ceiling: these are deliberately long stress scripts,
@@ -1024,6 +1071,7 @@ pub fn main(init: std.process.Init) !void {
                 if (balanced) {
                     std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
                     printOptimizerEvidence(ctx, &case_optimizer_publications, &case_optimizer_invalidations);
+                    printParallelGcEvidence(ctx);
                 } else {
                     const progress = ctx.evaluate("String(__asyncPassed) + '/' + String(__asyncExpected)") catch js.Value.undef();
                     const progress_s = if (progress.isString()) progress.asStr() else "?/?";
@@ -1108,6 +1156,7 @@ pub fn main(init: std.process.Init) !void {
                     });
                 }
                 printHeapBudget(ctx);
+                printParallelGcEvidence(ctx);
             }
         }
     }

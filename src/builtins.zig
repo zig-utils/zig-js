@@ -814,10 +814,14 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
         } else if (is_proxy) blk: {
             const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ ov, try self.keyToValue(k) });
             break :blk desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean();
-        } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString())
-            // A String wrapper exposes only its char indices as enumerable own keys.
-            (arrayIndexOf(k) != null and arrayIndexOf(k).? < Interpreter.utf16LenOfValue(o.boxedPrimitive().?))
-        else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
+        } else if (o.boxedPrimitive() != null and o.boxedPrimitive().?.isString()) blk: {
+            // String exotic indices are enumerable own properties, "length" is
+            // not, and ordinary properties added to the wrapper keep their attrs.
+            if (std.mem.eql(u8, k, "length")) break :blk false;
+            if (arrayIndexOf(k)) |idx| if (idx < Interpreter.utf16LenOfValue(o.boxedPrimitive().?))
+                break :blk true;
+            break :blk try self.enumerableOwnPropertyResult(o, k);
+        } else if ((o.is_array or o.typedArray() != null) and std.mem.eql(u8, k, "length"))
             // An Array's / TypedArray's "length" is a non-enumerable own property.
             false
         else

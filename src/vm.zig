@@ -216,14 +216,14 @@ fn looksLikeCompletionKind(v: Value) bool {
     if (!v.isNumber()) return false;
     const n = v.asNum();
     if (@trunc(n) != n) return false;
-    return n >= 0 and n <= @as(f64, @floatFromInt(@intFromEnum(Completion.continue_)));
+    return n >= 0 and n <= @as(f64, @floatFromInt(@backingInt(Completion.continue_)));
 }
 
 fn completionKindBelowTop(stack: *const OperandStack) ?Completion {
     if (stack.items.len == 0) return null;
     const v = stack.items[stack.items.len - 1];
     if (!looksLikeCompletionKind(v)) return null;
-    return @enumFromInt(@as(u8, @intFromFloat(v.asNum())));
+    return @fromBackingInt(@intCast(@as(u8, @intFromFloat(v.asNum()))));
 }
 
 /// Unwind `exec.handlers` (innermost-first) to the next `finally`, carrying an
@@ -237,7 +237,7 @@ fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value,
         if (h.finally_pc != Handler.none) {
             exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try exec.stack.append(stack_alloc, cval);
-            try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@intFromEnum(kind))));
+            try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@backingInt(kind))));
             return h.finally_pc;
         }
     }
@@ -3654,23 +3654,23 @@ fn nativeArrayAppendGuard(runtime_context: ?*anyopaque, object_bits: u64, callee
 
 fn nativeArrayPushGrow(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
-        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+        return @backingInt(jit.NativeOperationStatus.host_trap)));
     const metadata: *const jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
-        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+        return @backingInt(jit.NativeOperationStatus.host_trap)));
     if (operation_id >= metadata.descriptors.len or frame.scratch == null)
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const descriptor = metadata.descriptors[operation_id];
     if (frame.operation_detail != operation_id or frame.exit_ip != descriptor.origin or
         frame.deopt_index != descriptor.deopt_index or descriptor.step_delta == 0 or
-        descriptor.bytecode_op != @intFromEnum(bc.Op.call_with_this) or descriptor.input_count < 2)
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        descriptor.bytecode_op != @backingInt(bc.Op.call_with_this) or descriptor.input_count < 2)
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const first: usize = descriptor.first_input;
     const count: usize = descriptor.input_count;
     if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const inputs: []const Value = @ptrCast(frame.scratch.?[first .. first + count]);
     if (!Interpreter.isIntrinsicArrayPush(inputs[0]))
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     if (builtin.is_test) {
         _ = optimizer_native_array_narrow_callbacks.fetchAdd(1, .monotonic);
         if (inputs[1].isObject()) if (inputs[1].asObj().elementsState()) |elements| {
@@ -3684,7 +3684,7 @@ fn nativeArrayPushGrow(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) 
         frame,
         vm,
         operation_id,
-        result orelse return @intFromEnum(jit.NativeOperationStatus.host_trap),
+        result orelse return @backingInt(jit.NativeOperationStatus.host_trap),
     );
 }
 
@@ -3707,22 +3707,22 @@ fn unsigned32GuardsPass(slots: []const Value, required_mask: u64) bool {
 }
 
 fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
-    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @intFromEnum(jit.ExitStatus.stop)));
-    const steps = (frame.steps orelse return @intFromEnum(jit.ExitStatus.stop)).*;
+    const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse return @backingInt(jit.ExitStatus.stop)));
+    const steps = (frame.steps orelse return @backingInt(jit.ExitStatus.stop)).*;
     if (steps > vm.step_budget) {
         const abrupt = vm.catchableOutOfMemory(vm.throwError("RangeError", "evaluation step budget exceeded"));
-        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+        return @backingInt(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     }
     // A budget island can share this callback with an ordinary 1024-step
     // checkpoint. When neither condition applies there is no runtime work.
     if ((steps & 1023) != 0) return 0;
     if (vm.stop_flag) |sf| if (sf.load(.monotonic)) {
         const abrupt = vm.catchableOutOfMemory(vm.throwError("Error", "worker terminated"));
-        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+        return @backingInt(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     };
     vm.serviceVmTraps() catch |err| {
         const abrupt = vm.catchableOutOfMemory(err);
-        return @intFromEnum(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
+        return @backingInt(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     };
     if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
     if (vm.gc_safepoint_fn != null) {
@@ -3752,14 +3752,14 @@ fn finishNativeOperation(
     const value_word = result catch |err| return switch (err) {
         error.Throw => thrown: {
             frame.operation_value_bits = vm.exception.rawBits();
-            break :thrown @intFromEnum(jit.NativeOperationStatus.catchable_exception);
+            break :thrown @backingInt(jit.NativeOperationStatus.catchable_exception);
         },
-        error.OutOfMemory => @intFromEnum(jit.NativeOperationStatus.out_of_memory),
-        error.OptShortCircuit => @intFromEnum(jit.NativeOperationStatus.host_trap),
+        error.OutOfMemory => @backingInt(jit.NativeOperationStatus.out_of_memory),
+        error.OptShortCircuit => @backingInt(jit.NativeOperationStatus.host_trap),
     };
     frame.operation_value_bits = value_word.rawBits();
     frame.operation_detail = operation_id;
-    return @intFromEnum(jit.NativeOperationStatus.value);
+    return @backingInt(jit.NativeOperationStatus.value);
 }
 
 fn nativeGetIndex(vm: *Interpreter, object: Value, key: Value) EvalError!Value {
@@ -4077,59 +4077,59 @@ fn tryLinkedNativeCall(
 
 fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(.c) u32 {
     const vm: *Interpreter = @ptrCast(@alignCast(frame.runtime_context orelse
-        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+        return @backingInt(jit.NativeOperationStatus.host_trap)));
     const metadata: *jit.NativeOperationMetadata = @ptrCast(@alignCast(frame.operation_context orelse
-        return @intFromEnum(jit.NativeOperationStatus.host_trap)));
+        return @backingInt(jit.NativeOperationStatus.host_trap)));
     if (operation_id >= metadata.descriptors.len or frame.scratch == null)
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const descriptor = metadata.descriptors[operation_id];
     if (frame.operation_detail != operation_id or frame.exit_ip != descriptor.origin or
         frame.deopt_index != descriptor.deopt_index or descriptor.step_delta == 0 or
         (descriptor.exceptional_target != jit.NativeOperationDescriptor.none and
-        descriptor.exceptional_target >= metadata.exceptional_targets.len))
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            descriptor.exceptional_target >= metadata.exceptional_targets.len))
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const first: usize = descriptor.first_input;
     const count: usize = descriptor.input_count;
     if (first > jit.numeric_scratch_capacity or count > jit.numeric_scratch_capacity - first)
-        return @intFromEnum(jit.NativeOperationStatus.host_trap);
+        return @backingInt(jit.NativeOperationStatus.host_trap);
     const inputs = frame.scratch.?[first .. first + count];
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.to_numeric) and inputs.len == 1)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, vm.toNumericPrimitive(Value.fromRawBits(inputs[0])));
-    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.neg) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.pos) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.not) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.typeof_op) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.inc) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.dec) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.bit_not) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.to_string) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.to_property_key)) and inputs.len == 1)
+    if ((descriptor.bytecode_op == @backingInt(bc.Op.neg) or
+        descriptor.bytecode_op == @backingInt(bc.Op.pos) or
+        descriptor.bytecode_op == @backingInt(bc.Op.not) or
+        descriptor.bytecode_op == @backingInt(bc.Op.typeof_op) or
+        descriptor.bytecode_op == @backingInt(bc.Op.inc) or
+        descriptor.bytecode_op == @backingInt(bc.Op.dec) or
+        descriptor.bytecode_op == @backingInt(bc.Op.bit_not) or
+        descriptor.bytecode_op == @backingInt(bc.Op.to_string) or
+        descriptor.bytecode_op == @backingInt(bc.Op.to_property_key)) and inputs.len == 1)
     {
-        const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
+        const op: bc.Op = @fromBackingInt(@intCast(@as(u8, @intCast(descriptor.bytecode_op))));
         return finishNativeOperation(frame, vm, operation_id, applyUnaryEffect(vm, op, Value.fromRawBits(inputs[0])));
     }
-    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.add) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.sub) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.mul) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.div) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.mod) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.lt) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.le) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.gt) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.ge) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.eq) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.neq) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.eq_strict) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.neq_strict) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.pow) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.bit_and) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.bit_or) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.bit_xor) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.shl) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.shr) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.ushr)) and inputs.len == 2)
+    if ((descriptor.bytecode_op == @backingInt(bc.Op.add) or
+        descriptor.bytecode_op == @backingInt(bc.Op.sub) or
+        descriptor.bytecode_op == @backingInt(bc.Op.mul) or
+        descriptor.bytecode_op == @backingInt(bc.Op.div) or
+        descriptor.bytecode_op == @backingInt(bc.Op.mod) or
+        descriptor.bytecode_op == @backingInt(bc.Op.lt) or
+        descriptor.bytecode_op == @backingInt(bc.Op.le) or
+        descriptor.bytecode_op == @backingInt(bc.Op.gt) or
+        descriptor.bytecode_op == @backingInt(bc.Op.ge) or
+        descriptor.bytecode_op == @backingInt(bc.Op.eq) or
+        descriptor.bytecode_op == @backingInt(bc.Op.neq) or
+        descriptor.bytecode_op == @backingInt(bc.Op.eq_strict) or
+        descriptor.bytecode_op == @backingInt(bc.Op.neq_strict) or
+        descriptor.bytecode_op == @backingInt(bc.Op.pow) or
+        descriptor.bytecode_op == @backingInt(bc.Op.bit_and) or
+        descriptor.bytecode_op == @backingInt(bc.Op.bit_or) or
+        descriptor.bytecode_op == @backingInt(bc.Op.bit_xor) or
+        descriptor.bytecode_op == @backingInt(bc.Op.shl) or
+        descriptor.bytecode_op == @backingInt(bc.Op.shr) or
+        descriptor.bytecode_op == @backingInt(bc.Op.ushr)) and inputs.len == 2)
     {
-        const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
+        const op: bc.Op = @fromBackingInt(@intCast(@as(u8, @intCast(descriptor.bytecode_op))));
         return finishNativeOperation(
             frame,
             vm,
@@ -4137,15 +4137,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             applyBinaryEffect(vm, op, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.load_var) and inputs.len == 0) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.load_var) and inputs.len == 0) {
         const name = metadata.nameFor(operation_id) orelse
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, nativeLoadVar(vm, name));
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop) and inputs.len == 1) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.get_prop) and inputs.len == 1) {
         if (builtin.is_test) _ = optimizer_native_property_read_callbacks.fetchAdd(1, .monotonic);
         const name = metadata.nameFor(operation_id) orelse
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
             frame,
             vm,
@@ -4153,7 +4153,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeGetProperty(vm, metadata.propertyCacheFor(operation_id), Value.fromRawBits(inputs[0]), name),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_index) and inputs.len == 2) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.get_index) and inputs.len == 2) {
         if (builtin.is_test) _ = optimizer_native_index_read_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
@@ -4162,10 +4162,10 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeGetIndex(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_prop) and inputs.len == 2) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.set_prop) and inputs.len == 2) {
         if (builtin.is_test) _ = optimizer_native_property_write_callbacks.fetchAdd(1, .monotonic);
         const name = metadata.nameFor(operation_id) orelse
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
             frame,
             vm,
@@ -4179,7 +4179,7 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             ),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.set_index) and inputs.len == 3) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.set_index) and inputs.len == 3) {
         if (builtin.is_test) _ = optimizer_native_index_write_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
@@ -4193,23 +4193,23 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             ),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.in_op) and inputs.len == 2)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.in_op) and inputs.len == 2)
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeInOperator(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.instance_of) and inputs.len == 2)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.instance_of) and inputs.len == 2)
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeInstanceOf(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.private_in) and inputs.len == 1) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.private_in) and inputs.len == 1) {
         const name = metadata.nameFor(operation_id) orelse
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
             frame,
             vm,
@@ -4217,13 +4217,13 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativePrivateIn(vm, name, Value.fromRawBits(inputs[0])),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_object) and inputs.len == 0)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.new_object) and inputs.len == 0)
         return finishNativeOperation(frame, vm, operation_id, vm.newObject());
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_array) and inputs.len == 0)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.new_array) and inputs.len == 0)
         return finishNativeOperation(frame, vm, operation_id, vm.newArray());
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_prop) and inputs.len == 2) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.init_prop) and inputs.len == 2) {
         const name = metadata.nameFor(operation_id) orelse
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(
             frame,
             vm,
@@ -4231,14 +4231,14 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeInitProperty(vm, Value.fromRawBits(inputs[0]), name, Value.fromRawBits(inputs[1])),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_proto) and inputs.len == 2)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.init_proto) and inputs.len == 2)
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeInitPrototype(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_prop_computed) and inputs.len == 3)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.init_prop_computed) and inputs.len == 3)
         return finishNativeOperation(
             frame,
             vm,
@@ -4250,15 +4250,15 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 Value.fromRawBits(inputs[2]),
             ),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.init_spread) and inputs.len == 2)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.init_spread) and inputs.len == 2)
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeInitSpread(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
-    if ((descriptor.bytecode_op == @intFromEnum(bc.Op.init_getter) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.init_setter)) and inputs.len == 3)
+    if ((descriptor.bytecode_op == @backingInt(bc.Op.init_getter) or
+        descriptor.bytecode_op == @backingInt(bc.Op.init_setter)) and inputs.len == 3)
         return finishNativeOperation(
             frame,
             vm,
@@ -4268,10 +4268,10 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
                 Value.fromRawBits(inputs[0]),
                 Value.fromRawBits(inputs[1]),
                 Value.fromRawBits(inputs[2]),
-                descriptor.bytecode_op == @intFromEnum(bc.Op.init_getter),
+                descriptor.bytecode_op == @backingInt(bc.Op.init_getter),
             ),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append) and inputs.len == 2) {
+    if (descriptor.bytecode_op == @backingInt(bc.Op.array_append) and inputs.len == 2) {
         if (builtin.is_test) _ = optimizer_native_array_append_callbacks.fetchAdd(1, .monotonic);
         return finishNativeOperation(
             frame,
@@ -4280,68 +4280,68 @@ fn nativeOperationDispatch(frame: *jit.NativeFrame, operation_id: u32) callconv(
             nativeArrayAppend(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
     }
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_append_hole) and inputs.len == 1)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.array_append_hole) and inputs.len == 1)
         return finishNativeOperation(frame, vm, operation_id, nativeArrayAppendHole(vm, Value.fromRawBits(inputs[0])));
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_spread) and inputs.len == 2)
+    if (descriptor.bytecode_op == @backingInt(bc.Op.array_spread) and inputs.len == 2)
         return finishNativeOperation(
             frame,
             vm,
             operation_id,
             nativeArraySpread(vm, Value.fromRawBits(inputs[0]), Value.fromRawBits(inputs[1])),
         );
-    if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_spread) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval_spread) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this_spread) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_eval) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_method) or
-        descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_with_this))
+    if (descriptor.bytecode_op == @backingInt(bc.Op.call) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_eval) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_method) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_spread) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_eval_spread) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_with_this_spread) or
+        descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) or
+        descriptor.bytecode_op == @backingInt(bc.Op.new_call) or
+        descriptor.bytecode_op == @backingInt(bc.Op.new_spread) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_eval) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_method) or
+        descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this))
     {
         const values: []const Value = @ptrCast(inputs);
-        if (builtin.is_test and descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) and
+        if (builtin.is_test and descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and
             values.len == 3 and Interpreter.isIntrinsicArrayPush(values[0]))
             _ = optimizer_native_array_append_callbacks.fetchAdd(1, .monotonic);
-        const result = if (descriptor.bytecode_op == @intFromEnum(bc.Op.call) and values.len >= 1)
+        const result = if (descriptor.bytecode_op == @backingInt(bc.Op.call) and values.len >= 1)
             (tryLinkedNativeCall(vm, metadata.callLinkFor(operation_id), values[0], values[1..]) catch |err|
                 return finishNativeOperation(frame, vm, operation_id, err)) orelse
                 callValue(vm, values[0], values[1..], Value.undef())
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval) and values.len >= 1)
             callEvalValue(vm, values[0], values[1..])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_method) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_method) and values.len >= 1)
             invokeMethod(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @intFromEnum(jit.NativeOperationStatus.host_trap), values[1..])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_spread) and values.len == 2)
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..])
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_spread) and values.len == 2)
             callSpreadValue(vm, values[0], values[1], Value.undef())
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_eval_spread) and values.len == 2)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_eval_spread) and values.len == 2)
             callEvalSpreadValue(vm, values[0], values[1])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this_spread) and values.len == 3)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this_spread) and values.len == 3)
             callSpreadValue(vm, values[0], values[2], values[1])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.call_with_this) and values.len >= 2)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.call_with_this) and values.len >= 2)
             callValue(vm, values[0], values[2..], values[1])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and values.len >= 1)
             construct(vm, values[0], values[1..])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_spread) and values.len == 2)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.new_spread) and values.len == 2)
             constructSpreadValue(vm, values[0], values[1])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call) and values.len >= 1)
             tailCallValue(vm, values[0], values[1..], Value.undef())
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_eval) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_eval) and values.len >= 1)
             tailCallEvalValue(vm, values[0], values[1..])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_method) and values.len >= 1)
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_method) and values.len >= 1)
             tailCallMethodValue(vm, values[0], metadata.nameFor(operation_id) orelse
-                return @intFromEnum(jit.NativeOperationStatus.host_trap), values[1..])
-        else if (descriptor.bytecode_op == @intFromEnum(bc.Op.tail_call_with_this) and values.len >= 2)
+                return @backingInt(jit.NativeOperationStatus.host_trap), values[1..])
+        else if (descriptor.bytecode_op == @backingInt(bc.Op.tail_call_with_this) and values.len >= 2)
             tailCallValue(vm, values[0], values[2..], values[1])
         else
-            return @intFromEnum(jit.NativeOperationStatus.host_trap);
+            return @backingInt(jit.NativeOperationStatus.host_trap);
         return finishNativeOperation(frame, vm, operation_id, result);
     }
-    return @intFromEnum(jit.NativeOperationStatus.host_trap);
+    return @backingInt(jit.NativeOperationStatus.host_trap);
 }
 
 fn nativeMovingSafepoint(frame: *jit.NativeFrame) callconv(.c) void {
@@ -4525,7 +4525,7 @@ fn reconstructNativeOperationException(
     exec.stack.shrinkRetainingCapacity(target.unwind_stack_depth);
     exec.stack.appendAssumeCapacity(Value.fromRawBits(native_frame.operation_value_bits));
     if (target.kind == .finally_)
-        exec.stack.appendAssumeCapacity(Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+        exec.stack.appendAssumeCapacity(Value.num(@floatFromInt(@backingInt(Completion.throw))));
     exec.handlers.clearRetainingCapacity();
     for (recovered_handlers[0..target.handler_count]) |handler| exec.handlers.appendAssumeCapacity(handler);
     exec.ip = target.target_ip;
@@ -4575,7 +4575,7 @@ fn resumeNativeFinallyDispatch(
                     exec.ip = handler.catch_pc;
                 } else {
                     try exec.stack.append(vm.arena, completion_value);
-                    try exec.stack.append(vm.arena, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+                    try exec.stack.append(vm.arena, Value.num(@floatFromInt(@backingInt(Completion.throw))));
                     exec.ip = handler.finally_pc;
                 }
                 return .deoptimized;
@@ -4624,7 +4624,7 @@ test "vm: native finally dispatch resumes every completion exactly once" {
     for (cases) |case| {
         var chunk = bc.Chunk.init(allocator);
         const value_constant = try chunk.addConst(Value.num(case.value));
-        const kind_constant = try chunk.addConst(Value.num(@floatFromInt(@intFromEnum(case.kind))));
+        const kind_constant = try chunk.addConst(Value.num(@floatFromInt(@backingInt(case.kind))));
         _ = try chunk.emit(.load_const, value_constant);
         _ = try chunk.emit(.load_const, kind_constant);
         _ = try chunk.emit(.end_finally, 0);
@@ -4688,15 +4688,15 @@ test "vm: native finally abrupt completions continue through an outer finally" {
     var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape };
     for ([_]Completion{ .ret, .break_, .continue_ }) |kind| {
         var chunk = bc.Chunk.init(allocator);
-        const completion_value = Value.num(47 + @as(f64, @floatFromInt(@intFromEnum(kind))));
+        const completion_value = Value.num(47 + @as(f64, @floatFromInt(@backingInt(kind))));
         const value_constant = try chunk.addConst(completion_value);
-        const kind_value = Value.num(@floatFromInt(@intFromEnum(kind)));
+        const kind_value = Value.num(@floatFromInt(@backingInt(kind)));
         const kind_constant = try chunk.addConst(kind_value);
         _ = try chunk.emitAB(.push_handler, Handler.none, 4);
         _ = try chunk.emit(.load_const, value_constant);
         _ = try chunk.emit(.load_const, kind_constant);
         _ = try chunk.emit(.end_finally, 0);
-        _ = try chunk.emit(.push_completion, @intFromEnum(Completion.normal));
+        _ = try chunk.emit(.push_completion, @backingInt(Completion.normal));
         _ = try chunk.emit(.end_finally, 0);
         var compiled = try optimizer_compiler.compile(&chunk);
         defer compiled.deinit();
@@ -4797,7 +4797,7 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
     const root_shape = try Shape.createRoot(arena.allocator());
     var machine = Interpreter{ .arena = arena.allocator(), .env = &env, .root_shape = root_shape };
     const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
-        .bytecode_op = @intFromEnum(bc.Op.to_numeric),
+        .bytecode_op = @backingInt(bc.Op.to_numeric),
         .first_input = 0,
         .input_count = 1,
         .deopt_index = 0,
@@ -4815,105 +4815,105 @@ test "vm: native operation dispatcher validates and executes to_numeric" {
         .deopt_index = 0,
     };
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.value),
+        @backingInt(jit.NativeOperationStatus.value),
         nativeOperationDispatch(&frame, 0),
     );
     try std.testing.expectEqual(Value.num(42).rawBits(), frame.operation_value_bits);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 1),
     );
     metadata.descriptors[0].first_input = jit.numeric_scratch_capacity;
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
     metadata.descriptors[0].first_input = 0;
     metadata.descriptors[0].bytecode_op = std.math.maxInt(u16);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.to_numeric);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.to_numeric);
     metadata.descriptors[0].exceptional_target = 0;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
     metadata.descriptors[0].exceptional_target = jit.NativeOperationDescriptor.none;
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.call);
     metadata.descriptors[0].input_count = 0;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call_method);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.call_method);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.call_spread);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.call_spread);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.new_object);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.new_object);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.init_prop);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.init_prop);
     metadata.descriptors[0].input_count = 2;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.get_prop);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.get_prop);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.set_prop);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.set_prop);
     metadata.descriptors[0].input_count = 2;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.set_index);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.set_index);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.in_op);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.in_op);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.private_in);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.private_in);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.neg);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.neg);
     metadata.descriptors[0].input_count = 2;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.pow);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.pow);
     metadata.descriptors[0].input_count = 1;
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
-    metadata.descriptors[0].bytecode_op = @intFromEnum(bc.Op.add);
+    metadata.descriptors[0].bytecode_op = @backingInt(bc.Op.add);
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.host_trap),
+        @backingInt(jit.NativeOperationStatus.host_trap),
         nativeOperationDispatch(&frame, 0),
     );
 }
@@ -4934,7 +4934,7 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
     var callable = value.Object{ .native = Native.call };
     var receiver = value.Object{};
     const metadata = try jit.NativeOperationMetadata.create(std.testing.allocator, &.{.{
-        .bytecode_op = @intFromEnum(bc.Op.call_with_this),
+        .bytecode_op = @backingInt(bc.Op.call_with_this),
         .first_input = 0,
         .input_count = 3,
         .deopt_index = 0,
@@ -4955,7 +4955,7 @@ test "vm: native operation dispatcher preserves explicit this and arguments" {
     };
 
     try std.testing.expectEqual(
-        @intFromEnum(jit.NativeOperationStatus.value),
+        @backingInt(jit.NativeOperationStatus.value),
         nativeOperationDispatch(&frame, 0),
     );
     try std.testing.expectEqual(Value.obj(&receiver).rawBits(), frame.operation_value_bits);
@@ -4980,7 +4980,7 @@ test "vm: native operation dispatcher executes invocation forms including tail c
             name: ?[]const u8,
         ) !Value {
             const descriptor = jit.NativeOperationDescriptor{
-                .bytecode_op = @intFromEnum(op),
+                .bytecode_op = @backingInt(op),
                 .first_input = 0,
                 .input_count = @intCast(inputs.len),
                 .deopt_index = 0,
@@ -5005,7 +5005,7 @@ test "vm: native operation dispatcher executes invocation forms including tail c
                 .deopt_index = 0,
             };
             try std.testing.expectEqual(
-                @intFromEnum(jit.NativeOperationStatus.value),
+                @backingInt(jit.NativeOperationStatus.value),
                 nativeOperationDispatch(&frame, 0),
             );
             return Value.fromRawBits(frame.operation_value_bits);
@@ -5107,7 +5107,7 @@ test "vm: native operation dispatcher executes object and array construction eff
             name: ?[]const u8,
         ) !Value {
             const descriptor = jit.NativeOperationDescriptor{
-                .bytecode_op = @intFromEnum(op),
+                .bytecode_op = @backingInt(op),
                 .first_input = 0,
                 .input_count = @intCast(inputs.len),
                 .deopt_index = 0,
@@ -5132,7 +5132,7 @@ test "vm: native operation dispatcher executes object and array construction eff
                 .deopt_index = 0,
             };
             try std.testing.expectEqual(
-                @intFromEnum(jit.NativeOperationStatus.value),
+                @backingInt(jit.NativeOperationStatus.value),
                 nativeOperationDispatch(&frame, 0),
             );
             return Value.fromRawBits(frame.operation_value_bits);
@@ -5567,8 +5567,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
                 .complete => |value_word| value_word,
                 .miss, .deoptimized => null,
             };
-        } else
-            tryRunUnmanagedNative(vm, artifact, slots[0..slot_count]);
+        } else tryRunUnmanagedNative(vm, artifact, slots[0..slot_count]);
         if (optimized) |native_value| {
             chunk.optimizer_tier.beginProfiling();
             chunk.optimizer_profile.observeEntry();
@@ -5590,8 +5589,7 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
             .complete => |value_word| value_word,
             .miss, .deoptimized => null,
         };
-    } else
-        tryRunUnmanagedNative(vm, native, slots[0..slot_count]);
+    } else tryRunUnmanagedNative(vm, native, slots[0..slot_count]);
     if (result) |native_value| {
         chunk.optimizer_tier.beginProfiling();
         chunk.optimizer_profile.observeEntry();
@@ -5675,7 +5673,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
                     // No catch: run the finally carrying a "throw" completion,
                     // which `end_finally` re-throws once the finally completes.
                     try exec.stack.append(stack_alloc, vm.exception);
-                    try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+                    try exec.stack.append(stack_alloc, Value.num(@floatFromInt(@backingInt(Completion.throw))));
                     exec.ip = h.finally_pc;
                 }
                 continue;
@@ -6191,7 +6189,21 @@ fn runChunk(
                     // [[Get]] path: getters + the prototype walk).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        if (o.shape) |shape| optimizer_delta.observeShape(@intFromPtr(shape));
+                        // Shape profiling is advisory, but the pointer itself is
+                        // published by property transitions under
+                        // `property_lock`; snapshot it under that lock in a
+                        // shared realm so profiling never races the writer.
+                        // Ordinary named reads keep this same acquisition for
+                        // the IC/slot lookup below instead of paying a second
+                        // hot-path lock. Arrays release it after the snapshot
+                        // because their length/prototype paths own separate
+                        // synchronization and only rarely fall through to named
+                        // own-property lookup.
+                        if (parallel_sync) o.lockProperties();
+                        const observed_shape = o.shape;
+                        if (parallel_sync and o.is_array) o.unlockProperties();
+                        defer if (parallel_sync and !o.is_array) o.unlockProperties();
+                        if (observed_shape) |shape| optimizer_delta.observeShape(@intFromPtr(shape));
                         if (o.is_array and !o.is_arguments and o.proxyHandler() == null and !o.proxy_revoked and
                             std.mem.eql(u8, name, "length"))
                         {
@@ -6213,8 +6225,8 @@ fn runChunk(
                                 break :fast;
                             }
                         }
-                        if (parallel_sync) o.lockProperties();
-                        defer if (parallel_sync) o.unlockProperties();
+                        if (parallel_sync and o.is_array) o.lockProperties();
+                        defer if (parallel_sync and o.is_array) o.unlockProperties();
                         if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {
                             const ic = &chunk.ics[ip - 1];
                             if (ic.lookupSlotMode(o.shape, parallel_sync)) |sl| {
@@ -6786,7 +6798,7 @@ fn runChunk(
                 try stack.append(stack_alloc, Value.num(@floatFromInt(inst.a)));
             },
             .end_finally => {
-                const kind: Completion = @enumFromInt(@as(u8, @intFromFloat(stack.pop().?.asNum())));
+                const kind: Completion = @fromBackingInt(@intCast(@as(u8, @intFromFloat(stack.pop().?.asNum()))));
                 const cval = stack.pop().?;
                 switch (kind) {
                     .normal => {}, // fall through past the finally
@@ -7053,7 +7065,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
                 }
                 if (fin) |fpc| {
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val); // completion value
-                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.ret))));
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@backingInt(Completion.ret))));
                     g.exec.ip = fpc;
                     // fall through to run the finally via execLoop
                 } else {
@@ -7175,7 +7187,7 @@ fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
         g.exec.ip = h.catch_pc;
     } else {
         try g.exec.stack.append(g.stackAllocator(vm.arena), e); // finally completion value
-        try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+        try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@backingInt(Completion.throw))));
         g.exec.ip = h.finally_pc;
     }
     return true;
@@ -7643,7 +7655,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                     g.exec.handlers.shrinkRetainingCapacity(keep_handlers);
                     g.exec.stack.shrinkRetainingCapacity(stack_depth);
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val);
-                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@intFromEnum(Completion.ret))));
+                    try g.exec.stack.append(g.stackAllocator(vm.arena), Value.num(@floatFromInt(@backingInt(Completion.ret))));
                     g.exec.ip = fpc;
                 } else return .{ .returned_await = val };
             },
@@ -8444,7 +8456,7 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
                 cur.exec.ip = h.catch_pc;
             } else {
                 // No catch: run the finally carrying a "throw" completion.
-                try cur.exec.stack.append(vm.arena, Value.num(@floatFromInt(@intFromEnum(Completion.throw))));
+                try cur.exec.stack.append(vm.arena, Value.num(@floatFromInt(@backingInt(Completion.throw))));
                 cur.exec.ip = h.finally_pc;
             }
             return true;
@@ -8500,8 +8512,7 @@ fn runDriver(vm: *Interpreter, initial: *Activation) EvalError!Value {
         const outcome: EvalError!Value = if (try tryRunNative(vm, &cur.exec, cur.chunk, cur.frame, null)) |native_result| result: {
             cur.optimizer_delta.observeValue(optimizerProfileKind(native_result));
             break :result native_result;
-        } else
-            runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
+        } else runChunk(vm, &cur.exec, cur.chunk, cur.frame, null, &cur.optimizer_delta);
         if (cur.debug_environment != null) syncFrameFromDebugEnvironment(cur);
         const rv = outcome catch |e| {
             const abrupt = if (activationStackHasHandler(&acts)) vm.catchableOutOfMemory(e) else e;
@@ -9279,7 +9290,7 @@ test "vm: optimizer native call resumes a function-valued parameter" {
     try std.testing.expectEqual(@as(u16, 2), point.stack_count);
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operations.descriptors[0].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
     try std.testing.expect(optimizer_native_call_link_publications.load(.monotonic) > call_link_publications_before);
     // The owner-scoped counter is what corpus evidence reads, so it has to
@@ -9341,7 +9352,7 @@ test "vm: optimizer native tail call replaces the current activation" {
     try std.testing.expectEqual(@as(u64, 0b11), artifact.stack_maps.?.forDeopt(index).?.frame_pointer_slots);
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.tail_call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.tail_call)), operations.descriptors[0].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
     const second_start = machine.steps;
@@ -9387,7 +9398,7 @@ test "vm: optimizer executes native object and array construction effects" {
     var saw_array_append = false;
     var saw_array_hole = false;
     for (operations.descriptors) |descriptor| {
-        const op: bc.Op = @enumFromInt(@as(u8, @intCast(descriptor.bytecode_op)));
+        const op: bc.Op = @fromBackingInt(@intCast(@as(u8, @intCast(descriptor.bytecode_op))));
         saw_new_object = saw_new_object or op == .new_object;
         saw_init_prop = saw_init_prop or op == .init_prop;
         saw_init_computed = saw_init_computed or op == .init_prop_computed;
@@ -9443,7 +9454,7 @@ test "vm: optimizer object and array construction resumes a spread throw once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var spread_operation: ?jit.NativeOperationDescriptor = null;
     for (operations.descriptors) |descriptor| {
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.array_spread)) spread_operation = descriptor;
+        if (descriptor.bytecode_op == @backingInt(bc.Op.array_spread)) spread_operation = descriptor;
     }
     const descriptor = spread_operation orelse return error.TestUnexpectedResult;
     try std.testing.expect(descriptor.exceptional_target != jit.NativeOperationDescriptor.none);
@@ -9491,7 +9502,7 @@ test "vm: optimizer native call resumes an exact caught exception" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expectEqual(
         jit.NativeExceptionalTargetKind.catch_,
@@ -9536,7 +9547,7 @@ test "vm: optimizer native call resumes finally and rethrows once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     const target = operations.exceptional_targets[operation.exceptional_target];
     try std.testing.expectEqual(jit.NativeExceptionalTargetKind.finally_, target.kind);
@@ -9577,7 +9588,7 @@ test "vm: optimizer native construction resumes a constructor parameter" {
     try std.testing.expectEqual(@as(u16, 2), (call_point orelse return error.TestUnexpectedResult).stack_count);
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.new_call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.new_call)), operations.descriptors[0].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
     const second_start = machine.steps;
@@ -9615,7 +9626,7 @@ test "vm: optimizer native construction resumes an exact caught exception" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var construction: ?jit.NativeOperationDescriptor = null;
     for (operations.descriptors) |descriptor| {
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_call) and descriptor.step_delta != 0)
+        if (descriptor.bytecode_op == @backingInt(bc.Op.new_call) and descriptor.step_delta != 0)
             construction = descriptor;
     }
     const operation = construction orelse return error.TestUnexpectedResult;
@@ -9669,14 +9680,14 @@ test "vm: optimizer native named read composes with a caught downstream call" {
     var saw_call = false;
     for (operations.descriptors, 0..) |descriptor, operation_id| {
         if (descriptor.step_delta == 0) continue;
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.get_prop)) {
+        if (descriptor.bytecode_op == @backingInt(bc.Op.get_prop)) {
             try std.testing.expectEqualStrings("value", operations.nameFor(operation_id).?);
             const property_cache = operations.propertyCacheFor(operation_id) orelse
                 return error.TestUnexpectedResult;
             try std.testing.expect(property_cache.shape_tokens[0] != 0);
             saw_read = true;
         }
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.call)) saw_call = true;
+        if (descriptor.bytecode_op == @backingInt(bc.Op.call)) saw_call = true;
     }
     try std.testing.expect(saw_read and saw_call);
     try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
@@ -9688,6 +9699,40 @@ test "vm: optimizer native named read composes with a caught downstream call" {
         property_callbacks_before,
         optimizer_native_property_read_callbacks.load(.monotonic),
     );
+}
+
+test "vm: native call deopts before tree-walk callee catches VM runtime throw" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+    const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
+    defer bc.ic_seqlock_enabled.store(original_parallel, .monotonic);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source =
+        \\function check(E, func) {
+        \\  try { func(); } catch (e) { return E.name; }
+        \\  return "none";
+        \\}
+        \\function inner() {
+        \\  var r = check(TypeError, function() { (void 0).x; });
+        \\  if (r !== "TypeError") throw new Error(r);
+        \\}
+        \\for (var i = 0; i < 30; i++) inner();
+        \\"ok"
+    ;
+    var parser = try Parser.init(allocator, source);
+    const program = try parser.parseProgram();
+    const root = try Compiler.compileProgram(allocator, program);
+    var owner = jit.Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var env = Environment{ .arena = allocator, .fn_scope = true };
+    const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+    try interp.installGlobals(&env, root_shape);
+    var machine = Interpreter{ .arena = allocator, .env = &env, .root_shape = root_shape, .jit_owner = &owner };
+    const attempts_before = optimizer_native_attempts.load(.monotonic);
+
+    try std.testing.expectEqualStrings("ok", (try run(&machine, root, null)).asStr());
+    try std.testing.expect(optimizer_native_attempts.load(.monotonic) > attempts_before);
 }
 
 test "vm: optimizer executes a global environment load natively" {
@@ -9729,7 +9774,7 @@ test "vm: optimizer executes a global environment load natively" {
     var saw_environment_load = false;
     for (operations.descriptors, 0..) |descriptor, operation_id| {
         if (descriptor.step_delta == 0) continue;
-        if (descriptor.bytecode_op != @intFromEnum(bc.Op.load_var)) continue;
+        if (descriptor.bytecode_op != @backingInt(bc.Op.load_var)) continue;
         // Zero inputs: the name is the whole operand, carried as artifact-owned
         // metadata rather than a scratch value.
         try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
@@ -10380,8 +10425,8 @@ test "vm: optimizer packed index guards direct existing-index reads and writes" 
     const wide_elements = try wide_array.asObj().ensureElementsList(allocator);
     try wide_elements.ensureTotalCapacity(wide_array.asObj().elementsAllocator(allocator), 16);
     var push_nine_slots = [_]Value{
-        intrinsic_push, wide_array, Value.num(2), Value.num(3), Value.num(4), Value.num(5),
-        Value.num(6),  Value.num(7), Value.num(8), Value.num(9), Value.num(10),
+        intrinsic_push, wide_array,   Value.num(2), Value.num(3), Value.num(4),  Value.num(5),
+        Value.num(6),   Value.num(7), Value.num(8), Value.num(9), Value.num(10),
     };
     const wide_before = optimizerNativeArrayAppendStatsForTesting();
     const wide_outcome = try tryRunManagedNative(&machine, &push_nine_compiled, &push_nine_slots, null);
@@ -10509,7 +10554,7 @@ test "vm: optimizer native named getter resumes an exact catch once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.get_prop)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operation.bytecode_op);
     try std.testing.expectEqualStrings("value", operations.nameFor(0).?);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expectEqual(
@@ -10547,9 +10592,9 @@ test "vm: optimizer executes a complete named method call chain" {
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.get_prop)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_prop)), operations.descriptors[0].bytecode_op);
     try std.testing.expectEqualStrings("add", operations.nameFor(0).?);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call_with_this)), operations.descriptors[1].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call_with_this)), operations.descriptors[1].bytecode_op);
     try std.testing.expect(operations.descriptors[0].step_delta != 0 and operations.descriptors[1].step_delta != 0);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 }
@@ -10593,7 +10638,7 @@ test "vm: optimizer native computed read resumes caught lookup exceptions" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.get_index)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_index)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     const roots = (@as(u64, 1) << @intCast(operation.first_input)) |
@@ -10636,7 +10681,7 @@ test "vm: optimizer native computed key resumes an exact catch once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.get_index)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_index)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
 }
 
@@ -10669,8 +10714,8 @@ test "vm: optimizer executes a complete computed method call chain" {
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.get_index)), operations.descriptors[0].bytecode_op);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call_with_this)), operations.descriptors[1].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.get_index)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call_with_this)), operations.descriptors[1].bytecode_op);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 }
 
@@ -10705,7 +10750,7 @@ test "vm: optimizer native named write returns and stores its value" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_prop)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_prop)), operation.bytecode_op);
     try std.testing.expectEqualStrings("value", operations.nameFor(0).?);
     try std.testing.expect((operations.propertyCacheFor(0) orelse return error.TestUnexpectedResult).shape_tokens[0] != 0);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
@@ -10891,7 +10936,7 @@ test "vm: optimizer native named setter resumes an exact catch once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_prop)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_prop)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
 }
 
@@ -10925,7 +10970,7 @@ test "vm: optimizer native named write invokes a proxy trap once" {
     const artifact = write_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_prop)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_prop)), operations.descriptors[0].bytecode_op);
 }
 
 test "vm: optimizer native computed write preserves mutation inputs" {
@@ -10966,7 +11011,7 @@ test "vm: optimizer native computed write preserves mutation inputs" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_index)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_index)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 3), operation.input_count);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 
@@ -11006,7 +11051,7 @@ test "vm: optimizer native computed write resumes key failure once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_index)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_index)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
 }
 
@@ -11041,8 +11086,8 @@ test "vm: optimizer native computed write evaluates rhs before nullish key rejec
         return error.TestUnexpectedResult;
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 2), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.call)), operations.descriptors[0].bytecode_op);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.set_index)), operations.descriptors[1].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.call)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.set_index)), operations.descriptors[1].bytecode_op);
 }
 
 test "vm: optimizer native in operator invokes a proxy trap once" {
@@ -11076,7 +11121,7 @@ test "vm: optimizer native in operator invokes a proxy trap once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.in_op)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.in_op)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
@@ -11113,7 +11158,7 @@ test "vm: optimizer native instanceof invokes Symbol.hasInstance once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.instance_of)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.instance_of)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
@@ -11162,7 +11207,7 @@ test "vm: optimizer native private-in preserves the class brand" {
     const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.private_in)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.private_in)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 1), operation.input_count);
     try std.testing.expectEqualStrings("#value", operations.nameFor(0).?);
 }
@@ -11227,7 +11272,7 @@ test "vm: optimizer native unary coercions preserve primitive results" {
         } else {
             const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-            try std.testing.expectEqual(@as(u16, @intFromEnum(case.op)), operations.descriptors[0].bytecode_op);
+            try std.testing.expectEqual(@as(u16, @backingInt(case.op)), operations.descriptors[0].bytecode_op);
         }
     }
 }
@@ -11263,7 +11308,7 @@ test "vm: optimizer native unary coercion resumes an exact catch once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.neg)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.neg)), operation.bytecode_op);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
 }
@@ -11307,7 +11352,7 @@ test "vm: optimizer native binary coercions preserve Number and BigInt semantics
         try std.testing.expectEqual(case.expected, result.asNum());
         const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-        try std.testing.expectEqual(@as(u16, @intFromEnum(case.op)), operations.descriptors[0].bytecode_op);
+        try std.testing.expectEqual(@as(u16, @backingInt(case.op)), operations.descriptors[0].bytecode_op);
         try std.testing.expectEqual(@as(u16, 2), operations.descriptors[0].input_count);
     }
 
@@ -11365,7 +11410,7 @@ test "vm: optimizer native binary coercion preserves left-to-right one-shot exce
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.pow)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.pow)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(optimizer_native_hits.load(.monotonic) > hits_before);
@@ -11428,7 +11473,7 @@ test "vm: optimizer native dynamic arithmetic preserves canonical results" {
         try std.testing.expectEqual(@as(u64, 0), compiled.required_numeric_slots);
         const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-        try std.testing.expectEqual(@as(u16, @intFromEnum(case.op)), operations.descriptors[0].bytecode_op);
+        try std.testing.expectEqual(@as(u16, @backingInt(case.op)), operations.descriptors[0].bytecode_op);
     }
 
     var bigint_chunk = bc.Chunk.init(allocator);
@@ -11490,7 +11535,7 @@ test "vm: optimizer profiles dynamic arithmetic and resumes its exact catch once
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
     const operation = operations.descriptors[0];
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.add)), operation.bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.add)), operation.bytecode_op);
     try std.testing.expectEqual(@as(u16, 2), operation.input_count);
     try std.testing.expect(operation.exceptional_target != jit.NativeOperationDescriptor.none);
     try std.testing.expect(dynamic_chunk.optimizerBinaryRequiresRuntime(operation.origin));
@@ -11541,7 +11586,7 @@ test "vm: optimizer native dynamic arithmetic comparison feeds Boolean control" 
 
     const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.lt)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.lt)), operations.descriptors[0].bytecode_op);
 }
 
 test "vm: optimizer native logical not feeds Boolean control" {
@@ -11585,7 +11630,7 @@ test "vm: optimizer native logical not feeds Boolean control" {
 
     const operations = compiled.native_operations orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), operations.descriptors.len);
-    try std.testing.expectEqual(@as(u16, @intFromEnum(bc.Op.not)), operations.descriptors[0].bytecode_op);
+    try std.testing.expectEqual(@as(u16, @backingInt(bc.Op.not)), operations.descriptors[0].bytecode_op);
 }
 
 test "vm: optimizer coercion-effect side exit preserves caught user exceptions" {
@@ -11664,7 +11709,7 @@ test "vm: optimizer native to_numeric returns and propagates uncaught object thr
     const metadata = artifact.native_operations orelse return error.TestUnexpectedResult;
     var to_numeric: ?jit.NativeOperationDescriptor = null;
     for (metadata.descriptors) |descriptor| {
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.to_numeric) and descriptor.step_delta != 0)
+        if (descriptor.bytecode_op == @backingInt(bc.Op.to_numeric) and descriptor.step_delta != 0)
             to_numeric = descriptor;
     }
     const descriptor = to_numeric orelse return error.TestUnexpectedResult;
@@ -11822,7 +11867,7 @@ test "vm: optimizer native allocation effect constructs exactly once" {
     const operations = artifact.native_operations orelse return error.TestUnexpectedResult;
     var allocation: ?jit.NativeOperationDescriptor = null;
     for (operations.descriptors) |descriptor| {
-        if (descriptor.bytecode_op == @intFromEnum(bc.Op.new_object)) allocation = descriptor;
+        if (descriptor.bytecode_op == @backingInt(bc.Op.new_object)) allocation = descriptor;
     }
     const descriptor = allocation orelse return error.TestUnexpectedResult;
     const point = artifact.deopt.?.points[descriptor.deopt_index];
@@ -12030,8 +12075,8 @@ test "vm: optimizer packed index loop executes existing-index reads and writes d
     var saw_index_read = false;
     var saw_index_write = false;
     for (operations.descriptors) |operation| {
-        saw_index_read = saw_index_read or operation.bytecode_op == @intFromEnum(bc.Op.get_index);
-        saw_index_write = saw_index_write or operation.bytecode_op == @intFromEnum(bc.Op.set_index);
+        saw_index_read = saw_index_read or operation.bytecode_op == @backingInt(bc.Op.get_index);
+        saw_index_write = saw_index_write or operation.bytecode_op == @backingInt(bc.Op.set_index);
     }
     try std.testing.expect(saw_index_read and saw_index_write);
 
@@ -12121,8 +12166,8 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
     var saw_push_lookup = false;
     var saw_push_call = false;
     for (grow_artifact.native_operations.?.descriptors) |operation| {
-        saw_push_lookup = saw_push_lookup or operation.bytecode_op == @intFromEnum(bc.Op.get_prop);
-        saw_push_call = saw_push_call or operation.bytecode_op == @intFromEnum(bc.Op.call_with_this);
+        saw_push_lookup = saw_push_lookup or operation.bytecode_op == @backingInt(bc.Op.get_prop);
+        saw_push_call = saw_push_call or operation.bytecode_op == @backingInt(bc.Op.call_with_this);
     }
     try std.testing.expect(saw_push_lookup and saw_push_call);
 
@@ -12133,8 +12178,8 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
     var saw_new_array = false;
     var saw_array_append = false;
     for (build_artifact.native_operations.?.descriptors) |operation| {
-        saw_new_array = saw_new_array or operation.bytecode_op == @intFromEnum(bc.Op.new_array);
-        saw_array_append = saw_array_append or operation.bytecode_op == @intFromEnum(bc.Op.array_append);
+        saw_new_array = saw_new_array or operation.bytecode_op == @backingInt(bc.Op.new_array);
+        saw_array_append = saw_array_append or operation.bytecode_op == @backingInt(bc.Op.array_append);
     }
     try std.testing.expect(saw_new_array and saw_array_append);
 
@@ -12143,7 +12188,7 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
         return error.TestUnexpectedResult;
     var saw_exceptional_push = false;
     for (caught_artifact.native_operations.?.descriptors) |operation| {
-        if (operation.bytecode_op == @intFromEnum(bc.Op.call_with_this) and
+        if (operation.bytecode_op == @backingInt(bc.Op.call_with_this) and
             operation.exceptional_target != jit.NativeOperationDescriptor.none)
             saw_exceptional_push = true;
     }
@@ -12154,7 +12199,7 @@ test "vm: optimizer allocating array loops execute calls and literal effects" {
         return error.TestUnexpectedResult;
     var saw_construct = false;
     for (construct_artifact.native_operations.?.descriptors) |operation|
-        saw_construct = saw_construct or operation.bytecode_op == @intFromEnum(bc.Op.new_call);
+        saw_construct = saw_construct or operation.bytecode_op == @backingInt(bc.Op.new_call);
     try std.testing.expect(construct_artifact.osr != null and saw_construct);
 
     const steps_before_oom = machine.steps;

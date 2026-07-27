@@ -3236,6 +3236,24 @@ pub const Context = struct {
         remaining_bytes: usize,
     };
 
+    /// Read-only evidence for the abort-safe parallel collector. The corpus
+    /// runner records this beside failures so a missing root can be correlated
+    /// with the exact publication/finish path without exposing mutable collector
+    /// state or relying on a diagnostic rebuild.
+    pub const ParallelGcStats = struct {
+        attempts: u64,
+        collections: u64,
+        aborts: u64,
+        publication_timeout_aborts: u64,
+        round_limit_aborts: u64,
+        generations: u64,
+        peer_publications: u64,
+        finish_retries: u64,
+        born_growth_rounds: u64,
+        deferred_rounds: u64,
+        deferred_aborts: u64,
+    };
+
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
     /// Phase 7). Held by pointer so addresses are stable; `null` costs nothing
     /// when the GC is off.
@@ -5294,6 +5312,23 @@ pub const Context = struct {
     pub fn heapBudgetStats(self: *const Context) ?HeapBudgetStats {
         const ba = self.budget_allocator orelse return null;
         return ba.stats();
+    }
+
+    pub fn parallelGcStats(self: *const Context) ?ParallelGcStats {
+        if (!self.gc_par_enabled) return null;
+        return .{
+            .attempts = self.gc_par_attempts.load(.monotonic),
+            .collections = self.gc_par_collections.load(.monotonic),
+            .aborts = self.gc_par_aborts.load(.monotonic),
+            .publication_timeout_aborts = self.gc_par_publication_timeout_aborts.load(.monotonic),
+            .round_limit_aborts = self.gc_par_round_limit_aborts.load(.monotonic),
+            .generations = self.gc_par_generations.load(.monotonic),
+            .peer_publications = self.gc_par_peer_publications.load(.monotonic),
+            .finish_retries = self.gc_par_finish_retries.load(.monotonic),
+            .born_growth_rounds = self.gc_par_born_growth_rounds.load(.monotonic),
+            .deferred_rounds = self.gc_par_deferred_rounds.load(.monotonic),
+            .deferred_aborts = self.gc_par_deferred_aborts.load(.monotonic),
+        };
     }
 
     pub const RuntimeHeapAccounting = struct {
@@ -13071,6 +13106,62 @@ test "Object.keys/values/entries enumerate array indices" {
     try expectEvalStr("1", "var a = [10, 20]; Object.defineProperty(a, 0, { enumerable: false }); Object.keys(a).join(',')");
 }
 
+test "String exotic wrappers expose immutable indices and length" {
+    try expectEvalStr("0,1,2,20,-20", "var s = new String('abc'); s[-20] = 1; s[20] = 2; Object.keys(s).join(',')");
+    try expectEvalStr("0,1,2,20,length,-20", "var s = new String('abc'); s[-20] = 1; s[20] = 2; Object.getOwnPropertyNames(s).join(',')");
+    try std.testing.expect((try evalIn(
+        \\var s = new String("abc");
+        \\var d0 = Object.getOwnPropertyDescriptor(s, "0");
+        \\var dl = Object.getOwnPropertyDescriptor(s, "length");
+        \\d0.value === "a" && d0.enumerable === true && d0.writable === false && d0.configurable === false &&
+        \\dl.value === 3 && dl.enumerable === false && dl.writable === false && dl.configurable === false
+    )).asBool());
+}
+
+test "borrowed Array mutators throw on String exotic length writes" {
+    try std.testing.expect((try evalIn(
+        \\function throws(fn) {
+        \\  try { fn(); } catch (e) { return e instanceof TypeError; }
+        \\  return false;
+        \\}
+        \\throws(function() { Array.prototype.push.call("abc", 1); }) &&
+        \\throws(function() { Array.prototype.push.call("", 1); }) &&
+        \\throws(function() { Array.prototype.push.call(""); }) &&
+        \\throws(function() { Array.prototype.unshift.call("abc"); }) &&
+        \\throws(function() { Array.prototype.pop.call(""); })
+    )).asBool());
+}
+
+test "array-like indexed writes on Date objects stay ordinary properties" {
+    try std.testing.expect((try evalIn(
+        \\var obj = new Date(0);
+        \\obj.length = 2;
+        \\obj[1] = true;
+        \\Array.prototype.indexOf.call(obj, true) === 1 &&
+        \\obj.hasOwnProperty("1") &&
+        \\Object.keys(obj).join(",") === "1,length"
+    )).asBool());
+}
+
+test "generic Array reverse deletes ordinary object numeric properties" {
+    try std.testing.expect((try evalIn(
+        \\var obj = {};
+        \\obj.length = 10;
+        \\obj.reverse = Array.prototype.reverse;
+        \\obj[0] = true;
+        \\obj[2] = Infinity;
+        \\obj[4] = undefined;
+        \\obj[5] = undefined;
+        \\obj[8] = "NaN";
+        \\obj[9] = "-1";
+        \\obj.reverse();
+        \\obj.length = 9;
+        \\obj.reverse();
+        \\obj[0] === undefined && obj[1] === Infinity && obj[7] === "NaN" && obj[8] === "-1" &&
+        \\!obj.hasOwnProperty("0")
+    )).asBool());
+}
+
 test "Array.isArray follows proxies and recognizes Array.prototype" {
     try std.testing.expect((try evalIn("Array.isArray(Array.prototype)")).asBool());
     try std.testing.expect((try evalIn(
@@ -13720,6 +13811,26 @@ test "TypedArray subarray omits species length for length-tracking views" {
         \\result.length === 15 &&
         \\(rab.resize(8), true) &&
         \\result.length === 7;
+    )).asBool());
+}
+
+test "TypedArray species constructors preserve VM frame captures" {
+    try std.testing.expect((try evalIn(
+        \\function run(TA) {
+        \\  var sample = new TA([1, 2, 3]);
+        \\  var calls = 0;
+        \\  var other;
+        \\  sample.constructor = {
+        \\    [Symbol.species]: function(len) {
+        \\      calls++;
+        \\      other = new TA(len);
+        \\      return other;
+        \\    }
+        \\  };
+        \\  var result = sample.map(function(value) { return value + 1; });
+        \\  return calls === 1 && result === other && result[0] === 2 && result[2] === 4;
+        \\}
+        \\run(Float64Array);
     )).asBool());
 }
 
@@ -18173,6 +18284,45 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     try std.testing.expect(profile.minor_sweep_ns_total > 0);
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+}
+
+test "parallel_js: cooperative nursery roots caller scopes beneath nested VM calls" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.gc_cooperative_tranche_bytes = 256 * 1024;
+
+    const result = try ctx.evaluate(
+        \\function nestedChurn(seed, iteration) {
+        \\  let tail = null;
+        \\  for (let i = 0; i < 48; i++)
+        \\    tail = { seed, iteration, i, prior: tail };
+        \\  return tail.i;
+        \\}
+        \\function callerScopeLane(seed) {
+        \\  const retained = { token: seed };
+        \\  let checksum = 0;
+        \\  for (let i = 0; i < 1200; i++) {
+        \\    checksum += nestedChurn(seed, i);
+        \\    if (retained.token !== seed)
+        \\      throw new Error("caller scope lost beneath nested call");
+        \\  }
+        \\  return retained.token + checksum;
+        \\}
+        \\const first = new Thread(callerScopeLane, 11);
+        \\const second = new Thread(callerScopeLane, 29);
+        \\first.join() + second.join();
+    );
+    try std.testing.expectEqual(@as(f64, 112840), result.asNum());
+    try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) > 0);
+    try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > 0);
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_cooperative_timeouts.load(.monotonic));
 }
 
 test "parallel_js: multi-age cooperative nursery retains old-owner graph" {

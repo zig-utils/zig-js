@@ -1652,10 +1652,16 @@ pub const Interpreter = struct {
     pub fn invalidateJitHeapFactsFor(self: *Interpreter, obj: ?*const value.Object) void {
         const owner = self.jit_owner orelse return;
         if (!owner.hasPublishedArtifacts()) return;
-        const shape_token = if (obj) |o|
-            if (o.shape) |shape| @intFromPtr(shape) else 0
-        else
-            0;
+        const shape_token = if (obj) |o| token: {
+            // Shape transitions publish under `property_lock`. The watchpoint
+            // pre-check runs before this mutator's store, but another shared
+            // mutator may be transitioning the same object concurrently; read
+            // the exact pre-store shape under that same lock rather than racing
+            // the writer or consulting a torn/stale pointer.
+            o.lockProperties();
+            defer o.unlockProperties();
+            break :token if (o.shape) |shape| @intFromPtr(shape) else 0;
+        } else 0;
         if (!owner.shapeMayInvalidate(shape_token)) return;
         if (self.jit_invalidation_fn) |invalidate|
             invalidate(self.jit_invalidation_ctx.?, self);
@@ -6295,16 +6301,16 @@ pub const Interpreter = struct {
         // (`load_upval`), which only the VM's activation frames provide — the
         // tree-walker's `callPlain` resolves names through the lexical
         // `Environment` chain, where a frame-local upvalue does not exist. When
-        // such a closure is invoked from a tree-walker entry (e.g. a spawned
-        // `Thread`'s `callValueWithThis`, or any host call that lands here while
-        // the top-level ran on the VM), tree-walking the body raises a spurious
-        // `ReferenceError`. `vm.callValue` already dispatches chunk functions to
-        // the VM; mirror that here so the two entry paths agree. Constructor
-        // entries from this interpreter path still keep the tree-walk path; the
-        // VM's own construct opcode threads `new.target` when it stays on bytecode.
-        // (A surfaced concurrent-JS fuzzer regression: a shared closure read
-        // across threads.)
-        if (new_target.isUndefined() and !func.is_generator and !func.is_async) {
+        // such a closure is invoked from a tree-walker/native entry (e.g. a spawned
+        // `Thread`'s `callValueWithThis`, a TypedArray `@@species` constructor, or
+        // any host call that lands here while the top-level ran on the VM),
+        // tree-walking the body raises a spurious `ReferenceError`. `vm.callValue`
+        // and the VM's construct opcode already dispatch chunk functions to the
+        // VM; mirror that here so interpreter/native calls and constructor entries
+        // thread the same activation frame and explicit `new.target`.
+        if (new_target.isUndefined() and func.is_class_constructor)
+            return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
+        if (!func.is_generator and !func.is_async) {
             if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
         }
         var cur_func = func;
@@ -12112,29 +12118,6 @@ pub const Interpreter = struct {
                 }
                 try ro.extendArrayLengthFloor(self.arena, i + 1);
             }
-        } else if (arrayElementIndex(key)) |i| {
-            if (ro.attrsMap() != null or ro.accessorsMap() != null or ro.has_indexed_property.load(.monotonic) or
-                ro.keyOrder() != null or !self.arrayProtoChainCleanForIndexedSet(ro))
-            {
-                try self.setProp(ro, key, v);
-                if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
-                    const root = rootEnv(self.env);
-                    // consts + vars read under one lock hold (a peer putConst
-                    // writes consts under it — the no-GIL Environment race class).
-                    root.lockBindings();
-                    defer root.unlockBindings();
-                    if (!root.consts.contains(key)) {
-                        if (root.vars.getPtr(key)) |slot| slot.* = v;
-                    }
-                }
-                return true;
-            }
-            const dense_cap: usize = 1 << 24;
-            const dense_len = ro.elementsLen();
-            if (i < dense_cap and i <= dense_len + 1024 and ro.getAccessor(key) == null) {
-                _ = try ro.growDenseElement(self.arena, i, v);
-                return true;
-            }
         }
         try self.setProp(ro, key, v);
         if (self.global_object != null and ro == self.global_object.? and had_receiver_own) {
@@ -13590,6 +13573,8 @@ pub const Interpreter = struct {
                 return self.throwError("TypeError", "Cannot delete a non-configurable array element");
             return;
         }
+        if (o.boxedPrimitive()) |p| if (p.isString())
+            return self.throwError("TypeError", "Cannot assign to read only property 'length'");
         // Set(O, "length", newLen, true) — force strict so a non-writable /
         // setter-less length on an array-like rejects with a TypeError.
         const saved = self.strict;
@@ -15454,6 +15439,7 @@ pub const Interpreter = struct {
         // block that internally throws-and-catches clobbers it, so hold it
         // alongside `held_err` and restore it if the held throw resumes.
         var held_exc: Value = Value.undef();
+        const try_env = self.env;
         // A heap-limit OOM can be converted into a JS throw using the reserved
         // OutOfMemoryError object, but `catch (e)` still needs a declarative
         // catch environment. Reserve the simple catch-binding environment before
@@ -15482,7 +15468,8 @@ pub const Interpreter = struct {
                 const exc = self.exception;
                 self.exception = Value.undef();
                 self.debug_exception_origin_notified = false;
-                const saved = self.env;
+                const saved = try_env;
+                self.env = try_env;
                 // Bind the catch target (identifier or destructuring pattern)
                 // into a dedicated catch scope. A simple identifier binding is
                 // Annex B.3.5-exempt from the eval var-conflict check. With an
@@ -15514,6 +15501,7 @@ pub const Interpreter = struct {
             }
         }
         if (t.finally_block) |fb| {
+            self.env = try_env;
             // The try/catch completion may have left an abrupt signal pending; a
             // statement list short-circuits on it, so clear it before running
             // finally and hold it aside. If finally completes normally the held
@@ -32685,7 +32673,7 @@ fn shouldPreserveZonedCalendarTime(self: *Interpreter, dur: [10]f64, rel: RelTo)
 fn totalDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, unit: TUnit) EvalError!f64 {
     const ep = try durEndpointsNs(self, dur, rel);
     // Day-and-smaller units (and weeks) have a fixed nanosecond length.
-    if (unit == .day or @intFromEnum(unit) > @intFromEnum(TUnit.day)) {
+    if (unit == .day or @backingInt(unit) > @backingInt(TUnit.day)) {
         if (rel.zoned and unit == .day) return totalZonedDaysRel(self, ep.start, ep.end, rel);
         return decimalTotalFromNs(self, ep.end - ep.start, nsPerUnit(unit), 40);
     }
@@ -32721,12 +32709,12 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
     const smallest = opts.smallest;
     const largest = opts.largest;
     if (rel.zoned and !opts.smallest_set and opts.increment == 1 and durHasCalendar(dur) and
-        @intFromEnum(largest) <= @intFromEnum(durPresentLargest(dur)) and
+        @backingInt(largest) <= @backingInt(durPresentLargest(dur)) and
         try shouldPreserveZonedCalendarTime(self, dur, rel))
         return dur;
     // Case 1: smallestUnit is day or a time unit — round on the nanosecond span.
-    if (@intFromEnum(smallest) >= @intFromEnum(TUnit.day)) {
-        if (rel.zoned and largest == .day and @intFromEnum(smallest) > @intFromEnum(TUnit.day) and
+    if (@backingInt(smallest) >= @backingInt(TUnit.day)) {
+        if (rel.zoned and largest == .day and @backingInt(smallest) > @backingInt(TUnit.day) and
             dur[0] == 0 and dur[1] == 0 and dur[2] == 0)
         {
             const date_part_ns = (@as(i128, @intFromFloat(dur[2])) * 7 + @as(i128, @intFromFloat(dur[3]))) * DAY_NS;
@@ -32742,14 +32730,14 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
             out[3] = @floatFromInt(try roundZonedDayCountRel(self, ep.start, ep.end, rel, opts.increment, opts.mode));
             return out;
         }
-        if (rel.zoned and @intFromEnum(largest) < @intFromEnum(TUnit.day) and smallest == .day) {
+        if (rel.zoned and @backingInt(largest) < @backingInt(TUnit.day) and smallest == .day) {
             const rounded_days = try roundZonedDayCountRel(self, ep.start, ep.end, rel, opts.increment, opts.mode);
             const placed = isoDateAdd(rel.y, rel.m, rel.d, 0, 0, 0, rounded_days);
             const diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
             return .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
         }
-        if (rel.zoned and @intFromEnum(largest) < @intFromEnum(TUnit.day) and
-            @intFromEnum(smallest) > @intFromEnum(TUnit.day) and opts.increment != 1)
+        if (rel.zoned and @backingInt(largest) < @backingInt(TUnit.day) and
+            @backingInt(smallest) > @backingInt(TUnit.day) and opts.increment != 1)
         {
             const raw_days = try balanceZonedDaysRel(self, ep.start, total_ns, rel);
             var raw_time_zero = true;
@@ -32767,7 +32755,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         }
         const rounded_ns = roundNs(total_ns, smallest, opts.increment, opts.mode);
         // Express the rounded span balanced to largestUnit.
-        if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
+        if (@backingInt(largest) >= @backingInt(TUnit.day)) {
             // Time/day-only output (no calendar units in the result).
             if (rel.zoned and largest == .day)
                 return balanceZonedDaysRel(self, ep.start, rounded_ns, rel);
@@ -32789,7 +32777,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         const ed = tCivilFromDays(@intCast(rounded_end_days));
         const diff = differenceISODate(rel.y, rel.m, rel.d, ed.y, ed.m, ed.d, largest);
         var out: [10]f64 = .{ diff[0], diff[1], diff[2], diff[3], 0, 0, 0, 0, 0, 0 };
-        if (rel.zoned and @intFromEnum(smallest) > @intFromEnum(TUnit.day) and opts.increment != 1)
+        if (rel.zoned and @backingInt(smallest) > @backingInt(TUnit.day) and opts.increment != 1)
             time_ns = roundNs(time_ns, smallest, opts.increment, opts.mode);
         const tparts = balanceTimeNs(time_ns, .hour);
         for (4..10) |i| out[i] = tparts[i];
@@ -32810,7 +32798,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
                 break;
             }
         }
-        if (!has_lower and @intFromEnum(largest) >= @intFromEnum(smallest)) return dur;
+        if (!has_lower and @backingInt(largest) >= @backingInt(smallest)) return dur;
     }
     if (opts.increment != 1) {
         const dir: i64 = if (ep.end >= ep.start) 1 else -1;
@@ -32823,7 +32811,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         };
         try checkIsoDate(self, @floatFromInt(probe.y), @floatFromInt(probe.m), @floatFromInt(probe.d));
     }
-    if (smallest == .week and @intFromEnum(largest) < @intFromEnum(TUnit.week)) {
+    if (smallest == .week and @backingInt(largest) < @backingInt(TUnit.week)) {
         const end_floor = tCivilFromDays(@intCast(@divFloor(relEpochToLocalNs(rel, ep.end), DAY_NS)));
         const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
         const lo_date = isoDateAdd(rel.y, rel.m, rel.d, @intFromFloat(exact[0]), @intFromFloat(exact[1]), 0, 0);
@@ -32832,10 +32820,10 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         const rounded_weeks = applyRounding(ep.end - lo_ns, inc * 7 * DAY_NS, opts.mode) * inc;
         return .{ exact[0], exact[1], @floatFromInt(rounded_weeks), 0, 0, 0, 0, 0, 0, 0 };
     }
-    if (@intFromEnum(largest) < @intFromEnum(smallest)) {
+    if (@backingInt(largest) < @backingInt(smallest)) {
         const end_floor = tCivilFromDays(@intCast(@divFloor(relEpochToLocalNs(rel, ep.end), DAY_NS)));
         const exact = differenceISODate(rel.y, rel.m, rel.d, end_floor.y, end_floor.m, end_floor.d, largest);
-        const lower_start: usize = @intFromEnum(largest) + 1;
+        const lower_start: usize = @backingInt(largest) + 1;
         var has_lower = false;
         for (lower_start..4) |i| {
             if (exact[i] != 0) {
@@ -32859,7 +32847,7 @@ fn roundDurationRel(self: *Interpreter, dur: [10]f64, rel: RelTo, opts: RoundOpt
         else => isoDateAdd(rel.y, rel.m, rel.d, 0, 0, rounded_units, 0), // week
     };
     var diff = differenceISODate(rel.y, rel.m, rel.d, placed.y, placed.m, placed.d, largest);
-    if (smallest == .week and @intFromEnum(largest) < @intFromEnum(TUnit.week)) {
+    if (smallest == .week and @backingInt(largest) < @backingInt(TUnit.week)) {
         diff[2] += @floatFromInt(applyRounding(@intFromFloat(diff[3]), 7, opts.mode));
         diff[3] = 0;
     }
@@ -33074,7 +33062,7 @@ fn durationLargestPresentUnit(dur: [10]f64) TUnit {
 fn durationLargestPresentUnit2(a: [10]f64, b: [10]f64) TUnit {
     const au = durationLargestPresentUnit(a);
     const bu = durationLargestPresentUnit(b);
-    return if (@intFromEnum(au) < @intFromEnum(bu)) au else bu;
+    return if (@backingInt(au) < @backingInt(bu)) au else bu;
 }
 
 /// IsValidDuration's magnitude bounds: every field finite, the calendar fields
@@ -33170,11 +33158,11 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
             if ((anchor.zoned or anchor.has_time_zone) and (anchor.epoch_ns < -max_temporal_instant_ns or anchor.epoch_ns > max_temporal_instant_ns - DAY_NS))
                 return self.throwError("RangeError", "relativeTo date-time out of range");
         };
-        if (@intFromEnum(unit) >= @intFromEnum(TUnit.day)) return Value.num(0);
+        if (@backingInt(unit) >= @backingInt(TUnit.day)) return Value.num(0);
     }
     // With a relativeTo anchor, compute the calendar-aware (fractional) total.
     if (rel) |anchor| return Value.num(try totalDurationRel(self, dur, anchor, unit));
-    if (durHasCalendar(dur) or @intFromEnum(unit) < @intFromEnum(TUnit.day))
+    if (durHasCalendar(dur) or @backingInt(unit) < @backingInt(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.total with calendar units requires relativeTo");
     return Value.num(try totalDurationFixed(self, dur, unit));
 }
@@ -33182,7 +33170,7 @@ fn temporalDurationTotalFn(ctx: *anyopaque, this: Value, args: []const Value) va
 /// The largest non-zero unit of a duration (default `day`), for `largestUnit:
 /// "auto"`.
 fn durPresentLargest(dur: [10]f64) TUnit {
-    for (0..10) |i| if (dur[i] != 0) return @enumFromInt(@as(u8, @intCast(i)));
+    for (0..10) |i| if (dur[i] != 0) return @fromBackingInt(@intCast(@as(u8, @intCast(i))));
     return .day;
 }
 
@@ -33195,11 +33183,11 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
     var opts = read.opts;
     if (!read.has_unit) return self.throwError("RangeError", "Temporal.Duration.prototype.round requires largestUnit or smallestUnit");
     // largestUnit must be ≥ smallestUnit.
-    if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) opts.largest = opts.smallest;
+    if (@backingInt(opts.largest) > @backingInt(opts.smallest)) opts.largest = opts.smallest;
     if (durIsBlank(dur)) {
         if (read.relative_to) |rel| {
             if (rel.zoned and opts.largest_set and opts.largest == .day and
-                @intFromEnum(opts.smallest) > @intFromEnum(TUnit.day) and
+                @backingInt(opts.smallest) > @backingInt(TUnit.day) and
                 rel.epoch_ns > max_temporal_instant_ns - DAY_NS)
             {
                 return self.throwError("RangeError", "relativeTo date-time out of range");
@@ -33208,7 +33196,7 @@ fn temporalDurationRoundFn(ctx: *anyopaque, this: Value, args: []const Value) va
         return makeDuration(self, dur);
     }
     if (read.relative_to) |rel| return makeDuration(self, try roundDurationRel(self, dur, rel, opts));
-    if (durHasCalendar(dur) or @intFromEnum(opts.largest) < @intFromEnum(TUnit.day) or @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day))
+    if (durHasCalendar(dur) or @backingInt(opts.largest) < @backingInt(TUnit.day) or @backingInt(opts.smallest) < @backingInt(TUnit.day))
         return self.throwError("RangeError", "Temporal.Duration.prototype.round with calendar units requires relativeTo");
     const rounded = roundNs(durationTimeNs(dur), opts.smallest, opts.increment, opts.mode);
     return makeDuration(self, balanceTimeNs(rounded, opts.largest));
@@ -36434,9 +36422,9 @@ fn temporalYearMonthUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toYearMonthFields(self, if (args.len > 0) args[0] else Value.undef(), true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .year, .smallest = .month, .mode = .trunc, .increment = 1 }, false);
             // Only year/month units are valid for a PlainYearMonth difference.
-            if (@intFromEnum(opts.largest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
-            if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
-            if (@intFromEnum(opts.largest) > @intFromEnum(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
+            if (@backingInt(opts.largest) > @backingInt(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference largestUnit must be year or month");
+            if (@backingInt(opts.smallest) > @backingInt(TUnit.month)) return self.throwError("RangeError", "PlainYearMonth difference smallestUnit must be year or month");
+            if (@backingInt(opts.largest) > @backingInt(opts.smallest)) return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
             const a = this.asObj().temporalData().?;
             if (!temporalCalendarIdsEqual(a.calendar, other.cal))
                 return self.throwError("RangeError", "calendar mismatch");
@@ -37091,7 +37079,7 @@ fn balanceTimeNs(total: i128, largest: TUnit) [10]f64 {
     };
     var started = false;
     for (order) |o| {
-        if (!started and @intFromEnum(o.u) < @intFromEnum(largest)) continue;
+        if (!started and @backingInt(o.u) < @backingInt(largest)) continue;
         started = true;
         const per = nsPerUnit(o.u);
         const q = @divTrunc(rem, per);
@@ -37267,7 +37255,7 @@ fn readTemporalStringPrecision(self: *Interpreter, options: Value, min_unit: TUn
     if (!suv.isUndefined()) {
         const su = tUnitFromStr(try self.toStringV(suv)) orelse
             return self.throwError("RangeError", "invalid smallestUnit");
-        if (@intFromEnum(su) < @intFromEnum(min_unit))
+        if (@backingInt(su) < @backingInt(min_unit))
             return self.throwError("RangeError", "invalid smallestUnit");
         p.unit = su;
         p.auto = false;
@@ -37495,7 +37483,7 @@ fn readRoundOpts(self: *Interpreter, opts: Value, def: RoundOpts, allow_string: 
     // ValidateTemporalUnitRange: a larger TUnit has a smaller enum value, so an
     // explicit largestUnit smaller than the smallestUnit is a RangeError.
     // (largest_set is always false on the round path, so this is inert there.)
-    if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
+    if (largest_set and smallest_set and @backingInt(r.largest) > @backingInt(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
     return r;
 }
@@ -37542,11 +37530,11 @@ fn readDurationRoundOptions(self: *Interpreter, opts_v: Value, dur: [10]f64) Eva
         r.smallest_set = true;
     }
 
-    if (largest_set and smallest_set and @intFromEnum(r.largest) > @intFromEnum(r.smallest))
+    if (largest_set and smallest_set and @backingInt(r.largest) > @backingInt(r.smallest))
         return self.throwError("RangeError", "largestUnit cannot be smaller than smallestUnit");
     if (!largest_set and r.smallest == .week and r.increment != 1 and (dur[0] != 0 or dur[1] != 0))
         return self.throwError("RangeError", "largestUnit is required when rounding calendar durations to week increments");
-    if (largest_set and smallest_set and r.increment != 1 and @intFromEnum(r.largest) < @intFromEnum(r.smallest) and @intFromEnum(r.smallest) <= @intFromEnum(TUnit.day))
+    if (largest_set and smallest_set and r.increment != 1 and @backingInt(r.largest) < @backingInt(r.smallest) and @backingInt(r.smallest) <= @backingInt(TUnit.day))
         return self.throwError("RangeError", "roundingIncrement cannot be combined with calendar unit balancing");
     try validateDurationRoundingIncrement(self, r.smallest, r.increment);
     return .{ .opts = r, .relative_to = rel, .has_unit = largest_set or smallest_set };
@@ -37657,9 +37645,9 @@ fn temporalInstantUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .instant)) return self.throwError("TypeError", "non-Instant");
             const other = try toInstantArg(self, if (args.len > 0) args[0] else Value.undef());
             var opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .second, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
-            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
-            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant difference smallestUnit must be hour or smaller");
-            if (!opts.largest_set and opts.smallest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.second))
+            if (@backingInt(opts.largest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "Instant difference largestUnit must be hour or smaller");
+            if (@backingInt(opts.smallest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "Instant difference smallestUnit must be hour or smaller");
+            if (!opts.largest_set and opts.smallest_set and @backingInt(opts.smallest) < @backingInt(TUnit.second))
                 opts.largest = opts.smallest;
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             var diff = @as(i128, @intFromFloat(sign)) * (other - this.asObj().temporalData().?.epoch_ns);
@@ -37676,7 +37664,7 @@ fn temporalInstantRoundFn(ctx: *anyopaque, this: Value, args: []const Value) val
     if (opts_v.isUndefined()) return self.throwError("TypeError", "options must be an object or string");
     const opts = try readRoundOpts(self, opts_v, .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
-    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
+    if (@backingInt(opts.smallest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "Instant.round smallestUnit must be hour or smaller");
     try validateInstantRoundingIncrement(self, opts.smallest, opts.increment);
     const o = try makeInstantFromEpochNs(self, roundInstantNs(this.asObj().temporalData().?.epoch_ns, opts.smallest, opts.increment, opts.mode));
     return Value.obj(o);
@@ -37804,8 +37792,8 @@ fn temporalPlainTimeUntilFn(comptime sign: f64) value.NativeFn {
             if (!tIsTemporal(this, .plain_time)) return self.throwError("TypeError", "non-PlainTime");
             const other = try toPlainTimeData(self, if (args.len > 0) args[0] else Value.undef());
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
-            if (@intFromEnum(opts.largest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
-            if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference smallestUnit must be hour or smaller");
+            if (@backingInt(opts.largest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference largestUnit must be hour or smaller");
+            if (@backingInt(opts.smallest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "PlainTime difference smallestUnit must be hour or smaller");
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
             var diff = @as(i128, @intFromFloat(sign)) * (timeToNs(&other) - timeToNs(this.asObj().temporalData().?));
             diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
@@ -37820,7 +37808,7 @@ fn temporalPlainTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Value) v
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
-    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
+    if (@backingInt(opts.smallest) < @backingInt(TUnit.hour)) return self.throwError("RangeError", "PlainTime.round smallestUnit must be hour or smaller");
     try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
     const rounded = roundNs(timeToNs(this.asObj().temporalData().?), opts.smallest, opts.increment, opts.mode);
     const o = try makeTemporal(self, .plain_time, "\x00T.PlainTime");
@@ -38105,11 +38093,11 @@ fn temporalPlainDateTimeUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toPlainDateTimeData(self, if (args.len > 0) args[0] else Value.undef(), true);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
-            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
+            const largest = if (!opts.largest_set and @backingInt(opts.smallest) < @backingInt(TUnit.day)) opts.smallest else opts.largest;
             const a = this.asObj().temporalData().?;
             const b = &other;
             if (!temporalCalendarIdsEqual(a.calendar, b.calendar)) return self.throwError("RangeError", "calendar mismatch");
-            if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
+            if (@backingInt(largest) >= @backingInt(TUnit.day)) {
                 // Exact nanosecond difference balanced into days and below.
                 var diff = @as(i128, @intFromFloat(sign)) * (dateTimeToNs(b) - dateTimeToNs(a));
                 diff = roundNs(diff, opts.smallest, opts.increment, opts.mode);
@@ -38269,7 +38257,7 @@ fn temporalPlainDateTimeRoundFn(ctx: *anyopaque, this: Value, args: []const Valu
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "PlainDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
-    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
+    if (@backingInt(opts.smallest) < @backingInt(TUnit.day)) return self.throwError("RangeError", "PlainDateTime.round smallestUnit must be day or smaller");
     try validatePlainDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporalData().?;
     const total = dateTimeToNs(t);
@@ -38449,10 +38437,10 @@ fn temporalPlainDateUntilFn(comptime sign: f64) value.NativeFn {
             const b = try toPlainDateFields(self, if (args.len > 0) args[0] else Value.undef(), true);
             if (!temporalCalendarIdsEqual(t.calendar, b.cal)) return self.throwError("RangeError", "calendar mismatch");
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .day, .smallest = .day, .mode = .trunc, .increment = 1 }, false);
-            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
-            if (@intFromEnum(largest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate largestUnit cannot be a time unit");
-            if (@intFromEnum(opts.smallest) > @intFromEnum(TUnit.day)) return self.throwError("RangeError", "PlainDate smallestUnit cannot be a time unit");
-            if (!(@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day) or opts.increment != 1)) {
+            const largest = if (!opts.largest_set and @backingInt(opts.smallest) < @backingInt(TUnit.day)) opts.smallest else opts.largest;
+            if (@backingInt(largest) > @backingInt(TUnit.day)) return self.throwError("RangeError", "PlainDate largestUnit cannot be a time unit");
+            if (@backingInt(opts.smallest) > @backingInt(TUnit.day)) return self.throwError("RangeError", "PlainDate smallestUnit cannot be a time unit");
+            if (!(@backingInt(opts.smallest) < @backingInt(TUnit.day) or opts.increment != 1)) {
                 var dd = calendarDateDiff(t.calendar, t.year, t.month, t.day, b.y, b.m, b.d, largest);
                 if (sign < 0) for (&dd) |*c| {
                     c.* = -c.*;
@@ -38886,7 +38874,7 @@ fn readInstantToStringOptions(self: *Interpreter, options: Value) EvalError!Inst
 
     if (su_name) |name| {
         const su = tUnitFromStr(name) orelse return self.throwError("RangeError", "invalid smallestUnit");
-        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+        if (@backingInt(su) < @backingInt(TUnit.minute))
             return self.throwError("RangeError", "invalid smallestUnit");
         out.precision.unit = su;
         out.precision.auto = false;
@@ -40334,7 +40322,7 @@ fn readZdtToStringOptions(self: *Interpreter, options: Value) EvalError!ZdtToStr
     out.time_zone_name = (try dtfGetStr(self, options, "timeZoneName", &.{ "auto", "never", "critical" }, "auto")).?;
 
     if (smallest) |su| {
-        if (@intFromEnum(su) < @intFromEnum(TUnit.minute))
+        if (@backingInt(su) < @backingInt(TUnit.minute))
             return self.throwError("RangeError", "invalid smallestUnit");
         out.precision.unit = su;
         out.precision.auto = false;
@@ -40564,11 +40552,11 @@ fn temporalZdtUntilFn(comptime sign: f64) value.NativeFn {
             const other = try toZdtArg(self, other_arg, true, .reject, .compatible);
             const opts = try readRoundOpts(self, if (args.len > 1) args[1] else Value.undef(), .{ .largest = .hour, .smallest = .nanosecond, .mode = .trunc, .increment = 1 }, false);
             try validateDurationRoundingIncrement(self, opts.smallest, opts.increment);
-            const largest = if (!opts.largest_set and @intFromEnum(opts.smallest) <= @intFromEnum(TUnit.day)) opts.smallest else opts.largest;
+            const largest = if (!opts.largest_set and @backingInt(opts.smallest) <= @backingInt(TUnit.day)) opts.smallest else opts.largest;
             const t = this.asObj().temporalData().?;
             if (!temporalCalendarIdsEqual(t.calendar, other.calendar)) return self.throwError("RangeError", "calendar mismatch");
             if (!other_arg.isString() and !temporalTimeZoneIdsEqual(t.tz_name, other.tz_name)) return self.throwError("RangeError", "time zone mismatch");
-            if (@intFromEnum(largest) >= @intFromEnum(TUnit.day)) {
+            if (@backingInt(largest) >= @backingInt(TUnit.day)) {
                 if (largest == .day) {
                     const start_zdt = if (sign < 0) &other else t;
                     const span = if (sign < 0) t.epoch_ns - other.epoch_ns else other.epoch_ns - t.epoch_ns;
@@ -40686,7 +40674,7 @@ fn temporalZdtRoundFn(ctx: *anyopaque, this: Value, args: []const Value) value.H
     if (args.len == 0 or args[0].isUndefined()) return self.throwError("TypeError", "ZonedDateTime.round requires options");
     const opts = try readRoundOpts(self, args[0], .{ .largest = .day, .smallest = .nanosecond, .mode = .half_expand, .increment = 1 }, true);
     if (!opts.smallest_set) return self.throwError("RangeError", "smallestUnit is required");
-    if (@intFromEnum(opts.smallest) < @intFromEnum(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
+    if (@backingInt(opts.smallest) < @backingInt(TUnit.day)) return self.throwError("RangeError", "ZonedDateTime.round smallestUnit must be day or smaller");
     try validateZonedDateTimeRoundingIncrement(self, opts.smallest, opts.increment);
     const t = this.asObj().temporalData().?;
     if (opts.smallest == .day) {

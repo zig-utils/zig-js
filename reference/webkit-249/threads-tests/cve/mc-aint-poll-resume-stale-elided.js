@@ -138,9 +138,11 @@ for (let r = 0; r < READERS; ++r) {
                 const aOwner = inSet(a, ALPHA_BASE), aForeign = inSet(a, FOREIGN_ALPHA);
                 const bOwner = inSet(b, BETA_BASE), bForeign = inSet(b, FOREIGN_BETA);
                 if (!(aOwner || aForeign) || !(bOwner || bForeign)) {
-                    print("FAILURE: cross-sentinel/torn read after poll-resume: alpha=" + a + " beta=" + b);
+                    print("FAILURE: cross-sentinel/torn read after poll-resume: alpha=" + a + " beta=" + b
+                        + " flags=" + aOwner + "/" + aForeign + "/" + bOwner + "/" + bForeign);
                     Atomics.store(gate, "stop", 1);
-                    throw new Error("MC-AINT S4 / SPEC-jit I21(b) violated: alpha=" + a + " beta=" + b);
+                    throw new Error("MC-AINT S4 / SPEC-jit I21(b) violated: alpha=" + a + " beta=" + b
+                        + " flags=" + aOwner + "/" + aForeign + "/" + bOwner + "/" + bForeign);
                 }
                 ++checks;
             }
