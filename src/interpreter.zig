@@ -8986,11 +8986,7 @@ pub const Interpreter = struct {
         if (!rx.isObject() or !rx.asObj().behavior.is_regex) return false;
         const exec = self.getProperty(rx, "exec") catch return false;
         if (!exec.isObject()) return false;
-        const rc = self.env.get("RegExp") orelse return false;
-        if (!rc.isObject()) return false;
-        const proto = rc.asObj().getOwn("prototype") orelse return false;
-        if (!proto.isObject()) return false;
-        const builtin_exec = proto.asObj().getOwn("exec") orelse return false;
+        const builtin_exec = rootEnv(self.env).get("\x00RegExpBuiltinExec") orelse return false;
         return builtin_exec.isObject() and exec.asObj() == builtin_exec.asObj();
     }
 
@@ -9377,7 +9373,7 @@ pub const Interpreter = struct {
                 continue;
             }
 
-            const e = toLen(try self.toNumberV(try self.getProperty(splitter, "lastIndex")));
+            const e = @min(toLen(try self.toNumberV(try self.getProperty(splitter, "lastIndex"))), size);
             if (e == p) {
                 q = advanceStringIndex(s, q, full_unicode);
                 continue;
@@ -31940,6 +31936,7 @@ fn installRegExpProto(env: *Environment, rs: *Shape) EvalError!void {
     try setNativeGetterWithData(a, rs, p, "unicodeSets", regexFlagGetter('v'), @ptrCast(accessor_data));
     try setNativeGetterWithData(a, rs, p, "hasIndices", regexFlagGetter('d'), @ptrCast(accessor_data));
     try setNative(a, rs, p, "exec", 1, regexProtoMethod("exec"));
+    if (p.getOwn("exec")) |exec| try env.put("\x00RegExpBuiltinExec", exec);
     try setNative(a, rs, p, "test", 1, regexProtoMethod("test"));
     try setNativeWithData(a, rs, p, "compile", 2, regexProtoMethod("compile"), @ptrCast(accessor_data));
     try setNative(a, rs, p, "toString", 0, regexProtoMethod("toString"));

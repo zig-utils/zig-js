@@ -1,10 +1,10 @@
 {
   "valid": {
-    "passing": 48488,
+    "passing": 48491,
     "total": 48506,
-    "percentage": 99.96,
+    "percentage": 99.97,
     "parseFail": 0,
-    "runtimeFail": 16,
+    "runtimeFail": 13,
     "hostFail": 2
   },
   "negative": {
@@ -1665,11 +1665,11 @@
     },
     {
       "name": "staging",
-      "passing": 1465,
+      "passing": 1467,
       "total": 1476,
-      "percentage": 99.25,
+      "percentage": 99.39,
       "parseFail": 0,
-      "runtimeFail": 9,
+      "runtimeFail": 7,
       "hostFail": 2
     },
     {
@@ -2358,11 +2358,11 @@
     },
     {
       "name": "built-ins/RegExp/prototype",
-      "passing": 457,
+      "passing": 458,
       "total": 458,
-      "percentage": 99.78,
+      "percentage": 100,
       "parseFail": 0,
-      "runtimeFail": 1,
+      "runtimeFail": 0,
       "hostFail": 0
     },
     {

@@ -10686,6 +10686,17 @@ test "String.prototype.split: limit + regex separators" {
     try expectEvalStr("a|b|c", "'abc'.split(/(?:)/).join('|')");
     // Capture groups are spliced into the result.
     try expectEvalStr(",t,es,t,", "'test'.split(/(t)/).join(',')");
+    // RegExp @@split clamps a user-written lastIndex to the input length.
+    try std.testing.expect((try evalIn(
+        \\var oldExec = RegExp.prototype.exec;
+        \\RegExp.prototype.exec = function() {
+        \\  this.lastIndex = 100;
+        \\  return { length: 0, index: 0 };
+        \\};
+        \\var result = /a/[Symbol.split]("foo");
+        \\RegExp.prototype.exec = oldExec;
+        \\result.length === 2 && result[0] === "" && result[1] === ""
+    )).asBool());
     // Empty input: [""] unless the pattern matches the empty string (then []).
     try std.testing.expectEqual(@as(f64, 1), (try evalIn("''.split(/x/).length")).asNum());
     try std.testing.expectEqual(@as(f64, 0), (try evalIn("''.split(/(?:)/).length")).asNum());
