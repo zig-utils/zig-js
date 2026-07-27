@@ -58,7 +58,7 @@ Some rows are individual files or worker shards (e.g. `…generated/.#0:20`) rat
 
 ## Remaining High-Impact Work
 
-The configured runner is green, so the next work is not a bucket of known valid failures. It is an audit of what is outside the denominator:
+The configured runner has zero skips and zero excluded files, but the VALID axis still has a small failure tail. Keep fixing those cases directly; separately, audit anything outside the configured denominator:
 
 - When using a saved transcript, keep `docs/.data/test262-run-*.txt` and `docs/.data/test262.json` paired. Otherwise regenerate `docs/.data/test262.json` directly with `bun run docs:data`.
 - Keep `docs/.data/test262-skips.tsv` in sync with `zig-out/bin/test262 --list-skips`.

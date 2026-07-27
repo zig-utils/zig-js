@@ -1,11 +1,11 @@
 {
   "valid": {
-    "passing": 48506,
+    "passing": 48488,
     "total": 48506,
-    "percentage": 100,
+    "percentage": 99.96,
     "parseFail": 0,
-    "runtimeFail": 0,
-    "hostFail": 0
+    "runtimeFail": 16,
+    "hostFail": 2
   },
   "negative": {
     "passing": 4669,
@@ -13,7 +13,7 @@
     "percentage": 100
   },
   "skipped": 0,
-  "generatedAt": "2026-07-06",
+  "generatedAt": "2026-07-27",
   "harness": "real (pinned tc39/test262 submodule)",
   "suites": [
     {
@@ -1080,11 +1080,11 @@
     },
     {
       "name": "language/statements/using",
-      "passing": 49,
+      "passing": 47,
       "total": 49,
-      "percentage": 100,
+      "percentage": 95.92,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 2,
       "hostFail": 0
     },
     {
@@ -1161,11 +1161,11 @@
     },
     {
       "name": "intl402/Collator",
-      "passing": 65,
+      "passing": 64,
       "total": 65,
-      "percentage": 100,
+      "percentage": 98.46,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {
@@ -1269,11 +1269,11 @@
     },
     {
       "name": "intl402/Intl",
-      "passing": 66,
+      "passing": 65,
       "total": 66,
-      "percentage": 100,
+      "percentage": 98.48,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {
@@ -1377,11 +1377,11 @@
     },
     {
       "name": "intl402/String",
-      "passing": 19,
+      "passing": 18,
       "total": 19,
-      "percentage": 100,
+      "percentage": 94.74,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {
@@ -1665,12 +1665,12 @@
     },
     {
       "name": "staging",
-      "passing": 1476,
+      "passing": 1465,
       "total": 1476,
-      "percentage": 100,
+      "percentage": 99.25,
       "parseFail": 0,
-      "runtimeFail": 0,
-      "hostFail": 0
+      "runtimeFail": 9,
+      "hostFail": 2
     },
     {
       "name": "built-ins/AbstractModuleSource",
@@ -2358,11 +2358,11 @@
     },
     {
       "name": "built-ins/RegExp/prototype",
-      "passing": 458,
+      "passing": 457,
       "total": 458,
-      "percentage": 100,
+      "percentage": 99.78,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {
@@ -2475,11 +2475,11 @@
     },
     {
       "name": "built-ins/Temporal",
-      "passing": 4603,
+      "passing": 4602,
       "total": 4603,
-      "percentage": 100,
+      "percentage": 99.98,
       "parseFail": 0,
-      "runtimeFail": 0,
+      "runtimeFail": 1,
       "hostFail": 0
     },
     {

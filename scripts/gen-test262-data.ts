@@ -41,6 +41,8 @@ async function getOutput(): Promise<string> {
 
 function parse(text: string) {
   const todayIso = new Date().toISOString().slice(0, 10)
+  const pct = (passing: number, total: number) =>
+    total === 0 ? 0 : Number(((passing / total) * 100).toFixed(2))
 
   const validLine = text.match(/VALID[^:]*:\s*(\d+)\/(\d+)\s*\(([\d.]+)%\)(?:[^\n]*parse-fail\s*(\d+)[^\n]*runtime-fail\s*(\d+)[^\n]*host-fail\s*(\d+))?/i)
   const negLine = text.match(/NEGATIVE[^:]*:\s*(\d+)\/(\d+)\s*\(([\d.]+)%\)/i)
@@ -54,30 +56,36 @@ function parse(text: string) {
   const suiteRe = /test\/(.+?):\s*valid\s*(\d+)\/(\d+)\s*\(([\d.]+)%\)(?:\s*\[parse-fail\s*(\d+)[^\]]*runtime-fail\s*(\d+)[^\]]*host-fail\s*(\d+)\])?/gi
   const suites: Array<Record<string, unknown>> = []
   for (const m of text.matchAll(suiteRe)) {
+    const passing = Number(m[2])
+    const total = Number(m[3])
     suites.push({
       name: m[1],
-      passing: Number(m[2]),
-      total: Number(m[3]),
-      percentage: Number(m[4]),
+      passing,
+      total,
+      percentage: pct(passing, total),
       ...(m[5] !== undefined
         ? { parseFail: Number(m[5]), runtimeFail: Number(m[6]), hostFail: Number(m[7]) }
         : {}),
     })
   }
 
+  const validPassing = Number(validLine[1])
+  const validTotal = Number(validLine[2])
   const valid = {
-    passing: Number(validLine[1]),
-    total: Number(validLine[2]),
-    percentage: Number(validLine[3]),
+    passing: validPassing,
+    total: validTotal,
+    percentage: pct(validPassing, validTotal),
     ...(validLine[4] !== undefined
       ? { parseFail: Number(validLine[4]), runtimeFail: Number(validLine[5]), hostFail: Number(validLine[6]) }
       : {}),
   }
+  const negativePassing = negLine ? Number(negLine[1]) : 0
+  const negativeTotal = negLine ? Number(negLine[2]) : 0
 
   return {
     valid,
     negative: negLine
-      ? { passing: Number(negLine[1]), total: Number(negLine[2]), percentage: Number(negLine[3]) }
+      ? { passing: negativePassing, total: negativeTotal, percentage: pct(negativePassing, negativeTotal) }
       : { passing: 0, total: 0, percentage: 0 },
     skipped: skipLine ? Number(skipLine[1]) : 0,
     generatedAt: todayIso,

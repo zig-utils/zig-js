@@ -29,7 +29,7 @@ zig-js is an early but capable v1: a correct tree-walking interpreter over a bro
 :::
 
 ::: warning Scope caveat
-The configured test262 runner is green with zero skipped tests and zero excluded files. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module coverage, and module+async/top-level-await graph ordering are scored. Two non-normative SpiderMonkey staging files are removed from the configured corpus because their pending expectations contradict stronger Annex B coverage.
+The configured test262 runner currently has zero skipped tests and zero excluded files, with remaining failures visible in the checked-in score. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module coverage, and module+async/top-level-await graph ordering are scored. Two non-normative SpiderMonkey staging files are removed from the configured corpus because their pending expectations contradict stronger Annex B coverage.
 :::
 
 ## Next steps

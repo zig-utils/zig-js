@@ -6309,7 +6309,7 @@ pub const Interpreter = struct {
         // VM; mirror that here so interpreter/native calls and constructor entries
         // thread the same activation frame and explicit `new.target`.
         if (new_target.isUndefined() and func.is_class_constructor)
-            return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
+            return throwClassConstructorCallError(self, func);
         if (!func.is_generator and !func.is_async) {
             if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
         }
@@ -6535,7 +6535,7 @@ pub const Interpreter = struct {
             self.pending_brand_names = saved_pbn;
         }
         if (func.is_class_constructor and new_target.isUndefined())
-            return self.throwError("TypeError", "Class constructor cannot be invoked without 'new'");
+            return throwClassConstructorCallError(self, func);
 
         // Non-arrow functions get an `arguments` array-like over the call args —
         // but only if the body could reference it. When `uses_arguments` is false
@@ -18364,6 +18364,10 @@ fn throwErrorInRealm(self: *Interpreter, realm: *Environment, name: []const u8, 
     self.env = realm;
     defer self.env = saved_env;
     return self.throwError(name, message);
+}
+
+fn throwClassConstructorCallError(self: *Interpreter, func: *Function) EvalError {
+    return throwErrorInRealm(self, func.closure, "TypeError", "Class constructor cannot be invoked without 'new'");
 }
 
 fn objectFunctionRealm(o: *value.Object) ?*Environment {
@@ -48466,6 +48470,19 @@ test "DataView cross-realm brand errors use the method realm" {
         \\let getterRealm = false;
         \\try { av.buffer; } catch (e) { getterRealm = e.constructor === alien.TypeError; }
         \\methodRealm && getterRealm
+    )).asBool());
+}
+
+test "class constructor call TypeError uses the callee realm" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try std.testing.expect((try evalSource(a,
+        \\let alien = $262.createRealm().global;
+        \\let C = alien.eval("(class {})");
+        \\let ok = false;
+        \\try { C(); } catch (e) { ok = e.constructor === alien.TypeError; }
+        \\ok
     )).asBool());
 }
 
