@@ -42,6 +42,8 @@ README_USE_START = "<!-- release-compatibility:use:start -->"
 README_USE_END = "<!-- release-compatibility:use:end -->"
 README_OVERVIEW_START = "<!-- release-compatibility:overview:start -->"
 README_OVERVIEW_END = "<!-- release-compatibility:overview:end -->"
+README_QUICKSTART_START = "<!-- release-compatibility:quickstart:start -->"
+README_QUICKSTART_END = "<!-- release-compatibility:quickstart:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -359,6 +361,29 @@ def generated_readme_overview() -> str:
     ])
 
 
+def generated_readme_quickstart() -> str:
+    build_source = artifact_path("build.zig").read_text()
+    root_source = artifact_path("src/root.zig").read_text()
+    context_source = artifact_path("src/context.zig").read_text()
+    require('b.addModule("js"' in build_source, "README quickstart requires `js` module wiring")
+    require("pub const Context = @import(\"context.zig\").Context;" in root_source, "README quickstart requires Context re-export")
+    require("pub fn create(gpa: std.mem.Allocator) !*Context" in context_source, "README quickstart requires Context.create")
+    require("pub fn destroy(self: *Context)" in context_source, "README quickstart requires Context.destroy")
+    require("pub fn evaluate(self: *Context, source: []const u8)" in context_source, "README quickstart requires Context.evaluate")
+    return "\n".join([
+        README_QUICKSTART_START,
+        "```zig",
+        "const js = @import(\"js\");",
+        "",
+        "const ctx = try js.Context.create(allocator);",
+        "defer ctx.destroy();",
+        "",
+        "const value = try ctx.evaluate(\"let x = 40; x + 2\");",
+        "```",
+        README_QUICKSTART_END,
+    ])
+
+
 def generated_readme_notice(matrix: dict[str, object]) -> str:
     gates = matrix["gates"]
     open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
@@ -435,10 +460,32 @@ def replace_readme_overview(readme: str, generated: str) -> str:
     heading = "# zig-js\n\n"
     require(heading in readme, "README title is absent")
     before, section_and_after = readme.split(heading, 1)
-    code_start = section_and_after.find("\n```zig\n")
-    require(code_start != -1, "README overview code sample is absent")
-    after = section_and_after[code_start + 1 :]
+    if README_QUICKSTART_START in section_and_after:
+        quickstart_start = section_and_after.find(README_QUICKSTART_START)
+        after = section_and_after[quickstart_start:]
+    else:
+        code_start = section_and_after.find("\n```zig\n")
+        require(code_start != -1, "README overview code sample is absent")
+        after = section_and_after[code_start + 1 :]
     return f"{before}{heading}{generated}\n\n{after}"
+
+
+def replace_readme_quickstart(readme: str, generated: str) -> str:
+    if README_QUICKSTART_START in readme or README_QUICKSTART_END in readme:
+        require(
+            readme.count(README_QUICKSTART_START) == 1 and readme.count(README_QUICKSTART_END) == 1,
+            "README quickstart marker pair drift",
+        )
+        before, remainder = readme.split(README_QUICKSTART_START, 1)
+        _, after = remainder.split(README_QUICKSTART_END, 1)
+        return f"{before}{generated}\n\n{after.lstrip(chr(10))}"
+    overview_end = README_OVERVIEW_END + "\n\n"
+    require(overview_end in readme, "README quickstart requires overview marker")
+    before, section_and_after = readme.split(overview_end, 1)
+    code_end = section_and_after.find("\n```\n")
+    require(section_and_after.startswith("```zig\n") and code_end != -1, "README quickstart code block is absent")
+    after = section_and_after[code_end + len("\n```\n") :]
+    return f"{before}{overview_end}{generated}\n\n{after.lstrip(chr(10))}"
 
 
 def replace_readme_use(readme: str, generated: str) -> str:
@@ -611,6 +658,7 @@ def main() -> int:
     require(isinstance(heading, str) and heading, "README heading policy is required")
     if args.update_readme:
         readme = replace_readme_overview(readme, generated_readme_overview())
+        readme = replace_readme_quickstart(readme, generated_readme_quickstart())
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
         readme = replace_readme_benchmark_comparison(
             readme,
@@ -628,6 +676,7 @@ def main() -> int:
         readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
     require(generated_readme_overview() in readme, "README overview drift")
+    require(generated_readme_quickstart() in readme, "README quickstart drift")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
     require(generated_readme_benchmark_comparison(benchmark_summary, readme_path) in readme, "README benchmark comparison drift")
     require(generated_readme_use() in readme, "README use section drift")

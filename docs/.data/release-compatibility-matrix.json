@@ -131,6 +131,7 @@
         "build.zig.zon",
         ".github/workflows/ci.yml",
         "src/root.zig",
+        "src/context.zig",
         "src/c_api.zig",
         "src/objc_bridge.m",
         "docs/api.md",

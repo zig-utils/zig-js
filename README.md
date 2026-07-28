@@ -4,6 +4,7 @@
 Core engine and importable `js` module code are Zig; the static library exports JavaScriptCore-shaped C headers/symbols, with macOS Objective-C bridge glue in `src/objc_bridge.m`. The package depends on `zig-regex` and `zig-gc`, not bundled JSC/V8; system JavaScriptCore is used only by explicit differential and benchmark targets. APIs are pre-stabilization.
 <!-- release-compatibility:overview:end -->
 
+<!-- release-compatibility:quickstart:start -->
 ```zig
 const js = @import("js");
 
@@ -12,6 +13,7 @@ defer ctx.destroy();
 
 const value = try ctx.evaluate("let x = 40; x + 2");
 ```
+<!-- release-compatibility:quickstart:end -->
 
 ## Status
 
