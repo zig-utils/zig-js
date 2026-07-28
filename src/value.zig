@@ -1551,6 +1551,13 @@ pub const Object = struct {
     /// another. This dedicated lock serializes backing activation across them.
     /// Gated on `element_locks_enabled` so the default engine pays nothing.
     backing_lock: std.atomic.Mutex = .unlocked,
+    /// Serializes one observable indexed-property mutation across the separate
+    /// descriptor (`property_lock`) and dense-value (`elements_lock`) stores.
+    /// Property-mode Atomics, [[DefineOwnProperty]], and delete take this outer
+    /// transaction only after all user-code coercion/traps have completed, so a
+    /// missing-element store cannot race an accessor/non-writable definition
+    /// into a state no sequential ordering can produce.
+    indexed_property_lock: std.atomic.Mutex = .unlocked,
     /// Coarse synchronization for ordinary named-property metadata: shape
     /// publication, slots, accessors, attributes, and key order. The Layer-B GIL
     /// still serializes JS execution today; this lock is the Layer-C object-side
@@ -2873,6 +2880,24 @@ pub const Object = struct {
     pub fn unlockProperties(self: *const Object) void {
         gc_runtime.leaveTraceSensitiveLock();
         @constCast(self).property_lock.unlock();
+    }
+
+    pub fn lockIndexedProperty(self: *const Object) void {
+        var spins: usize = 0;
+        const mutex = &@constCast(self).indexed_property_lock;
+        while (!mutex.tryLock()) : (spins += 1) {
+            if ((spins & 0xff) == 0) {
+                std.Thread.yield() catch {};
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+        gc_runtime.enterTraceSensitiveLock();
+    }
+
+    pub fn unlockIndexedProperty(self: *const Object) void {
+        gc_runtime.leaveTraceSensitiveLock();
+        @constCast(self).indexed_property_lock.unlock();
     }
 
     /// [[Prototype]], read/written atomically: `setPrototypeOf` (and internal

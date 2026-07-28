@@ -12232,6 +12232,9 @@ pub const Interpreter = struct {
                 .accepted => |accepted| return accepted,
             }
         };
+        const indexed_locked = value.canonicalIndex(key) != null;
+        if (indexed_locked) o.lockIndexedProperty();
+        defer if (indexed_locked) o.unlockIndexedProperty();
         // Accessor property.
         switch (try o.deleteAccessorOwn(self.arena, key)) {
             .absent => {},

@@ -2625,6 +2625,12 @@ fn namedSlotUnlocked(o: *const value.Object, key: []const u8) ?usize {
     return @intCast(sh.lookup(key) orelse return null);
 }
 
+fn lockIndexedAtomicsProperty(o: *value.Object, key: []const u8) bool {
+    if (value.canonicalIndex(key) == null) return false;
+    o.lockIndexedProperty();
+    return true;
+}
+
 fn ownDataOrThrow(self: *Interpreter, o: *value.Object, key: []const u8, what: []const u8) value.HostError!Value {
     if (isLockedNamedAtomicsKey(key)) {
         o.lockProperties();
@@ -2653,6 +2659,8 @@ fn argAt(args: []const Value, i: usize) Value {
 pub fn propLoad(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    const indexed_locked = lockIndexedAtomicsProperty(o, key);
+    defer if (indexed_locked) o.unlockIndexedProperty();
     if (denseAtomicsIndex(o, key)) |i| {
         if (o.atomicDenseElementLoad(i)) |v| return v;
     }
@@ -2663,6 +2671,8 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const v = argAt(args, 2);
+    const indexed_locked = lockIndexedAtomicsProperty(o, key);
+    defer if (indexed_locked) o.unlockIndexedProperty();
     if (denseAtomicsIndex(o, key)) |i| {
         if (o.atomicDenseElementStore(i, v)) |stored| return stored;
     }
@@ -2684,15 +2694,18 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     } else if (!o.isExtensible()) {
         return self.throwError("TypeError", "Atomics.store: cannot add a property to a non-extensible object");
     }
-    // [[Set]] writes shape props and index elements alike, preserving
-    // attributes and creating fresh default-attribute properties.
-    try self.setMember(Value.obj(o), key, v);
+    // Property-mode store is a direct own-property operation: an inherited
+    // setter cannot intercept the Missing arm. The outer indexed transaction
+    // also means no user code runs while it is held.
+    try self.setProp(o, key, v);
     return v;
 }
 
 pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    const indexed_locked = lockIndexedAtomicsProperty(o, key);
+    defer if (indexed_locked) o.unlockIndexedProperty();
     if (denseAtomicsIndex(o, key)) |i| {
         if (o.atomicDenseElementExchange(i, argAt(args, 2))) |old| return old;
     }
@@ -2709,13 +2722,15 @@ pub fn propExchange(self: *Interpreter, args: []const Value) value.HostError!Val
     }
     const old = try ownDataOrThrow(self, o, key, "Atomics.exchange: object has no own data property");
     try writableOrThrow(self, o, key, "Atomics.exchange: property is not writable");
-    try self.setMember(Value.obj(o), key, argAt(args, 2));
+    try self.setProp(o, key, argAt(args, 2));
     return old;
 }
 
 pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostError!Value {
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
+    const indexed_locked = lockIndexedAtomicsProperty(o, key);
+    defer if (indexed_locked) o.unlockIndexedProperty();
     if (denseAtomicsIndex(o, key)) |i| {
         if (o.atomicDenseElementCompareExchange(i, argAt(args, 2), argAt(args, 3))) |old| return old;
     }
@@ -2738,7 +2753,7 @@ pub fn propCompareExchange(self: *Interpreter, args: []const Value) value.HostEr
     // would fail.
     try writableOrThrow(self, o, key, "Atomics.compareExchange: property is not writable");
     if (sameValueZero(old, argAt(args, 2)))
-        try self.setMember(Value.obj(o), key, argAt(args, 3));
+        try self.setProp(o, key, argAt(args, 3));
     return old;
 }
 
@@ -2748,6 +2763,8 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
     const o = args[0].asObj();
     const key = try self.keyOf(argAt(args, 1));
     const operand = try self.toNumberV(argAt(args, 2));
+    const indexed_locked = lockIndexedAtomicsProperty(o, key);
+    defer if (indexed_locked) o.unlockIndexedProperty();
     if (denseAtomicsIndex(o, key)) |i| {
         const dense_op: value.Object.DenseElementRmwOp = switch (op) {
             .add => .add,
@@ -2788,7 +2805,7 @@ pub fn propRmw(self: *Interpreter, op: PropRmwOp, args: []const Value) value.Hos
         .or_ => @floatFromInt(jsInt32(old.asNum()) | jsInt32(operand)),
         .xor => @floatFromInt(jsInt32(old.asNum()) ^ jsInt32(operand)),
     };
-    try self.setMember(Value.obj(o), key, Value.num(result));
+    try self.setProp(o, key, Value.num(result));
     return old;
 }
 

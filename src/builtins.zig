@@ -1660,6 +1660,9 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
             }
         }
     }
+    const indexed_locked = value.canonicalIndex(key) != null;
+    if (indexed_locked) target.lockIndexedProperty();
+    defer if (indexed_locked) target.unlockIndexedProperty();
     // Array `length` is a data property { writable, !enumerable, !configurable }.
     // Redefining it can change the value (ToUint32, truncating/extending) and
     // toggle writability, but not make it configurable/enumerable or an accessor.
