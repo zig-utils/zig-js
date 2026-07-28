@@ -4923,18 +4923,55 @@ pub const Interpreter = struct {
             std.mem.indexOf(u8, source, ".arguments") != null;
     }
 
-    fn sourceBodyMayCall(source: []const u8) bool {
+    fn sourceIdentifierByte(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
+    }
+
+    fn sourceBodyMayCallOtherThan(source: []const u8, allowed_name: []const u8) bool {
         // A traditional function's own parameter list is not a body call. The
         // old whole-source scan therefore rejected every sloppy function before
         // the named-property and self-recursion exceptions below could apply.
-        // Starting after the opening brace stays conservative for grouping and
-        // nested syntax while admitting the exact no-call property bodies this
-        // policy is meant to tier.
+        // Starting after the opening brace, distinguish control/grouping
+        // parentheses from call syntax. This remains deliberately conservative:
+        // a computed/parenthesized callee or any non-self identifier call keeps
+        // the body on the tree-walker for legacy caller/arguments observability.
         const body_start = if (std.mem.indexOfScalar(u8, source, '{')) |brace|
             brace + 1
         else
             0;
-        return std.mem.indexOfScalar(u8, source[body_start..], '(') != null;
+        var search = body_start;
+        while (std.mem.indexOfScalarPos(u8, source, search, '(')) |paren| {
+            var end = paren;
+            while (end > body_start and std.ascii.isWhitespace(source[end - 1])) end -= 1;
+            if (end == body_start) {
+                search = paren + 1;
+                continue;
+            }
+            const preceding = source[end - 1];
+            if (preceding == ')' or preceding == ']' or preceding == '.') return true;
+            // A comment can separate an identifier callee from `(`, and a
+            // non-ASCII byte can be part of an identifier. The source-level
+            // classifier intentionally rejects both ambiguous forms rather
+            // than admitting a real call by mistake.
+            if (preceding == '/' or preceding >= 0x80) return true;
+            if (!sourceIdentifierByte(preceding)) {
+                search = paren + 1;
+                continue;
+            }
+            var start = end - 1;
+            while (start > body_start and sourceIdentifierByte(source[start - 1])) start -= 1;
+            const token = source[start..end];
+            const control = std.mem.eql(u8, token, "if") or
+                std.mem.eql(u8, token, "for") or
+                std.mem.eql(u8, token, "while") or
+                std.mem.eql(u8, token, "switch") or
+                std.mem.eql(u8, token, "catch") or
+                std.mem.eql(u8, token, "with");
+            if (!control and (allowed_name.len == 0 or !std.mem.eql(u8, token, allowed_name)))
+                return true;
+            search = paren + 1;
+        }
+        return false;
     }
 
     fn sourceHasNamedSelfCall(source: []const u8, name: []const u8) bool {
@@ -4964,9 +5001,10 @@ pub const Interpreter = struct {
             return sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null;
         const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
         return !sourceMayObserveLegacyCallFrame(fnode.source) and
+            !sourceBodyMayCallOtherThan(fnode.source, if (named_self_recursion) fnode.name else "") and
             (named_self_recursion or
-                (!sourceBodyMayCall(fnode.source) and
-                    std.mem.indexOfScalar(u8, fnode.source, '.') != null));
+                std.mem.indexOfScalar(u8, fnode.source, '.') != null or
+                std.mem.indexOfScalar(u8, fnode.source, '[') != null);
     }
 
     pub fn funcOf(v: Value) ?*Function {

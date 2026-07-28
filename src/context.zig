@@ -17463,6 +17463,34 @@ test "vm trampoline: safe sloppy functions can use heap-bounded recursion" {
     try std.testing.expectEqual(@as(f64, 2000), r.result);
 }
 
+test "vm admission: safe sloppy indexed loops exclude real callees" {
+    const ctx = try Context.createWith(std.testing.allocator, .{});
+    defer ctx.destroy();
+
+    const indexed = try ctx.evaluate(
+        \\function indexedSum(a, spins) {
+        \\  let s = 0;
+        \\  for (let i = 0; i < spins; ++i) s += a[i & 1];
+        \\  return s;
+        \\}
+        \\try { var marker = 1; } catch (e) {}
+        \\indexedSum
+    );
+    const indexed_raw = indexed.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const indexed_func: *interp.Function = @ptrCast(@alignCast(indexed_raw));
+    try std.testing.expect(indexed_func.chunk != null);
+    try std.testing.expectEqual(@as(f64, 9), (try ctx.evaluate("indexedSum([1, 2], 6)")).asNum());
+
+    const caller = try ctx.evaluate(
+        \\function indexedCall(a) { return String /* keep call detection conservative */ (a[0]); }
+        \\try { var marker = 1; } catch (e) {}
+        \\indexedCall
+    );
+    const caller_raw = caller.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const caller_func: *interp.Function = @ptrCast(@alignCast(caller_raw));
+    try std.testing.expect(caller_func.chunk == null);
+}
+
 test "deep stack: main-realm non-tail recursion runs under the stack guard" {
     // Bounded witness for non-tail recursion on the main realm. Proper tail calls
     // now intentionally avoid native-stack growth for tail recursion, so the old
