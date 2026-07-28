@@ -93,6 +93,16 @@ Run `zig build --help` for the full command list.
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 <!-- release-compatibility:notice:end -->
 
+## Documentation
+
+- [Features](docs/features/index.md) — language, built-ins, Intl/Temporal, binary data, concurrency, WebAssembly.
+- [Advanced](docs/advanced/index.md) — embedding, memory and GC, execution tiers, debugging, verification.
+- [Architecture](docs/architecture.md) · [Conformance](docs/conformance.md) · [Benchmarks](docs/benchmarks.md) · [Threads](docs/threads/index.md)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for toolchain setup (including the sibling `zig-regex` / `zig-gc` checkouts), how to run each suite, the CI gates, and the commit conventions. Coding agents should start from [CLAUDE.md](CLAUDE.md) (symlinked as `AGENTS.md`).
+
 ## Community
 
 For help, discussion about best practices, or any other conversation that would benefit from being searchable:
