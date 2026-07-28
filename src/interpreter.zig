@@ -16254,12 +16254,62 @@ fn dynamicDebugSourceUrl(source: []const u8, fallback: []const u8) []const u8 {
     return best_value orelse fallback;
 }
 
+fn isAsciiJsWhitespace(c: u8) bool {
+    return switch (c) {
+        ' ', '\t', '\n', '\r', 0x0b, 0x0c => true,
+        else => false,
+    };
+}
+
+fn sourceOnlyEmptyBlocks(source: []const u8) bool {
+    var depth: usize = 0;
+    var i: usize = 0;
+    while (i < source.len) {
+        const c = source[i];
+        if (isAsciiJsWhitespace(c) or c == ';') {
+            i += 1;
+            continue;
+        }
+        if (c == '{') {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if (c == '}') {
+            if (depth == 0) return false;
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < source.len) {
+            if (source[i + 1] == '/') {
+                i += 2;
+                while (i < source.len and source[i] != '\n' and source[i] != '\r' and
+                    !(i + 2 < source.len and source[i] == 0xe2 and source[i + 1] == 0x80 and
+                        (source[i + 2] == 0xa8 or source[i + 2] == 0xa9)))
+                    i += 1;
+                continue;
+            }
+            if (source[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < source.len and !(source[i] == '*' and source[i + 1] == '/')) i += 1;
+                if (i + 1 >= source.len) return false;
+                i += 2;
+                continue;
+            }
+        }
+        return false;
+    }
+    return depth == 0;
+}
+
 fn evalFn(ctx: *anyopaque, this: Value, args: []const Value) value.HostError!Value {
     _ = this;
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (args.len == 0) return Value.undef();
     if (!args[0].isString()) return args[0]; // eval of a non-string is the identity
     const src = args[0].asStr();
+    if (sourceOnlyEmptyBlocks(src)) return Value.undef();
     var lex_diagnostic: ?parser_mod.SourceLocation = null;
     var parser = Parser.initWithDiagnostic(self.arena, src, &lex_diagnostic) catch |err|
         return self.throwParserSyntaxErrorAt("eval", lex_diagnostic orelse parser_mod.sourceLocationAt(src, 0), err);
@@ -47986,6 +48036,24 @@ test "interpreter direct eval super early errors run before side effects" {
         \\class Base { get value() { return 7; } }
         \\class Derived extends Base { method() { return eval('super.value;'); } }
         \\new Derived().method()
+    )).asNum());
+}
+
+test "interpreter direct eval skips empty block floods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try std.testing.expect(sourceOnlyEmptyBlocks("{}; /* comment */\n{{}} // sourceURL comment\n"));
+    try std.testing.expect(!sourceOnlyEmptyBlocks("{ let x = 1; }"));
+    try std.testing.expect(!sourceOnlyEmptyBlocks("}{"));
+    try std.testing.expect(!sourceOnlyEmptyBlocks("//var \xe2\x80\xa8yy = -1"));
+
+    try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,
+        \\var s = "{}";
+        \\for (var i = 0; i < 16; i++) s += s;
+        \\eval(s);
+        \\1
     )).asNum());
 }
 

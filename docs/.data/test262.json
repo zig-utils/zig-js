@@ -1,11 +1,11 @@
 {
   "valid": {
-    "passing": 48505,
+    "passing": 48506,
     "total": 48506,
     "percentage": 100,
     "parseFail": 0,
     "runtimeFail": 0,
-    "hostFail": 1
+    "hostFail": 0
   },
   "negative": {
     "passing": 4669,
@@ -1665,12 +1665,12 @@
     },
     {
       "name": "staging",
-      "passing": 1475,
+      "passing": 1476,
       "total": 1476,
-      "percentage": 99.93,
+      "percentage": 100,
       "parseFail": 0,
       "runtimeFail": 0,
-      "hostFail": 1
+      "hostFail": 0
     },
     {
       "name": "built-ins/AbstractModuleSource",
