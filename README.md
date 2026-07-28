@@ -1,6 +1,8 @@
 # zig-js
 
-A pure-Zig JavaScript engine with a JavaScriptCore-shaped C API. No JSC, V8, or external C libraries; no compatibility promises before stabilization.
+<!-- release-compatibility:overview:start -->
+Core engine and importable `js` module code are Zig; the static library exports JavaScriptCore-shaped C headers/symbols, with macOS Objective-C bridge glue in `src/objc_bridge.m`. The package depends on `zig-regex` and `zig-gc`, not bundled JSC/V8; system JavaScriptCore is used only by explicit differential and benchmark targets. APIs are pre-stabilization.
+<!-- release-compatibility:overview:end -->
 
 ```zig
 const js = @import("js");

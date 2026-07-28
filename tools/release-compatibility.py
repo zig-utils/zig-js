@@ -39,6 +39,8 @@ README_BUILD_TEST_START = "<!-- release-compatibility:build-test:start -->"
 README_BUILD_TEST_END = "<!-- release-compatibility:build-test:end -->"
 README_USE_START = "<!-- release-compatibility:use:start -->"
 README_USE_END = "<!-- release-compatibility:use:end -->"
+README_OVERVIEW_START = "<!-- release-compatibility:overview:start -->"
+README_OVERVIEW_END = "<!-- release-compatibility:overview:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -98,7 +100,11 @@ def statuses(value: object) -> set[str]:
 
 
 def build_step_names(build_source: str) -> set[str]:
-    return set(re.findall(r'b\.step\("([^"]+)"', build_source))
+    return set(re.findall(r'b\.step\(\s*"([^"]+)"', build_source))
+
+
+def package_dependency_names(package_source: str) -> set[str]:
+    return set(re.findall(r'\.(zig_[A-Za-z0-9_]+)\s*=', package_source))
 
 
 def require_install_claims(build_source: str) -> None:
@@ -294,6 +300,29 @@ def generated_readme_use() -> str:
     ])
 
 
+def generated_readme_overview() -> str:
+    package_source = artifact_path("build.zig.zon").read_text()
+    build_source = artifact_path("build.zig").read_text()
+    root_source = artifact_path("src/root.zig").read_text()
+    c_api_source = artifact_path("src/c_api.zig").read_text()
+    objc_source = artifact_path("src/objc_bridge.m").read_text()
+    dependencies = package_dependency_names(package_source)
+    require(dependencies == {"zig_regex", "zig_gc"}, f"README overview dependency drift: {sorted(dependencies)}")
+    require("@import(\"js\")" in root_source and "Context.create" in root_source, "README overview requires Zig module API evidence")
+    require("JavaScriptCore-shaped C API" in c_api_source, "README overview requires JSC-shaped C API evidence")
+    require("#import <JavaScriptCore/JavaScriptCore.h>" in objc_source, "README overview requires Objective-C bridge evidence")
+    require("src/objc_bridge.m" in build_source, "README overview requires Objective-C bridge build wiring")
+    steps = build_step_names(build_source)
+    require({"benchmark-comparison", "c-api-jsc-diff", "wasm-exception-jsc-diff"} <= steps, "README overview requires explicit system-JSC evidence steps")
+    require('linkFramework("JavaScriptCore"' in build_source, "README overview requires system-JSC link evidence")
+
+    return "\n".join([
+        README_OVERVIEW_START,
+        "Core engine and importable `js` module code are Zig; the static library exports JavaScriptCore-shaped C headers/symbols, with macOS Objective-C bridge glue in `src/objc_bridge.m`. The package depends on `zig-regex` and `zig-gc`, not bundled JSC/V8; system JavaScriptCore is used only by explicit differential and benchmark targets. APIs are pre-stabilization.",
+        README_OVERVIEW_END,
+    ])
+
+
 def generated_readme_notice(matrix: dict[str, object]) -> str:
     gates = matrix["gates"]
     open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
@@ -364,6 +393,16 @@ def replace_readme_status(readme: str, generated: str) -> str:
     require(next_heading_at != -1, "README status section is unterminated")
     after = section_and_after[next_heading_at + 1 :]
     return f"{before}{heading}\n{generated}\n\n{after}"
+
+
+def replace_readme_overview(readme: str, generated: str) -> str:
+    heading = "# zig-js\n\n"
+    require(heading in readme, "README title is absent")
+    before, section_and_after = readme.split(heading, 1)
+    code_start = section_and_after.find("\n```zig\n")
+    require(code_start != -1, "README overview code sample is absent")
+    after = section_and_after[code_start + 1 :]
+    return f"{before}{heading}{generated}\n\n{after}"
 
 
 def replace_readme_use(readme: str, generated: str) -> str:
@@ -532,6 +571,7 @@ def main() -> int:
     heading = policy.get("not_implemented_heading")
     require(isinstance(heading, str) and heading, "README heading policy is required")
     if args.update_readme:
+        readme = replace_readme_overview(readme, generated_readme_overview())
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
         readme = replace_readme_use(readme, generated_readme_use())
         readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
@@ -544,6 +584,7 @@ def main() -> int:
         )
         readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
+    require(generated_readme_overview() in readme, "README overview drift")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
     require(generated_readme_use() in readme, "README use section drift")
     require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
