@@ -26,6 +26,8 @@ EXPECTED_GATES = {
 }
 README_NOTICE_START = "<!-- release-compatibility:notice:start -->"
 README_NOTICE_END = "<!-- release-compatibility:notice:end -->"
+README_STATUS_START = "<!-- release-compatibility:status:start -->"
+README_STATUS_END = "<!-- release-compatibility:status:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -97,6 +99,44 @@ def generated_readme_notice(matrix: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def private_abi_count(relative: str) -> int:
+    inventory = json.loads(artifact_path(relative).read_text())
+    by_classification = inventory.get("totals", {}).get("by_classification", {})
+    return int(by_classification.get("private_jsc", 0))
+
+
+def generated_readme_status(
+    test262_pass: int,
+    test262_total: int,
+    wasm: dict[str, object],
+) -> str:
+    wasm_totals = wasm["combined_totals"]
+    core_3 = next((profile for profile in wasm["profiles"] if profile["id"] == "core-3"), None)
+    require(core_3 is not None, "README status generation requires Core 3 profile")
+    core_3_totals = core_3["totals"]
+    home_private = private_abi_count("docs/abi/home-private-7ed99c02-inventory.json")
+    bun_private = private_abi_count("docs/abi/bun-private-core-4982b91e-inventory.json")
+    return "\n".join([
+        README_STATUS_START,
+        "| profile | result | evidence |",
+        "| --- | ---: | --- |",
+        f"| configured test262 | **{test262_pass:,} / {test262_total:,}** | [run](docs/.data/test262-run-2026-07-27.txt) · [data](docs/.data/test262.json) |",
+        f"| ten-profile WebAssembly matrix | **{wasm_totals['pass']:,} / {wasm_totals['pass']:,} applicable** | Core 3: {core_3_totals['pass']:,}/{core_3_totals['pass']:,} · [matrix](docs/.data/wasm-conformance-matrix.json) · [upstream-main shadow](docs/.data/wasm-core-main-shadow-inventory.json) · [reproduce](docs/wasm.md) |",
+        f"| pinned private ABI | **Home {home_private}/{home_private} · Bun {bun_private}/{bun_private}** | [inventories, provider audit, precise lifecycle, and exact reproduction](docs/abi/README.md) |",
+        README_STATUS_END,
+    ])
+
+
+def replace_readme_status(readme: str, generated: str) -> str:
+    heading = "## Status\n"
+    require(heading in readme, "README status heading is absent")
+    before, section_and_after = readme.split(heading, 1)
+    next_heading_at = section_and_after.find("\n## ")
+    require(next_heading_at != -1, "README status section is unterminated")
+    after = section_and_after[next_heading_at + 1 :]
+    return f"{before}{heading}\n{generated}\n\n{after}"
+
+
 def replace_readme_notice(readme: str, heading: str, generated: str) -> str:
     heading_line = heading + "\n"
     require(heading_line in readme, "README missing-surface heading is absent")
@@ -105,6 +145,17 @@ def replace_readme_notice(readme: str, heading: str, generated: str) -> str:
     require(next_heading_at != -1, "README missing-surface section is unterminated")
     after = section_and_after[next_heading_at + 1 :]
     return f"{before}{heading_line}\n{generated}\n\n{after}"
+
+
+def remove_readme_notice(readme: str, heading: str) -> str:
+    heading_line = heading + "\n"
+    if heading_line not in readme:
+        return readme
+    before, section_and_after = readme.split(heading_line, 1)
+    next_heading_at = section_and_after.find("\n## ")
+    require(next_heading_at != -1, "README missing-surface section is unterminated")
+    after = section_and_after[next_heading_at + 1 :]
+    return before.rstrip() + "\n\n" + after
 
 
 def main() -> int:
@@ -196,10 +247,16 @@ def main() -> int:
     readme = readme_path.read_text()
     heading = policy.get("not_implemented_heading")
     require(isinstance(heading, str) and heading, "README heading policy is required")
-    if args.update_readme and not all_green:
-        readme = replace_readme_notice(readme, heading, generated_readme_notice(matrix))
+    if args.update_readme:
+        readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
+        readme = (
+            remove_readme_notice(readme, heading)
+            if all_green
+            else replace_readme_notice(readme, heading, generated_readme_notice(matrix))
+        )
         readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
+    require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
     if not all_green:
         require(generated_readme_notice(matrix) in readme, "README missing-surface notice drift")
     require(f"**{test262_pass:,} / {test262_total:,}**" in readme, "README test262 score drift")
