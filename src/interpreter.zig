@@ -2911,7 +2911,15 @@ pub const Interpreter = struct {
                 if (a.value.* == .field_init_value and a.target.* == .member) {
                     const m = a.target.member;
                     const obj = try self.eval(m.object);
-                    const key = try self.memberKey(m.property, m.computed);
+                    // Computed public class fields are resolved once at class
+                    // definition time, then baked into this desugared member node
+                    // as an already-encoded storage key. Reusing memberKey would
+                    // double-escape NUL-led string keys and turn Symbol storage
+                    // keys into public strings.
+                    const key = if (m.computed == null and m.property.len > 0 and m.property[0] == 0)
+                        m.property
+                    else
+                        try self.memberKey(m.property, m.computed);
                     const v = try self.eval(a.value);
                     try self.maybeNameAnon(v, a.value.field_init_value, key);
                     if (obj.isObject()) {
@@ -3860,7 +3868,7 @@ pub const Interpreter = struct {
                         // for-in has no per-iteration `using` resource, so the
                         // binding env is always reusable while uncaptured.
                         if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
-                        try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, k));
+                        try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
                         last = try self.eval(body);
                         if (self.loopSignal(my_label)) |stop| if (stop) break;
                     }
@@ -3923,7 +3931,7 @@ pub const Interpreter = struct {
             else
                 try o.ownKeys(self.arena);
             for (own_keys) |k| {
-                if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+                if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
                 if (visited.contains(k)) continue;
                 try visited.put(self.arena, k, {});
                 const enumerable = if (moduleNsOf(o) != null) blk: {
@@ -3950,7 +3958,7 @@ pub const Interpreter = struct {
         var cur: ?*value.Object = start;
         while (cur) |object| {
             for (try self.objectOwnKeysList(object)) |key| {
-                if (value.isSymbolKey(key) or value.isPrivateKey(key) or visited.contains(key)) continue;
+                if (value.isRealSymbolKey(key) or value.isHiddenInternalKey(key) or value.isPrivateKey(key) or visited.contains(key)) continue;
                 try visited.put(self.arena, key, {});
                 const enumerable = if (moduleNsOf(object) != null) blk: {
                     const desc = try moduleNsDesc(self, object, key);
@@ -3976,7 +3984,7 @@ pub const Interpreter = struct {
         if (!v.isUndefined() and !v.isNull()) {
             const o = try self.toObject(v);
             for (try self.forInKeyList(o)) |k| {
-                try arr.appendElement(self.arena, try Value.strAlloc(self.arena, k));
+                try arr.appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
             }
         }
         return Value.obj(arr);
@@ -5672,7 +5680,7 @@ pub const Interpreter = struct {
                 }
                 break :blk try self.toPropertyKeyValue(try self.eval(ke));
             } else null;
-            const key = if (kv) |k| try self.keyOf(k) else m.key;
+            const key = if (kv) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, m.key);
             // The name an anonymous field/method initializer takes from this key.
             // A private name (`#x`) was rewritten to the `#x\x00<serial>` storage
             // key, but its function name is the source form `#x` (the part before
@@ -6909,7 +6917,7 @@ pub const Interpreter = struct {
 
     fn memberKey(self: *Interpreter, static: []const u8, computed: ?*Node) EvalError![]const u8 {
         if (computed) |ce| return self.keyOf(try self.eval(ce));
-        return static;
+        return value.encodeStringKey(self.arena, static);
     }
 
     fn fastNumericIndex(v: Value) ?usize {
@@ -7118,8 +7126,13 @@ pub const Interpreter = struct {
     /// two `keyOf`/`keyDisplayName` calls would run `valueOf`/`@@toPrimitive`
     /// twice and, when the result is a Symbol, throw in the ToString half.)
     pub fn toPropertyKeyValue(self: *Interpreter, k: Value) EvalError!Value {
-        if (!k.isObject() or k.asObj().is_symbol) return k;
-        return self.toPrimitive(k, .string);
+        const primitive = if (k.isObject() and !k.asObj().is_symbol)
+            try self.toPrimitive(k, .string)
+        else
+            k;
+        if (primitive.isObject() and primitive.asObj().is_symbol) return primitive;
+        if (primitive.isString()) return try Value.strAlloc(self.arena, try primitive.asWtf8(self.arena));
+        return try Value.strAlloc(self.arena, try primitive.toString(self.arena));
     }
 
     pub fn keyOf(self: *Interpreter, k: Value) EvalError![]const u8 {
@@ -7132,11 +7145,11 @@ pub const Interpreter = struct {
             if (prim.isObject() and prim.asObj().is_symbol) return self.registerSymbol(prim.asObj());
             // Property keys are canonical WTF-8 (compared by bytes, read by JSON /
             // enumeration), so re-encode a flat-latin1 string key.
-            if (prim.isString()) return prim.asWtf8(self.arena);
-            return prim.toString(self.arena);
+            if (prim.isString()) return value.encodeStringKey(self.arena, try prim.asWtf8(self.arena));
+            return value.encodeStringKey(self.arena, try prim.toString(self.arena));
         }
-        if (k.isString()) return k.asWtf8(self.arena);
-        return k.toString(self.arena);
+        if (k.isString()) return value.encodeStringKey(self.arena, try k.asWtf8(self.arena));
+        return value.encodeStringKey(self.arena, try k.toString(self.arena));
     }
 
     /// Index a Symbol by its encoded `sym_key` so it can later be recovered (by
@@ -8353,7 +8366,7 @@ pub const Interpreter = struct {
             // keyOf and keyDisplayName then read the resulting primitive without
             // re-coercing.
             const kv: ?Value = if (p.key_expr) |ke| try self.toPropertyKeyValue(try self.eval(ke)) else null;
-            const key = if (kv) |k| try self.keyOf(k) else p.key;
+            const key = if (kv) |k| try self.keyOf(k) else try value.encodeStringKey(self.arena, p.key);
             // The name a method/accessor takes from this key (a symbol shows as
             // `[description]`, not its internal key).
             const name_str = if (kv) |k| try self.keyDisplayName(k) else p.key;
@@ -10423,7 +10436,7 @@ pub const Interpreter = struct {
     pub fn keyToValue(self: *Interpreter, key: []const u8) EvalError!Value {
         // A symbol-encoded key recovers the original Symbol (registered in
         // `keyOf` when it was used as a property key); other keys are strings.
-        if (value.isSymbolKey(key)) {
+        if (value.isRealSymbolKey(key)) {
             if (self.symbols.get(key)) |sym| return Value.obj(sym);
             // Context embedding calls create short-lived Interpreter values.
             // Recover Symbols used by a previous call from a reflection-hidden
@@ -10452,7 +10465,7 @@ pub const Interpreter = struct {
                 }
             };
         }
-        return try Value.strAlloc(self.arena, key);
+        return try Value.strAlloc(self.arena, value.decodeStringKey(key));
     }
 
     /// Guard against unbounded proxy→target→proxy forwarding (which recurses
@@ -10671,7 +10684,7 @@ pub const Interpreter = struct {
         const appendReflectable = struct {
             fn f(arena: std.mem.Allocator, list: *std.ArrayListUnmanaged([]const u8), k: []const u8) !void {
                 if (value.isPrivateKey(k)) return;
-                if (value.isSymbolKey(k) and !value.isRealSymbolKey(k)) return;
+                if (value.isHiddenInternalKey(k)) return;
                 try list.append(arena, k);
             }
         }.f;
@@ -10702,9 +10715,9 @@ pub const Interpreter = struct {
                 var strings: std.ArrayListUnmanaged([]const u8) = .empty;
                 var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
                 for (try t.ownKeys(self.arena)) |k| {
-                    if (std.mem.eql(u8, k, "length") or value.isPrivateKey(k)) continue;
-                    if (value.isSymbolKey(k)) {
-                        if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
+                    if (std.mem.eql(u8, k, "length") or value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
+                    if (value.isRealSymbolKey(k)) {
+                        try symbols.append(self.arena, k);
                     } else if (value.canonicalIndex(k)) |idx| {
                         if (!seen.contains(idx)) {
                             try seen.put(self.arena, idx, {});
@@ -10749,9 +10762,9 @@ pub const Interpreter = struct {
             var strings: std.ArrayListUnmanaged([]const u8) = .empty;
             var symbols: std.ArrayListUnmanaged([]const u8) = .empty;
             for (try t.ownKeys(self.arena)) |k| {
-                if (value.isPrivateKey(k)) continue;
-                if (value.isSymbolKey(k)) {
-                    if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
+                if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
+                if (value.isRealSymbolKey(k)) {
+                    try symbols.append(self.arena, k);
                 } else if (value.canonicalIndex(k)) |idx| {
                     if (!seen.contains(idx)) {
                         try seen.put(self.arena, idx, {});
@@ -10791,8 +10804,10 @@ pub const Interpreter = struct {
         var seen_strings: std.StringHashMapUnmanaged(void) = .empty;
         if (t.hostClassHooks()) |hooks| if (hooks.own_keys) |own_keys| {
             for (try own_keys(@ptrCast(self), t)) |k| {
-                if (value.isPrivateKey(k) or value.isSymbolKey(k)) continue;
-                if (value.canonicalIndex(k)) |idx| {
+                if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
+                if (value.isRealSymbolKey(k)) {
+                    try symbols.append(self.arena, k);
+                } else if (value.canonicalIndex(k)) |idx| {
                     if (!seen.contains(idx)) {
                         try seen.put(self.arena, idx, {});
                         try indices.append(self.arena, k);
@@ -10804,9 +10819,9 @@ pub const Interpreter = struct {
             }
         };
         for (try t.ownKeys(self.arena)) |k| {
-            if (value.isPrivateKey(k)) continue;
-            if (value.isSymbolKey(k)) {
-                if (value.isRealSymbolKey(k)) try symbols.append(self.arena, k);
+            if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
+            if (value.isRealSymbolKey(k)) {
+                try symbols.append(self.arena, k);
             } else if (value.canonicalIndex(k)) |idx| {
                 if (!seen.contains(idx)) {
                     try seen.put(self.arena, idx, {});
@@ -11370,7 +11385,7 @@ pub const Interpreter = struct {
         const home = self.home_object orelse return self.throwError("SyntaxError", "'super' outside a method");
         if (!self.this_initialized) return self.throwError("ReferenceError", "Must call super constructor before using 'this'");
         const parent = home.protoAtomic() orelse return self.throwError("TypeError", "Cannot set property of null (super)");
-        const key = if (computed != null) try self.keyOf(computed_key) else property;
+        const key = if (computed != null) try self.keyOf(computed_key) else try value.encodeStringKey(self.arena, property);
         if (!try self.setMemberResult(Value.obj(parent), key, v, self.this_value)) {
             if (self.strict) return self.throwError("TypeError", "Cannot set property");
         }
@@ -11381,7 +11396,7 @@ pub const Interpreter = struct {
             return self.throwError("TypeError", "cannot destructure null or undefined");
         var consumed: std.ArrayListUnmanaged([]const u8) = .empty;
         for (props) |prop| {
-            const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else prop.key;
+            const key = if (prop.key_expr) |ke| try self.keyOf(try self.eval(ke)) else try value.encodeStringKey(self.arena, prop.key);
             try consumed.append(self.arena, key);
             // KeyedDestructuringAssignmentEvaluation: when the target is a plain
             // member reference (assignment form), its reference (base, then the key
@@ -43777,11 +43792,11 @@ fn urlSearchParamsConstructorFn(ctx: *anyopaque, this: Value, args: []const Valu
             if (!entry.isObject()) return self.throwError("TypeError", "URLSearchParams init sequence entry must be a pair");
             const k = try self.toStringWtf8(if (entry.asObj().elementAt(0)) |x| x else Value.undef());
             const v = try self.toStringWtf8(if (entry.asObj().elementAt(1)) |x| x else Value.undef());
-            try uspPush(self, pairs, k, v);
+            try uspPush(self, pairs, value.decodeStringKey(k), v);
         }
     } else if (init.isObject() and !init.asObj().is_symbol) {
         for (try self.objectOwnKeysList(init.asObj())) |k| {
-            if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+            if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
             if (!objectHasOwn(init.asObj(), k) or !init.asObj().getAttr(k).enumerable) continue;
             const v = try self.toStringWtf8(try self.getProperty(init, k));
             try uspPush(self, pairs, k, v);
@@ -44173,7 +44188,7 @@ pub fn fetchHeadersFill(self: *Interpreter, this: Value, init: Value) EvalError!
     if (init.isObject()) {
         // Record<string, string>: own enumerable string keys in order.
         for (try self.objectOwnKeysList(init.asObj())) |k| {
-            try headersAppendRaw(self, this, try Value.strAlloc(self.arena, k), try self.getProperty(init, k));
+            try headersAppendRaw(self, this, try Value.strAlloc(self.arena, value.decodeStringKey(k)), try self.getProperty(init, k));
         }
         return;
     }
@@ -48642,6 +48657,18 @@ test "interpreter JSON, Object, Number builtins" {
     const a = arena.allocator();
     try std.testing.expectEqualStrings("{\"a\":1,\"b\":[2,3]}", (try evalSource(a, "JSON.stringify({ a: 1, b: [2, 3] })")).asStr());
     try std.testing.expectEqualStrings("[1,\"x\",true,null]", (try evalSource(a, "JSON.stringify([1, 'x', true, null])")).asStr());
+    try std.testing.expect((try evalSource(a,
+        \\let nulKey = "\u0000\u000b";
+        \\let alphaNulKey = "\u0000alpha";
+        \\let o = {};
+        \\o[nulKey] = "";
+        \\o[alphaNulKey] = 1;
+        \\JSON.stringify({ [nulKey]: "" }) === "{\"\\u0000\\u000b\":\"\"}" &&
+        \\Object.keys(o)[0] === nulKey &&
+        \\JSON.stringify({ [alphaNulKey]: 1 }) === "{\"\\u0000alpha\":1}" &&
+        \\Object.getOwnPropertyNames(o).includes(alphaNulKey) &&
+        \\Reflect.ownKeys(o).includes(alphaNulKey)
+    )).asBool());
     try std.testing.expectEqual(@as(f64, 3), (try evalSource(a, "let o = JSON.parse('{\"n\": 3}'); o.n")).asNum());
     try std.testing.expectEqual(@as(f64, 6), (try evalSource(a, "let v = JSON.parse('[1,2,3]'); v[0] + v[1] + v[2]")).asNum());
     try std.testing.expectEqual(@as(f64, 1), (try evalSource(a,
@@ -48958,6 +48985,20 @@ test "interpreter classes (methods, static, instanceof, computed)" {
         \\let C = class { [k]() { return 42; } };
         \\(new C()).go()
     )).asNum());
+    try std.testing.expect((try evalSource(a,
+        \\let m = Symbol(), f = Symbol(), s = Symbol();
+        \\class C {
+        \\  [m]() { return 2; }
+        \\  [f] = 5;
+        \\  static [s] = 11;
+        \\}
+        \\let c = new C();
+        \\Object.prototype.hasOwnProperty.call(C.prototype, m) &&
+        \\  Object.prototype.hasOwnProperty.call(c, f) &&
+        \\  Object.prototype.hasOwnProperty.call(C, s) &&
+        \\  !Object.prototype.hasOwnProperty.call(c, "f") &&
+        \\  c[m]() + c[f] + C[s] === 18
+    )).asBool());
     // instance fields + static field
     try std.testing.expectEqual(@as(f64, 8), (try evalSource(a,
         \\class F { x = 5; y; constructor() { this.y = 3; } total() { return this.x + this.y; } }

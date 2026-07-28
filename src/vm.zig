@@ -3900,7 +3900,7 @@ fn nativePrivateIn(vm: *Interpreter, name: []const u8, object: Value) EvalError!
 fn applyUnaryEffect(vm: *Interpreter, op: bc.Op, input: Value) EvalError!Value {
     return switch (op) {
         .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => vm.applyUnary(unaryOp(op), input),
-        .to_property_key => Value.strAlloc(vm.arena, try propKey(vm, input)),
+        .to_property_key => vm.toPropertyKeyValue(input),
         .inc, .dec => update: {
             const numeric = try vm.toNumericPrimitive(input);
             if (numeric.isObject() and numeric.asObj().is_bigint) {
@@ -5986,9 +5986,9 @@ fn runChunk(
                 try stack.append(stack_alloc, try vm.toNumericPrimitive(stack.pop().?));
             },
             .to_property_key => {
-                // ToPropertyKey: coerce to the property-key string once (runs the
-                // key's toString/valueOf), so a computed key's coercion happens
-                // before the property value is evaluated.
+                // ToPropertyKey: coerce once (runs the key's toString/valueOf)
+                // before the property value is evaluated, while preserving a
+                // resulting Symbol for the later storage-key conversion.
                 try stack.append(stack_alloc, try applyUnaryEffect(vm, .to_property_key, stack.pop().?));
             },
             .name_anon => {

@@ -12844,6 +12844,47 @@ test "using declarations dispose sync function resources and keep classic-for bi
         \\}
         \\threw
     )).asBool());
+
+    try std.testing.expect((try evalIn(
+        \\var values = [];
+        \\{
+        \\  using x = { [Symbol.dispose]() { values.push("block"); } };
+        \\  values.push("body");
+        \\}
+        \\class StaticBlockUsing {
+        \\  static {
+        \\    using x = { [Symbol.dispose]() { values.push("static"); } };
+        \\  }
+        \\}
+        \\new StaticBlockUsing();
+        \\class Base {
+        \\  constructor() { values.push("base"); }
+        \\}
+        \\class Derived extends Base {
+        \\  constructor() {
+        \\    try {
+        \\      using x = { [Symbol.dispose]() { values.push("derived"); } };
+        \\    } finally {
+        \\      super();
+        \\    }
+        \\  }
+        \\}
+        \\new Derived();
+        \\function* gen() {
+        \\  using x = { [Symbol.dispose]() { values.push("gen"); } };
+        \\  yield x;
+        \\}
+        \\let iter = gen();
+        \\iter.next();
+        \\iter.next();
+        \\(function () {
+        \\  for (let i = 0; i < 3; i++) {
+        \\    using x = { value: i, [Symbol.dispose]() { values.push(this.value); } };
+        \\  }
+        \\  values.push(3);
+        \\})();
+        \\values.join(",") === "body,block,static,derived,base,gen,0,1,2,3"
+    )).asBool());
 }
 
 test "async generators: yield* captures sync iterator next once" {

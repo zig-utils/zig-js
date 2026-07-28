@@ -484,6 +484,37 @@ fn stmtListHasDisposableDecl(stmts: []*Node) bool {
     return false;
 }
 
+fn stmtContainsDisposableDeclDeep(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .var_decl => |d| d.dispose != 0,
+        .block, .decl_group, .program => |stmts| stmtListContainsDisposableDeclDeep(stmts),
+        .if_stmt => |s| stmtContainsDisposableDeclDeep(s.consequent) or
+            (if (s.alternate) |alt| stmtContainsDisposableDeclDeep(alt) else false),
+        .while_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
+        .do_while_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
+        .for_stmt => |s| (if (s.init) |init| stmtContainsDisposableDeclDeep(init) else false) or
+            stmtContainsDisposableDeclDeep(s.body),
+        .for_in => |s| s.dispose != 0 or
+            (if (s.var_init) |init| stmtContainsDisposableDeclDeep(init) else false) or
+            stmtContainsDisposableDeclDeep(s.body),
+        .switch_stmt => |s| blk: {
+            for (s.cases) |case| if (stmtListContainsDisposableDeclDeep(case.body)) break :blk true;
+            break :blk false;
+        },
+        .try_stmt => |t| stmtContainsDisposableDeclDeep(t.block) or
+            (if (t.catch_block) |c| stmtContainsDisposableDeclDeep(c) else false) or
+            (if (t.finally_block) |f| stmtContainsDisposableDeclDeep(f) else false),
+        .labeled_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
+        .with_stmt => |s| stmtContainsDisposableDeclDeep(s.body),
+        else => false,
+    };
+}
+
+fn stmtListContainsDisposableDeclDeep(stmts: []*Node) bool {
+    for (stmts) |s| if (stmtContainsDisposableDeclDeep(s)) return true;
+    return false;
+}
+
 fn stmtHasAwaitUsingDecl(node: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => |d| d.dispose == 2,
@@ -828,7 +859,7 @@ pub const Compiler = struct {
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
         // these bodies on the tree-walker until function-exit disposal is lowered.
-        if (!fnode.is_expr_body and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
+        if (!fnode.is_expr_body and stmtContainsDisposableDeclDeep(fnode.body)) return error.Unsupported;
         // A function declaration nested in a block needs the tree-walker in BOTH
         // modes: strict scopes it to the block (a binding the flat slot model
         // can't isolate), and sloppy gives it Annex B.3.3 dual bindings — a block
@@ -1616,7 +1647,7 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.set_index, 0);
         } else {
             try self.emitLoad(val); // [obj, val]
-            _ = try self.chunk.emit(.set_prop, try self.chunk.addName(m.property));
+            _ = try self.chunk.emit(.set_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
         }
         _ = try self.chunk.emit(.pop, 0); // discard the set result
     }
@@ -1768,7 +1799,7 @@ pub const Compiler = struct {
                 try self.compileExpr(ke);
                 _ = try self.chunk.emit(.get_index, 0);
             } else {
-                _ = try self.chunk.emit(.get_prop, try self.chunk.addName(prop.key));
+                _ = try self.chunk.emit(.get_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, prop.key)));
             }
             try self.emitDefine(ev);
             // default
@@ -1864,7 +1895,7 @@ pub const Compiler = struct {
             // Fetch the method (RequireObjectCoercible on the receiver) BEFORE the
             // args, per spec order, then tail-call with this = recv.
             const m = c.callee.member;
-            const ni = try self.chunk.addName(m.property);
+            const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
@@ -1904,7 +1935,7 @@ pub const Compiler = struct {
             // `obj.tag`...`` → this = obj. Fetch the tag (RequireObjectCoercible +
             // any getter) BEFORE the arguments, per spec order.
             const m = tag.member;
-            const ni = try self.chunk.addName(m.property);
+            const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
@@ -2031,7 +2062,7 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.set_index, 0);
                     } else {
                         try self.compileExpr(a.value);
-                        const ni = try self.chunk.addName(m.property);
+                        const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
                         _ = try self.chunk.emit(.set_prop, ni);
                     }
                 },
@@ -2130,7 +2161,7 @@ pub const Compiler = struct {
                         try self.compileExpr(ce);
                         _ = try self.chunk.emit(.super_get_index, 0);
                     } else {
-                        _ = try self.chunk.emit(.super_get, try self.chunk.addName(sm.property));
+                        _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, sm.property)));
                     }
                     _ = try self.chunk.emit(.load_this, 0);
                     for (c.args) |arg| try self.compileExpr(arg);
@@ -2138,7 +2169,7 @@ pub const Compiler = struct {
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
-                    const ni = try self.chunk.addName(m.property);
+                    const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
                     if (spread) {
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
@@ -2197,7 +2228,7 @@ pub const Compiler = struct {
                     try self.compileExpr(ce);
                     _ = try self.chunk.emit(.get_index, 0);
                 } else {
-                    const ni = try self.chunk.addName(m.property);
+                    const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
                     _ = try self.chunk.emit(.get_prop, ni);
                 }
             },
@@ -2209,7 +2240,7 @@ pub const Compiler = struct {
                     try self.compileExpr(ce);
                     _ = try self.chunk.emit(.super_get_index, 0);
                 } else {
-                    _ = try self.chunk.emit(.super_get, try self.chunk.addName(m.property));
+                    _ = try self.chunk.emit(.super_get, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
                 }
             },
             .new_expr => |n| {
@@ -2265,7 +2296,7 @@ pub const Compiler = struct {
                             _ = try self.chunk.emit(.init_proto, 0); // `__proto__: v` colon form
                         } else {
                             try self.emitNamedEval(p.value, p.key);
-                            _ = try self.chunk.emit(.init_prop, try self.chunk.addName(p.key));
+                            _ = try self.chunk.emit(.init_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, p.key)));
                         }
                     }
                 }

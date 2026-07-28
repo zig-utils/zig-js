@@ -761,8 +761,8 @@ pub fn ownEnumerablePropertyKeys(
     try self.checkRestricted(o);
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     for (try self.objectOwnKeysList(o)) |k| {
-        if (value.isPrivateKey(k)) continue;
-        if (value.isSymbolKey(k) and (!include_symbols or !value.isRealSymbolKey(k))) continue;
+        if (value.isPrivateKey(k) or value.isHiddenInternalKey(k)) continue;
+        if (value.isRealSymbolKey(k) and !include_symbols) continue;
         const desc = try objectGetOwnPropertyDescriptor(self, Value.undef(), &.{ Value.obj(o), try self.keyToValue(k) });
         if (desc.isObject() and (try self.getProperty(desc, "enumerable")).toBoolean())
             try list.append(self.arena, k);
@@ -788,7 +788,7 @@ fn ownStringKeysOrdered(self: *Interpreter, o: *value.Object) HostError![]const 
     // spec order), keeping only the string keys.
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
     for (try self.objectOwnKeysList(o)) |k| {
-        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
+        if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
         try list.append(self.arena, k);
     }
     return list.items;
@@ -828,7 +828,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             try self.enumerableOwnPropertyResult(o, k);
         if (!enumerable) continue;
         if (kind == .key) {
-            try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
+            try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
             continue;
         }
         const v = try self.getProperty(ov, k); // [[Get]] — runs an accessor getter
@@ -836,7 +836,7 @@ fn enumerableOwnProperties(self: *Interpreter, arg0: Value, kind: EnumKind) Host
             try result.asObj().appendElement(self.arena, v);
         } else {
             const pair = try self.newArray();
-            try pair.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
+            try pair.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
             try pair.asObj().appendElement(self.arena, v);
             try result.asObj().appendElement(self.arena, pair);
         }
@@ -2459,8 +2459,8 @@ pub fn objectGetOwnPropertyNames(ctx: *anyopaque, this: Value, args: []const Val
     // [[OwnPropertyKeys]] (proxy-aware, array-index/length-aware), string
     // keys only (symbols go to getOwnPropertySymbols).
     for (try self.objectOwnKeysList(o)) |k| {
-        if (value.isSymbolKey(k) or value.isPrivateKey(k)) continue;
-        try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, k));
+        if (value.isRealSymbolKey(k) or value.isHiddenInternalKey(k) or value.isPrivateKey(k)) continue;
+        try result.asObj().appendElement(self.arena, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
     }
     return result;
 }
@@ -2618,12 +2618,13 @@ pub fn jsonStringify(ctx: *anyopaque, this: Value, args: []const Value) HostErro
                     else => {},
                 }
                 if (k) |key| {
+                    const storage_key = try value.encodeStringKey(a, key);
                     var dup = false;
-                    for (allow.items) |e| if (std.mem.eql(u8, e, key)) {
+                    for (allow.items) |e| if (std.mem.eql(u8, e, storage_key)) {
                         dup = true;
                         break;
                     };
-                    if (!dup) try allow.append(a, key);
+                    if (!dup) try allow.append(a, storage_key);
                 }
             }
             st.allow = allow.items;
@@ -2697,10 +2698,10 @@ const Stringifier = struct {
         if (v.isObject() and !v.asObj().is_symbol) {
             const tj = try self.getProperty(v, "toJSON");
             if (tj.isObject() and tj.asObj().isCallableObject())
-                v = try self.callValueWithThis(tj, &.{try Value.strAlloc(self.arena, key)}, v);
+                v = try self.callValueWithThis(tj, &.{try Value.strAlloc(self.arena, value.decodeStringKey(key))}, v);
         }
         if (st.replacer_fn) |rf|
-            v = try self.callValueWithThis(rf, &.{ try Value.strAlloc(self.arena, key), v }, holder);
+            v = try self.callValueWithThis(rf, &.{ try Value.strAlloc(self.arena, value.decodeStringKey(key)), v }, holder);
         // A JSON.rawJSON object emits its validated text verbatim.
         if (v.isObject() and v.asObj().behavior.is_raw_json) {
             const raw = (v.asObj().getOwn("rawJSON") orelse Value.str("")).asStr();
@@ -2815,7 +2816,7 @@ const Stringifier = struct {
             if (!try st.serialize(&member, v, k)) continue; // omitted property
             if (count != 0) try tmp.append(a, ',');
             try st.newlineIndentTo(&tmp, st.indent.items);
-            try writeJsonString(a, &tmp, k);
+            try writeJsonString(a, &tmp, value.decodeStringKey(k));
             try tmp.append(a, ':');
             if (st.gap.len != 0) try tmp.append(a, ' ');
             try tmp.appendSlice(a, member.items);
@@ -2856,9 +2857,7 @@ const Stringifier = struct {
 };
 
 fn jsonHiddenKey(k: []const u8) bool {
-    if (value.isPrivateKey(k)) return true;
-    if (value.isRealSymbolKey(k)) return true;
-    return k.len > 1 and k[0] == 0 and std.ascii.isAlphabetic(k[1]);
+    return value.isPrivateKey(k) or value.isRealSymbolKey(k) or value.isHiddenInternalKey(k);
 }
 
 fn wtf8SurrogateAt(s: []const u8, i: usize) ?u21 {
@@ -3021,7 +3020,7 @@ fn internalizeJson(self: *Interpreter, holder: Value, key: []const u8, reviver: 
         }
     }
     const context = try jsonReviverContext(self, holder, key, val, sources);
-    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(self.arena, key), val, context }, holder);
+    return self.callValueWithThis(reviver, &.{ try Value.strAlloc(self.arena, value.decodeStringKey(key)), val, context }, holder);
 }
 
 fn jsonReviverContext(self: *Interpreter, holder: Value, key: []const u8, val: Value, sources: []const JsonSourceEntry) HostError!Value {

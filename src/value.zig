@@ -3887,7 +3887,7 @@ pub const Object = struct {
     pub fn enumerableKeys(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]const []const u8 {
         var list: std.ArrayListUnmanaged([]const u8) = .empty;
         for (try self.ownKeys(arena)) |k| {
-            if (isSymbolKey(k) or isPrivateKey(k)) continue; // symbol/private keys aren't string-enumerable
+            if (isRealSymbolKey(k) or isHiddenInternalKey(k) or isPrivateKey(k)) continue;
             if (self.getAttr(k).enumerable) try list.append(arena, k);
         }
         return list.items;
@@ -4300,11 +4300,24 @@ pub const Accessor = struct {
     descriptor_cell: ?*Object = null,
 };
 
-/// A symbol's internal property-key encoding is a NUL-led string, which can't
-/// be produced by user code — so symbol-keyed properties never collide with
-/// string keys and are excluded from string enumeration.
+/// A symbol's internal property-key encoding is a NUL-led string. User strings
+/// that start with NUL are storage-escaped by the interpreter before insertion,
+/// so public string keys do not collide with these engine encodings.
 pub fn isSymbolKey(k: []const u8) bool {
     return k.len > 0 and k[0] == 0;
+}
+
+pub fn isEscapedStringKey(k: []const u8) bool {
+    return k.len >= 2 and k[0] == 0 and k[1] == 0;
+}
+
+pub fn encodeStringKey(arena: std.mem.Allocator, k: []const u8) std.mem.Allocator.Error![]const u8 {
+    if (k.len == 0 or k[0] != 0) return k;
+    return std.mem.concat(arena, u8, &.{ "\x00\x00", k });
+}
+
+pub fn decodeStringKey(k: []const u8) []const u8 {
+    return if (isEscapedStringKey(k)) k[2..] else k;
 }
 
 /// A key for an actual JS Symbol ("\x00s" + digits), as minted by makeSymbolObj
@@ -4314,6 +4327,14 @@ pub fn isRealSymbolKey(k: []const u8) bool {
     if (k.len < 3 or k[0] != 0 or k[1] != 's') return false;
     for (k[2..]) |c| if (c < '0' or c > '9') return false;
     return true;
+}
+
+/// Engine-owned internal slots are NUL-led names such as "\x00intl" or
+/// "\x00__none". A user string may contain NUL too; only the engine naming
+/// pattern is hidden from public own-key enumeration.
+pub fn isHiddenInternalKey(k: []const u8) bool {
+    return k.len > 1 and k[0] == 0 and !isRealSymbolKey(k) and !isEscapedStringKey(k) and
+        (std.ascii.isAlphabetic(k[1]) or k[1] == '_');
 }
 
 /// If `k` is a canonical array-index string — a non-negative integer below
