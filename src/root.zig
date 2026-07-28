@@ -7,10 +7,18 @@
 //!      static library and call the exported `JSGlobalContextCreate` /
 //!      `JSEvaluateScript` / ... symbols. See `c_api.zig`.
 //!
-//! v1 scope: expressions, `var`/`let`/`const`, `if`/`else`, `while`, blocks,
-//! string concatenation, and the JSC value/string/object C-API surface that
-//! `~/Code/Home/lang`'s runtime consumes. Functions, closures, and a real GC
-//! are the next milestones (see craft's docs/architecture/web-engine-plan.md).
+//!   3. On macOS, through the Objective-C bridge (`objc_bridge.m`), or through a
+//!      revision-pinned private consumer profile (`private_abi.zig`).
+//!
+//! Execution runs on a tree-walking interpreter (`interpreter.zig`, the semantic
+//! baseline) with a bytecode VM (`compiler.zig` + `vm.zig`) for suspend/resume,
+//! deep recursion, and proper tail calls, and native baseline/optimizing tiers
+//! above that (`jit.zig`). A `Context` allocates from an arena by default, or
+//! from the precise tracing collector with `.enable_gc`; `.enable_threads` adds
+//! GIL-free shared-realm `Thread`s. APIs are pre-stabilization.
+//!
+//! Docs: `docs/features/` (what is implemented), `docs/advanced/` (embedding,
+//! memory/GC, tiers), `docs/architecture.md`, and `CONTRIBUTING.md`.
 
 const std = @import("std");
 
