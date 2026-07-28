@@ -124,7 +124,7 @@
     {
       "id": "readme_generation",
       "issue": 147,
-      "status": "open",
+      "status": "green",
       "evidence": [
         "README.md",
         "build.zig",
@@ -154,7 +154,7 @@
         "docs/.data/gc-compaction-2026-07-19.md",
         "docs/.data/gc-compaction-2026-07-19.tsv"
       ],
-      "blockers": ["generate every capability and benchmark claim from the unified release matrix"]
+      "blockers": []
     }
   ],
   "readme_policy": {
