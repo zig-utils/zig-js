@@ -5,7 +5,7 @@ description: The execution model and source map of zig-js.
 
 # Architecture
 
-zig-js runs JavaScript through a tree-walking interpreter and a suspendable bytecode VM that share the same object model. The **tree-walker is the semantic baseline**. Supported functions and programs compile to bytecode for suspend-and-resume, a heap activation stack for deep recursion and proper tail calls, and the optimization substrate. Hot bytecode will tier into native code under the [baseline JIT contract](baseline-jit.md); unsupported code always retains an exact interpreter fallback.
+zig-js runs JavaScript through a tree-walking interpreter and a suspendable bytecode VM that share the same object model. The **tree-walker is the semantic baseline**. Supported functions and programs compile to bytecode for suspend-and-resume, a heap activation stack for deep recursion and proper tail calls, and the optimization substrate. Hot bytecode tiers into native code under the [baseline JIT contract](baseline-jit.md), with a further [optimizing tier](optimizing-jit.md) over its documented subset; unsupported code always retains an exact interpreter fallback. [Execution tiers](/advanced/execution-tiers) walks the whole ladder and the divergence risk between its rungs.
 
 ## Execution paths
 
@@ -15,6 +15,8 @@ zig-js runs JavaScript through a tree-walking interpreter and a suspendable byte
 | **Bytecode VM** | AST lowered to a linear instruction stream (`compiler.zig`) run on a stack machine (`vm.zig`). | Suspend/resume for generators, async functions, and async generators; and a heap-allocated activation stack (`vm.runDriver`) so deep recursion and proper tail calls are bounded by the logical call-depth cap, not the native OS stack. Not a general speedup. |
 | **Slots & closures** | Slot-allocated locals and frame-linked closures. | Removes hash lookups for locals and captured variables on the VM path. |
 | **Shapes & inline caches** | Hidden classes (`shape.zig`) + monomorphic property-access caches. | Object property access without per-access hashmap cost. |
+| **Baseline native tier** | AArch64 code compiled at a chunk entry from proven-hot bytecode (`jit.zig`, `jit/aarch64.zig`). | General native throughput, with an exact bytecode fallback for anything the tier cannot represent. |
+| **Optimizing tier** | Speculative compilation over an exact documented subset (`jit/optimizer*.zig`). | Profile-driven specialization, with deoptimization back to a precise interpreter state. |
 
 ### When each path runs
 
@@ -48,9 +50,45 @@ The VM gives each compiled function one **flat, block-transparent slot array**: 
 | `context.zig` | The engine instance (`JSGlobalContextRef` analog): arena allocator, globals, exception state, microtask queue. |
 | `builtins.zig` | Every built-in constructor and prototype method. |
 | `promise.zig` | Promise runtime + microtask queue. |
-| `c_api.zig` | The exported JavaScriptCore-shaped C API subset. |
 | `jsstring.zig` | Refcounted `JSStringRef` backing. |
 | `root.zig` | Module entry point and `installGlobals` bootstrap. |
+
+### Native tiers
+
+| File | Responsibility |
+| ---- | -------------- |
+| `jit.zig` | Tier records, entry ABI, safepoints, and executable-memory policy. |
+| `jit/compiler.zig`, `jit/aarch64.zig` | The baseline tier and its AArch64 emitter. |
+| `jit/optimizer.zig`, `jit/optimizer_compiler.zig` | Profiling, plan selection, and the optimizing tier. |
+
+### Memory and concurrency
+
+| File | Responsibility |
+| ---- | -------------- |
+| `gc.zig`, `gc_runtime.zig` | The precise-collector binding: cell kinds, trace surface, roots. |
+| `gc_relocation.zig` | Pointer rewriting and pinning for moving collection. |
+| `stack_scan.zig`, `root_handshake.zig` | Conservative native-stack scanning and cross-thread root publication. |
+| `gil.zig`, `parallel_lock.zig` | The context lock and the per-structure locks the no-GIL path uses instead. |
+| `jsthread.zig` | Shared-realm `Thread`, `Lock`, `Condition`, `ThreadLocal`, property-mode `Atomics`. |
+| `worker.zig`, `agent.zig` | Isolated worker agents and the `$262.agent` / `Atomics.wait` waiter table. |
+| `shared_buffer.zig`, `structured_clone.zig` | Refcounted `SharedArrayBuffer` storage and the clone/transfer wire format. |
+
+### WebAssembly and embedding
+
+| File | Responsibility |
+| ---- | -------------- |
+| `wasm/decode.zig`, `wasm/validate.zig`, `wasm/exec.zig` | The binary pipeline: decode → validate → execute. |
+| `wasm/simd.zig`, `wasm/atomic.zig`, `wasm/gc.zig` | Post-MVP feature execution. |
+| `wasm/api.zig`, `wasm/types.zig` | The JavaScript `WebAssembly` namespace and the feature gates. |
+| `c_api.zig` | The exported JavaScriptCore-shaped C API subset. |
+| `private_abi.zig`, `private_abi/` | Revision-pinned private consumer profiles. |
+| `objc_bridge.m` | The macOS Objective-C bridge. |
+
+### Generated tables
+
+`cldr_*.zig`, `iana_*.zig`, `unicode_*.zig`, `intl_*.zig`, `encoding_*.zig`,
+`numbering_systems.zig`, and `text_codec_tables.zig` are produced by the
+`tools/gen_*` scripts. Edit the generator, never the table.
 
 ## Memory model
 

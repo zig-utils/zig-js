@@ -14,18 +14,22 @@ It is built as a general embeddable JavaScript engine for Zig applications, lang
 
 ## Status
 
-zig-js is an early but capable v1: a correct tree-walking interpreter over a broad language subset, a tier-1 bytecode VM, object shapes, and inline caches. It is scored continuously against the **real** pinned tc39/test262 corpus.
+zig-js runs a correct tree-walking interpreter as its semantic baseline, a suspendable bytecode VM, object shapes with inline caches, and native baseline and optimizing tiers above them. Alongside the language it implements a precise tracing garbage collector, GIL-free shared-realm threading, a pure-Zig WebAssembly runtime, and `Intl` / `Temporal` over checked-in CLDR and IANA data. It is scored continuously against the **real** pinned tc39/test262 corpus, and APIs remain pre-stabilization.
 
 <Test262Progress :stats="data.test262" />
 
 ## What's implemented
 
 ::: tip Language
-`var`/`let`/`const` with TDZ · full operator set incl. `**`, bitwise, `??`, optional chaining · `if`/`while`/`do`/`for`/`for-of`/`for-in`/`switch` · functions, arrows, closures, `this`/`new` · `class` with inheritance, getters/setters, private fields, static blocks · destructuring, spread/rest, template literals · `try`/`catch`/`finally`.
+`var`/`let`/`const` with TDZ · full operator set incl. `**`, bitwise, `??`, optional chaining · `if`/`while`/`do`/`for`/`for-of`/`for-in`/`for await`/`switch` · functions, arrows, closures, `this`/`new`, proper tail calls · `class` with inheritance, getters/setters, private fields and methods, static blocks · generators, async functions, async generators · modules with dynamic `import()`, `import.meta`, and top-level `await` · destructuring, spread/rest, template literals · `using` / `await using` · `try`/`catch`/`finally`. Full detail: [Language](/features/language).
 :::
 
 ::: tip Built-ins
-`Object`, `Array`, `String`, `Number`, `Boolean`, `Math`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `Symbol`, `Function`, `Date`, the `Error` family, `Promise`, `Proxy`, `Reflect`, and `RegExp` — including modern surface like ES2024 `Set` operations, `Object.groupBy`, `Array` hole/sparse semantics, and well-known symbols. The complete [WebAssembly MVP](/wasm) binary runtime and JavaScript API are scored against the pinned upstream wg-1.0 corpus.
+`Object`, `Array`, `String`, `Number`, `Boolean`, `BigInt`, `Math`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `FinalizationRegistry`, `Symbol`, `Function`, `Date`, the `Error` family, `Promise`, `Proxy`, `Reflect`, `Iterator` helpers, and `RegExp` — including modern surface like ES2024 `Set` operations, `Object.groupBy`, `Array` hole/sparse semantics, and well-known symbols. Plus `ArrayBuffer` with resize/transfer/immutable, all twelve typed arrays, `DataView`, `SharedArrayBuffer`, and `Atomics` ([Binary data](/features/binary-data)); ten `Intl` constructors and the `Temporal` namespace ([Intl & Temporal](/features/intl-temporal)); and host-shaped APIs such as timers, `URL`, `TextEncoder`/`TextDecoder`, `Headers`/`Request`/`Response`, `AbortController`, and `structuredClone` ([Web-shaped APIs](/features/web-apis)). The complete [WebAssembly MVP](/wasm) binary runtime and JavaScript API are scored against the pinned upstream wg-1.0 corpus.
+:::
+
+::: tip Runtime
+Precise tracing GC with generational collection and explicit compaction · GIL-free shared-realm `Thread`s, `Lock`, `Condition`, `ThreadLocal`, and property-mode `Atomics` · isolated `Worker` agents · an embedder-transported inspector protocol. See [Concurrency](/features/concurrency) and [Memory & GC](/advanced/memory-and-gc).
 :::
 
 ::: warning Scope caveat
