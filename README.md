@@ -64,6 +64,7 @@ Full methodology and results: [Performance benchmarks](docs/benchmarks.md).
 
 ## Build And Test
 
+<!-- release-compatibility:build-test:start -->
 Requires Zig 0.17.0-dev.
 
 ```sh
@@ -73,6 +74,7 @@ zig build test262               # configured tc39/test262 corpus
 zig build test-c-api            # C and C++ embedding fixtures
 zig build benchmark-comparison  # zig-js single/multithread vs JSC
 ```
+<!-- release-compatibility:build-test:end -->
 
 Run `zig build --help` for the full command list.
 

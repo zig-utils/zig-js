@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import re
 import statistics
 
 
@@ -34,6 +35,8 @@ README_WASM_PERFORMANCE_START = "<!-- release-compatibility:wasm-performance:sta
 README_WASM_PERFORMANCE_END = "<!-- release-compatibility:wasm-performance:end -->"
 README_GC_COMPACTION_START = "<!-- release-compatibility:gc-compaction:start -->"
 README_GC_COMPACTION_END = "<!-- release-compatibility:gc-compaction:end -->"
+README_BUILD_TEST_START = "<!-- release-compatibility:build-test:start -->"
+README_BUILD_TEST_END = "<!-- release-compatibility:build-test:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -41,6 +44,14 @@ README_NOTICE_GATE_LABELS = {
     "optimizing_jit": "optimizing-JIT backend/differential evidence",
     "readme_generation": "fully generated README/release claims",
 }
+README_BUILD_TEST_COMMANDS = (
+    ("zig build", "library and headers", None),
+    ("zig build test", "main test root", "test"),
+    ("zig build test262", "configured tc39/test262 corpus", "test262"),
+    ("zig build test-c-api", "C and C++ embedding fixtures", "test-c-api"),
+    ("zig build benchmark-comparison", "zig-js single/multithread vs JSC", "benchmark-comparison"),
+)
+README_ZIG_VERSION = "0.17.0-dev"
 SIMD_BASE_ITERATIONS = {
     "integer": 20_000,
     "float": 20_000,
@@ -75,6 +86,10 @@ def statuses(value: object) -> set[str]:
         for child in value:
             found.update(statuses(child))
     return found
+
+
+def build_step_names(build_source: str) -> set[str]:
+    return set(re.findall(r'b\.step\("([^"]+)"', build_source))
 
 
 def read_tsv(relative: str) -> list[dict[str, str]]:
@@ -218,6 +233,36 @@ def generated_readme_gc_compaction() -> str:
     ])
 
 
+def generated_readme_build_test() -> str:
+    build_source = artifact_path("build.zig").read_text()
+    ci_source = artifact_path(".github/workflows/ci.yml").read_text()
+    steps = build_step_names(build_source)
+    require('.name = "zig-js"' in build_source, "README build command requires zig-js library target")
+    require('"libzig-js.a"' in build_source, "README build command requires libzig-js.a install")
+    require("addInstallDirectory" in build_source and ".install_dir = .header" in build_source, "README build command requires header install")
+    require(f"zig@{README_ZIG_VERSION}" in ci_source, "README Zig version drift")
+    for command, _, step in README_BUILD_TEST_COMMANDS:
+        if step is not None:
+            require(step in steps, f"README command `{command}` references a missing build step")
+
+    width = max(len(command) for command, _, _ in README_BUILD_TEST_COMMANDS) + 2
+    lines = [
+        README_BUILD_TEST_START,
+        f"Requires Zig {README_ZIG_VERSION}.",
+        "",
+        "```sh",
+    ]
+    lines.extend(
+        f"{command:<{width}}# {description}"
+        for command, description, _ in README_BUILD_TEST_COMMANDS
+    )
+    lines.extend([
+        "```",
+        README_BUILD_TEST_END,
+    ])
+    return "\n".join(lines)
+
+
 def generated_readme_notice(matrix: dict[str, object]) -> str:
     gates = matrix["gates"]
     open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
@@ -315,6 +360,24 @@ def replace_readme_gc_compaction(readme: str, generated: str) -> str:
     )
     require(old is not None, "README explicit compaction bullet is absent")
     return readme.replace(old, generated, 1)
+
+
+def replace_readme_build_test(readme: str, generated: str) -> str:
+    if README_BUILD_TEST_START in readme or README_BUILD_TEST_END in readme:
+        require(
+            readme.count(README_BUILD_TEST_START) == 1 and readme.count(README_BUILD_TEST_END) == 1,
+            "README build/test marker pair drift",
+        )
+        before, remainder = readme.split(README_BUILD_TEST_START, 1)
+        _, after = remainder.split(README_BUILD_TEST_END, 1)
+        return f"{before}{generated}{after}"
+
+    heading = "## Build And Test\n\n"
+    sentinel = "\nRun `zig build --help` for the full command list."
+    require(heading in readme and sentinel in readme, "README build/test section is absent")
+    before, section_and_after = readme.split(heading, 1)
+    _, after = section_and_after.split(sentinel, 1)
+    return f"{before}{heading}{generated}\n{sentinel}{after}"
 
 
 def replace_readme_notice(readme: str, heading: str, generated: str) -> str:
@@ -431,6 +494,7 @@ def main() -> int:
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
         readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
         readme = replace_readme_gc_compaction(readme, generated_readme_gc_compaction())
+        readme = replace_readme_build_test(readme, generated_readme_build_test())
         readme = (
             remove_readme_notice(readme, heading)
             if all_green
@@ -441,6 +505,7 @@ def main() -> int:
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
     require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
     require(generated_readme_gc_compaction() in readme, "README GC compaction drift")
+    require(generated_readme_build_test() in readme, "README build/test drift")
     if not all_green:
         require(generated_readme_notice(matrix) in readme, "README missing-surface notice drift")
     require(f"**{test262_pass:,} / {test262_total:,}**" in readme, "README test262 score drift")

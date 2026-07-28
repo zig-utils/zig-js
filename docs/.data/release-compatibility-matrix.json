@@ -122,6 +122,8 @@
       "status": "open",
       "evidence": [
         "README.md",
+        "build.zig",
+        ".github/workflows/ci.yml",
         "tools/release-compatibility.py",
         "tools/benchmark-publication.py",
         "tools/gc-compaction-benchmark.py",
