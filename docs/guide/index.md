@@ -35,6 +35,9 @@ The configured test262 runner currently has zero skipped tests, zero excluded fi
 ## Next steps
 
 - [Building & Running](/guide/building) — get the engine compiled and run the suite.
+- [Features](/features/) — the full picture of what is implemented: language, built-ins, Intl/Temporal, binary data, concurrency, WebAssembly.
+- [Advanced](/advanced/) — embedding, memory and GC, execution tiers, debugging, and how claims are verified.
 - [Architecture](/architecture) — the tiered execution model and the source map.
 - [Conformance](/conformance) — how test262 is run and scored.
 - [JavaScriptCore C-API](/api) — embed zig-js in an existing app.
+- [Contributing](/guide/contributing) — set up the toolchain and land a change.

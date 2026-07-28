@@ -49,4 +49,6 @@ hero:
 
 ## Where engines like this go
 
-zig-js is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack. Read the [architecture](/architecture) deep-dive, the [conformance](/conformance) methodology, or the [C-API](/api) embedding guide.
+zig-js is built as a general embeddable JavaScript engine for Zig applications, language runtimes, tools, and hosts that want to own their JS stack.
+
+Start with [features](/features/) for what the engine implements, [advanced](/advanced/) for embedding it and understanding its internals, or the [architecture](/architecture) deep-dive, [conformance](/conformance) methodology, and [C-API](/api) embedding guide.
