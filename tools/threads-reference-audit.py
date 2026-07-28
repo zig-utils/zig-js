@@ -103,6 +103,18 @@ BLOCKED_EXPECTED_SERIALIZED_PASSES = {
 }
 
 
+def blocked_pass_without_optimizer_reason(case: str, output: str) -> str | None:
+    dependencies = BLOCKED_DEPENDENCIES.get(case)
+    if dependencies is None or "optimizing-jit" not in dependencies:
+        return None
+    if "optimizer: publications=" in output:
+        return None
+    return (
+        "The case passes, but the runner printed no optimizing-tier publication "
+        "evidence; #429 still blocks promotion."
+    )
+
+
 TERMINAL_DISPOSITIONS = {
     "api/wasm-refused-sd7.js": {
         "category": "intentionally-incompatible",
@@ -1273,11 +1285,20 @@ def run_unpromoted_scan(
 
         if returncode == 0:
             expected_pass_reason = BLOCKED_EXPECTED_SERIALIZED_PASSES.get(case)
-            if expected_pass_reason is None:
+            no_optimizer_reason = (
+                blocked_pass_without_optimizer_reason(case, output)
+                if expected_pass_reason is None
+                else None
+            )
+            if expected_pass_reason is None and no_optimizer_reason is None:
                 unexpected_passes += 1
                 status = "pass"
                 if emit:
                     print("    UNEXPECTED PASS: promote or reclassify this file")
+            elif no_optimizer_reason is not None:
+                status = "expected-blocked-no-optimizer-evidence"
+                if emit:
+                    print(f"    expected blocked pass without optimizer evidence: {no_optimizer_reason}")
             else:
                 status = "expected-blocked-serialized-pass"
                 if emit:
@@ -1288,6 +1309,7 @@ def run_unpromoted_scan(
                 "exit_code": returncode,
                 "categories": cats,
                 "expected_blocked_serialized_pass": expected_pass_reason,
+                "expected_blocked_no_optimizer_evidence": no_optimizer_reason,
                 "output": output_summary,
             })
         else:

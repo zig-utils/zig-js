@@ -299,6 +299,12 @@ tier was never reached, and that silence is the verdict — it is how
 `cve/mc-code-calllink-writer-writer.js` is known to pass without ever compiling
 its per-round call site.
 
+`tools/threads-reference-audit.py --scan-unpromoted` treats that
+pass-without-publication shape as still blocked for cases whose inventory
+dependency includes `optimizing-jit`; the same case becomes disposition drift
+once it prints an optimizer publication and should then be promoted or
+reclassified.
+
 Promotion also commits a case to the no-GIL gate below, which requires any case
 absent from the baseline to pass there. Measure both modes before adding one.
 It covers:
