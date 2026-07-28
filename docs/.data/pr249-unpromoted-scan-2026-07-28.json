@@ -1,17 +1,15 @@
 {
   "allowlist": {
-    "executable_passed": 250,
+    "executable_passed": 251,
     "executable_total": 259
   },
-  "blocked_executable": 3,
+  "blocked_executable": 2,
   "categories": {
     "$vm shared-heap/shell hooks": [
       "congc-t2-lockorder-lint.js",
-      "congc-t8-stop-interleaving.js",
-      "cve/mc-code-calllink-writer-writer.js"
+      "congc-t8-stop-interleaving.js"
     ],
     "JIT/code-artifact hooks": [
-      "cve/mc-code-calllink-writer-writer.js",
       "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "JSC butterfly verification shell option": [
@@ -138,13 +136,12 @@
   "executable_total": 259,
   "helper_preload": 5,
   "missing_allowlist_entries": [],
-  "promoted_executable": 250,
+  "promoted_executable": 251,
   "terminal_disposition_executable": 6,
   "uncategorized": [],
   "unpromoted": {
     "blocked": [
       "checktraps-invalidation.js",
-      "cve/mc-code-calllink-writer-writer.js",
       "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "helper_preload": [
@@ -277,19 +274,18 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (20 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (68 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
+          "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (20 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (68 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x102811a03 in main (threads-test)",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x102a4dd6b in main (threads-test)",
+          "                printHeapBudget(ctx);",
           "                                ^"
         ]
       },
@@ -376,12 +372,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t8-stop-interleaving.js (933 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (906 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t8-stop-interleaving.js",
-          "  PASS  congc-t8-stop-interleaving.js (933 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (906 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -407,29 +403,6 @@
       }
     },
     {
-      "case": "cve/mc-code-calllink-writer-writer.js",
-      "categories": [
-        "JIT/code-artifact hooks",
-        "$vm shared-heap/shell hooks"
-      ],
-      "exit_code": 0,
-      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
-      "expected_blocked_serialized_pass": null,
-      "output": {
-        "evidence": [
-          "  PASS  cve/mc-code-calllink-writer-writer.js (41996 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 cve/mc-code-calllink-writer-writer.js",
-          "  PASS  cve/mc-code-calllink-writer-writer.js (41996 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
-      },
-      "status": "expected-blocked-no-optimizer-evidence"
-    },
-    {
       "case": "cve/mc-df-arraycopy-relabel.js",
       "categories": [
         "JSC butterfly verification shell option",
@@ -439,19 +412,18 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (18 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (19 ms, Throw): RangeError: offset is out of bounds",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
+          "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (18 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (19 ms, Throw): RangeError: offset is out of bounds",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x10065da03 in main (threads-test)",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x100c41d6b in main (threads-test)",
+          "                printHeapBudget(ctx);",
           "                                ^"
         ]
       },
@@ -500,19 +472,18 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1268 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1318 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
+          "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1268 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1318 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x100991a03 in main (threads-test)",
-          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x102f39d6b in main (threads-test)",
+          "                printHeapBudget(ctx);",
           "                                ^"
         ]
       },
@@ -546,12 +517,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (2688 ms)",
+          "  PASS  w16-c1-prevent-collection.js (2674 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (2688 ms)",
+          "  PASS  w16-c1-prevent-collection.js (2674 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]

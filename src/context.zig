@@ -17470,8 +17470,8 @@ test "vm trampoline: safe sloppy functions can use heap-bounded recursion" {
     try std.testing.expectEqual(@as(f64, 2000), r.result);
 }
 
-test "vm admission: safe sloppy indexed loops exclude real callees" {
-    const ctx = try Context.createWith(std.testing.allocator, .{});
+test "vm admission: safe sloppy loops and strict dynamic calls tier safely" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = true });
     defer ctx.destroy();
 
     const indexed = try ctx.evaluate(
@@ -17496,6 +17496,21 @@ test "vm admission: safe sloppy indexed loops exclude real callees" {
     const caller_raw = caller.asObj().jsFunction() orelse return error.TestUnexpectedResult;
     const caller_func: *interp.Function = @ptrCast(@alignCast(caller_raw));
     try std.testing.expect(caller_func.chunk == null);
+
+    const dynamic = try ctx.evaluate(
+        \\globalThis.dynamicTarget = function (x) { return x + 1; };
+        \\globalThis.dynamicCall = Function("c", "x", '"use strict"; const result = c(x); return result;');
+        \\for (let i = 0; i < 64; ++i) dynamicCall(dynamicTarget, i);
+        \\dynamicCall
+    );
+    const dynamic_raw = dynamic.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const dynamic_func: *interp.Function = @ptrCast(@alignCast(dynamic_raw));
+    try std.testing.expect(dynamic_func.chunk != null);
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        try std.testing.expectEqual(jit.OptimizerTierState.ready, dynamic_func.chunk.?.optimizer_tier.state.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 1), dynamic_func.chunk.?.optimizer_tier.compileCount());
+        try std.testing.expectEqual(@as(u64, 1), ctx.jit_owner.optimizerPublications());
+    }
 }
 
 test "deep stack: main-realm non-tail recursion runs under the stack guard" {

@@ -1088,7 +1088,16 @@ pub const Compiler = struct {
                 }
             },
             .expr_stmt => |e| {
-                try self.compileExpr(e);
+                // A function-body string ExpressionStatement is discarded.
+                // Keep the two-instruction checkpoint/step shape for statement
+                // hooks, but do not retain the `"use strict"` StringCell as a
+                // movable constant: that otherwise makes every dynamically
+                // strict call body ineligible for the native optimizer even
+                // though the directive has no runtime value in function mode.
+                if (self.mode == .function and e.* == .string and std.mem.eql(u8, e.string, "use strict"))
+                    _ = try self.chunk.emit(.load_undefined, 0)
+                else
+                    try self.compileExpr(e);
                 _ = try self.chunk.emit(if (self.mode == .program) .set_acc else .pop, 0);
             },
             .debugger_stmt => _ = try self.chunk.emit(.nop, 0),

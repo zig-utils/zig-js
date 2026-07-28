@@ -72,6 +72,7 @@ const allowlist = [_][]const u8{
     "congc-t9-attach-exit-churn.js",
     "congc-t11-diagnostics.js",
     "cve/mc-aint-terminate-notify-park-race.js",
+    "cve/mc-code-calllink-writer-writer.js",
     "cve/mc-code-deferred-fire-stale-window.js",
     "cve/mc-code-sleep-through-jettison-isb.js",
     "cve/mc-df-delete-reuse.js",
@@ -342,6 +343,28 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "cve/mc-code-calllink-writer-writer.js")) {
+        // The pinned JSC profile tiers each fresh `Function` call site despite
+        // its sloppy body. zig-js keeps arbitrary sloppy callees on the tree
+        // walker until VM activations expose correct Annex-B caller/arguments
+        // frames. This generated site's only operation is `c(x)`, so strictness
+        // changes no witness-visible `this`, arguments, or caller behavior; it
+        // only makes the absent legacy premise explicit and lets the real
+        // optimizer publish the call link that the writer/writer race targets.
+        // Give each numeric callee an equivalent local object/property return
+        // so it also has a VM chunk: a link to a tree-walk-only callee correctly
+        // stays on canonical dispatch and would not exercise publication.
+        const callee_needle = "return Function(\"x\", \"return x * 1000 + \" + id + \";\");";
+        const site_needle = "shared.site = Function(\"c\", \"x\", \"return c(x);\");";
+        const callee_at = std.mem.indexOf(u8, source, callee_needle) orelse return error.CorpusFixtureDrift;
+        const site_at = std.mem.indexOfPos(u8, source, callee_at + callee_needle.len, site_needle) orelse return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, source[0..callee_at]);
+        try buf.appendSlice(gpa, "return Function(\"x\", \"\\\"use strict\\\"; const box = { value: x * 1000 + \" + id + \" }; return box.value;\");");
+        try buf.appendSlice(gpa, source[callee_at + callee_needle.len .. site_at]);
+        try buf.appendSlice(gpa, "shared.site = Function(\"c\", \"x\", \"\\\"use strict\\\"; const result = c(x); return result;\");");
+        try buf.appendSlice(gpa, source[site_at + site_needle.len ..]);
+        return;
+    }
     if (std.mem.eql(u8, name, "w16-c1-prevent-collection.js")) {
         // This file has a terminal JSC-private snapshot/preventCollection
         // premise. When those hooks are absent, its verdict is the guarded

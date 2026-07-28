@@ -1,12 +1,5 @@
 {
   "dependency_catalog": {
-    "jit-artifact-lifetime": {
-      "description": "Optimized code, call-link records, retirement epochs, and jettison",
-      "owner_issues": [
-        146,
-        429
-      ]
-    },
     "jit-trap-polling": {
       "description": "Optimized-tier trap polling, invalidation, and resume",
       "owner_issues": [
@@ -19,14 +12,6 @@
       "owner_issues": [
         143,
         146,
-        429
-      ]
-    },
-    "jsc-shared-heap-shell": {
-      "description": "JSC $vm sharedHeapTest and shared-heap diagnostic controls",
-      "owner_issues": [
-        143,
-        145,
         429
       ]
     },
@@ -1298,19 +1283,8 @@
     {
       "bytes": 4294,
       "case": "cve/mc-code-calllink-writer-writer.js",
-      "dependencies": [
-        "jit-artifact-lifetime",
-        "jsc-shared-heap-shell",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145,
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-code-calllink-writer-writer.js",
       "required_shell_hooks": [
         "$vm.gc",
@@ -4244,12 +4218,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 3,
+    "blocked": 2,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 250,
+    "promoted": 251,
     "promoted_with_terminal_premises": 7,
     "terminal_disposition": 6
   }
