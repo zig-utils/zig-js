@@ -4923,8 +4923,18 @@ pub const Interpreter = struct {
             std.mem.indexOf(u8, source, ".arguments") != null;
     }
 
-    fn sourceMayCall(source: []const u8) bool {
-        return std.mem.indexOfScalar(u8, source, '(') != null;
+    fn sourceBodyMayCall(source: []const u8) bool {
+        // A traditional function's own parameter list is not a body call. The
+        // old whole-source scan therefore rejected every sloppy function before
+        // the named-property and self-recursion exceptions below could apply.
+        // Starting after the opening brace stays conservative for grouping and
+        // nested syntax while admitting the exact no-call property bodies this
+        // policy is meant to tier.
+        const body_start = if (std.mem.indexOfScalar(u8, source, '{')) |brace|
+            brace + 1
+        else
+            0;
+        return std.mem.indexOfScalar(u8, source[body_start..], '(') != null;
     }
 
     fn sourceHasNamedSelfCall(source: []const u8, name: []const u8) bool {
@@ -4952,10 +4962,11 @@ pub const Interpreter = struct {
         if (fnode.is_method or fnode.is_generator or fnode.is_async or fnode.uses_arguments) return false;
         if (fnode.is_strict)
             return sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null;
+        const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
         return !sourceMayObserveLegacyCallFrame(fnode.source) and
-            !sourceMayCall(fnode.source) and
-            (sourceHasNamedSelfCall(fnode.source, fnode.name) or
-                std.mem.indexOfScalar(u8, fnode.source, '.') != null);
+            (named_self_recursion or
+                (!sourceBodyMayCall(fnode.source) and
+                    std.mem.indexOfScalar(u8, fnode.source, '.') != null));
     }
 
     pub fn funcOf(v: Value) ?*Function {
