@@ -15182,6 +15182,10 @@ test "Atomics on plain properties: semantics, exact counter, wait/notify" {
         \\Atomics.store(o, "fresh", "v");
         \\const d = Object.getOwnPropertyDescriptor(o, "fresh");
         \\if (!d.writable || !d.enumerable || !d.configurable) throw new Error("fresh attrs");
+        \\// a direct-own indexed store uses Array [[DefineOwnProperty]], including length
+        \\const arr = [10, 20];
+        \\if (Atomics.store(arr, 2, 30) !== 30 || arr[2] !== 30 || arr.length !== 3)
+        \\  throw new Error("array index store");
         \\// any value round-trips by identity
         \\const ref = { deep: true };
         \\Atomics.store(o, "obj", ref);

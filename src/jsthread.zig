@@ -2698,6 +2698,29 @@ pub fn propStore(self: *Interpreter, args: []const Value) value.HostError!Value 
     } else if (!o.isExtensible()) {
         return self.throwError("TypeError", "Atomics.store: cannot add a property to a non-extensible object");
     }
+    // The direct-own Missing arm still has Array [[DefineOwnProperty]]
+    // semantics: creating an index grows `length` and uses dense storage when
+    // practical. `setProp` alone would instead create a same-named shape slot,
+    // leaving the array length stale. Do this below the indexed transaction so
+    // a concurrent descriptor definition cannot interleave between the
+    // absent-property decision and publication.
+    if (o.is_array and !o.is_arguments) {
+        if (value.canonicalIndex(key)) |i_u32| {
+            const i: usize = i_u32;
+            const old_len = o.arrayLength();
+            if (i >= old_len and o.attrsMap() != null and !o.getAttr("length").writable)
+                return self.throwError("TypeError", "Atomics.store: array length is not writable");
+            if (o.attrsMap() != null and !o.getAttr(key).writable)
+                return self.throwError("TypeError", "Atomics.store: property is not writable");
+            const dense_cap: usize = 1 << 24;
+            const dense_len = o.elementsLen();
+            if (i < dense_cap and i <= dense_len + 1024) {
+                _ = try o.growDenseElement(self.arena, i, v);
+                return v;
+            }
+            try o.extendArrayLengthFloor(self.arena, i + 1);
+        }
+    }
     // Property-mode store is a direct own-property operation: an inherited
     // setter cannot intercept the Missing arm. The outer indexed transaction
     // also means no user code runs while it is held.
