@@ -24,6 +24,15 @@ EXPECTED_GATES = {
     "optimizing_jit",
     "readme_generation",
 }
+README_NOTICE_START = "<!-- release-compatibility:notice:start -->"
+README_NOTICE_END = "<!-- release-compatibility:notice:end -->"
+README_NOTICE_GATE_LABELS = {
+    "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
+    "moving_gc": "automatic shared-realm compaction",
+    "generational_gc": "moving nursery for the multi-age GC",
+    "optimizing_jit": "optimizing-JIT backend/differential evidence",
+    "readme_generation": "fully generated README/release claims",
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -54,10 +63,55 @@ def statuses(value: object) -> set[str]:
     return found
 
 
+def generated_readme_notice(matrix: dict[str, object]) -> str:
+    gates = matrix["gates"]
+    open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
+    lines = [README_NOTICE_START]
+    if "shell_and_reference_hooks" in open_ids:
+        inventory = json.loads(artifact_path("docs/.data/pr249-reference-inventory.json").read_text())
+        summary = inventory["summary"]
+        lines.append(
+            "- PR-249 reference tail: "
+            f"**{summary['blocked']}** files remain blocked on shell/JIT evidence; "
+            f"**{summary['terminal_disposition']}** JSC-private or incompatible premises have terminal dispositions "
+            "([inventory](docs/.data/pr249-reference-inventory.json))."
+        )
+    release_gate_labels = [
+        README_NOTICE_GATE_LABELS[gate_id]
+        for gate_id in open_ids
+        if gate_id in README_NOTICE_GATE_LABELS
+    ]
+    if release_gate_labels:
+        lines.append(
+            "- Open release gates: "
+            + "; ".join(release_gate_labels)
+            + " ([matrix](docs/.data/release-compatibility-matrix.json))."
+        )
+    lines.extend([
+        "",
+        "The [release matrix](docs/.data/release-compatibility-matrix.json) tracks "
+        "[#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by "
+        "[#246](https://github.com/zig-utils/zig-js/issues/246).",
+        README_NOTICE_END,
+    ])
+    return "\n".join(lines)
+
+
+def replace_readme_notice(readme: str, heading: str, generated: str) -> str:
+    heading_line = heading + "\n"
+    require(heading_line in readme, "README missing-surface heading is absent")
+    before, section_and_after = readme.split(heading_line, 1)
+    next_heading_at = section_and_after.find("\n## ")
+    require(next_heading_at != -1, "README missing-surface section is unterminated")
+    after = section_and_after[next_heading_at + 1 :]
+    return f"{before}{heading_line}\n{generated}\n\n{after}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("matrix", nargs="?", type=Path, default=DEFAULT_MATRIX)
     parser.add_argument("--release", action="store_true", help="fail unless every roadmap gate is green")
+    parser.add_argument("--update-readme", action="store_true", help="rewrite the README missing-surface notice from the matrix")
     args = parser.parse_args()
 
     matrix = json.loads(args.matrix.read_text())
@@ -138,10 +192,16 @@ def main() -> int:
     require(matrix.get("all_green") is all_green, "all_green does not match gate states")
     policy = matrix.get("readme_policy", {})
     require(policy.get("remove_only_when_all_green") is True, "README removal policy drift")
-    readme = artifact_path(policy.get("path", "")).read_text()
+    readme_path = artifact_path(policy.get("path", ""))
+    readme = readme_path.read_text()
     heading = policy.get("not_implemented_heading")
     require(isinstance(heading, str) and heading, "README heading policy is required")
+    if args.update_readme and not all_green:
+        readme = replace_readme_notice(readme, heading, generated_readme_notice(matrix))
+        readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
+    if not all_green:
+        require(generated_readme_notice(matrix) in readme, "README missing-surface notice drift")
     require(f"**{test262_pass:,} / {test262_total:,}**" in readme, "README test262 score drift")
     require(f"**{wasm_totals['pass']:,} / {wasm_totals['pass']:,} applicable**" in readme, "README WebAssembly score drift")
 

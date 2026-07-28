@@ -120,7 +120,7 @@
       "id": "readme_generation",
       "issue": 147,
       "status": "open",
-      "evidence": ["README.md", "tools/benchmark-publication.py", "docs/.data/wasm-conformance-matrix.json"],
+      "evidence": ["README.md", "tools/release-compatibility.py", "tools/benchmark-publication.py", "docs/.data/wasm-conformance-matrix.json"],
       "blockers": ["generate every capability and benchmark claim from the unified release matrix"]
     }
   ],
