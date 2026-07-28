@@ -536,29 +536,6 @@ def validate_pr249_tail(gate: dict[str, object]) -> None:
             require(entry.get("expected_blocked_serialized_pass"), f"{case}: serialized pass lacks blocker reason")
         if status == "expected-blocked-no-optimizer-evidence":
             require(entry.get("expected_blocked_no_optimizer_evidence"), f"{case}: optimizer pass lacks blocker reason")
-        if case == "cve/mc-aint-poll-resume-stale-elided.js":
-            declared_probe = entry.get("declared_parallel_js_probe")
-            require(isinstance(declared_probe, dict), f"{case}: declared no-GIL probe is missing")
-            require(
-                declared_probe.get("status") == "expected-blocked-no-optimizer-evidence",
-                f"{case}: declared no-GIL probe does not prove the remaining optimizer blocker",
-            )
-            require(declared_probe.get("observed_status") == "pass", f"{case}: declared no-GIL probe did not pass")
-            command = declared_probe.get("command")
-            require(
-                command == [
-                    str(ROOT / "zig-out" / "bin" / "threads-test"),
-                    "parallel-js",
-                    "one",
-                    case,
-                ],
-                f"{case}: declared no-GIL probe command drift",
-            )
-            require(
-                declared_probe.get("expected_blocked_no_optimizer_evidence"),
-                f"{case}: declared no-GIL pass lacks blocker reason",
-            )
-
 
 def private_abi_count(relative: str) -> int:
     inventory = json.loads(artifact_path(relative).read_text())

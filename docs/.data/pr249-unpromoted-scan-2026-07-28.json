@@ -1,22 +1,18 @@
 {
   "allowlist": {
-    "executable_passed": 248,
+    "executable_passed": 250,
     "executable_total": 259
   },
-  "blocked_executable": 5,
+  "blocked_executable": 3,
   "categories": {
     "$vm shared-heap/shell hooks": [
       "congc-t2-lockorder-lint.js",
       "congc-t8-stop-interleaving.js",
-      "cve/mc-aint-poll-resume-stale-elided.js",
-      "cve/mc-code-calllink-writer-writer.js",
-      "jit/ic-publish-reset-loops.js"
+      "cve/mc-code-calllink-writer-writer.js"
     ],
     "JIT/code-artifact hooks": [
-      "cve/mc-aint-poll-resume-stale-elided.js",
       "cve/mc-code-calllink-writer-writer.js",
-      "cve/mc-jit-stale-base-grow-oob.js",
-      "jit/ic-publish-reset-loops.js"
+      "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "JSC butterfly verification shell option": [
       "cve/mc-df-arraycopy-relabel.js"
@@ -142,16 +138,14 @@
   "executable_total": 259,
   "helper_preload": 5,
   "missing_allowlist_entries": [],
-  "promoted_executable": 248,
+  "promoted_executable": 250,
   "terminal_disposition_executable": 6,
   "uncategorized": [],
   "unpromoted": {
     "blocked": [
       "checktraps-invalidation.js",
-      "cve/mc-aint-poll-resume-stale-elided.js",
       "cve/mc-code-calllink-writer-writer.js",
-      "cve/mc-jit-stale-base-grow-oob.js",
-      "jit/ic-publish-reset-loops.js"
+      "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "helper_preload": [
       "bench/harness.js",
@@ -283,16 +277,20 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (11 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (20 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
         ],
         "tail": [
           "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (11 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (20 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x102811a03 in main (threads-test)",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "                                ^"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -339,12 +337,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t2-lockorder-lint.js (5 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (12 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t2-lockorder-lint.js",
-          "  PASS  congc-t2-lockorder-lint.js (5 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (12 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -378,12 +376,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (933 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t8-stop-interleaving.js",
-          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (933 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -409,55 +407,6 @@
       }
     },
     {
-      "case": "cve/mc-aint-poll-resume-stale-elided.js",
-      "categories": [
-        "JIT/code-artifact hooks",
-        "$vm shared-heap/shell hooks"
-      ],
-      "declared_parallel_js_probe": {
-        "command": [
-          "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
-          "parallel-js",
-          "one",
-          "cve/mc-aint-poll-resume-stale-elided.js"
-        ],
-        "exit_code": 0,
-        "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
-        "observed_status": "pass",
-        "output": {
-          "evidence": [
-            "  PASS  cve/mc-aint-poll-resume-stale-elided.js (13304 ms)",
-            "  cooperative GC: attempts=1 collections=1 timeouts=0 peer-parks=4 exit-cleanups=0 bytes-reset=1073815856",
-            "1/1 corpus files passed"
-          ],
-          "tail": [
-            "  RUN   1/1 cve/mc-aint-poll-resume-stale-elided.js",
-            "  PASS  cve/mc-aint-poll-resume-stale-elided.js (13304 ms)",
-            "  cooperative GC: attempts=1 collections=1 timeouts=0 peer-parks=4 exit-cleanups=0 bytes-reset=1073815856",
-            "------------------------",
-            "1/1 corpus files passed"
-          ]
-        },
-        "status": "expected-blocked-no-optimizer-evidence"
-      },
-      "exit_code": 0,
-      "expected_blocked_no_optimizer_evidence": null,
-      "expected_blocked_serialized_pass": "The serialized leg skips the post-UNGIL JSC optimizing-tier poll/resume arm; #429 owns real no-GIL promotion.",
-      "output": {
-        "evidence": [
-          "  PASS  cve/mc-aint-poll-resume-stale-elided.js (2 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 cve/mc-aint-poll-resume-stale-elided.js",
-          "  PASS  cve/mc-aint-poll-resume-stale-elided.js (2 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
-      },
-      "status": "expected-blocked-serialized-pass"
-    },
-    {
       "case": "cve/mc-code-calllink-writer-writer.js",
       "categories": [
         "JIT/code-artifact hooks",
@@ -468,12 +417,12 @@
       "expected_blocked_serialized_pass": null,
       "output": {
         "evidence": [
-          "  PASS  cve/mc-code-calllink-writer-writer.js (1763 ms)",
+          "  PASS  cve/mc-code-calllink-writer-writer.js (41996 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-code-calllink-writer-writer.js",
-          "  PASS  cve/mc-code-calllink-writer-writer.js (1763 ms)",
+          "  PASS  cve/mc-code-calllink-writer-writer.js (41996 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -490,16 +439,20 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (3 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (18 ms, Throw): RangeError: offset is out of bounds",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (3 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (18 ms, Throw): RangeError: offset is out of bounds",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x10065da03 in main (threads-test)",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "                                ^"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -527,22 +480,15 @@
       "categories": [
         "JIT/code-artifact hooks"
       ],
-      "exit_code": 0,
-      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
-      "expected_blocked_serialized_pass": null,
+      "exit_code": null,
       "output": {
-        "evidence": [
-          "  PASS  cve/mc-jit-stale-base-grow-oob.js (38404 ms)",
-          "1/1 corpus files passed"
-        ],
+        "evidence": [],
         "tail": [
-          "  RUN   1/1 cve/mc-jit-stale-base-grow-oob.js",
-          "  PASS  cve/mc-jit-stale-base-grow-oob.js (38404 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
+          "  RUN   1/1 cve/mc-jit-stale-base-grow-oob.js"
         ]
       },
-      "status": "expected-blocked-no-optimizer-evidence"
+      "status": "timeout",
+      "terminal_disposition": null
     },
     {
       "case": "cve/mc-life-creator-thread-dies.js",
@@ -554,16 +500,20 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1268 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1268 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures"
+          "error: CorpusFailures",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1262:33: 0x100991a03 in main (threads-test)",
+          "    if (failed != 0 and !sweep) return error.CorpusFailures;",
+          "                                ^"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -587,29 +537,6 @@
       }
     },
     {
-      "case": "jit/ic-publish-reset-loops.js",
-      "categories": [
-        "JIT/code-artifact hooks",
-        "$vm shared-heap/shell hooks"
-      ],
-      "exit_code": 0,
-      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
-      "expected_blocked_serialized_pass": null,
-      "output": {
-        "evidence": [
-          "  PASS  jit/ic-publish-reset-loops.js (3624 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 jit/ic-publish-reset-loops.js",
-          "  PASS  jit/ic-publish-reset-loops.js (3624 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
-      },
-      "status": "expected-blocked-no-optimizer-evidence"
-    },
-    {
       "case": "w16-c1-prevent-collection.js",
       "categories": [
         "portable snapshot graph/parse/ownership promoted by test-private-heap-snapshot",
@@ -619,12 +546,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (5438 ms)",
+          "  PASS  w16-c1-prevent-collection.js (2688 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (5438 ms)",
+          "  PASS  w16-c1-prevent-collection.js (2688 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]

@@ -95,12 +95,7 @@ DISPOSITION_PROBE_EXPECTATIONS = {
     ),
 }
 
-BLOCKED_EXPECTED_SERIALIZED_PASSES = {
-    "cve/mc-aint-poll-resume-stale-elided.js": (
-        "The serialized leg skips the post-UNGIL JSC optimizing-tier poll/resume arm; "
-        "#429 owns real no-GIL promotion."
-    ),
-}
+BLOCKED_EXPECTED_SERIALIZED_PASSES = {}
 
 
 def blocked_pass_without_optimizer_reason(case: str, output: str) -> str | None:
@@ -198,6 +193,11 @@ PROMOTED_TERMINAL_PREMISES["dw2-marklistset-storm.js"] = [{
     "hook": "JSC MarkedVector/MarkListSet internals",
     "reason": "The portable sort/apply/GC root-pressure witness is maintained; zig-js does not claim JSC's private marker-container implementation.",
 }]
+PROMOTED_TERMINAL_PREMISES["jit/ic-publish-reset-loops.js"] = [{
+    "category": "jsc-private-branch",
+    "hook": "$vm.toCacheableDictionary/$vm.flattenDictionaryObject",
+    "reason": "The real get/put optimizer publication and concurrent coherence arms are maintained; zig-js does not emulate JSC's private cacheable-dictionary IC reset mechanism.",
+}]
 
 NON_JIT_PROMOTED = {
     "congc-t3-barrier-storm.js",
@@ -269,25 +269,12 @@ DEPENDENCY_CATALOG = {
 
 BLOCKED_DEPENDENCIES = {
     "checktraps-invalidation.js": ("jit-trap-polling", "optimizing-jit"),
-    # Declared no-GIL mode now passes on main, but still prints no optimizer
-    # publication evidence. Keep it blocked on the real poll/resume and shell
-    # premises; the unpromoted scan separately records the declared no-GIL probe
-    # so this cannot regress to a hidden binding-resolution failure.
-    "cve/mc-aint-poll-resume-stale-elided.js": (
-        "jit-trap-polling",
-        "jsc-shared-heap-shell",
-        "optimizing-jit",
-    ),
     "cve/mc-code-calllink-writer-writer.js": (
         "jit-artifact-lifetime",
         "jsc-shared-heap-shell",
         "optimizing-jit",
     ),
     "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
-    "jit/ic-publish-reset-loops.js": (
-        "jsc-shared-heap-shell",
-        "optimizing-jit",
-    ),
 }
 
 SHELL_GLOBAL_HOOKS = (

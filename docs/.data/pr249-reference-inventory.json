@@ -1263,19 +1263,8 @@
     {
       "bytes": 10892,
       "case": "cve/mc-aint-poll-resume-stale-elided.js",
-      "dependencies": [
-        "jit-trap-polling",
-        "jsc-shared-heap-shell",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145,
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
       "required_shell_hooks": [
         "$vm.useThreadGIL",
@@ -2743,18 +2732,8 @@
     {
       "bytes": 4336,
       "case": "jit/ic-publish-reset-loops.js",
-      "dependencies": [
-        "jsc-shared-heap-shell",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        145,
-        146,
-        429
-      ],
       "path": "threads-tests/jit/ic-publish-reset-loops.js",
       "required_shell_hooks": [
         "$vm.flattenDictionaryObject",
@@ -2766,7 +2745,14 @@
         "option:--useDollarVM=1",
         "option:--useJSThreads=1"
       ],
-      "sha256": "b0a34f223aff98a692e6e55ebc84c5e2a97b723b4b7cc8962d7ea6805fe1a089"
+      "sha256": "b0a34f223aff98a692e6e55ebc84c5e2a97b723b4b7cc8962d7ea6805fe1a089",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.toCacheableDictionary/$vm.flattenDictionaryObject",
+          "reason": "The real get/put optimizer publication and concurrent coherence arms are maintained; zig-js does not emulate JSC's private cacheable-dictionary IC reset mechanism."
+        }
+      ]
     },
     {
       "bytes": 4620,
@@ -4258,13 +4244,13 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 5,
+    "blocked": 3,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 248,
-    "promoted_with_terminal_premises": 6,
+    "promoted": 250,
+    "promoted_with_terminal_premises": 7,
     "terminal_disposition": 6
   }
 }

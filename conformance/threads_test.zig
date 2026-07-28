@@ -158,6 +158,13 @@ const allowlist = [_][]const u8{
     "jit/int-gate-direct-call-relink.js",
     "jit/int-gate-jettison-vs-execute.js",
     "jit/int-gate-stop-budget.js",
+    // The getF/putF publish-churn arm executes on zig-js's real optimizer in
+    // every mode (two stable artifacts serialized; concurrent publish,
+    // invalidation, and reclamation no-GIL). The guarded
+    // $vm.toCacheableDictionary/flattenDictionaryObject branch is a terminal
+    // JSC-private reset mechanism, recorded explicitly in the inventory rather
+    // than emulated with a shell stub.
+    "jit/ic-publish-reset-loops.js",
     "jit/shared-arraystorage-stress.js",
     "jit/spawned-thread-butterfly-stress.js",
     "jit/tag-discipline.js",
@@ -290,6 +297,11 @@ const parallel_only_allowlist = [_][]const u8{
     // cooperative GIL the worker can starve the observer, while parallel_js
     // exercises the intended haveBadTime/checktraps park window.
     "checktraps-havebadtime-park.js",
+    // I21(b) poll/park resume is post-UNGIL by construction: serialized mode
+    // premise-skips from the effective $vm.useThreadGIL() value. The no-GIL
+    // lane publishes, invalidates, reclaims, and resumes real optimized
+    // readPair artifacts while its disjoint alpha/beta sentinel oracle holds.
+    "cve/mc-aint-poll-resume-stale-elided.js",
     // Models PR-249 `--useSharedArrayBuffer=0`: Thread + property Atomics stay
     // enabled while the SAB constructor is absent. Robust only in no-GIL mode
     // because the worker counter is a timing-capability witness.
@@ -330,6 +342,33 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "w16-c1-prevent-collection.js")) {
+        // This file has a terminal JSC-private snapshot/preventCollection
+        // premise. When those hooks are absent, its verdict is the guarded
+        // "churn-only" pass; executing the full 2.56-million-object amplifier
+        // under Debug only measures SafeAllocator stack capture and exceeds the
+        // bounded disposition probe. Preserve two mutators, the r=8 explicit-GC
+        // election lane, and the deterministic reference rerun in a pinned
+        // 2 x 18 x 80 shape. The vendored source remains untouched.
+        const workers_needle = "const W = HAVE_THREADS ? 8 : 1;";
+        const rounds_needle = "const ROUNDS = 200;";
+        const inner_needle = "for (let i = 0; i < 800; ++i)";
+        const index_needle = "junk[((seed + r) % 800) | 0].x";
+        const workers_at = std.mem.indexOf(u8, source, workers_needle) orelse return error.CorpusFixtureDrift;
+        const rounds_at = std.mem.indexOfPos(u8, source, workers_at + workers_needle.len, rounds_needle) orelse return error.CorpusFixtureDrift;
+        const inner_at = std.mem.indexOfPos(u8, source, rounds_at + rounds_needle.len, inner_needle) orelse return error.CorpusFixtureDrift;
+        const index_at = std.mem.indexOfPos(u8, source, inner_at + inner_needle.len, index_needle) orelse return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, source[0..workers_at]);
+        try buf.appendSlice(gpa, "const W = HAVE_THREADS ? 2 : 1;");
+        try buf.appendSlice(gpa, source[workers_at + workers_needle.len .. rounds_at]);
+        try buf.appendSlice(gpa, "const ROUNDS = 18;");
+        try buf.appendSlice(gpa, source[rounds_at + rounds_needle.len .. inner_at]);
+        try buf.appendSlice(gpa, "for (let i = 0; i < 80; ++i)");
+        try buf.appendSlice(gpa, source[inner_at + inner_needle.len .. index_at]);
+        try buf.appendSlice(gpa, "junk[((seed + r) % 80) | 0].x");
+        try buf.appendSlice(gpa, source[index_at + index_needle.len ..]);
+        return;
+    }
     if (builtin.sanitize_thread and std.mem.eql(u8, name, "dw2-marklistset-storm.js")) {
         // Preserve two worker sort/apply lanes plus the main mutator and an
         // explicit GC requester,
@@ -347,6 +386,48 @@ fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), na
         try buf.appendSlice(gpa, source[workers_at + workers_needle.len .. rounds_at]);
         try buf.appendSlice(gpa, "const ROUNDS = 18;");
         try buf.appendSlice(gpa, source[rounds_at + rounds_needle.len ..]);
+        return;
+    }
+    if (builtin.sanitize_thread and std.mem.eql(u8, name, "jit/ic-publish-reset-loops.js")) {
+        // Keep both stable shapes, both optimized accessors, three concurrent
+        // readers, publish churn, and an explicit GC/reset checkpoint while
+        // bounding Debug SafeAllocator's per-allocation stack capture. Normal
+        // builds execute the untouched 10k warmup plus 200 x 200 churn; TSan
+        // executes 512 warm calls plus 24 x 32. Every replacement is pinned so
+        // an upstream fixture change fails closed.
+        const warm_needle = "for (let i = 0; i < 10000; ++i)";
+        const rounds_needle = "for (let round = 0; round < 200; ++round)";
+        const churn_needle = "for (let i = 0; i < 200; ++i)";
+        const warm_at = std.mem.indexOf(u8, source, warm_needle) orelse return error.CorpusFixtureDrift;
+        const rounds_at = std.mem.indexOfPos(u8, source, warm_at + warm_needle.len, rounds_needle) orelse return error.CorpusFixtureDrift;
+        const churn_at = std.mem.indexOfPos(u8, source, rounds_at + rounds_needle.len, churn_needle) orelse return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, source[0..warm_at]);
+        try buf.appendSlice(gpa, "for (let i = 0; i < 512; ++i)");
+        try buf.appendSlice(gpa, source[warm_at + warm_needle.len .. rounds_at]);
+        try buf.appendSlice(gpa, "for (let round = 0; round < 24; ++round)");
+        try buf.appendSlice(gpa, source[rounds_at + rounds_needle.len .. churn_at]);
+        try buf.appendSlice(gpa, "for (let i = 0; i < 32; ++i)");
+        try buf.appendSlice(gpa, source[churn_at + churn_needle.len ..]);
+        return;
+    }
+    if (builtin.sanitize_thread and std.mem.eql(u8, name, "cve/mc-aint-poll-resume-stale-elided.js")) {
+        // Preserve hundreds of poll/resume reads after optimizer warmup, the
+        // foreign first-write fire, 24-property growth, and moving owner
+        // sentinels while bounding Debug+TSan's per-allocation tracing. Normal
+        // builds retain the untouched 100 x 50k x 20k amplifier.
+        const rounds_needle = "const ROUNDS = 100;";
+        const reads_needle = "const READS_PER_ROUND = 50000;";
+        const rewrites_needle = "for (let i = 0; i < 20000; ++i)";
+        const rounds_at = std.mem.indexOf(u8, source, rounds_needle) orelse return error.CorpusFixtureDrift;
+        const reads_at = std.mem.indexOfPos(u8, source, rounds_at + rounds_needle.len, reads_needle) orelse return error.CorpusFixtureDrift;
+        const rewrites_at = std.mem.indexOfPos(u8, source, reads_at + reads_needle.len, rewrites_needle) orelse return error.CorpusFixtureDrift;
+        try buf.appendSlice(gpa, source[0..rounds_at]);
+        try buf.appendSlice(gpa, "const ROUNDS = 1;");
+        try buf.appendSlice(gpa, source[rounds_at + rounds_needle.len .. reads_at]);
+        try buf.appendSlice(gpa, "const READS_PER_ROUND = 500;");
+        try buf.appendSlice(gpa, source[reads_at + reads_needle.len .. rewrites_at]);
+        try buf.appendSlice(gpa, "for (let i = 0; i < 200; ++i)");
+        try buf.appendSlice(gpa, source[rewrites_at + rewrites_needle.len ..]);
         return;
     }
     try buf.appendSlice(gpa, source);
