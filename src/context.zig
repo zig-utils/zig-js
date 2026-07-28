@@ -30,6 +30,10 @@ const fetch_headers = @import("fetch_headers.zig");
 
 pub const RunError = interp.EvalError || @import("parser.zig").ParseError;
 
+// Zig 0.17 renamed the builtin optimization enum tags from title case to
+// lowercase. Keep the declared dev.956+ compiler window source-compatible.
+const debug_build = std.ascii.eqlIgnoreCase(@tagName(builtin.mode), "debug");
+
 const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
@@ -5499,7 +5503,7 @@ pub const Context = struct {
     /// realm state, `.gil = true` requires VM-lock ownership, and non-threaded
     /// contexts require creator-thread affinity. Compiles out in release modes.
     pub fn assertOwnerThread(self: *const Context) void {
-        if (comptime builtin.mode == .Debug) {
+        if (comptime debug_build) {
             if (self.gil) |g| {
                 if (self.parallel_js) return;
                 if (!g.holds()) std.debug.panic(

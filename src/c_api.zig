@@ -43,6 +43,10 @@ const vm = @import("vm.zig");
 const strcell = @import("strcell.zig");
 const text_codec = @import("text_codec.zig");
 const fetch_headers = @import("fetch_headers.zig");
+
+// Zig 0.17 renamed the builtin optimization enum tags from title case to
+// lowercase. Keep the declared dev.956+ compiler window source-compatible.
+const debug_build = std.ascii.eqlIgnoreCase(@tagName(builtin.mode), "debug");
 const wasm_api = @import("wasm/api.zig");
 const parser_mod = @import("parser.zig");
 const private_encoded_value = @import("private_abi/encoded_value.zig");
@@ -2840,7 +2844,7 @@ fn ctxFrom(ref: JSContextRef) ?*Context {
 fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
     if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
-    if (comptime builtin.mode == .Debug) {
+    if (comptime debug_build) {
         if (!c.isOwnerThread()) std.debug.panic(
             "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
             .{ std.Thread.getCurrentId(), c.owner_thread },
@@ -2852,7 +2856,7 @@ fn ctxForHandleInspection(ref: JSContextRef) ?*Context {
 fn ctxForEvaluation(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
     if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
-    if (comptime builtin.mode == .Debug) {
+    if (comptime debug_build) {
         // Serialized threaded contexts acquire the GIL inside
         // `Context.evaluateWithThis`, then assert that ownership there. For
         // non-threaded and true-parallel C contexts, preserve the documented
@@ -2870,7 +2874,7 @@ fn ctxForEvaluation(ref: JSContextRef) ?*Context {
 fn ctxForLifecycle(ref: JSContextRef) ?*Context {
     const c = ctxRawFrom(ref) orelse return null;
     if (c.c_api_group != null and c.c_api_ref_count.load(.acquire) == 0) return null;
-    if (comptime builtin.mode == .Debug) {
+    if (comptime debug_build) {
         // Retain/release are host lifecycle operations, not VM execution. They
         // must preserve context thread-affinity without requiring the serialized
         // GIL to already be held.
@@ -16325,7 +16329,7 @@ fn valueFromContext(ctx: *Context, ref: JSValueRef) ?Value {
 
 fn objectFromHandleInspection(ref: JSObjectRef) ?*Object {
     const b = boxedFrom(ref) orelse return null;
-    if (comptime builtin.mode == .Debug) {
+    if (comptime debug_build) {
         if (!b.owner.isOwnerThread()) std.debug.panic(
             "Context is single-thread-affine: used from thread {d}, owned by thread {d} (docs/threads/bindings.md)",
             .{ std.Thread.getCurrentId(), b.owner.owner_thread },
@@ -16523,7 +16527,7 @@ fn typedArrayTypeFromValue(v: Value) JSTypedArrayType {
 
 fn contextGroupFrom(ref: JSContextGroupRef) ?*CContextGroup {
     const group: *CContextGroup = @ptrCast(@alignCast(ref orelse return null));
-    if (comptime builtin.mode == .Debug) {
+    if (comptime debug_build) {
         if (group.owner_thread != std.Thread.getCurrentId()) std.debug.panic(
             "JSContextGroupRef is thread-affine: used from thread {d}, owned by thread {d}",
             .{ std.Thread.getCurrentId(), group.owner_thread },
