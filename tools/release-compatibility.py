@@ -420,6 +420,41 @@ def generated_readme_notice(matrix: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def validate_platform_matrix(matrix: dict[str, object], gate: dict[str, object]) -> None:
+    required = {
+        "tools/platform-release-matrix.py",
+        "docs/.data/platform-release-matrix-2026-07-28.json",
+        "docs/platforms.md",
+        ".github/workflows/ci.yml",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+    }
+    evidence = set(gate.get("evidence", []))
+    require(required <= evidence, "platform matrix gate evidence is incomplete")
+
+    generator = load_python_module("tools/platform-release-matrix.py", "platform_release_matrix_check")
+    expected = generator.build_matrix()
+    checked = json.loads(artifact_path("docs/.data/platform-release-matrix-2026-07-28.json").read_text())
+    require(checked == expected, "platform release matrix drift")
+    require(artifact_path("docs/platforms.md").read_text() == generator.render_markdown(expected), "platform matrix Markdown drift")
+    require(checked["status"] == "published", "platform release matrix is not published")
+    summary = checked["summary"]
+    require(summary["correctness_gated_platforms"] >= 1, "platform matrix lacks correctness coverage")
+    require(summary["sanitizer_gated_platforms"] >= 1, "platform matrix lacks sanitizer coverage")
+    require(summary["performance_published_platforms"] >= 1, "platform matrix lacks performance coverage")
+
+    platform_scope = matrix.get("platform_scope", {})
+    require(
+        platform_scope == {
+            "matrix": "docs/.data/platform-release-matrix-2026-07-28.json",
+            "correctness": [{"os": "linux", "architecture": "x86_64", "status": "gated"}],
+            "sanitizers": [{"os": "linux", "architecture": "x86_64", "status": "gated"}],
+            "performance": [{"os": "macos", "architecture": "arm64", "status": "published"}],
+        },
+        "platform scope summary drift",
+    )
+
+
 def pr249_scan_path(gate: dict[str, object]) -> str:
     scans = [
         relative
@@ -684,6 +719,7 @@ def main() -> int:
             require(blockers, f"{gate_id}: open gate has no blocker")
 
     gate_by_id = {gate["id"]: gate for gate in gates}
+    validate_platform_matrix(matrix, gate_by_id["platform_matrix"])
     for gate_id in ("public_jsc_c_api", "objective_c_bridge", "inspector"):
         inventory = json.loads(artifact_path(gate_by_id[gate_id]["evidence"][0]).read_text())
         require(statuses(inventory) == {"implemented"}, f"{gate_id}: inventory is not fully implemented")

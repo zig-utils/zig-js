@@ -88,7 +88,7 @@ Run `zig build --help` for the full command list.
 
 <!-- release-compatibility:notice:start -->
 - PR-249 reference tail: **5** files remain blocked on shell/JIT evidence; **6** JSC-private or incompatible premises have terminal dispositions ([inventory](docs/.data/pr249-reference-inventory.json) · [scan](docs/.data/pr249-unpromoted-scan-2026-07-28.json)).
-- Open release gates: supported platform correctness/sanitizer/performance matrix publication; automatic shared-realm compaction; moving nursery for the multi-age GC; optimizing-JIT backend/differential evidence ([matrix](docs/.data/release-compatibility-matrix.json)).
+- Open release gates: automatic shared-realm compaction; moving nursery for the multi-age GC; optimizing-JIT backend/differential evidence ([matrix](docs/.data/release-compatibility-matrix.json)).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 <!-- release-compatibility:notice:end -->

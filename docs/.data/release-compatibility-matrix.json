@@ -6,12 +6,15 @@
   "readme_removal_issue": 246,
   "all_green": false,
   "platform_scope": {
+    "matrix": "docs/.data/platform-release-matrix-2026-07-28.json",
     "correctness": [
-      { "os": "linux", "architecture": "x86_64", "evidence": ".github/workflows/ci.yml" },
-      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-22-property-osr.md" }
+      { "os": "linux", "architecture": "x86_64", "status": "gated" }
+    ],
+    "sanitizers": [
+      { "os": "linux", "architecture": "x86_64", "status": "gated" }
     ],
     "performance": [
-      { "os": "macos", "architecture": "arm64", "evidence": "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv" }
+      { "os": "macos", "architecture": "arm64", "status": "published" }
     ]
   },
   "summaries": {
@@ -39,9 +42,16 @@
     {
       "id": "platform_matrix",
       "issue": 147,
-      "status": "open",
-      "evidence": [".github/workflows/ci.yml", "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"],
-      "blockers": ["publish the final supported OS/architecture correctness, sanitizer, and performance matrix"]
+      "status": "green",
+      "evidence": [
+        "tools/platform-release-matrix.py",
+        "docs/.data/platform-release-matrix-2026-07-28.json",
+        "docs/platforms.md",
+        ".github/workflows/ci.yml",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"
+      ],
+      "blockers": []
     },
     {
       "id": "public_jsc_c_api",

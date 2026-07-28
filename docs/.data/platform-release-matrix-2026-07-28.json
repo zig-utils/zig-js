@@ -1,0 +1,121 @@
+{
+  "generated_at": "2026-07-28",
+  "inputs": {
+    ".github/workflows/ci.yml": "1bbece5f4bb97eac051a0abe8ff6e2cba9aabd18d44ef0b303518548f94010a4",
+    "docs/.data/benchmark-comparison-2026-07-22-property-osr.md": "06ce734af1f10dba66e206c47a50b4dc475256a4f2dd4519d7d0f1e82993ff0e",
+    "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv": "291096a97ecf923fb09e244257eca2b5d0a14d4fb117885fed832f25829bae3b"
+  },
+  "kind": "zig_js_platform_release_matrix",
+  "platforms": [
+    {
+      "architecture": "x86_64",
+      "correctness": {
+        "evidence": [
+          ".github/workflows/ci.yml"
+        ],
+        "jobs": [
+          "benchmark-comparison-harness",
+          "focused-engine-tests",
+          "releasesafe-threadfuzz",
+          "threadfuzz",
+          "threadfuzz-amplified",
+          "threadfuzz-broad",
+          "threadfuzz-lifecycle",
+          "threadfuzz-midgc",
+          "threadfuzz-verify",
+          "threads-execution-inventory-witness",
+          "threads-gil (shard 0/4)",
+          "threads-gil (shard 1/4)",
+          "threads-gil (shard 2/4)",
+          "threads-gil (shard 3/4)",
+          "threads-nogil-witness",
+          "threads-reference-audit",
+          "unit (shard 0/4)",
+          "unit (shard 1/4)",
+          "unit (shard 2/4)",
+          "unit (shard 3/4)",
+          "wasm-core-2-structural-smoke",
+          "wasm-core-3-memory64-gc-smoke",
+          "wasm-feature-profiles",
+          "wasm-mvp-smoke",
+          "wasm-post-mvp-smoke",
+          "wasm-simd-smoke",
+          "wasm-threads-smoke"
+        ],
+        "status": "gated"
+      },
+      "id": "linux-x86_64-ci",
+      "os": "linux",
+      "performance": {
+        "reason": "No checked release throughput artifact is published for Linux x86_64.",
+        "status": "not_claimed"
+      },
+      "runner": "ubuntu-latest",
+      "sanitizers": {
+        "evidence": [
+          ".github/workflows/ci.yml"
+        ],
+        "jobs": [
+          "nightly-threadfuzz-tsan",
+          "private-abi-boundary",
+          "tsan-nogil-corpus",
+          "tsan-parallel-js",
+          "tsan-threadfuzz",
+          "tsan-threadfuzz-lifecycle",
+          "tsan-threadfuzz-midgc",
+          "tsan-threadfuzz-watchdog-cleanup",
+          "tsan-unit (shard 0/4)",
+          "tsan-unit (shard 1/4)",
+          "tsan-unit (shard 2/4)",
+          "tsan-unit (shard 3/4)"
+        ],
+        "status": "gated"
+      }
+    },
+    {
+      "architecture": "arm64",
+      "correctness": {
+        "reason": "macOS correctness exists in host-specific build/test steps but is not the final release CI correctness matrix.",
+        "status": "not_release_gated"
+      },
+      "id": "macos-arm64-performance",
+      "os": "macos",
+      "performance": {
+        "evidence": [
+          "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+          "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv"
+        ],
+        "host": "Apple M3 Pro; 11 physical / 11 logical CPUs; 18.0 GiB",
+        "os": "macOS 27.0 (26A5368g)",
+        "samples": 1540,
+        "status": "published"
+      },
+      "runner": "local-Apple-M3-Pro",
+      "sanitizers": {
+        "reason": "macOS sanitizer coverage is host-specific and not the final release CI sanitizer matrix.",
+        "status": "not_release_gated"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "status": "published",
+  "summary": {
+    "benchmark_samples": 1540,
+    "correctness_gated_platforms": 1,
+    "linux_gate_matrix_entries": 37,
+    "performance_published_platforms": 1,
+    "sanitizer_gated_platforms": 1
+  },
+  "triggers": [
+    "pull_request",
+    "push:main",
+    "workflow_dispatch",
+    "nightly:schedule"
+  ],
+  "unclaimed": [
+    "No Windows release platform is claimed.",
+    "No Linux throughput artifact is claimed.",
+    "No macOS release CI correctness or sanitizer gate is claimed by this matrix.",
+    "No architecture-specific WebAssembly or JIT fast path is claimed beyond the artifacts cited by their own gates."
+  ]
+}
