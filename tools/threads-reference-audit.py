@@ -249,14 +249,6 @@ DEPENDENCY_CATALOG = {
         "owner_issues": [143],
         "resolution": "explicitly-incompatible: zig-js supports WebAssembly in shared-realm threads",
     },
-    "nogil-binding-resolution": {
-        "description": (
-            "A block-scoped binding that exists stops resolving under concurrent "
-            "no-GIL execution, raising ReferenceError with the binding absent "
-            "rather than in TDZ"
-        ),
-        "owner_issues": [430],
-    },
     "optimizing-jit": {
         "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
         "owner_issues": [146, 429],
@@ -277,19 +269,13 @@ DEPENDENCY_CATALOG = {
 
 BLOCKED_DEPENDENCIES = {
     "checktraps-invalidation.js": ("jit-trap-polling", "optimizing-jit"),
-    # Observed blocker is no longer the optimizing tier. In a ReleaseSafe build
-    # this fails no-GIL in 6,009 ms with `ReferenceError: b`, where `b` is the
-    # second element of `const [a, b] = readPair(o)` used two statements later —
-    # the exact block-scoped-const shape #430 records for
-    # dw2-marklistset-storm.js, with the binding absent rather than in TDZ. It
-    # is now the cheapest reproduction of that defect by roughly two orders of
-    # magnitude. The JIT dependencies stay listed because they still gate
-    # promotion once the binding defect is fixed and the case can run to its
-    # poll/resume assertions.
+    # Declared no-GIL mode now passes on main, but still prints no optimizer
+    # publication evidence. Keep it blocked on the real poll/resume and shell
+    # premises; the unpromoted scan separately records the declared no-GIL probe
+    # so this cannot regress to a hidden binding-resolution failure.
     "cve/mc-aint-poll-resume-stale-elided.js": (
         "jit-trap-polling",
         "jsc-shared-heap-shell",
-        "nogil-binding-resolution",
         "optimizing-jit",
     ),
     "cve/mc-code-calllink-writer-writer.js": (
@@ -328,6 +314,19 @@ def probe_command(case: str) -> list[str]:
         "one",
         case,
     ]
+
+
+def parallel_probe_command(case: str) -> list[str]:
+    return [
+        str(REPO / "zig-out" / "bin" / "threads-test"),
+        "parallel-js",
+        "one",
+        case,
+    ]
+
+
+def declares_thread_gil_off(src: str) -> bool:
+    return "--useThreadGILOffUnsafe=1" in src
 
 
 def load_allowlist() -> set[str]:
@@ -1019,6 +1018,9 @@ def probe_evidence_lines(lines: list[str]) -> list[str]:
             or "SyntaxError:" in stripped
             or "TypeError:" in stripped
             or "CorpusFailures" in stripped
+            or "optimizer:" in stripped
+            or "parallel GC:" in stripped
+            or "cooperative GC:" in stripped
         ):
             evidence.append(line)
     return evidence
@@ -1232,6 +1234,7 @@ def run_unpromoted_scan(
             continue
 
         cats = classified.get(case) or uncategorized.get(case) or []
+        src = (CORPUS / case).read_text(errors="replace")
         reason = ", ".join(cats) if cats else "uncategorized"
         if emit:
             print(f"  - {case}: {reason}")
@@ -1290,6 +1293,12 @@ def run_unpromoted_scan(
                 if expected_pass_reason is None
                 else None
             )
+            declared_parallel_probe = blocked_declared_parallel_probe(
+                case,
+                src,
+                timeout_s=timeout_s,
+                emit=emit,
+            )
             if expected_pass_reason is None and no_optimizer_reason is None:
                 unexpected_passes += 1
                 status = "pass"
@@ -1303,7 +1312,7 @@ def run_unpromoted_scan(
                 status = "expected-blocked-serialized-pass"
                 if emit:
                     print(f"    expected blocked serialized pass: {expected_pass_reason}")
-            results.append({
+            result = {
                 "case": case,
                 "status": status,
                 "exit_code": returncode,
@@ -1311,20 +1320,79 @@ def run_unpromoted_scan(
                 "expected_blocked_serialized_pass": expected_pass_reason,
                 "expected_blocked_no_optimizer_evidence": no_optimizer_reason,
                 "output": output_summary,
-            })
+            }
+            if declared_parallel_probe is not None:
+                result["declared_parallel_js_probe"] = declared_parallel_probe
+            results.append(result)
         else:
+            declared_parallel_probe = blocked_declared_parallel_probe(
+                case,
+                src,
+                timeout_s=timeout_s,
+                emit=emit,
+            )
             if emit:
                 print(f"    expected non-promotion evidence exit={returncode}")
                 print_probe_output_tail(output)
-            results.append({
+            result = {
                 "case": case,
                 "status": "fail",
                 "exit_code": returncode,
                 "categories": cats,
                 "output": output_summary,
-            })
+            }
+            if declared_parallel_probe is not None:
+                result["declared_parallel_js_probe"] = declared_parallel_probe
+            results.append(result)
 
     return unexpected_passes, results
+
+
+def blocked_declared_parallel_probe(
+    case: str,
+    src: str,
+    *,
+    timeout_s: float,
+    emit: bool,
+) -> dict[str, object] | None:
+    if case not in BLOCKED_DEPENDENCIES or not declares_thread_gil_off(src):
+        return None
+    cmd = parallel_probe_command(case)
+    if emit:
+        print("    declared no-GIL probe")
+    run_status, returncode, output = run_probe_command(cmd, timeout_s)
+    output_summary = probe_output_summary(output)
+    result: dict[str, object] = {
+        "command": cmd,
+        "exit_code": returncode,
+        "output": output_summary,
+    }
+    if run_status == "timeout":
+        result["status"] = "timeout"
+        if emit:
+            print("      TIMEOUT")
+            if output:
+                print_probe_output_tail(output, prefix="        ")
+        return result
+    observed_status = "pass" if returncode == 0 else "fail"
+    result["observed_status"] = observed_status
+    if returncode == 0:
+        no_optimizer_reason = blocked_pass_without_optimizer_reason(case, output)
+        if no_optimizer_reason is not None:
+            result["status"] = "expected-blocked-no-optimizer-evidence"
+            result["expected_blocked_no_optimizer_evidence"] = no_optimizer_reason
+            if emit:
+                print(f"      expected blocked no-GIL pass without optimizer evidence: {no_optimizer_reason}")
+        else:
+            result["status"] = "pass"
+            if emit:
+                print("      PASS without blocker evidence")
+    else:
+        result["status"] = "fail"
+        if emit:
+            print(f"      FAIL exit={returncode}")
+            print_probe_output_tail(output, prefix="        ")
+    return result
 
 
 def main(argv: list[str]) -> int:

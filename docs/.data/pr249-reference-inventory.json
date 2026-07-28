@@ -30,12 +30,6 @@
         429
       ]
     },
-    "nogil-binding-resolution": {
-      "description": "A block-scoped binding that exists stops resolving under concurrent no-GIL execution, raising ReferenceError with the binding absent rather than in TDZ",
-      "owner_issues": [
-        430
-      ]
-    },
     "optimizing-jit": {
       "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
       "owner_issues": [
@@ -1272,7 +1266,6 @@
       "dependencies": [
         "jit-trap-polling",
         "jsc-shared-heap-shell",
-        "nogil-binding-resolution",
         "optimizing-jit"
       ],
       "execution_state": "blocked",
@@ -1281,8 +1274,7 @@
         143,
         145,
         146,
-        429,
-        430
+        429
       ],
       "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
       "required_shell_hooks": [

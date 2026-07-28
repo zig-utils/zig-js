@@ -283,13 +283,13 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (8 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (11 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (8 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (11 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures"
@@ -339,12 +339,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (5 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t2-lockorder-lint.js",
-          "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (5 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -414,6 +414,32 @@
         "JIT/code-artifact hooks",
         "$vm shared-heap/shell hooks"
       ],
+      "declared_parallel_js_probe": {
+        "command": [
+          "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+          "parallel-js",
+          "one",
+          "cve/mc-aint-poll-resume-stale-elided.js"
+        ],
+        "exit_code": 0,
+        "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
+        "observed_status": "pass",
+        "output": {
+          "evidence": [
+            "  PASS  cve/mc-aint-poll-resume-stale-elided.js (13304 ms)",
+            "  cooperative GC: attempts=1 collections=1 timeouts=0 peer-parks=4 exit-cleanups=0 bytes-reset=1073815856",
+            "1/1 corpus files passed"
+          ],
+          "tail": [
+            "  RUN   1/1 cve/mc-aint-poll-resume-stale-elided.js",
+            "  PASS  cve/mc-aint-poll-resume-stale-elided.js (13304 ms)",
+            "  cooperative GC: attempts=1 collections=1 timeouts=0 peer-parks=4 exit-cleanups=0 bytes-reset=1073815856",
+            "------------------------",
+            "1/1 corpus files passed"
+          ]
+        },
+        "status": "expected-blocked-no-optimizer-evidence"
+      },
       "exit_code": 0,
       "expected_blocked_no_optimizer_evidence": null,
       "expected_blocked_serialized_pass": "The serialized leg skips the post-UNGIL JSC optimizing-tier poll/resume arm; #429 owns real no-GIL promotion.",
@@ -442,12 +468,12 @@
       "expected_blocked_serialized_pass": null,
       "output": {
         "evidence": [
-          "  PASS  cve/mc-code-calllink-writer-writer.js (1748 ms)",
+          "  PASS  cve/mc-code-calllink-writer-writer.js (1763 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-code-calllink-writer-writer.js",
-          "  PASS  cve/mc-code-calllink-writer-writer.js (1748 ms)",
+          "  PASS  cve/mc-code-calllink-writer-writer.js (1763 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -464,13 +490,13 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (3 ms, Throw): RangeError: offset is out of bounds",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (3 ms, Throw): RangeError: offset is out of bounds",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures"
@@ -506,12 +532,12 @@
       "expected_blocked_serialized_pass": null,
       "output": {
         "evidence": [
-          "  PASS  cve/mc-jit-stale-base-grow-oob.js (31971 ms)",
+          "  PASS  cve/mc-jit-stale-base-grow-oob.js (38404 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-jit-stale-base-grow-oob.js",
-          "  PASS  cve/mc-jit-stale-base-grow-oob.js (31971 ms)",
+          "  PASS  cve/mc-jit-stale-base-grow-oob.js (38404 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -528,13 +554,13 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures"
@@ -571,12 +597,12 @@
       "expected_blocked_serialized_pass": null,
       "output": {
         "evidence": [
-          "  PASS  jit/ic-publish-reset-loops.js (2795 ms)",
+          "  PASS  jit/ic-publish-reset-loops.js (3624 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 jit/ic-publish-reset-loops.js",
-          "  PASS  jit/ic-publish-reset-loops.js (2795 ms)",
+          "  PASS  jit/ic-publish-reset-loops.js (3624 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -593,12 +619,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (4003 ms)",
+          "  PASS  w16-c1-prevent-collection.js (5438 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (4003 ms)",
+          "  PASS  w16-c1-prevent-collection.js (5438 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
