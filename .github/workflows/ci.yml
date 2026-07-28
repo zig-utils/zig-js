@@ -713,6 +713,12 @@ jobs:
         with:
           path: zig-js
       - uses: oven-sh/setup-bun@v2
+      # bunpress renders whatever it is given, so a link to a page that no
+      # longer exists builds cleanly. This catches that, plus sidebar entries
+      # pointing at renamed files.
+      - name: docs link check
+        working-directory: zig-js
+        run: python3 tools/docs-link-check.py
       - name: docs:build
         working-directory: zig-js
         run: |

@@ -169,7 +169,8 @@ zig build test-objc-api-evidence            # macOS Objective-C matrix
 
 ```bash
 bun run docs:dev
-bun run docs:build      # this is a CI gate
+python3 tools/docs-link-check.py   # CI gate: every internal link + sidebar entry resolves
+bun run docs:build                 # CI gate
 ```
 
 ### Concurrency discipline (please read)
@@ -232,6 +233,9 @@ Public claims are backed by checked-in evidence.
 
 New docs pages must be added to `markdown.sidebar` in
 [`docs.config.ts`](docs.config.ts) — otherwise they are unreachable.
+`tools/docs-link-check.py` verifies that every internal link and sidebar entry
+resolves; `bun run docs:build` will happily render a link to a page that does
+not exist, which is why the check is separate.
 
 ### Commits
 

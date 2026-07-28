@@ -48,7 +48,10 @@ false`, so an unrelated failure cannot mask the threading gates.
    binaries pinned by commit and SHA-256.
 6. **ABI boundary** fixtures across Debug / ReleaseSafe / TSan, plus the audits.
 7. **`test262-parallel`** — parallel execution introduces no new failures.
-8. **`bun run docs:build`** — the docs site must build.
+8. **Docs** — `tools/docs-link-check.py` resolves every internal link and
+   sidebar entry, then `bun run docs:build` must succeed. The link check is
+   separate because bunpress renders a link to a missing page without
+   complaint.
 
 A manual-only [performance workflow](https://github.com/zig-utils/zig-js/blob/main/.github/workflows/performance.yml)
 runs the macOS/JSC matrix and retains raw samples plus a rendered report as a
