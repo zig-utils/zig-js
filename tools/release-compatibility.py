@@ -37,6 +37,8 @@ README_GC_COMPACTION_START = "<!-- release-compatibility:gc-compaction:start -->
 README_GC_COMPACTION_END = "<!-- release-compatibility:gc-compaction:end -->"
 README_BUILD_TEST_START = "<!-- release-compatibility:build-test:start -->"
 README_BUILD_TEST_END = "<!-- release-compatibility:build-test:end -->"
+README_USE_START = "<!-- release-compatibility:use:start -->"
+README_USE_END = "<!-- release-compatibility:use:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -44,6 +46,13 @@ README_NOTICE_GATE_LABELS = {
     "optimizing_jit": "optimizing-JIT backend/differential evidence",
     "readme_generation": "fully generated README/release claims",
 }
+README_USE_LINKS = (
+    ("Zig API", "src/root.zig"),
+    ("C API", "docs/api.md"),
+    ("timers", "docs/timers.md"),
+    ("WebAssembly and direct-chunk streaming compilation", "docs/wasm.md"),
+    ("threads/GC", "docs/threads/index.md"),
+)
 README_BUILD_TEST_COMMANDS = (
     ("zig build", "library and headers", None),
     ("zig build test", "main test root", "test"),
@@ -90,6 +99,15 @@ def statuses(value: object) -> set[str]:
 
 def build_step_names(build_source: str) -> set[str]:
     return set(re.findall(r'b\.step\("([^"]+)"', build_source))
+
+
+def require_install_claims(build_source: str) -> None:
+    require('.name = "zig-js"' in build_source, "README build command requires zig-js library target")
+    require('"libzig-js.a"' in build_source, "README build command requires libzig-js.a install")
+    require(
+        "addInstallDirectory" in build_source and ".install_dir = .header" in build_source,
+        "README build command requires header install",
+    )
 
 
 def read_tsv(relative: str) -> list[dict[str, str]]:
@@ -237,9 +255,7 @@ def generated_readme_build_test() -> str:
     build_source = artifact_path("build.zig").read_text()
     ci_source = artifact_path(".github/workflows/ci.yml").read_text()
     steps = build_step_names(build_source)
-    require('.name = "zig-js"' in build_source, "README build command requires zig-js library target")
-    require('"libzig-js.a"' in build_source, "README build command requires libzig-js.a install")
-    require("addInstallDirectory" in build_source and ".install_dir = .header" in build_source, "README build command requires header install")
+    require_install_claims(build_source)
     require(f"zig@{README_ZIG_VERSION}" in ci_source, "README Zig version drift")
     for command, _, step in README_BUILD_TEST_COMMANDS:
         if step is not None:
@@ -261,6 +277,21 @@ def generated_readme_build_test() -> str:
         README_BUILD_TEST_END,
     ])
     return "\n".join(lines)
+
+
+def generated_readme_use() -> str:
+    build_source = artifact_path("build.zig").read_text()
+    require_install_claims(build_source)
+    artifact_path("include/JavaScriptCore/JavaScript.h")
+    artifact_path("include/zig-js/Extensions.h")
+    for _, relative in README_USE_LINKS:
+        artifact_path(relative)
+    link_text = ", ".join(f"[{label}]({relative})" for label, relative in README_USE_LINKS)
+    return "\n".join([
+        README_USE_START,
+        f"`zig build` installs `libzig-js.a` and compatible headers under `zig-out/`. See the {link_text}.",
+        README_USE_END,
+    ])
 
 
 def generated_readme_notice(matrix: dict[str, object]) -> str:
@@ -331,6 +362,16 @@ def replace_readme_status(readme: str, generated: str) -> str:
     before, section_and_after = readme.split(heading, 1)
     next_heading_at = section_and_after.find("\n## ")
     require(next_heading_at != -1, "README status section is unterminated")
+    after = section_and_after[next_heading_at + 1 :]
+    return f"{before}{heading}\n{generated}\n\n{after}"
+
+
+def replace_readme_use(readme: str, generated: str) -> str:
+    heading = "## Use\n"
+    require(heading in readme, "README use heading is absent")
+    before, section_and_after = readme.split(heading, 1)
+    next_heading_at = section_and_after.find("\n## ")
+    require(next_heading_at != -1, "README use section is unterminated")
     after = section_and_after[next_heading_at + 1 :]
     return f"{before}{heading}\n{generated}\n\n{after}"
 
@@ -492,6 +533,7 @@ def main() -> int:
     require(isinstance(heading, str) and heading, "README heading policy is required")
     if args.update_readme:
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
+        readme = replace_readme_use(readme, generated_readme_use())
         readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
         readme = replace_readme_gc_compaction(readme, generated_readme_gc_compaction())
         readme = replace_readme_build_test(readme, generated_readme_build_test())
@@ -503,6 +545,7 @@ def main() -> int:
         readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
+    require(generated_readme_use() in readme, "README use section drift")
     require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
     require(generated_readme_gc_compaction() in readme, "README GC compaction drift")
     require(generated_readme_build_test() in readme, "README build/test drift")
