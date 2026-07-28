@@ -28,6 +28,11 @@
       "not_applicable": 2862,
       "fail": 0,
       "runner_error": 0
+    },
+    "benchmark_comparison": {
+      "report": "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+      "raw": "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+      "samples": 1540
     }
   },
   "gates": [
@@ -136,6 +141,9 @@
         "include/zig-js/Extensions.h",
         "tools/release-compatibility.py",
         "tools/benchmark-publication.py",
+        "tools/benchmark-comparison.py",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
         "tools/gc-compaction-benchmark.py",
         "docs/.data/wasm-conformance-matrix.json",
         "docs/.data/wasm-simd-benchmark-2026-07-18.md",

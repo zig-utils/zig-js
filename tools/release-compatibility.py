@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -74,6 +75,15 @@ SIMD_BASE_ITERATIONS = {
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(f"release-compatibility: {message}")
+
+
+def load_python_module(relative: str, name: str):
+    path = artifact_path(relative)
+    spec = importlib.util.spec_from_file_location(name, path)
+    require(spec is not None and spec.loader is not None, f"cannot load Python module: {relative}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def artifact_path(relative: str) -> Path:
@@ -255,6 +265,32 @@ def generated_readme_gc_compaction() -> str:
         f"- **Explicit compaction:** {retained_reduction * 100:.1f}% less retained fragmented backing ({control_capacity / 1048576:.2f} → {compact_capacity / 1048576:.2f} MiB) with a {compact_pause_ms:.2f} ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).",
         README_GC_COMPACTION_END,
     ])
+
+
+def generated_readme_benchmark_comparison(summary: dict[str, object], readme_path: Path) -> str:
+    raw_relative = summary.get("raw")
+    report_relative = summary.get("report")
+    require(isinstance(raw_relative, str) and raw_relative, "benchmark comparison raw path is required")
+    require(isinstance(report_relative, str) and report_relative, "benchmark comparison report path is required")
+    raw_path = artifact_path(raw_relative)
+    report_path = artifact_path(report_relative)
+    publication = load_python_module("tools/benchmark-publication.py", "benchmark_publication_release")
+    rows = publication.read_rows(raw_path)
+    metadata = publication.parse_metadata(report_path)
+    publication.ensure_report_matches(rows, metadata, raw_path, report_path)
+    require(summary.get("samples") == len(rows), "benchmark comparison sample-count drift")
+    report_link = report_path.relative_to(readme_path.parent).as_posix()
+    raw_link = raw_path.relative_to(readme_path.parent).as_posix()
+    generated = publication.readme_scorecard(rows, metadata, report_link, raw_link)
+    return f"{publication.README_START}\n{generated.rstrip()}\n{publication.README_END}"
+
+
+def replace_readme_benchmark_comparison(readme: str, generated: str) -> str:
+    publication = load_python_module("tools/benchmark-publication.py", "benchmark_publication_update")
+    require(generated.startswith(publication.README_START + "\n"), "generated benchmark scorecard missing start marker")
+    require(generated.endswith("\n" + publication.README_END), "generated benchmark scorecard missing end marker")
+    inner = generated.removeprefix(publication.README_START + "\n").removesuffix("\n" + publication.README_END)
+    return publication.replace_readme_block(readme, inner)
 
 
 def generated_readme_build_test() -> str:
@@ -562,6 +598,9 @@ def main() -> int:
     mvp = next((profile for profile in wasm["profiles"] if profile["id"] == "mvp"), None)
     require(mvp is not None and mvp["status"] == "terminal", "MVP WebAssembly gate drift")
 
+    benchmark_summary = summaries.get("benchmark_comparison", {})
+    require(isinstance(benchmark_summary, dict), "benchmark comparison summary is required")
+
     all_green = all(gate["status"] == "green" for gate in gates)
     require(matrix.get("all_green") is all_green, "all_green does not match gate states")
     policy = matrix.get("readme_policy", {})
@@ -573,6 +612,10 @@ def main() -> int:
     if args.update_readme:
         readme = replace_readme_overview(readme, generated_readme_overview())
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
+        readme = replace_readme_benchmark_comparison(
+            readme,
+            generated_readme_benchmark_comparison(benchmark_summary, readme_path),
+        )
         readme = replace_readme_use(readme, generated_readme_use())
         readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
         readme = replace_readme_gc_compaction(readme, generated_readme_gc_compaction())
@@ -586,6 +629,7 @@ def main() -> int:
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
     require(generated_readme_overview() in readme, "README overview drift")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
+    require(generated_readme_benchmark_comparison(benchmark_summary, readme_path) in readme, "README benchmark comparison drift")
     require(generated_readme_use() in readme, "README use section drift")
     require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
     require(generated_readme_gc_compaction() in readme, "README GC compaction drift")
