@@ -17,7 +17,7 @@ The harness (`conformance/test262.zig`) walks the corpus and, for each `.js` fil
 
 1. **Reads the frontmatter** — the `/*--- … ---*/` YAML block declaring `flags` (`raw`, `onlyStrict`, `async`, `module`), `includes:` harness files, and `negative:` expectations.
 2. **Assembles the source** — prepends `"use strict"` when `onlyStrict`, loads the real upstream `harness/sta.js` + `assert.js` plus any `includes:`, then appends the test body.
-3. **Runs it in an isolated subprocess worker** under a **30-second backstop timeout** (120 s for a few known-slow sweeps), where a timeout is charged as a host failure. Each worker streams one `<index>:<outcome>` line per test. If a worker crashes or times out, the parent respawns it just past the failure — so a single segfault or hang can never zero out a run.
+3. **Runs it in an isolated subprocess worker** under a **30-second backstop timeout** (120 s for a few known-slow sweeps), where a timeout is charged as a host failure. Each worker streams one `<index>:<outcome>` line per test. If a worker crashes or times out, the parent respawns it just past the failure — so a single segfault or hang can never zero out a run. The parent exits non-zero if any aggregate parse, runtime, host, negative, or skip count is non-zero.
 4. **Scores the outcome** on one of two axes.
 
 ## Two axes

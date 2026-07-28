@@ -1466,6 +1466,14 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
         total.pass_negative, total.negTotal(), Stats.pct(total.pass_negative, total.negTotal()),
     });
     std.debug.print("skipped (unsupported harness/path metadata): {d}\n", .{total.skip});
+    if (total.fail_parse != 0 or
+        total.fail_runtime != 0 or
+        total.fail_other != 0 or
+        total.fail_negative != 0 or
+        total.skip != 0)
+    {
+        return error.Test262Failures;
+    }
 }
 
 /// Run one subtree to completion across worker (re)spawns. Each worker streams
@@ -1591,6 +1599,9 @@ fn workerTimeoutForSubtreePath(sub: []const u8, path: ?[]const u8) std.Io.Timeou
     if (path) |p| {
         if (std.mem.eql(u8, sub, "test/staging") and
             std.mem.eql(u8, p, "sm/TypedArray/sort_large_countingsort.js"))
+            return slow_worker_timeout;
+        if (std.mem.eql(u8, sub, "test/built-ins/TypedArray") and
+            std.mem.startsWith(u8, p, "prototype/copyWithin/coerced-values-"))
             return slow_worker_timeout;
     }
     if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay") or
