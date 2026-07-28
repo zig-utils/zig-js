@@ -751,9 +751,10 @@ fn appendAsyncPrintDetail(gpa: std.mem.Allocator, out: []const u8, d: *std.Array
 // The ENTIRE test262 corpus: `language`, `annexB`, `intl402`, `staging`, and
 // every `built-ins/*` area — so `zig build test262` measures everything (each
 // dir reported separately for visibility). Subprocess isolation means an
-// unimplemented area just scores low rather than aborting the run. Some giant
-// areas (Temporal, intl402, Atomics/SharedArrayBuffer, ShadowRealm) are largely
-// unimplemented and run slow; they're scored honestly at their true (low) rate.
+// unimplemented area just scores low rather than aborting the run, so an area
+// is always scored honestly at its true rate rather than being hidden. The
+// giant areas (Temporal, intl402, Atomics/SharedArrayBuffer, ShadowRealm) are
+// implemented and included; they remain the slowest subtrees to run.
 const subtrees = [_][]const u8{
     "test/language/arguments-object",
     "test/language/asi",
