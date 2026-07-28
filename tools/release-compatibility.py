@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
+import statistics
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,12 +30,20 @@ README_NOTICE_START = "<!-- release-compatibility:notice:start -->"
 README_NOTICE_END = "<!-- release-compatibility:notice:end -->"
 README_STATUS_START = "<!-- release-compatibility:status:start -->"
 README_STATUS_END = "<!-- release-compatibility:status:end -->"
+README_WASM_PERFORMANCE_START = "<!-- release-compatibility:wasm-performance:start -->"
+README_WASM_PERFORMANCE_END = "<!-- release-compatibility:wasm-performance:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
     "generational_gc": "moving nursery for the multi-age GC",
     "optimizing_jit": "optimizing-JIT backend/differential evidence",
     "readme_generation": "fully generated README/release claims",
+}
+SIMD_BASE_ITERATIONS = {
+    "integer": 20_000,
+    "float": 20_000,
+    "shuffle": 4_000,
+    "memory": 20_000,
 }
 
 
@@ -63,6 +73,101 @@ def statuses(value: object) -> set[str]:
         for child in value:
             found.update(statuses(child))
     return found
+
+
+def read_tsv(relative: str) -> list[dict[str, str]]:
+    return list(csv.DictReader(artifact_path(relative).read_text().splitlines(), delimiter="\t"))
+
+
+def tsv_median_ns(rows: list[dict[str, str]], **fields: object) -> float:
+    values = [
+        int(row["elapsed_ns"])
+        for row in rows
+        if all(row[key] == str(value) for key, value in fields.items())
+    ]
+    require(values, f"no benchmark samples match {fields}")
+    return statistics.median(values)
+
+
+def simd_logical_updates(family: str, jobs: int, lanes: int) -> int:
+    base = SIMD_BASE_ITERATIONS[family]
+    return sum(base + ((job + lane) & 15) for lane in range(lanes) for job in range(jobs))
+
+
+def simd_rate(rows: list[dict[str, str]], engine: str, mode: str, family: str, lanes: int) -> float:
+    workload = f"wasm_{family}_simd"
+    matching_jobs = {
+        int(row["jobs"])
+        for row in rows
+        if row["engine"] == engine
+        and row["mode"] == mode
+        and row["workload"] == workload
+        and int(row["lanes"]) == lanes
+    }
+    require(len(matching_jobs) == 1, f"ambiguous SIMD job count for {engine}/{mode}/{workload}/{lanes}")
+    jobs = next(iter(matching_jobs))
+    elapsed = tsv_median_ns(rows, engine=engine, mode=mode, workload=workload, lanes=lanes, jobs=jobs)
+    return simd_logical_updates(family, jobs, lanes) / (elapsed / 1e9)
+
+
+def format_factor_range(values: list[float]) -> str:
+    require(values, "cannot format empty factor range")
+    low = min(values)
+    high = max(values)
+    if round(low, 2) == round(high, 2):
+        return f"{low:.2f}x"
+    return f"{low:.2f}–{high:.2f}x"
+
+
+def generated_readme_wasm_performance() -> str:
+    simd_rows = read_tsv("docs/.data/wasm-simd-benchmark-2026-07-18.tsv")
+    simd_lanes = max(int(row["lanes"]) for row in simd_rows if row["mode"] == "independent_steady")
+    require(simd_lanes == 8, "README SIMD performance headline expects eight-lane samples")
+    scaling = []
+    jsc_relative = []
+    for family in SIMD_BASE_ITERATIONS:
+        z1 = simd_rate(simd_rows, "zig-js", "single", family, 1)
+        zm = simd_rate(simd_rows, "zig-js", "independent_steady", family, simd_lanes)
+        jm = simd_rate(simd_rows, "JavaScriptCore", "independent_steady", family, simd_lanes)
+        scaling.append(zm / z1)
+        jsc_relative.append(zm / jm)
+
+    thread_rows = read_tsv("docs/.data/wasm-threads-benchmark-2026-07-18.tsv")
+    thread_lanes = max(int(row["lanes"]) for row in thread_rows if row["mode"] == "shared")
+    require(thread_lanes == 8, "README Threads performance headline expects eight-worker samples")
+    add_jobs = next(
+        int(row["jobs"])
+        for row in thread_rows
+        if row["mode"] == "shared" and row["workload"] == "wasm_threads_atomic_add" and int(row["lanes"]) == thread_lanes
+    )
+    add_elapsed = tsv_median_ns(
+        thread_rows,
+        mode="shared",
+        workload="wasm_threads_atomic_add",
+        lanes=thread_lanes,
+        jobs=add_jobs,
+    )
+    add_rate_millions = add_jobs * thread_lanes / (add_elapsed / 1e9) / 1e6
+    wait_jobs = next(
+        int(row["jobs"])
+        for row in thread_rows
+        if row["mode"] == "shared" and row["workload"] == "wasm_threads_wait_notify" and int(row["lanes"]) == thread_lanes
+    )
+    wait_elapsed = tsv_median_ns(
+        thread_rows,
+        mode="shared",
+        workload="wasm_threads_wait_notify",
+        lanes=thread_lanes,
+        jobs=wait_jobs,
+    )
+    wait_handoffs = wait_jobs * thread_lanes / 2 / (wait_elapsed / 1e9)
+
+    return "\n".join([
+        README_WASM_PERFORMANCE_START,
+        f"- **SIMD:** {format_factor_range(scaling)} eight-lane scaling; {format_factor_range(jsc_relative)} JSC throughput ([report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)).",
+        f"- **Threads:** {add_rate_millions:.2f} M/s contended adds and {wait_handoffs:,.0f} wait/notify handoffs/s at eight workers ([report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)).",
+        README_WASM_PERFORMANCE_END,
+    ])
 
 
 def generated_readme_notice(matrix: dict[str, object]) -> str:
@@ -133,6 +238,16 @@ def replace_readme_status(readme: str, generated: str) -> str:
     before, section_and_after = readme.split(heading, 1)
     next_heading_at = section_and_after.find("\n## ")
     require(next_heading_at != -1, "README status section is unterminated")
+    after = section_and_after[next_heading_at + 1 :]
+    return f"{before}{heading}\n{generated}\n\n{after}"
+
+
+def replace_readme_wasm_performance(readme: str, generated: str) -> str:
+    heading = "### WebAssembly\n"
+    require(heading in readme, "README WebAssembly performance heading is absent")
+    before, section_and_after = readme.split(heading, 1)
+    next_heading_at = section_and_after.find("\n### ")
+    require(next_heading_at != -1, "README WebAssembly performance section is unterminated")
     after = section_and_after[next_heading_at + 1 :]
     return f"{before}{heading}\n{generated}\n\n{after}"
 
@@ -249,6 +364,7 @@ def main() -> int:
     require(isinstance(heading, str) and heading, "README heading policy is required")
     if args.update_readme:
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
+        readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
         readme = (
             remove_readme_notice(readme, heading)
             if all_green
@@ -257,6 +373,7 @@ def main() -> int:
         readme_path.write_text(readme)
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
+    require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
     if not all_green:
         require(generated_readme_notice(matrix) in readme, "README missing-surface notice drift")
     require(f"**{test262_pass:,} / {test262_total:,}**" in readme, "README test262 score drift")

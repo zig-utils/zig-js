@@ -42,8 +42,10 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 
 ### WebAssembly
 
+<!-- release-compatibility:wasm-performance:start -->
 - **SIMD:** 3.67–4.58x eight-lane scaling; 0.10–0.14x JSC throughput ([report](docs/.data/wasm-simd-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-simd-benchmark-2026-07-18.tsv)).
 - **Threads:** 17.23 M/s contended adds and 287,444 wait/notify handoffs/s at eight workers ([report](docs/.data/wasm-threads-benchmark-2026-07-18.md) · [samples](docs/.data/wasm-threads-benchmark-2026-07-18.tsv)).
+<!-- release-compatibility:wasm-performance:end -->
 
 ### Garbage collection
 
