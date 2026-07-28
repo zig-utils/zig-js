@@ -4,6 +4,21 @@
   "status": "explicit_stop_the_world",
   "movement_enabled": true,
   "placement_policy": "dense_size_class_prefix_tail_evacuation",
+  "automatic_policy": {
+    "quiescent_full_gc": "enabled",
+    "trigger": "reclaimable_fragmented_backing_bytes >= 524288",
+    "shared_mid_script": "open_release_gate",
+    "telemetry": [
+      "requests",
+      "attempts",
+      "compacted",
+      "no_candidates",
+      "unsupported",
+      "out_of_memory",
+      "moved_cells",
+      "moved_bytes"
+    ]
+  },
   "c_api": {
     "entrypoint": "ZJSContextCompactGarbage",
     "request_entrypoint": "ZJSContextRequestGarbageCompaction",

@@ -115,7 +115,7 @@
         "docs/.data/gc-relocation-inventory.json",
         "docs/.data/gc-compaction-2026-07-19.md"
       ],
-      "blockers": ["enable automatic compaction at shared precise safepoints"]
+      "blockers": ["publish shared/mid-script automatic compaction evidence"]
     },
     {
       "id": "generational_gc",

@@ -46,7 +46,7 @@ README_QUICKSTART_START = "<!-- release-compatibility:quickstart:start -->"
 README_QUICKSTART_END = "<!-- release-compatibility:quickstart:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
-    "moving_gc": "automatic shared-realm compaction",
+    "moving_gc": "automatic shared/mid-script compaction evidence",
     "generational_gc": "moving nursery for the multi-age GC",
     "optimizing_jit": "optimizing-JIT backend/differential evidence",
     "readme_generation": "fully generated README/release claims",

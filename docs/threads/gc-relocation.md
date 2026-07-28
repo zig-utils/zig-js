@@ -1,13 +1,15 @@
 # GC Relocation Contract
 
 Moving collection is available through explicit `Context.compactGarbage` on a
-quiescent precise-GC realm, or a `Context.requestGarbageCompaction` consumed at
-the current AArch64 numeric tier's declared precise checkpoint. Published code,
-tier metadata, bytecode chunks, and native-frame storage do not move; the
-checkpoint has already materialized every managed local/operand in registered
-roots. Running JS threads, generic/native-host checkpoints, conservative stack
-scans, and in-flight concurrent/parallel collections still fail closed. C and
-Objective-C embedders use `ZJSGlobalContextCreateGarbageCollected`,
+quiescent precise-GC realm, automatic quiescent slab-pressure compaction after a
+full collection leaves at least 512 KiB of reclaimable fragmented backing, or a
+`Context.requestGarbageCompaction` consumed at the current AArch64 numeric
+tier's declared precise checkpoint. Published code, tier metadata, bytecode
+chunks, and native-frame storage do not move; the checkpoint has already
+materialized every managed local/operand in registered roots. Running JS
+threads, generic/native-host checkpoints, conservative stack scans, and
+in-flight concurrent/parallel collections still fail closed. C and Objective-C
+embedders use `ZJSGlobalContextCreateGarbageCollected`,
 `ZJSContextRequestGarbageCompaction`, and `ZJSContextCompactGarbage` for the
 same scheduled/direct boundaries.
 
@@ -60,11 +62,13 @@ back on OOM, rewrites moved and pinned cells, and commits live storage without
 running finalizers. zig-js's owned `GcCellBacking` provides a matching
 unpublished reserve/release/commit trio: relocation does not inflate mutator
 allocation pressure, publication swaps under one size-class lock, and live-slot
-accounting stays unchanged. The engine now invokes this mechanism only through
-the checked explicit stop-the-world policy; automatic and mid-script movement
-remain off. Paired post-commit verification hooks retain the forwarding map
-long enough to trace every current root/live cell and trap if any audited slot
-still contains an old payload address.
+accounting stays unchanged. The engine now invokes this mechanism through the
+checked explicit stop-the-world policy, the automatic quiescent full-GC pressure
+policy, and the declared moving-safepoint request path. Production
+shared-realm/mid-script automatic scheduling remains the open release gate.
+Paired post-commit verification hooks retain the forwarding map long enough to
+trace every current root/live cell and trap if any audited slot still contains
+an old payload address.
 
 The first engine rewrite slice is complete under
 [#338](https://github.com/zig-utils/zig-js/issues/338): `Function` marking and

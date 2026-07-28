@@ -103,6 +103,8 @@ Moving collection exists, but under an explicit contract
 ([GC relocation contract](/threads/gc-relocation)):
 
 - `Context.compactGarbage` moves on a **quiescent** precise-GC realm;
+- the automatic quiescent full-GC policy moves when slab pressure leaves at
+  least 512 KiB of reclaimable fragmented backing;
 - `Context.requestGarbageCompaction` is consumed at the AArch64 numeric tier's
   declared precise checkpoint;
 - published code, tier metadata, bytecode chunks, and native-frame storage
@@ -129,7 +131,7 @@ from `src/gc.zig` and requires exact ordered coverage.
 Published compaction evidence: 90.8% less retained fragmented backing
 (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action
 throughput ([report](https://github.com/zig-utils/zig-js/blob/main/docs/.data/gc-compaction-2026-07-19.md)).
-**Automatic** shared-realm compaction remains an open release gate.
+Automatic shared/mid-script compaction evidence remains an open release gate.
 
 ## Heap budgets
 

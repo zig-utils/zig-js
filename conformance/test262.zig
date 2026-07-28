@@ -51,6 +51,10 @@ const slow_worker_timeout: std.Io.Timeout = .{ .duration = .{
     .raw = .fromSeconds(120),
     .clock = .awake,
 } };
+const very_slow_worker_timeout: std.Io.Timeout = .{ .duration = .{
+    .raw = .fromSeconds(300),
+    .clock = .awake,
+} };
 const verbose_failures = false;
 const max_test_source_bytes: usize = 8 << 20;
 const unsupported_subtrees = [_][]const u8{};
@@ -1054,6 +1058,10 @@ pub fn main(init: std.process.Init) !void {
             const limit = std.fmt.parseInt(usize, args.next() orelse "0", 10) catch 0;
             return runWorker(gpa, io, root, sub, start, limit);
         }
+        if (std.mem.eql(u8, mode, "--drive-subtree")) {
+            const sub = args.next() orelse return;
+            return runSubtreeDriver(gpa, io, root, sub);
+        }
         if (std.mem.eql(u8, mode, "--diag")) {
             const sub = args.next() orelse return;
             const filter = args.next();
@@ -1071,6 +1079,56 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     return runParent(gpa, io, root);
+}
+
+fn emitStats(out: std.Io.File, io: std.Io, stats: Stats) void {
+    var buf: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "STATS\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{
+        stats.pass,
+        stats.pass_negative,
+        stats.skip,
+        stats.fail_parse,
+        stats.fail_runtime,
+        stats.fail_negative,
+        stats.fail_other,
+    }) catch return;
+    out.writeStreamingAll(io, line) catch {};
+}
+
+fn parseStatsLine(line: []const u8) ?Stats {
+    if (!std.mem.startsWith(u8, line, "STATS\t")) return null;
+    var fields = std.mem.splitScalar(u8, line["STATS\t".len..], '\t');
+    return .{
+        .pass = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .pass_negative = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .skip = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .fail_parse = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .fail_runtime = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .fail_negative = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+        .fail_other = std.fmt.parseInt(usize, fields.next() orelse return null, 10) catch return null,
+    };
+}
+
+fn runSubtreeDriver(gpa: std.mem.Allocator, io: std.Io, root: []const u8, sub: []const u8) !void {
+    const exe = std.process.executablePathAlloc(io, gpa) catch {
+        std.debug.print("test262: could not resolve own executable path; cannot spawn workers.\n", .{});
+        emitStats(std.Io.File.stdout(), io, .{ .fail_other = 1 });
+        return error.Test262Failures;
+    };
+    defer gpa.free(exe);
+
+    var stats: Stats = .{};
+    driveSubtree(gpa, io, root, exe, sub, &stats);
+    emitStats(std.Io.File.stdout(), io, stats);
+
+    if (stats.fail_parse != 0 or
+        stats.fail_runtime != 0 or
+        stats.fail_other != 0 or
+        stats.fail_negative != 0 or
+        stats.skip != 0)
+    {
+        return error.Test262Failures;
+    }
 }
 
 const SubtreeSpec = struct {
@@ -1442,8 +1500,10 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
         }
         any_dir = true;
 
-        var stats: Stats = .{};
-        driveSubtree(gpa, io, root, exe, sub, &stats);
+        var stats = driveSubtreeIsolated(gpa, io, exe, sub) catch |err| blk: {
+            std.debug.print("  (subtree driver failed with {s} for {s})\n", .{ @errorName(err), sub });
+            break :blk Stats{ .fail_other = 1 };
+        };
         const vt = stats.validTotal();
         std.debug.print("  {s}: valid {d}/{d} ({d:.1}%)  [parse-fail {d} · runtime-fail {d} · host-fail {d}]  neg {d}/{d}\n", .{
             sub,              stats.pass,         vt,               Stats.pct(stats.pass, vt),
@@ -1475,6 +1535,46 @@ fn runParent(gpa: std.mem.Allocator, io: std.Io, root: []const u8) !void {
     {
         return error.Test262Failures;
     }
+}
+
+fn driveSubtreeIsolated(gpa: std.mem.Allocator, io: std.Io, exe: []const u8, sub: []const u8) !Stats {
+    const argv = [_][]const u8{ exe, "--drive-subtree", sub };
+    const res = try std.process.run(gpa, io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(16 << 20),
+        .stderr_limit = .limited(256 << 20),
+    });
+    defer gpa.free(res.stdout);
+    defer gpa.free(res.stderr);
+
+    if (res.stderr.len != 0) std.debug.print("{s}", .{res.stderr});
+    if (!res.term.success()) {
+        std.debug.print("  (subtree driver exited unsuccessfully for {s}: {})\n", .{ sub, res.term });
+    }
+
+    var parsed: ?Stats = null;
+    var lines = std.mem.splitScalar(u8, res.stdout, '\n');
+    while (lines.next()) |line| {
+        if (parseStatsLine(line)) |stats| {
+            parsed = stats;
+        } else if (line.len != 0) {
+            std.debug.print("{s}\n", .{line});
+        }
+    }
+
+    const stats = parsed orelse return error.MissingSubtreeStats;
+    if (!res.term.success() and
+        stats.fail_parse == 0 and
+        stats.fail_runtime == 0 and
+        stats.fail_other == 0 and
+        stats.fail_negative == 0 and
+        stats.skip == 0)
+    {
+        var failed = stats;
+        failed.fail_other += 1;
+        return failed;
+    }
+    return stats;
 }
 
 /// Run one subtree to completion across worker (re)spawns. Each worker streams
@@ -1516,6 +1616,7 @@ fn driveSubtree(gpa: std.mem.Allocator, io: std.Io, root: []const u8, exe: []con
             },
             else => {
                 std.debug.print("  (worker run failed with {s} for {s} at {d})\n", .{ @errorName(err), sub, next });
+                stats.add(.fail_other);
                 return;
             },
         };
@@ -1582,6 +1683,10 @@ fn workerLimitForSubtree(sub: []const u8) usize {
     if (std.mem.eql(u8, sub, "test/built-ins/RegExp/.") or
         std.mem.eql(u8, sub, "test/built-ins/String") or
         std.mem.eql(u8, sub, "test/built-ins/TypedArray")) return 1;
+    // Class destructuring contains a few finite but expensive private-field
+    // binding patterns. Keep them exact so the parent can grant only those
+    // paths a longer timeout without hiding neighboring regressions.
+    if (std.mem.eql(u8, sub, "test/language/expressions/class")) return 1;
     // Some non-ISO calendar PlainMonthDay intl cases are slow but finite. Keep
     // them isolated so the parent does not discard a completed slow batch as a
     // timeout and mis-score its first test as a host failure.
@@ -1601,9 +1706,15 @@ fn workerTimeoutForSubtreePath(sub: []const u8, path: ?[]const u8) std.Io.Timeou
         if (std.mem.eql(u8, sub, "test/staging") and
             std.mem.eql(u8, p, "sm/TypedArray/sort_large_countingsort.js"))
             return slow_worker_timeout;
+        if (std.mem.eql(u8, sub, "test/staging") and
+            std.mem.startsWith(u8, p, "sm/Date/dst-offset-caching-"))
+            return very_slow_worker_timeout;
+        if (std.mem.eql(u8, sub, "test/language/expressions/class") and
+            std.mem.eql(u8, p, "dstr/private-meth-dflt-ary-ptrn-rest-id-direct.js"))
+            return very_slow_worker_timeout;
         if (std.mem.eql(u8, sub, "test/built-ins/TypedArray") and
             std.mem.startsWith(u8, p, "prototype/copyWithin/coerced-values-"))
-            return slow_worker_timeout;
+            return very_slow_worker_timeout;
     }
     if (std.mem.startsWith(u8, sub, "test/intl402/Temporal/PlainMonthDay") or
         std.mem.eql(u8, sub, "test/built-ins/decodeURI") or

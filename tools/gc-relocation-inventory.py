@@ -44,6 +44,27 @@ def main() -> int:
         document.get("placement_policy") == "dense_size_class_prefix_tail_evacuation",
         "compaction placement policy drift",
     )
+    automatic_policy = document.get("automatic_policy", {})
+    require(automatic_policy.get("quiescent_full_gc") == "enabled", "automatic quiescent compaction policy missing")
+    require(
+        automatic_policy.get("trigger") == "reclaimable_fragmented_backing_bytes >= 524288",
+        "automatic compaction trigger drift",
+    )
+    require(automatic_policy.get("shared_mid_script") == "open_release_gate", "shared/mid-script gate drift")
+    require(
+        automatic_policy.get("telemetry")
+        == [
+            "requests",
+            "attempts",
+            "compacted",
+            "no_candidates",
+            "unsupported",
+            "out_of_memory",
+            "moved_cells",
+            "moved_bytes",
+        ],
+        "automatic compaction telemetry drift",
+    )
     c_api = document.get("c_api", {})
     require(c_api.get("entrypoint") == "ZJSContextCompactGarbage", "C compaction entrypoint drift")
     require(c_api.get("request_entrypoint") == "ZJSContextRequestGarbageCompaction", "C compaction request entrypoint drift")
@@ -109,6 +130,14 @@ def main() -> int:
     require("pub fn compactGarbage" in compact_source, "checked Context compaction entrypoint missing")
     require("shouldRelocateCell" in context_source, "dense-prefix candidate policy missing")
     require("trimCompactedTailChunks" in context_source, "compacted-tail release policy missing")
+    require("gc_auto_compaction_min_reclaimable_bytes: usize = 512 * 1024" in context_source, "automatic compaction threshold missing")
+    require("pub fn compactionPressure" in context_source, "automatic compaction pressure snapshot missing")
+    require("automaticGcCompactionStats" in context_source, "automatic compaction telemetry snapshot missing")
+    require("runAutomaticCompactionWithConductor" in context_source, "automatic compaction runner missing")
+    require(
+        "enable_gc automatic quiescent compaction follows full-GC slab pressure" in context_source,
+        "automatic compaction regression test missing",
+    )
     require("pub fn protectValue" in context_source, "Zig protected-value API missing")
     require("pub fn unprotectValue" in context_source, "Zig protected-value release API missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
@@ -169,7 +198,7 @@ def main() -> int:
     print(
         "gc-relocation-inventory: "
         f"{len(entries)} cell kinds, {len(surfaces)} pointer surfaces, "
-        f"{len(required_tags)} boundary tags; explicit stop-the-world movement enabled"
+        f"{len(required_tags)} boundary tags; explicit and automatic-quiescent movement enabled"
     )
     return 0
 

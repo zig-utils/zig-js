@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-07-28",
   "inputs": {
-    ".github/workflows/ci.yml": "1bbece5f4bb97eac051a0abe8ff6e2cba9aabd18d44ef0b303518548f94010a4",
+    ".github/workflows/ci.yml": "f52242d40b86c02bff3fca5c0d77a24abfd6ca6694855b3cf488a4cf89b4292a",
     "docs/.data/benchmark-comparison-2026-07-22-property-osr.md": "06ce734af1f10dba66e206c47a50b4dc475256a4f2dd4519d7d0f1e82993ff0e",
     "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv": "291096a97ecf923fb09e244257eca2b5d0a14d4fb117885fed832f25829bae3b"
   },

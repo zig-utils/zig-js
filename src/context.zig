@@ -34,6 +34,7 @@ const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
 const runtime_gc_tenuring_age: u8 = 3;
+const gc_auto_compaction_min_reclaimable_bytes: usize = 512 * 1024;
 
 /// Serializes calls into an embedder allocator that may not itself be safe for
 /// concurrent use. Under no-GIL execution, otherwise-independent engine locks
@@ -698,6 +699,11 @@ pub const GcCellBacking = struct {
         capacity_slots: usize = 0,
         free_slots: usize = 0,
         live_slots: usize = 0,
+    };
+    pub const CompactionPressure = struct {
+        reclaimable_bytes: usize = 0,
+        relocatable_live_slots: usize = 0,
+        retained_empty_tail_bytes: usize = 0,
     };
     pub const BucketStats = struct {
         slot_size: usize = 0,
@@ -1512,6 +1518,38 @@ pub const GcCellBacking = struct {
             self.unlockBucket(idx);
         }
         out.live_slots = out.capacity_slots - out.free_slots;
+        return out;
+    }
+
+    /// Bytes held past the minimal dense live prefix for every cell size class.
+    /// Non-moving full GC may leave reusable empty tail chunks behind; moving GC
+    /// can either evacuate live cells from fragmented suffix chunks or trim that
+    /// retained tail entirely.
+    pub fn compactionPressure(self: *GcCellBacking) CompactionPressure {
+        var out = CompactionPressure{};
+        inline for (0..bucket_count) |idx| {
+            self.acquireBucket(idx);
+            const chunks = self.bucket_chunks[idx].items;
+            const live_counts = self.bucket_live_counts[idx].items;
+            var total_live: usize = 0;
+            for (live_counts) |count| total_live += count;
+
+            var target_chunks: usize = 0;
+            var dense_capacity: usize = 0;
+            while (target_chunks < chunks.len and dense_capacity < total_live) : (target_chunks += 1)
+                dense_capacity += chunks[target_chunks].len / bucket_sizes[idx];
+
+            for (chunks[target_chunks..], target_chunks..) |chunk, chunk_idx| {
+                out.reclaimable_bytes += chunk.len;
+                const live = live_counts[chunk_idx];
+                if (live == 0) {
+                    out.retained_empty_tail_bytes += chunk.len;
+                } else {
+                    out.relocatable_live_slots += live;
+                }
+            }
+            self.unlockBucket(idx);
+        }
         return out;
     }
 
@@ -3070,6 +3108,17 @@ pub const Context = struct {
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
     /// Supported moving attempts serviced while that precise path is active.
     gc_moving_safepoint_compactions: std.atomic.Value(u64) = .init(0),
+    /// Automatic quiescent compaction telemetry. Requests count deterministic
+    /// fragmentation/retained-tail pressure decisions; attempts and status
+    /// buckets count the guarded moving collection outcome that followed.
+    gc_auto_compaction_requests: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_attempts: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_compacted: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_no_candidates: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_unsupported: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_out_of_memory: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_moved_cells: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_moved_bytes: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, public `timers`, `protected_values`, `c_api_handles`, and
     /// `finalization_cleanup_jobs` — so the
@@ -3252,6 +3301,16 @@ pub const Context = struct {
         born_growth_rounds: u64,
         deferred_rounds: u64,
         deferred_aborts: u64,
+    };
+    pub const AutomaticGcCompactionStats = struct {
+        requests: u64,
+        attempts: u64,
+        compacted: u64,
+        no_candidates: u64,
+        unsupported: u64,
+        out_of_memory: u64,
+        moved_cells: u64,
+        moved_bytes: u64,
     };
 
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
@@ -5362,6 +5421,19 @@ pub const Context = struct {
         };
     }
 
+    pub fn automaticGcCompactionStats(self: *const Context) AutomaticGcCompactionStats {
+        return .{
+            .requests = self.gc_auto_compaction_requests.load(.monotonic),
+            .attempts = self.gc_auto_compaction_attempts.load(.monotonic),
+            .compacted = self.gc_auto_compaction_compacted.load(.monotonic),
+            .no_candidates = self.gc_auto_compaction_no_candidates.load(.monotonic),
+            .unsupported = self.gc_auto_compaction_unsupported.load(.monotonic),
+            .out_of_memory = self.gc_auto_compaction_out_of_memory.load(.monotonic),
+            .moved_cells = self.gc_auto_compaction_moved_cells.load(.monotonic),
+            .moved_bytes = self.gc_auto_compaction_moved_bytes.load(.monotonic),
+        };
+    }
+
     pub fn requestGarbageCollection(self: *Context) void {
         if (self.gc != null) self.gc_requested.store(true, .release);
     }
@@ -5777,7 +5849,6 @@ pub const Context = struct {
     }
 
     fn compactGarbageChecked(self: *Context, allowed_active_interpreter: ?*interp.Interpreter) GcHeap.CompactionResult {
-        const h = self.gc orelse return .{ .status = .unsupported };
         if (self.gc_state) |state| {
             if (state.realms.owner != self or !state.realms.liveSiblingsAreQuiescent())
                 return .{ .status = .unsupported };
@@ -5789,9 +5860,19 @@ pub const Context = struct {
 
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
+        return self.compactGarbageWithConductor(allowed_active_interpreter);
+    }
+
+    fn compactGarbageWithConductor(self: *Context, allowed_active_interpreter: ?*interp.Interpreter) GcHeap.CompactionResult {
+        const h = self.gc orelse return .{ .status = .unsupported };
+        if (self.gc_state) |state| {
+            if (state.realms.owner != self or !state.realms.liveSiblingsAreQuiescent())
+                return .{ .status = .unsupported };
+        }
+        if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
+            return .{ .status = .unsupported };
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null)
             return .{ .status = .unsupported };
-
         self.lockActiveInterpreters();
         const has_active_interpreter = self.active_interpreters.items.len != 0;
         const active_interpreter_can_move = if (allowed_active_interpreter) |machine|
@@ -5823,9 +5904,38 @@ pub const Context = struct {
         return result;
     }
 
+    fn shouldAutoCompactAfterFullCollection(self: *Context) bool {
+        const backing = self.gc_cell_backing orelse return false;
+        const pressure = backing.compactionPressure();
+        return pressure.reclaimable_bytes >= gc_auto_compaction_min_reclaimable_bytes and
+            (pressure.relocatable_live_slots != 0 or pressure.retained_empty_tail_bytes != 0);
+    }
+
+    fn recordAutomaticCompactionResult(self: *Context, result: GcHeap.CompactionResult) void {
+        switch (result.status) {
+            .compacted => {
+                _ = self.gc_auto_compaction_compacted.fetchAdd(1, .monotonic);
+                _ = self.gc_auto_compaction_moved_cells.fetchAdd(@intCast(result.moved_cells), .monotonic);
+                _ = self.gc_auto_compaction_moved_bytes.fetchAdd(@intCast(result.moved_bytes), .monotonic);
+            },
+            .no_candidates => _ = self.gc_auto_compaction_no_candidates.fetchAdd(1, .monotonic),
+            .unsupported => _ = self.gc_auto_compaction_unsupported.fetchAdd(1, .monotonic),
+            .out_of_memory => _ = self.gc_auto_compaction_out_of_memory.fetchAdd(1, .monotonic),
+        }
+    }
+
+    fn runAutomaticCompactionWithConductor(self: *Context) void {
+        _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
+        const result = self.compactGarbageWithConductor(null);
+        self.recordAutomaticCompactionResult(result);
+    }
+
     /// Automatic quiescent policy used at evaluation boundaries. Young space is
     /// collected only after its nursery threshold; once tenured bytes cross the
     /// full-heap threshold, the existing precise collector reclaims old garbage.
+    /// A full collection that leaves a large fragmented or retained slab suffix
+    /// schedules one guarded moving pass and records whether the same movement
+    /// gates accepted it.
     fn collectQuiescentGarbage(self: *Context) void {
         const h = self.gc orelse return;
         if (self.hasRunningJsThreads()) return;
@@ -5834,8 +5944,10 @@ pub const Context = struct {
         defer self.leaveJitGcConductor();
         if (self.hasRunningJsThreads() or self.gc_par_collector.load(.acquire) != null) return;
         self.finishConcurrentGCIfActive();
+        var full_collection = false;
         if (h.shouldCollectOld()) {
             h.collect();
+            full_collection = true;
         } else if (h.shouldCollectYoung()) {
             h.collectYoung();
         } else {
@@ -5843,6 +5955,13 @@ pub const Context = struct {
         }
         wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        var scheduled_auto_compaction = false;
+        if (full_collection and self.shouldAutoCompactAfterFullCollection()) {
+            _ = self.gc_auto_compaction_requests.fetchAdd(1, .monotonic);
+            self.gc_compaction_requested.store(true, .release);
+            scheduled_auto_compaction = true;
+        }
+        if (scheduled_auto_compaction) self.runAutomaticCompactionWithConductor();
     }
 
     fn collectRequestedGarbage(self: *Context) void {
@@ -16547,6 +16666,46 @@ test "GC compaction rewrites public Zig protected handles" {
     try std.testing.expectEqual(Context.GcHeap.CompactionStatus.no_candidates, ctx.compactGarbage().status);
     try std.testing.expect(!foreign.unprotectValue(handle));
     try std.testing.expect(ctx.unprotectValue(handle));
+}
+
+test "enable_gc automatic quiescent compaction follows full-GC slab pressure" {
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+
+    _ = try ctx.evaluate(
+        \\globalThis.autoCompactDiscard = [];
+        \\for (let i = 0; i < 8192; i++)
+        \\  autoCompactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\globalThis.autoCompactKeep = { marker: 363, child: { live: true } };
+        \\0;
+    );
+    ctx.collectGarbage();
+    const keep_before = @intFromPtr(ctx.global_object.getOwn("autoCompactKeep").?.asObj());
+    _ = try ctx.evaluate("autoCompactDiscard = null; 0");
+    const backing_before = ctx.gc_cell_backing.?.stats();
+    const stats_before = ctx.automaticGcCompactionStats();
+
+    heap.threshold_bytes = 1;
+    ctx.collectQuiescentGarbage();
+
+    const stats_after = ctx.automaticGcCompactionStats();
+    try std.testing.expectEqual(stats_before.requests + 1, stats_after.requests);
+    try std.testing.expectEqual(stats_before.attempts + 1, stats_after.attempts);
+    try std.testing.expectEqual(stats_before.compacted + 1, stats_after.compacted);
+    try std.testing.expect(stats_after.moved_cells > stats_before.moved_cells);
+    try std.testing.expect(stats_after.moved_bytes > stats_before.moved_bytes);
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    const keep_after = ctx.global_object.getOwn("autoCompactKeep").?.asObj();
+    try std.testing.expect(keep_before != @intFromPtr(keep_after));
+    try std.testing.expectEqual(@as(f64, 363), keep_after.getOwn("marker").?.asNum());
+    const backing_after = ctx.gc_cell_backing.?.stats();
+    try std.testing.expect(backing_after.chunks < backing_before.chunks);
+    try std.testing.expect(backing_after.capacity_bytes < backing_before.capacity_bytes);
 }
 
 test "enable_gc nursery: quick object replacement keeps exact-managed children" {
