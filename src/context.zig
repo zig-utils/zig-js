@@ -3112,7 +3112,7 @@ pub const Context = struct {
     gc_precise_safepoints: std.atomic.Value(u64) = .init(0),
     /// Supported moving attempts serviced while that precise path is active.
     gc_moving_safepoint_compactions: std.atomic.Value(u64) = .init(0),
-    /// Automatic quiescent compaction telemetry. Requests count deterministic
+    /// Automatic compaction telemetry. Requests count deterministic
     /// fragmentation/retained-tail pressure decisions; attempts and status
     /// buckets count the guarded moving collection outcome that followed.
     gc_auto_compaction_requests: std.atomic.Value(u64) = .init(0),
@@ -3123,6 +3123,17 @@ pub const Context = struct {
     gc_auto_compaction_out_of_memory: std.atomic.Value(u64) = .init(0),
     gc_auto_compaction_moved_cells: std.atomic.Value(u64) = .init(0),
     gc_auto_compaction_moved_bytes: std.atomic.Value(u64) = .init(0),
+    /// Distinguishes a scheduled automatic request from an explicit embedder
+    /// request while it waits for a supported moving checkpoint. Shared
+    /// attempts are counted separately so evidence cannot confuse a quiescent
+    /// pass with a real no-GIL stop.
+    gc_auto_compaction_pending: std.atomic.Value(bool) = .init(false),
+    gc_auto_compaction_shared_attempts: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_shared_timeouts: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_shared_rendezvous_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_shared_rendezvous_ns_max: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_shared_pause_ns_total: std.atomic.Value(u64) = .init(0),
+    gc_auto_compaction_shared_pause_ns_max: std.atomic.Value(u64) = .init(0),
     /// Guards the low-frequency realm-root lists that have no other lock —
     /// `async_waiters`, public `timers`, `protected_values`, `c_api_handles`, and
     /// `finalization_cleanup_jobs` — so the
@@ -3315,6 +3326,12 @@ pub const Context = struct {
         out_of_memory: u64,
         moved_cells: u64,
         moved_bytes: u64,
+        shared_attempts: u64,
+        shared_timeouts: u64,
+        shared_rendezvous_ns_total: u64,
+        shared_rendezvous_ns_max: u64,
+        shared_pause_ns_total: u64,
+        shared_pause_ns_max: u64,
     };
 
     /// The engine's precise-GC heap type and its root-tracing binding (issue #1
@@ -5435,6 +5452,12 @@ pub const Context = struct {
             .out_of_memory = self.gc_auto_compaction_out_of_memory.load(.monotonic),
             .moved_cells = self.gc_auto_compaction_moved_cells.load(.monotonic),
             .moved_bytes = self.gc_auto_compaction_moved_bytes.load(.monotonic),
+            .shared_attempts = self.gc_auto_compaction_shared_attempts.load(.monotonic),
+            .shared_timeouts = self.gc_auto_compaction_shared_timeouts.load(.monotonic),
+            .shared_rendezvous_ns_total = self.gc_auto_compaction_shared_rendezvous_ns_total.load(.monotonic),
+            .shared_rendezvous_ns_max = self.gc_auto_compaction_shared_rendezvous_ns_max.load(.monotonic),
+            .shared_pause_ns_total = self.gc_auto_compaction_shared_pause_ns_total.load(.monotonic),
+            .shared_pause_ns_max = self.gc_auto_compaction_shared_pause_ns_max.load(.monotonic),
         };
     }
 
@@ -5864,11 +5887,17 @@ pub const Context = struct {
 
         self.enterJitGcConductor();
         defer self.leaveJitGcConductor();
-        return self.compactGarbageWithConductor(allowed_active_interpreter);
+        const automatic = self.gc_auto_compaction_pending.load(.acquire);
+        if (automatic) _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
+        const result = self.compactGarbageWithConductor(allowed_active_interpreter);
+        if (automatic and result.status != .unsupported) {
+            self.recordAutomaticCompactionResult(result);
+            self.gc_auto_compaction_pending.store(false, .release);
+        }
+        return result;
     }
 
     fn compactGarbageWithConductor(self: *Context, allowed_active_interpreter: ?*interp.Interpreter) GcHeap.CompactionResult {
-        const h = self.gc orelse return .{ .status = .unsupported };
         if (self.gc_state) |state| {
             if (state.realms.owner != self or !state.realms.liveSiblingsAreQuiescent())
                 return .{ .status = .unsupported };
@@ -5886,8 +5915,37 @@ pub const Context = struct {
             !has_active_interpreter;
         self.unlockActiveInterpreters();
         if (!active_interpreter_can_move) return .{ .status = .unsupported };
+        return self.compactGarbageAfterRootValidation(allowed_active_interpreter != null);
+    }
 
-        if (allowed_active_interpreter == null) self.finishConcurrentGCIfActive();
+    /// Moving entry for the cooperative no-GIL stop. The caller owns the
+    /// conductor and collector election, and every peer has release-published a
+    /// relocation-safe park for this exact generation. Unlike the public
+    /// quiescent entry, live Thread records are expected here; only materialized
+    /// interpreter roots are rewritten.
+    fn compactGarbageWithCooperativeStop(
+        self: *Context,
+        machine: *interp.Interpreter,
+        request: u64,
+    ) GcHeap.CompactionResult {
+        if (self.gc_state) |state| {
+            if (state.realms.owner != self or !state.realms.liveSiblingsAreQuiescent())
+                return .{ .status = .unsupported };
+        }
+        if (self.gc_scan_native_stack or self.gc_scan_parked_stacks)
+            return .{ .status = .unsupported };
+        if (self.gc_par_collector.load(.acquire) != machine)
+            return .{ .status = .unsupported };
+        if (!self.allCooperativePeersAtMovingSafepoint(request, machine))
+            return .{ .status = .unsupported };
+        return self.compactGarbageAfterRootValidation(true);
+    }
+
+    /// Common moving body after the caller proves that every active interpreter
+    /// can have its precise slots rewritten. The conductor is held throughout.
+    fn compactGarbageAfterRootValidation(self: *Context, moving_safepoint: bool) GcHeap.CompactionResult {
+        const h = self.gc orelse return .{ .status = .unsupported };
+        if (!moving_safepoint) self.finishConcurrentGCIfActive();
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire))
             return .{ .status = .unsupported };
 
@@ -5903,16 +5961,25 @@ pub const Context = struct {
             _ = backing.trimCompactedTailChunks();
         self.gc_requested.store(false, .monotonic);
         self.gc_compaction_requested.store(false, .release);
-        if (builtin.is_test and allowed_active_interpreter != null)
+        if (builtin.is_test and moving_safepoint)
             _ = self.gc_moving_safepoint_compactions.fetchAdd(1, .monotonic);
         return result;
     }
 
-    fn shouldAutoCompactAfterFullCollection(self: *Context) bool {
+    fn shouldAutoCompactAfterCollection(self: *Context) bool {
         const backing = self.gc_cell_backing orelse return false;
         const pressure = backing.compactionPressure();
         return pressure.reclaimable_bytes >= gc_auto_compaction_min_reclaimable_bytes and
             (pressure.relocatable_live_slots != 0 or pressure.retained_empty_tail_bytes != 0);
+    }
+
+    fn scheduleAutomaticCompactionIfNeeded(self: *Context) bool {
+        if (!self.shouldAutoCompactAfterCollection()) return false;
+        if (self.gc_auto_compaction_pending.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+            return false;
+        _ = self.gc_auto_compaction_requests.fetchAdd(1, .monotonic);
+        self.gc_compaction_requested.store(true, .release);
+        return true;
     }
 
     fn recordAutomaticCompactionResult(self: *Context, result: GcHeap.CompactionResult) void {
@@ -5932,6 +5999,8 @@ pub const Context = struct {
         _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
         const result = self.compactGarbageWithConductor(null);
         self.recordAutomaticCompactionResult(result);
+        if (result.status != .unsupported)
+            self.gc_auto_compaction_pending.store(false, .release);
     }
 
     /// Automatic quiescent policy used at evaluation boundaries. Young space is
@@ -5959,12 +6028,8 @@ pub const Context = struct {
         }
         wasm_api.collectWasmGarbage(self);
         if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
-        var scheduled_auto_compaction = false;
-        if (full_collection and self.shouldAutoCompactAfterFullCollection()) {
-            _ = self.gc_auto_compaction_requests.fetchAdd(1, .monotonic);
-            self.gc_compaction_requested.store(true, .release);
-            scheduled_auto_compaction = true;
-        }
+        const scheduled_auto_compaction =
+            full_collection and self.scheduleAutomaticCompactionIfNeeded();
         if (scheduled_auto_compaction) self.runAutomaticCompactionWithConductor();
     }
 
@@ -6106,12 +6171,16 @@ pub const Context = struct {
         const request = self.gc_par_request.load(.acquire);
         if (request == 0 or self.gc_par_collector.load(.acquire) == machine) return;
 
+        machine.gc_moving_parked.store(
+            machine.gc_precise_safepoint and machine.gc_moving_safepoint,
+            .monotonic,
+        );
         stack_scan.beginPark();
-        machine.gc_parked.store(true, .release);
         if (machine.gc_published_gen.load(.monotonic) != request) {
             machine.gc_published_gen.store(request, .release);
             _ = self.gc_cooperative_peer_parks.fetchAdd(1, .monotonic);
         }
+        machine.gc_parked.store(true, .release);
         var spins: usize = 0;
         while (self.gc_par_request.load(.acquire) == request) : (spins += 1) {
             if ((spins & 0xff) == 0 and !self.cooperativeCollectorIsActive()) {
@@ -6124,6 +6193,7 @@ pub const Context = struct {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
         machine.lockGcRoots();
+        machine.gc_moving_parked.store(false, .monotonic);
         machine.gc_parked.store(false, .release);
         machine.unlockGcRoots();
         stack_scan.endPark();
@@ -6139,12 +6209,29 @@ pub const Context = struct {
         return false;
     }
 
-    fn allCooperativePeersStopped(self: *Context, request: u64, me: *interp.Interpreter) bool {
+    fn allCooperativePeersStopped(self: *Context, _: u64, me: *interp.Interpreter) bool {
         self.lockActiveInterpreters();
         defer self.unlockActiveInterpreters();
         for (self.active_interpreters.items) |machine| {
-            if (machine == me or machine.gc_parked.load(.acquire)) continue;
+            if (machine == me) continue;
+            if (!machine.gc_parked.load(.acquire)) return false;
+        }
+        return true;
+    }
+
+    /// Stronger stop predicate for relocation. `gc_parked` alone also covers
+    /// native waits whose conservative stack words can be traced but not
+    /// rewritten. The release publication of `gc_parked` makes the preceding
+    /// moving token and the interpreter's materialized roots visible here.
+    fn allCooperativePeersAtMovingSafepoint(self: *Context, request: u64, me: *interp.Interpreter) bool {
+        if (!me.gc_precise_safepoint or !me.gc_moving_safepoint) return false;
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        for (self.active_interpreters.items) |machine| {
+            if (machine == me) continue;
+            if (!machine.gc_parked.load(.acquire)) return false;
             if (machine.gc_published_gen.load(.acquire) != request) return false;
+            if (!machine.gc_moving_parked.load(.acquire)) return false;
         }
         return true;
     }
@@ -6170,22 +6257,41 @@ pub const Context = struct {
         self.recordParallelGcMax(&self.gc_cooperative_rendezvous_ns_max, elapsed);
     }
 
+    fn recordAutomaticSharedCompactionRendezvous(self: *Context, started_ns: u64) void {
+        const elapsed = parallelGcNowNs() -| started_ns;
+        _ = self.gc_auto_compaction_shared_rendezvous_ns_total.fetchAdd(elapsed, .monotonic);
+        self.recordParallelGcMax(&self.gc_auto_compaction_shared_rendezvous_ns_max, elapsed);
+    }
+
+    fn recordAutomaticSharedCompactionPause(self: *Context, started_ns: u64) void {
+        const elapsed = parallelGcNowNs() -| started_ns;
+        _ = self.gc_auto_compaction_shared_pause_ns_total.fetchAdd(elapsed, .monotonic);
+        self.recordParallelGcMax(&self.gc_auto_compaction_shared_pause_ns_max, elapsed);
+    }
+
     /// Reclaim a large shared allocation tranche with every mutator frozen at
-    /// an existing lock-free checkpoint. The 1 GiB trigger amortizes native
-    /// stack publication/scan cost while bounding the former multi-gigabyte
-    /// quiescent-only object batch.
+    /// an existing lock-free checkpoint, or service pending movement when every
+    /// peer reaches its declared relocation-safe checkpoint. The 1 GiB nursery
+    /// trigger amortizes native stack publication/scan cost while bounding the
+    /// former multi-gigabyte quiescent-only object batch.
     fn serviceCooperativeYoungGc(self: *Context, h: *GcHeap, machine: *interp.Interpreter) void {
         if (self.gc_par_request.load(.acquire) != 0) {
             self.joinCooperativeGcRequest(machine);
             return;
         }
         if (machine.gc_parked.load(.acquire) or self.shouldDeferParallelGcRetry()) return;
+        const moving_request =
+            machine.gc_precise_safepoint and machine.gc_moving_safepoint and
+            self.gc_compaction_requested.load(.acquire);
         const backing = self.gc_cell_backing orelse return;
-        if (backing.parallelCellBytesSinceCollection() < self.gc_cooperative_tranche_bytes) return;
+        if (!moving_request and
+            backing.parallelCellBytesSinceCollection() < self.gc_cooperative_tranche_bytes) return;
         // A lone running mutator is faster collecting precisely at the host
         // boundary. Forget its tranche so it pays this registry check only once
-        // per GiB rather than at every later VM checkpoint.
-        if (!self.hasCooperativeRunningPeer(machine)) {
+        // per GiB rather than at every later VM checkpoint. A pending moving
+        // request is different: a live Thread record blocks the host boundary,
+        // while this interpreter checkpoint can safely service it by itself.
+        if (!moving_request and !self.hasCooperativeRunningPeer(machine)) {
             const reset_bytes = backing.resetParallelCellBytesSinceCollection();
             _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
             return;
@@ -6201,9 +6307,14 @@ pub const Context = struct {
             return;
         }
         defer self.gc_par_collector.store(null, .release);
-        _ = self.gc_cooperative_attempts.fetchAdd(1, .monotonic);
         const started_ns = parallelGcNowNs();
-        defer self.recordCooperativeGcPause(started_ns);
+        const automatic_moving_request =
+            moving_request and self.gc_auto_compaction_pending.load(.acquire);
+        if (!moving_request)
+            _ = self.gc_cooperative_attempts.fetchAdd(1, .monotonic);
+        defer if (!moving_request) self.recordCooperativeGcPause(started_ns);
+        defer if (automatic_moving_request)
+            self.recordAutomaticSharedCompactionPause(started_ns);
 
         self.lockActiveInterpreters();
         const request = self.openParallelPublicationGeneration();
@@ -6212,14 +6323,46 @@ pub const Context = struct {
 
         const deadline = parallelGcNowNs() + 100 * std.time.ns_per_ms;
         var spins: usize = 0;
-        while (!self.allCooperativePeersStopped(request, machine)) : (spins += 1) {
+        while (!(if (moving_request)
+            self.allCooperativePeersAtMovingSafepoint(request, machine)
+        else
+            self.allCooperativePeersStopped(request, machine))) : (spins += 1)
+        {
             if (parallelGcNowNs() >= deadline) {
-                _ = self.gc_cooperative_timeouts.fetchAdd(1, .monotonic);
-                self.recordCooperativeGcRendezvous(started_ns);
+                if (moving_request) {
+                    if (automatic_moving_request) {
+                        _ = self.gc_auto_compaction_shared_timeouts.fetchAdd(1, .monotonic);
+                        self.recordAutomaticSharedCompactionRendezvous(started_ns);
+                    }
+                } else {
+                    _ = self.gc_cooperative_timeouts.fetchAdd(1, .monotonic);
+                    self.recordCooperativeGcRendezvous(started_ns);
+                }
                 self.deferParallelGcRetry();
                 return;
             }
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+        if (moving_request) {
+            if (automatic_moving_request)
+                self.recordAutomaticSharedCompactionRendezvous(started_ns);
+            const automatic = self.gc_auto_compaction_pending.load(.acquire);
+            if (automatic) {
+                _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
+                _ = self.gc_auto_compaction_shared_attempts.fetchAdd(1, .monotonic);
+            }
+            const result = self.compactGarbageWithCooperativeStop(machine, request);
+            if (automatic) {
+                self.recordAutomaticCompactionResult(result);
+                if (result.status != .unsupported)
+                    self.gc_auto_compaction_pending.store(false, .release);
+            }
+            if (result.status != .unsupported) {
+                const reset_bytes = backing.resetParallelCellBytesSinceCollection();
+                _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
+                self.gc_par_retry_after_ns.store(0, .release);
+            }
+            return;
         }
         self.recordCooperativeGcRendezvous(started_ns);
 
@@ -6232,6 +6375,7 @@ pub const Context = struct {
         _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
         self.gc_par_retry_after_ns.store(0, .release);
         _ = self.gc_cooperative_collections.fetchAdd(1, .monotonic);
+        _ = self.scheduleAutomaticCompactionIfNeeded();
     }
 
     fn collectMidScript(raw_ctx: *anyopaque, raw_machine: *anyopaque) void {
@@ -6246,7 +6390,9 @@ pub const Context = struct {
         if (gc_runtime.inTraceSensitiveLock()) return;
         const h = self.gc orelse return;
         const precise_roots = machine.gc_precise_safepoint;
-        if (machine.gc_moving_safepoint and self.gc_compaction_requested.load(.acquire)) {
+        if (machine.gc_moving_safepoint and self.gc_compaction_requested.load(.acquire) and
+            !(h.parallel and self.gc_cooperative_enabled))
+        {
             const result = self.compactGarbageAtMovingSafepoint(machine);
             if (result.status != .unsupported) return;
         }
@@ -16710,6 +16856,117 @@ test "enable_gc automatic quiescent compaction follows full-GC slab pressure" {
     const backing_after = ctx.gc_cell_backing.?.stats();
     try std.testing.expect(backing_after.chunks < backing_before.chunks);
     try std.testing.expect(backing_after.capacity_bytes < backing_before.capacity_bytes);
+}
+
+test "parallel_js moving stop rejects a peer parked outside a moving safepoint" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    var collector = ctx.interpreter();
+    var peer = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&collector);
+    defer ctx.popActiveInterpreter(&collector);
+    try ctx.pushActiveInterpreter(&peer);
+    defer ctx.popActiveInterpreter(&peer);
+
+    collector.gc_precise_safepoint = true;
+    collector.gc_moving_safepoint = true;
+    peer.gc_published_gen.store(79, .release);
+    peer.gc_parked.store(true, .release);
+    defer peer.gc_parked.store(false, .release);
+
+    try std.testing.expect(!ctx.allCooperativePeersAtMovingSafepoint(79, &collector));
+    peer.gc_moving_parked.store(true, .release);
+    defer peer.gc_moving_parked.store(false, .release);
+    try std.testing.expect(ctx.allCooperativePeersAtMovingSafepoint(79, &collector));
+}
+
+test "parallel_js automatic compaction relocates at a shared moving stop" {
+    if (builtin.single_threaded or !jit.supported or builtin.cpu.arch != .aarch64)
+        return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.gc_cooperative_tranche_bytes = 1024 * 1024;
+
+    _ = try ctx.evaluate(
+        \\var sharedAutoCompactWarmDiscard = [];
+        \\for (var dead = 0; dead < 4096; dead = dead + 1)
+        \\  sharedAutoCompactWarmDiscard.push({ dead, child: { value: dead + 1 } });
+        \\var sharedAutoCompactWitness = { marker: 364, child: { live: true } };
+        \\var sharedAutoCompactGate = new Int32Array(new SharedArrayBuffer(4));
+        \\function sharedAutoCompactSpin(limit, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < limit) cursor = cursor + 1;
+        \\  return held.marker;
+        \\}
+        \\sharedAutoCompactWarmDiscard = null;
+        \\function sharedAutoCompactLane(lane) {
+        \\  var ring = [];
+        \\  for (var i = 0; i < 64; i = i + 1)
+        \\    ring.push({ value: i, lane: lane, prior: 0 });
+        \\  for (var i = 0; i < 12000; i = i + 1) {
+        \\    var index = i & 63;
+        \\    var old = ring[index];
+        \\    ring[index] = { value: old.value + i + lane, lane: lane, prior: old.value };
+        \\  }
+        \\  Atomics.add(sharedAutoCompactGate, 0, 1);
+        \\  while (Atomics.load(sharedAutoCompactGate, 0) !== 3) {}
+        \\  return sharedAutoCompactSpin(2000000, sharedAutoCompactWitness) + lane;
+        \\}
+        \\0;
+    );
+    _ = try ctx.evaluate(
+        \\for (var warm = 0; warm < 10; warm = warm + 1)
+        \\  sharedAutoCompactSpin(6, sharedAutoCompactWitness);
+    );
+    const spin_object = ctx.global_object.getOwn("sharedAutoCompactSpin").?.asObj();
+    const spin_function: *interp.Function = @ptrCast(@alignCast(spin_object.jsFunction().?));
+    try std.testing.expect(spin_function.chunk != null);
+
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("sharedAutoCompactWitness").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const witness_before = @intFromPtr(handle.get().asObj());
+    const stats_before = ctx.automaticGcCompactionStats();
+    const moving_before = ctx.gc_moving_safepoint_compactions.load(.monotonic);
+
+    const result = try ctx.evaluate(
+        \\var sharedAutoCompactFirst = new Thread(sharedAutoCompactLane, 1);
+        \\var sharedAutoCompactSecond = new Thread(sharedAutoCompactLane, 2);
+        \\var sharedAutoCompactMain = sharedAutoCompactLane(3);
+        \\sharedAutoCompactMain + sharedAutoCompactFirst.join() + sharedAutoCompactSecond.join();
+    );
+    try std.testing.expect(result.isNumber());
+
+    const stats_after = ctx.automaticGcCompactionStats();
+    try std.testing.expect(stats_after.requests > stats_before.requests);
+    try std.testing.expect(stats_after.attempts > stats_before.attempts);
+    try std.testing.expect(stats_after.shared_attempts > stats_before.shared_attempts);
+    try std.testing.expect(stats_after.compacted > stats_before.compacted);
+    try std.testing.expect(stats_after.moved_cells > stats_before.moved_cells);
+    try std.testing.expect(stats_after.moved_bytes > stats_before.moved_bytes);
+    try std.testing.expect(stats_after.shared_rendezvous_ns_total > stats_before.shared_rendezvous_ns_total);
+    try std.testing.expect(stats_after.shared_rendezvous_ns_max > stats_before.shared_rendezvous_ns_max);
+    try std.testing.expect(stats_after.shared_pause_ns_total > stats_before.shared_pause_ns_total);
+    try std.testing.expect(stats_after.shared_pause_ns_max > stats_before.shared_pause_ns_max);
+    try std.testing.expect(ctx.gc_moving_safepoint_compactions.load(.monotonic) > moving_before);
+    try std.testing.expect(!ctx.gc_auto_compaction_pending.load(.acquire));
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(witness_before != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 364), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
+    try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
 }
 
 test "enable_gc nursery: quick object replacement keeps exact-managed children" {

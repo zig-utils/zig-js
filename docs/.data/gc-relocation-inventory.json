@@ -7,7 +7,8 @@
   "automatic_policy": {
     "quiescent_full_gc": "enabled",
     "trigger": "reclaimable_fragmented_backing_bytes >= 524288",
-    "shared_mid_script": "open_release_gate",
+    "shared_mid_script": "enabled_at_declared_moving_safepoints",
+    "shared_publication_evidence": "open_release_gate",
     "telemetry": [
       "requests",
       "attempts",
@@ -16,7 +17,13 @@
       "unsupported",
       "out_of_memory",
       "moved_cells",
-      "moved_bytes"
+      "moved_bytes",
+      "shared_attempts",
+      "shared_timeouts",
+      "shared_rendezvous_ns_total",
+      "shared_rendezvous_ns_max",
+      "shared_pause_ns_total",
+      "shared_pause_ns_max"
     ]
   },
   "c_api": {

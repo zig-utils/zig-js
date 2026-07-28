@@ -1326,6 +1326,12 @@ pub const Interpreter = struct {
     /// every peer has published the current generation. Atomic for the cross-thread
     /// read; `0` until the first publish.
     gc_published_gen: std.atomic.Value(u64) = .init(0),
+    /// True only while `gc_parked` was published from a checkpoint that also
+    /// declared `gc_precise_safepoint` + `gc_moving_safepoint`. A cooperative
+    /// moving collector requires this token from every peer; ordinary native
+    /// waits remain parked for non-moving tracing but must fail closed for
+    /// relocation because their raw stack words cannot be rewritten.
+    gc_moving_parked: std.atomic.Value(bool) = .init(false),
     /// True while this interpreter's thread is blocked in native park code
     /// (Thread.join, Atomics.wait, contended Lock/Condition) with no GIL — it is
     /// not running JS, so its roots are frozen. The mid-script parallel collector

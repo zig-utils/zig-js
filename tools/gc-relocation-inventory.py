@@ -50,7 +50,14 @@ def main() -> int:
         automatic_policy.get("trigger") == "reclaimable_fragmented_backing_bytes >= 524288",
         "automatic compaction trigger drift",
     )
-    require(automatic_policy.get("shared_mid_script") == "open_release_gate", "shared/mid-script gate drift")
+    require(
+        automatic_policy.get("shared_mid_script") == "enabled_at_declared_moving_safepoints",
+        "shared/mid-script policy drift",
+    )
+    require(
+        automatic_policy.get("shared_publication_evidence") == "open_release_gate",
+        "shared/mid-script publication gate drift",
+    )
     require(
         automatic_policy.get("telemetry")
         == [
@@ -62,6 +69,12 @@ def main() -> int:
             "out_of_memory",
             "moved_cells",
             "moved_bytes",
+            "shared_attempts",
+            "shared_timeouts",
+            "shared_rendezvous_ns_total",
+            "shared_rendezvous_ns_max",
+            "shared_pause_ns_total",
+            "shared_pause_ns_max",
         ],
         "automatic compaction telemetry drift",
     )
@@ -138,6 +151,12 @@ def main() -> int:
         "enable_gc automatic quiescent compaction follows full-GC slab pressure" in context_source,
         "automatic compaction regression test missing",
     )
+    require(
+        "parallel_js automatic compaction relocates at a shared moving stop" in context_source,
+        "automatic shared compaction regression test missing",
+    )
+    require("allCooperativePeersAtMovingSafepoint" in context_source, "shared moving-stop predicate missing")
+    require("gc_auto_compaction_shared_attempts" in context_source, "shared compaction telemetry missing")
     require("pub fn protectValue" in context_source, "Zig protected-value API missing")
     require("pub fn unprotectValue" in context_source, "Zig protected-value release API missing")
     require("gc_relocation_active" in context_source, "relocation activation token missing")
@@ -198,7 +217,8 @@ def main() -> int:
     print(
         "gc-relocation-inventory: "
         f"{len(entries)} cell kinds, {len(surfaces)} pointer surfaces, "
-        f"{len(required_tags)} boundary tags; explicit and automatic-quiescent movement enabled"
+        f"{len(required_tags)} boundary tags; explicit, automatic-quiescent, "
+        "and declared shared-safepoint movement enabled"
     )
     return 0
 
