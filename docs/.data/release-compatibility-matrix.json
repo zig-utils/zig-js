@@ -124,11 +124,14 @@
         "README.md",
         "tools/release-compatibility.py",
         "tools/benchmark-publication.py",
+        "tools/gc-compaction-benchmark.py",
         "docs/.data/wasm-conformance-matrix.json",
         "docs/.data/wasm-simd-benchmark-2026-07-18.md",
         "docs/.data/wasm-simd-benchmark-2026-07-18.tsv",
         "docs/.data/wasm-threads-benchmark-2026-07-18.md",
-        "docs/.data/wasm-threads-benchmark-2026-07-18.tsv"
+        "docs/.data/wasm-threads-benchmark-2026-07-18.tsv",
+        "docs/.data/gc-compaction-2026-07-19.md",
+        "docs/.data/gc-compaction-2026-07-19.tsv"
       ],
       "blockers": ["generate every capability and benchmark claim from the unified release matrix"]
     }

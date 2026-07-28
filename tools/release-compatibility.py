@@ -32,6 +32,8 @@ README_STATUS_START = "<!-- release-compatibility:status:start -->"
 README_STATUS_END = "<!-- release-compatibility:status:end -->"
 README_WASM_PERFORMANCE_START = "<!-- release-compatibility:wasm-performance:start -->"
 README_WASM_PERFORMANCE_END = "<!-- release-compatibility:wasm-performance:end -->"
+README_GC_COMPACTION_START = "<!-- release-compatibility:gc-compaction:start -->"
+README_GC_COMPACTION_END = "<!-- release-compatibility:gc-compaction:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic shared-realm compaction",
@@ -77,6 +79,12 @@ def statuses(value: object) -> set[str]:
 
 def read_tsv(relative: str) -> list[dict[str, str]]:
     return list(csv.DictReader(artifact_path(relative).read_text().splitlines(), delimiter="\t"))
+
+
+def median_int(rows: list[dict[str, str]], field: str) -> float:
+    values = [int(row[field]) for row in rows]
+    require(values, f"no values for {field}")
+    return statistics.median(values)
 
 
 def tsv_median_ns(rows: list[dict[str, str]], **fields: object) -> float:
@@ -170,6 +178,46 @@ def generated_readme_wasm_performance() -> str:
     ])
 
 
+def generated_readme_gc_compaction() -> str:
+    rows = read_tsv("docs/.data/gc-compaction-2026-07-19.tsv")
+    control = [row for row in rows if row["mode"] == "control"]
+    compact = [row for row in rows if row["mode"] == "compact"]
+    require(len(control) == len(compact) and control, "GC compaction benchmark requires paired control/compact rows")
+    require(
+        {row["sample"] for row in control} == {row["sample"] for row in compact},
+        "GC compaction benchmark samples are not paired",
+    )
+    require(
+        all(row["action_status"] == "control" and row["fixed_status"] == "not_run" for row in control),
+        "GC compaction control rows drifted",
+    )
+    require(
+        all(row["action_status"] == "compacted" and row["fixed_status"] == "no_candidates" for row in compact),
+        "GC compaction rows are not compacted fixed points",
+    )
+    require(
+        all(int(row["before_live_slots"]) == int(row["after_live_slots"]) for row in rows),
+        "GC compaction benchmark live-slot drift",
+    )
+    require(
+        all(int(row["moved_cells"]) > 0 and int(row["moved_bytes"]) > 0 for row in compact),
+        "GC compaction rows did not move tail cells",
+    )
+    control_capacity = median_int(control, "after_capacity_bytes")
+    compact_capacity = median_int(compact, "after_capacity_bytes")
+    require(compact_capacity < control_capacity, "GC compaction did not reduce retained backing")
+    retained_reduction = 1 - compact_capacity / control_capacity
+    compact_pause_ms = median_int(compact, "action_ns") / 1e6
+    probe_ratio = median_int(control, "probe_ns") / median_int(compact, "probe_ns")
+    require(0.99 <= probe_ratio <= 1.01, f"GC compaction probe throughput drifted to {probe_ratio:.3f}x")
+
+    return "\n".join([
+        README_GC_COMPACTION_START,
+        f"- **Explicit compaction:** {retained_reduction * 100:.1f}% less retained fragmented backing ({control_capacity / 1048576:.2f} → {compact_capacity / 1048576:.2f} MiB) with a {compact_pause_ms:.2f} ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).",
+        README_GC_COMPACTION_END,
+    ])
+
+
 def generated_readme_notice(matrix: dict[str, object]) -> str:
     gates = matrix["gates"]
     open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
@@ -250,6 +298,23 @@ def replace_readme_wasm_performance(readme: str, generated: str) -> str:
     require(next_heading_at != -1, "README WebAssembly performance section is unterminated")
     after = section_and_after[next_heading_at + 1 :]
     return f"{before}{heading}\n{generated}\n\n{after}"
+
+
+def replace_readme_gc_compaction(readme: str, generated: str) -> str:
+    if README_GC_COMPACTION_START in readme or README_GC_COMPACTION_END in readme:
+        require(
+            readme.count(README_GC_COMPACTION_START) == 1 and readme.count(README_GC_COMPACTION_END) == 1,
+            "README GC compaction marker pair drift",
+        )
+        before, remainder = readme.split(README_GC_COMPACTION_START, 1)
+        _, after = remainder.split(README_GC_COMPACTION_END, 1)
+        return f"{before}{generated}{after}"
+    old = next(
+        (line for line in readme.splitlines() if line.startswith("- **Explicit compaction:** ")),
+        None,
+    )
+    require(old is not None, "README explicit compaction bullet is absent")
+    return readme.replace(old, generated, 1)
 
 
 def replace_readme_notice(readme: str, heading: str, generated: str) -> str:
@@ -365,6 +430,7 @@ def main() -> int:
     if args.update_readme:
         readme = replace_readme_status(readme, generated_readme_status(test262_pass, test262_total, wasm))
         readme = replace_readme_wasm_performance(readme, generated_readme_wasm_performance())
+        readme = replace_readme_gc_compaction(readme, generated_readme_gc_compaction())
         readme = (
             remove_readme_notice(readme, heading)
             if all_green
@@ -374,6 +440,7 @@ def main() -> int:
     require((heading not in readme) is all_green, "README missing-surface section does not match release state")
     require(generated_readme_status(test262_pass, test262_total, wasm) in readme, "README status table drift")
     require(generated_readme_wasm_performance() in readme, "README WebAssembly performance drift")
+    require(generated_readme_gc_compaction() in readme, "README GC compaction drift")
     if not all_green:
         require(generated_readme_notice(matrix) in readme, "README missing-surface notice drift")
     require(f"**{test262_pass:,} / {test262_total:,}**" in readme, "README test262 score drift")
