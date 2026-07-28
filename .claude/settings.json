@@ -1,0 +1,49 @@
+{
+  "$comment": [
+    "Project-wide permissions for coding agents. Everything here is read-only",
+    "inspection or a verification gate that only reads the tree and writes into",
+    "the reproducible .zig-cache / zig-out / dist directories.",
+    "",
+    "Deliberately NOT allowed, so they always prompt: git commit/push/checkout/",
+    "reset, rm, and the corpus gates that spawn and reap process groups",
+    "(tools/nogil-corpus-gate.py, threadfuzz) — those are long, mutually",
+    "exclusive jobs that should be started deliberately. Personal additions",
+    "belong in .claude/settings.local.json, which is gitignored."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(zig build *)",
+      "Bash(zig version)",
+      "Bash(zig fmt --check *)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git blame*)",
+      "Bash(git remote -v)",
+      "Bash(git submodule status*)",
+      "Bash(gh issue *)",
+      "Bash(gh pr view*)",
+      "Bash(gh run list*)",
+      "Bash(gh run view*)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(rg *)",
+      "Bash(wc *)",
+      "Bash(pgrep *)",
+      "Bash(python3 tools/docs-link-check.py*)",
+      "Bash(python3 tools/release-compatibility.py*)",
+      "Bash(python3 tools/platform-release-matrix.py*)",
+      "Bash(python3 tools/wasm-conformance-matrix.py*)",
+      "Bash(python3 tools/threads-reference-audit.py*)",
+      "Bash(python3 tools/verify-c-api.py*)",
+      "Bash(python3 tools/verify-objc-api.py*)",
+      "Bash(python3 tools/verify-abi-profile.py*)",
+      "Bash(python3 -m unittest tools/*)",
+      "Bash(bun run docs:build*)",
+      "Bash(bun run docs:data*)",
+      "Bash(echo \"EXIT=$?\")"
+    ]
+  }
+}

@@ -267,6 +267,9 @@ export default {
           items: [
             { text: 'JavaScriptCore C-API', link: '/api' },
             { text: 'Inspector Protocol', link: '/inspector' },
+            { text: 'Public C API Inventory', link: '/c-api/README' },
+            { text: 'Objective-C Bridge Inventory', link: '/objc-api/README' },
+            { text: 'Private ABI Profiles', link: '/abi/README' },
           ],
         },
       ],

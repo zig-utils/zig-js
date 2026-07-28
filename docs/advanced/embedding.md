@@ -11,11 +11,11 @@ three levels of contract stability.
 | Surface | Use it when | Stability |
 | --- | --- | --- |
 | **Zig module** (`@import("js")`) | You are writing Zig and want the whole engine. | Pre-stabilization; the richest surface. |
-| **Public C API** ([`/api`](/api)) | Your host already speaks the JavaScriptCore C API. | A pinned, inventoried subset target. |
-| **Objective-C bridge** ([`docs/objc-api/`](https://github.com/zig-utils/zig-js/tree/main/docs/objc-api)) | macOS hosts using `JSContext` / `JSValue`. | Pinned against a specific macOS SDK. |
+| **Public C API** ([guide](/api) · [inventory](/c-api/README)) | Your host already speaks the JavaScriptCore C API. | A pinned, inventoried subset target. |
+| **Objective-C bridge** ([inventory](/objc-api/README)) | macOS hosts using `JSContext` / `JSValue`. | Pinned against a specific macOS SDK. |
 
 Private, revision-pinned profiles for named downstream consumers are a separate
-thing again — see [`docs/abi/`](https://github.com/zig-utils/zig-js/tree/main/docs/abi).
+thing again — see [Private ABI profiles](/abi/README).
 
 ## Wiring the dependency
 
