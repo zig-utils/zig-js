@@ -10,4 +10,6 @@ bun.lockb
 /pantry
 pantry.lock
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
+.claude/worktrees
 /.zig-global-cache
