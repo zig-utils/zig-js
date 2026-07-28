@@ -16356,6 +16356,8 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
 /// function stays native — which is only possible because the graph now gives
 /// that binary an effect frame state to stage a descriptor against.
 fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_class_a_stop: bool) !void {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
     defer ctx.destroy();
     _ = try ctx.evaluate(
@@ -16434,6 +16436,7 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
 
 test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
         .enable_threads = true,

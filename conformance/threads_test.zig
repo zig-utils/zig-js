@@ -438,6 +438,17 @@ fn parallelJsBudgetSkip(name: []const u8) bool {
     return false;
 }
 
+fn nativeOptimizerAvailable() bool {
+    return js.jit.supported and builtin.cpu.arch == .aarch64;
+}
+
+fn requiresNativeOptimizer(name: []const u8) bool {
+    // This witness's lower bound is deliberately tied to a real optimizer
+    // publication. On targets without the aarch64 optimizer backend, running
+    // it would turn "backend unavailable" into a false convergence failure.
+    return std.mem.eql(u8, name, "jit/foreign-reify-getbyid-converges.js");
+}
+
 fn requiresProcessIsolation(name: []const u8) bool {
     // This WeakRef/GC reclamation oracle is intentionally process-isolated in
     // the full corpus so previous stress cases cannot pin its process-global
@@ -872,8 +883,14 @@ pub fn main(init: std.process.Init) !void {
     // process via `threads-test parallel-js one <path>` — per-case isolation that
     // sidesteps the cumulative-load OOM of a single all-in-one-process TSan run.
     if (list_mode) {
-        for (allowlist) |name| std.debug.print("{s}\n", .{name});
-        if (parallel_js) for (parallel_only_allowlist) |name| std.debug.print("{s}\n", .{name});
+        for (allowlist) |name| {
+            if (requiresNativeOptimizer(name) and !nativeOptimizerAvailable()) continue;
+            std.debug.print("{s}\n", .{name});
+        }
+        if (parallel_js) for (parallel_only_allowlist) |name| {
+            if (requiresNativeOptimizer(name) and !nativeOptimizerAvailable()) continue;
+            std.debug.print("{s}\n", .{name});
+        };
         return;
     }
 
@@ -991,6 +1008,13 @@ pub fn main(init: std.process.Init) !void {
         };
         completed += 1;
         std.debug.print("  RUN   {d}/{d} {s}\n", .{ completed, selected_total, name });
+        if (requiresNativeOptimizer(name) and !nativeOptimizerAvailable()) {
+            skipped += 1;
+            const case_ms = elapsedMs(case_started_ns, nowNs(io));
+            recordSlowCase(&slowest, name, case_ms);
+            std.debug.print("  SKIP  {s} ({d} ms, native optimizer unavailable)\n", .{ name, case_ms });
+            continue;
+        }
         if (parallel_js and !explicit_one and parallelJsBudgetSkip(name)) {
             skipped += 1;
             const case_ms = elapsedMs(case_started_ns, nowNs(io));
