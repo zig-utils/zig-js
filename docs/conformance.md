@@ -29,7 +29,7 @@ Valid and negative tests measure different things, so they are scored separately
 
 Skipped tests are excluded from both denominators. The configured runner currently has **zero** unsupported metadata skips; `docs/.data/test262-skips.tsv` is still generated as the audit file.
 
-The configured runner also has **zero** excluded files; `docs/.data/test262-excluded.tsv` is still generated as the audit file. Two non-normative SpiderMonkey staging files (`sm/regress/regress-602621.js` and `sm/lexical-environment/block-scoped-functions-annex-b-arguments.js`) are removed from the configured corpus definition because their pending Annex B block-scoped-function expectations contradict the normative Annex B tests in `test/annexB`. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior, plain modules, module+async/top-level-await graph-ordering tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
+The configured runner also has **zero** excluded files; `docs/.data/test262-excluded.tsv` is still generated as the audit file. Two non-normative SpiderMonkey staging files (`sm/regress/regress-602621.js` and `sm/lexical-environment/block-scoped-functions-annex-b-arguments.js`) are removed from the configured corpus definition before scoring because their pending Annex B block-scoped-function expectations contradict the normative Annex B tests in `test/annexB`. They are not skip-list or exclusion-list entries. Proper-tail-call coverage, dynamic-import catch-target behavior, import-defer async-module behavior, plain modules, module+async/top-level-await graph-ordering tests, plain async tests, and `CanBlockIsFalse` tests are part of the runner where supported.
 
 The denominator is the **configured subtree list** in `conformance/test262.zig`; directories not enumerated there are outside the measurement entirely — distinct from *skipped* (unsupported metadata) and *excluded*/*removed* (corpus-definition) files. So 100% means 100% of the configured corpus, not of every path under `test262/test`.
 
@@ -58,7 +58,7 @@ Some rows are individual files or worker shards (e.g. `…generated/.#0:20`) rat
 
 ## Remaining High-Impact Work
 
-The configured runner has zero skips and zero excluded files, but the VALID axis still has a small failure tail. Keep fixing those cases directly; separately, audit anything outside the configured denominator:
+The configured runner has zero skips, zero excluded files, and no VALID failure tail in the checked-in run. Keep that invariant from regressing; separately, audit anything outside the configured denominator:
 
 - When using a saved transcript, keep `docs/.data/test262-run-*.txt` and `docs/.data/test262.json` paired. Otherwise regenerate `docs/.data/test262.json` directly with `bun run docs:data`.
 - Keep `docs/.data/test262-skips.tsv` in sync with `zig-out/bin/test262 --list-skips`.

@@ -5,7 +5,7 @@
 //! against upstream's latest — and runs each `.js` test through the engine,
 //! reporting how many pass. This is the true conformance gate the engine grows
 //! against; `zig build conformance` keeps a small always-green smoke suite,
-//! while `zig build test262` reports the real (currently partial) number.
+//! while `zig build test262` reports the current configured-corpus score.
 //!
 //! **Subprocess isolation**: a single engine panic / segfault on a pathological
 //! test would otherwise abort the whole run. So the runner is split into a

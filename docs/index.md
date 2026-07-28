@@ -34,7 +34,7 @@ hero:
 <FeatureCard tag="// pure-zig" title="No C dependencies">Lexer, parser, interpreter, bytecode VM, and every builtin are written from scratch in Zig. One static library, no system JavaScriptCore.</FeatureCard>
 <FeatureCard tag="// tiered" title="Tree-walk → VM → shapes">A correct tree-walking evaluator with a tier-1 stack VM on top: slot-allocated locals, frame-linked closures, object shapes, and inline caches.</FeatureCard>
 <FeatureCard tag="// c-api" title="C API subset">Exports the implemented public C API surface — <code>JSGlobalContextCreate</code>, <code>JSEvaluateScript</code>, and friends — for hosts that only need that subset, without treating compatibility shims as permanent before stabilization.</FeatureCard>
-<FeatureCard tag="// conformance" title="Measured, scoped">Scored against the real test262 suite with a crash-proof subprocess harness. Current runs report zero skips and zero exclusions, with remaining failures visible in the score.</FeatureCard>
+<FeatureCard tag="// conformance" title="Measured, scoped">Scored against the real test262 suite with a crash-proof subprocess harness. Current runs report zero skips, zero exclusions, and no configured VALID failures.</FeatureCard>
 </div>
 
 ## Per-suite breakdown
