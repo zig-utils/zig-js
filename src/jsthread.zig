@@ -535,6 +535,10 @@ test "jsthread contention stats reset and snapshot" {
 }
 
 test "jsthread lifecycle profile excludes full contention counters" {
+    // Other sharded tests can leave a completed full-profile snapshot behind.
+    // Establish a clean disabled baseline before proving that lifecycle-only
+    // recording does not populate the full contention counters.
+    resetContentionStats();
     disableContentionStats();
     resetLifecycleStats();
     recordThreadJoinPark();
