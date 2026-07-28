@@ -330,9 +330,14 @@ called out in the relevant docs — check there before starting.
 - [Discussions](https://github.com/zig-utils/zig-js/discussions) for anything
   worth making searchable.
 - [Discord](https://discord.gg/f7wBym6JF2) for casual conversation.
-- Issues for bugs, with a minimal script and the mode it reproduces in (arena vs.
-  `enable_gc`, tree-walker vs. VM, serialized vs. no-GIL) — that context usually
+- Issues for bugs. The [bug report template](.github/ISSUE_TEMPLATE/bug_report.yml)
+  asks for the mode it reproduces in — arena vs. `enable_gc`, tree-walker vs. VM
+  vs. native tier, serialized vs. no-GIL — because that context usually
   determines where the bug is.
+- [`SECURITY.md`](SECURITY.md) for memory-safety, sandbox-escape, or
+  engine-state-corruption bugs. Report those privately rather than in an issue.
+
+Participation is covered by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 By contributing you agree that your contributions are licensed under the
 [MIT License](LICENSE).

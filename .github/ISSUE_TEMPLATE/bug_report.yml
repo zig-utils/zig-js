@@ -1,0 +1,113 @@
+name: Bug report
+description: Wrong behaviour, a crash, a hang, or a conformance failure
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The **mode** a bug reproduces in usually determines where the bug is, so the
+        dropdowns below matter more than they look. If you are not sure, leave the
+        defaults — a report with an unsure mode is far better than no report.
+
+        For a suspected memory-safety or sandbox-escape bug, please use
+        [private vulnerability reporting](https://github.com/zig-utils/zig-js/security/advisories/new)
+        instead of this form. See [SECURITY.md](https://github.com/zig-utils/zig-js/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest script that shows the problem. JavaScript, `.wast`, or a Zig/C embedding snippet.
+      render: javascript
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual
+      description: What you expected, what happened, and — if relevant — what another engine does.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: allocator
+    attributes:
+      label: Allocator mode
+      description: How the `Context` was created.
+      options:
+        - "Not sure"
+        - "Arena (default)"
+        - "Precise GC (.enable_gc = true)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution
+    attributes:
+      label: Execution path
+      description: Generators, async functions, and self-recursive strict functions run on the bytecode VM; nearly everything else tree-walks.
+      options:
+        - "Not sure"
+        - "Tree-walker"
+        - "Bytecode VM (generator / async / async generator)"
+        - "Native tier (.enable_jit = true, AArch64)"
+        - "Reproduces with .enable_jit = false too"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: concurrency
+    attributes:
+      label: Concurrency mode
+      options:
+        - "Single-threaded (no .enable_threads)"
+        - "Shared-realm threads, parallel (default)"
+        - "Shared-realm threads, serialized (.gil = true)"
+        - "Workers / agents"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: zig-js commit
+      description: "`git rev-parse --short HEAD`"
+    validations:
+      required: true
+
+  - type: input
+    id: zig
+    attributes:
+      label: Zig version
+      description: "`zig version` — the tree requires 0.17.0-dev.956 or newer"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 27.0 arm64 / Ubuntu 24.04 x86_64"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: triage
+    attributes:
+      label: Extra triage (optional but very useful)
+      description: |
+        `-Doptimize=ReleaseSafe` keeps Zig's safety checks on under the optimizer and
+        catches codegen-dependent faults that Debug hides. `-Dtsan=true` separates an
+        engine-state race from a functional bug.
+      options:
+        - label: "Also reproduces with `-Doptimize=ReleaseSafe`"
+        - label: "Also reproduces with `-Dtsan=true`"
+        - label: "I have a failing test262 path for this"
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Error text, stack trace, sanitizer report, or the relevant run summary.
+      render: shell

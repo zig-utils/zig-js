@@ -1,0 +1,39 @@
+# Matches what the tree already contains; `zig fmt` is the authority for .zig.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{zig,zon}]
+indent_size = 4
+
+[*.py]
+indent_size = 4
+
+[*.{c,h,m,cpp}]
+indent_size = 4
+
+[*.{ts,js,mjs,json}]
+indent_size = 2
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.md]
+indent_size = 2
+# Two trailing spaces are a hard line break in Markdown.
+trim_trailing_whitespace = false
+
+[*.{sh,bash}]
+indent_size = 2
+
+# Corpus and evidence files are written by tools and upstream projects; leave
+# them exactly as generated.
+[{docs/.data/**,test262/**,wasm-spec-wg1/**,wasm-spec-wg3/**,reference/**,src/data/**}]
+trim_trailing_whitespace = false
+insert_final_newline = false
