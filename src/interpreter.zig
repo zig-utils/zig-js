@@ -4917,6 +4917,10 @@ pub const Interpreter = struct {
             std.mem.indexOf(u8, source, ".arguments") != null;
     }
 
+    fn sourceMayCall(source: []const u8) bool {
+        return std.mem.indexOfScalar(u8, source, '(') != null;
+    }
+
     fn sourceHasNamedSelfCall(source: []const u8, name: []const u8) bool {
         if (name.len == 0) return false;
         var search: usize = 0;
@@ -4943,6 +4947,7 @@ pub const Interpreter = struct {
         if (fnode.is_strict)
             return sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null;
         return !sourceMayObserveLegacyCallFrame(fnode.source) and
+            !sourceMayCall(fnode.source) and
             (sourceHasNamedSelfCall(fnode.source, fnode.name) or
                 std.mem.indexOfScalar(u8, fnode.source, '.') != null);
     }
@@ -9015,8 +9020,12 @@ pub const Interpreter = struct {
     /// property-`exec` path; used by the internal global loops.
     fn regexBuiltinExecWith(self: *Interpreter, o: *value.Object, input: []const u8, input_value: Value, search_input: []const u8, flags: []const u8, input_u16_len: usize, cursor: *RxCursor) EvalError!Value {
         const li = toLen(try self.toNumberV(try self.getProperty(Value.obj(o), "lastIndex")));
-        const global = std.mem.indexOfScalar(u8, flags, 'g') != null;
-        const sticky = std.mem.indexOfScalar(u8, flags, 'y') != null;
+        const live_flags = o.regexFlags();
+        const cached_unicode = std.mem.indexOfScalar(u8, flags, 'u') != null or std.mem.indexOfScalar(u8, flags, 'v') != null;
+        const live_unicode = std.mem.indexOfScalar(u8, live_flags, 'u') != null or std.mem.indexOfScalar(u8, live_flags, 'v') != null;
+        if (live_unicode != cached_unicode) return (try self.regexMethod(o, "exec", &.{input_value})).?;
+        const global = std.mem.indexOfScalar(u8, live_flags, 'g') != null;
+        const sticky = std.mem.indexOfScalar(u8, live_flags, 'y') != null;
         const start_units = if (global or sticky) li else 0;
         if (start_units > input_u16_len) {
             if (global or sticky) try self.setRegExpLastIndex(o, 0);
@@ -9043,7 +9052,7 @@ pub const Interpreter = struct {
             try self.setProp(arr.asObj(), "input", input_value); // shared cell (no per-match re-copy)
             const groups = try self.regexGroupsSpan(re, m, input, search_input);
             try self.setProp(arr.asObj(), "groups", if (groups) |g| Value.obj(g) else Value.undef());
-            if (std.mem.indexOfScalar(u8, flags, 'd') != null)
+            if (std.mem.indexOfScalar(u8, live_flags, 'd') != null)
                 try self.setProp(arr.asObj(), "indices", Value.obj(try self.makeIndicesArray(re, m, search_input, 0)));
             return arr;
         }
