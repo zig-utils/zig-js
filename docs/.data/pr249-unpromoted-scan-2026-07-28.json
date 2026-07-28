@@ -1,0 +1,627 @@
+{
+  "allowlist": {
+    "executable_passed": 248,
+    "executable_total": 259
+  },
+  "blocked_executable": 5,
+  "categories": {
+    "$vm shared-heap/shell hooks": [
+      "congc-t2-lockorder-lint.js",
+      "congc-t8-stop-interleaving.js",
+      "cve/mc-aint-poll-resume-stale-elided.js",
+      "cve/mc-code-calllink-writer-writer.js",
+      "jit/ic-publish-reset-loops.js"
+    ],
+    "JIT/code-artifact hooks": [
+      "cve/mc-aint-poll-resume-stale-elided.js",
+      "cve/mc-code-calllink-writer-writer.js",
+      "cve/mc-jit-stale-base-grow-oob.js",
+      "jit/ic-publish-reset-loops.js"
+    ],
+    "JSC butterfly verification shell option": [
+      "cve/mc-df-arraycopy-relabel.js"
+    ],
+    "JSC shared-collector preventCollection election hook has a terminal disposition": [
+      "w16-c1-prevent-collection.js"
+    ],
+    "JSC-specific spawned-thread WebAssembly refusal contract": [
+      "api/wasm-refused-sd7.js"
+    ],
+    "checktraps / haveBadTime shell controls": [
+      "checktraps-invalidation.js"
+    ],
+    "detached ArrayBuffer fresh-view construction race": [
+      "cve/mc-life-creator-thread-dies.js"
+    ],
+    "helper/preload": [
+      "bench/harness.js",
+      "harness.js",
+      "resources/assert.js",
+      "scaling/harness.js",
+      "vmstate/resources/workload.js"
+    ],
+    "portable creator-owned buffer survival already covered": [
+      "cve/mc-life-creator-thread-dies.js"
+    ],
+    "portable snapshot graph/parse/ownership promoted by test-private-heap-snapshot": [
+      "w16-c1-prevent-collection.js"
+    ],
+    "typed-array set source-length snapshot covered by zig-js witnesses": [
+      "cve/mc-df-arraycopy-relabel.js"
+    ],
+    "zig-js intentionally supports WebAssembly in shared-realm Threads": [
+      "api/wasm-refused-sd7.js"
+    ]
+  },
+  "disposition_probe_candidates": [
+    {
+      "case": "api/wasm-refused-sd7.js",
+      "categories": [
+        "JSC-specific spawned-thread WebAssembly refusal contract",
+        "zig-js intentionally supports WebAssembly in shared-realm Threads"
+      ],
+      "command": [
+        "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+        "one",
+        "api/wasm-refused-sd7.js"
+      ],
+      "expected_terminal_disposition": {
+        "evidence": [
+          "expected \"TypeError\" but got \"no-throw\""
+        ],
+        "status": "fail"
+      }
+    },
+    {
+      "case": "congc-t2-lockorder-lint.js",
+      "categories": [
+        "$vm shared-heap/shell hooks"
+      ],
+      "command": [
+        "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+        "one",
+        "congc-t2-lockorder-lint.js"
+      ],
+      "expected_terminal_disposition": {
+        "evidence": [],
+        "status": "pass"
+      }
+    },
+    {
+      "case": "congc-t8-stop-interleaving.js",
+      "categories": [
+        "$vm shared-heap/shell hooks"
+      ],
+      "command": [
+        "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+        "one",
+        "congc-t8-stop-interleaving.js"
+      ],
+      "expected_terminal_disposition": {
+        "evidence": [],
+        "status": "pass"
+      }
+    },
+    {
+      "case": "cve/mc-df-arraycopy-relabel.js",
+      "categories": [
+        "JSC butterfly verification shell option",
+        "typed-array set source-length snapshot covered by zig-js witnesses"
+      ],
+      "command": [
+        "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+        "one",
+        "cve/mc-df-arraycopy-relabel.js"
+      ],
+      "expected_terminal_disposition": {
+        "evidence": [
+          "RangeError: offset is out of bounds"
+        ],
+        "status": "fail"
+      }
+    },
+    {
+      "case": "cve/mc-life-creator-thread-dies.js",
+      "categories": [
+        "detached ArrayBuffer fresh-view construction race",
+        "portable creator-owned buffer survival already covered"
+      ],
+      "command": [
+        "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+        "one",
+        "cve/mc-life-creator-thread-dies.js"
+      ],
+      "expected_terminal_disposition": {
+        "evidence": [
+          "TypeError: Cannot construct a TypedArray on a detached buffer"
+        ],
+        "status": "fail"
+      }
+    }
+  ],
+  "executable_total": 259,
+  "helper_preload": 5,
+  "missing_allowlist_entries": [],
+  "promoted_executable": 248,
+  "terminal_disposition_executable": 6,
+  "uncategorized": [],
+  "unpromoted": {
+    "blocked": [
+      "checktraps-invalidation.js",
+      "cve/mc-aint-poll-resume-stale-elided.js",
+      "cve/mc-code-calllink-writer-writer.js",
+      "cve/mc-jit-stale-base-grow-oob.js",
+      "jit/ic-publish-reset-loops.js"
+    ],
+    "helper_preload": [
+      "bench/harness.js",
+      "harness.js",
+      "resources/assert.js",
+      "scaling/harness.js",
+      "vmstate/resources/workload.js"
+    ],
+    "terminal_dispositions": {
+      "api/wasm-refused-sd7.js": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "Every WebAssembly entry point must throw TypeError on a spawned shared-realm thread.",
+        "verification": {
+          "default": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "WebAssembly is intentionally available from shared-realm Thread workers."
+      },
+      "congc-t2-lockorder-lint.js": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The meaningful arms call JSC's $vm.sharedHeapTest lock-order diagnostics.",
+        "verification": {
+          "default": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js tests its collector lock order through native stress/fault gates and does not emulate JSC internal lock classes."
+      },
+      "congc-t8-stop-interleaving.js": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "All collector-stop arms require JSC's $vm.sharedHeapTest dispatcher and its internal stop counters.",
+        "verification": {
+          "default": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js verifies stop/GC interleavings through maintained collector and debugger stress gates, not JSC's private dispatcher."
+      },
+      "cve/mc-df-arraycopy-relabel.js": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A racing Array growth must not be observed by TypedArray.prototype.set and JSC's butterfly verifier must be present.",
+        "verification": {
+          "default": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "The source length is snapshotted at the specified set operation point; growth before that snapshot may correctly make the copy reject with RangeError."
+      },
+      "cve/mc-life-creator-thread-dies.js": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A reader repeatedly constructs a new TypedArray from a buffer after a concurrent transfer has detached it.",
+        "verification": {
+          "default": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "Constructing any TypedArray over an already detached ArrayBuffer throws TypeError; creator-owned backing lifetime is tested separately."
+      },
+      "w16-c1-prevent-collection.js": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The verdict requires JSC's concurrent Heap::preventCollection election through shell snapshot functions.",
+        "verification": {
+          "default": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "VM-wide heap snapshots are real and separately gated, but zig-js has no JSC preventCollection election or fake shell equivalent."
+      }
+    }
+  },
+  "unpromoted_scan_disposition_drift": 0,
+  "unpromoted_scan_results": [
+    {
+      "case": "api/wasm-refused-sd7.js",
+      "categories": [
+        "JSC-specific spawned-thread WebAssembly refusal contract",
+        "zig-js intentionally supports WebAssembly in shared-realm Threads"
+      ],
+      "exit_code": 1,
+      "observed_status": "fail",
+      "output": {
+        "evidence": [
+          "  FAIL  api/wasm-refused-sd7.js (8 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ],
+        "tail": [
+          "  RUN   1/1 api/wasm-refused-sd7.js",
+          "  FAIL  api/wasm-refused-sd7.js (8 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "------------------------",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "Every WebAssembly entry point must throw TypeError on a spawned shared-realm thread.",
+        "verification": {
+          "default": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "expected TypeError but got no-throw",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "WebAssembly is intentionally available from shared-realm Thread workers."
+      }
+    },
+    {
+      "case": "checktraps-invalidation.js",
+      "categories": [
+        "checktraps / haveBadTime shell controls"
+      ],
+      "exit_code": null,
+      "output": {
+        "evidence": [],
+        "tail": [
+          "  RUN   1/1 checktraps-invalidation.js"
+        ]
+      },
+      "status": "timeout",
+      "terminal_disposition": null
+    },
+    {
+      "case": "congc-t2-lockorder-lint.js",
+      "categories": [
+        "$vm shared-heap/shell hooks"
+      ],
+      "exit_code": 0,
+      "observed_status": "pass",
+      "output": {
+        "evidence": [
+          "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 congc-t2-lockorder-lint.js",
+          "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The meaningful arms call JSC's $vm.sharedHeapTest lock-order diagnostics.",
+        "verification": {
+          "default": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "only the trailing arithmetic sanity branch executes",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js tests its collector lock order through native stress/fault gates and does not emulate JSC internal lock classes."
+      }
+    },
+    {
+      "case": "congc-t8-stop-interleaving.js",
+      "categories": [
+        "$vm shared-heap/shell hooks"
+      ],
+      "exit_code": 0,
+      "observed_status": "pass",
+      "output": {
+        "evidence": [
+          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 congc-t8-stop-interleaving.js",
+          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "All collector-stop arms require JSC's $vm.sharedHeapTest dispatcher and its internal stop counters.",
+        "verification": {
+          "default": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "the sharedHeapTest-gated body is not entered",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "zig-js verifies stop/GC interleavings through maintained collector and debugger stress gates, not JSC's private dispatcher."
+      }
+    },
+    {
+      "case": "cve/mc-aint-poll-resume-stale-elided.js",
+      "categories": [
+        "JIT/code-artifact hooks",
+        "$vm shared-heap/shell hooks"
+      ],
+      "exit_code": 0,
+      "expected_blocked_no_optimizer_evidence": null,
+      "expected_blocked_serialized_pass": "The serialized leg skips the post-UNGIL JSC optimizing-tier poll/resume arm; #429 owns real no-GIL promotion.",
+      "output": {
+        "evidence": [
+          "  PASS  cve/mc-aint-poll-resume-stale-elided.js (2 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 cve/mc-aint-poll-resume-stale-elided.js",
+          "  PASS  cve/mc-aint-poll-resume-stale-elided.js (2 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "expected-blocked-serialized-pass"
+    },
+    {
+      "case": "cve/mc-code-calllink-writer-writer.js",
+      "categories": [
+        "JIT/code-artifact hooks",
+        "$vm shared-heap/shell hooks"
+      ],
+      "exit_code": 0,
+      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
+      "expected_blocked_serialized_pass": null,
+      "output": {
+        "evidence": [
+          "  PASS  cve/mc-code-calllink-writer-writer.js (1748 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 cve/mc-code-calllink-writer-writer.js",
+          "  PASS  cve/mc-code-calllink-writer-writer.js (1748 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "expected-blocked-no-optimizer-evidence"
+    },
+    {
+      "case": "cve/mc-df-arraycopy-relabel.js",
+      "categories": [
+        "JSC butterfly verification shell option",
+        "typed-array set source-length snapshot covered by zig-js witnesses"
+      ],
+      "exit_code": 1,
+      "observed_status": "fail",
+      "output": {
+        "evidence": [
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ],
+        "tail": [
+          "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+          "------------------------",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A racing Array growth must not be observed by TypedArray.prototype.set and JSC's butterfly verifier must be present.",
+        "verification": {
+          "default": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "RangeError: offset is out of bounds",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "The source length is snapshotted at the specified set operation point; growth before that snapshot may correctly make the copy reject with RangeError."
+      }
+    },
+    {
+      "case": "cve/mc-jit-stale-base-grow-oob.js",
+      "categories": [
+        "JIT/code-artifact hooks"
+      ],
+      "exit_code": 0,
+      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
+      "expected_blocked_serialized_pass": null,
+      "output": {
+        "evidence": [
+          "  PASS  cve/mc-jit-stale-base-grow-oob.js (31971 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 cve/mc-jit-stale-base-grow-oob.js",
+          "  PASS  cve/mc-jit-stale-base-grow-oob.js (31971 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "expected-blocked-no-optimizer-evidence"
+    },
+    {
+      "case": "cve/mc-life-creator-thread-dies.js",
+      "categories": [
+        "detached ArrayBuffer fresh-view construction race",
+        "portable creator-owned buffer survival already covered"
+      ],
+      "exit_code": 1,
+      "observed_status": "fail",
+      "output": {
+        "evidence": [
+          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ],
+        "tail": [
+          "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "------------------------",
+          "0/1 corpus files passed",
+          "error: CorpusFailures"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "owner_issues": [
+          428
+        ],
+        "premise": "A reader repeatedly constructs a new TypedArray from a buffer after a concurrent transfer has detached it.",
+        "verification": {
+          "default": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          },
+          "parallel_js": {
+            "evidence": "TypeError: Cannot construct a TypedArray on a detached buffer",
+            "status": "fail"
+          }
+        },
+        "zig_js_contract": "Constructing any TypedArray over an already detached ArrayBuffer throws TypeError; creator-owned backing lifetime is tested separately."
+      }
+    },
+    {
+      "case": "jit/ic-publish-reset-loops.js",
+      "categories": [
+        "JIT/code-artifact hooks",
+        "$vm shared-heap/shell hooks"
+      ],
+      "exit_code": 0,
+      "expected_blocked_no_optimizer_evidence": "The case passes, but the runner printed no optimizing-tier publication evidence; #429 still blocks promotion.",
+      "expected_blocked_serialized_pass": null,
+      "output": {
+        "evidence": [
+          "  PASS  jit/ic-publish-reset-loops.js (2795 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 jit/ic-publish-reset-loops.js",
+          "  PASS  jit/ic-publish-reset-loops.js (2795 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "expected-blocked-no-optimizer-evidence"
+    },
+    {
+      "case": "w16-c1-prevent-collection.js",
+      "categories": [
+        "portable snapshot graph/parse/ownership promoted by test-private-heap-snapshot",
+        "JSC shared-collector preventCollection election hook has a terminal disposition"
+      ],
+      "exit_code": 0,
+      "observed_status": "pass",
+      "output": {
+        "evidence": [
+          "  PASS  w16-c1-prevent-collection.js (4003 ms)",
+          "1/1 corpus files passed"
+        ],
+        "tail": [
+          "  RUN   1/1 w16-c1-prevent-collection.js",
+          "  PASS  w16-c1-prevent-collection.js (4003 ms)",
+          "------------------------",
+          "1/1 corpus files passed"
+        ]
+      },
+      "status": "terminal-disposition-confirmed",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "owner_issues": [
+          428
+        ],
+        "premise": "The verdict requires JSC's concurrent Heap::preventCollection election through shell snapshot functions.",
+        "verification": {
+          "default": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          },
+          "parallel_js": {
+            "evidence": "snapshot/preventCollection branches are unavailable",
+            "status": "pass"
+          }
+        },
+        "zig_js_contract": "VM-wide heap snapshots are real and separately gated, but zig-js has no JSC preventCollection election or fake shell equivalent."
+      }
+    }
+  ]
+}

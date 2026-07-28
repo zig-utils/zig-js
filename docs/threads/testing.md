@@ -305,6 +305,19 @@ dependency includes `optimizing-jit`; the same case becomes disposition drift
 once it prints an optimizer publication and should then be promoted or
 reclassified.
 
+The release README cites the checked-in unpromoted scan at
+[`pr249-unpromoted-scan-2026-07-28.json`](../.data/pr249-unpromoted-scan-2026-07-28.json).
+Refresh it with:
+
+```sh
+python3 tools/threads-reference-audit.py --format json --scan-unpromoted --output docs/.data/pr249-unpromoted-scan-2026-07-28.json
+```
+
+`zig build release-compatibility-check` rejects the artifact if the blocked
+case list, terminal dispositions, helper/preload files, promoted count, scan
+coverage, or pass-without-optimizer explanations drift from
+`pr249-reference-inventory.json`.
+
 Promotion also commits a case to the no-GIL gate below, which requires any case
 absent from the baseline to pass there. Measure both modes before adding one.
 It covers:

@@ -1385,7 +1385,14 @@ def main(argv: list[str]) -> int:
             "This slower opt-in sweep catches stale blockers and terminal premises."
         ),
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="Write the JSON summary to this path; requires --format json.",
+    )
     args = parser.parse_args(argv)
+    if args.output is not None and args.format != "json":
+        parser.error("--output requires --format json")
 
     if args.print_inventory:
         generated = build_reference_inventory()
@@ -1447,7 +1454,12 @@ def main(argv: list[str]) -> int:
             summary["inventory_matches"] = inventory_ok
         if args.self_test_inventory:
             summary["inventory_self_tests_pass"] = inventory_self_test_ok
-        print(json.dumps(summary, indent=2, sort_keys=True))
+        text = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+        if args.output is not None:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(text)
+        else:
+            print(text, end="")
 
     if missing_allowlist:
         return 1

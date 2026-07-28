@@ -386,16 +386,18 @@ def generated_readme_quickstart() -> str:
 
 def generated_readme_notice(matrix: dict[str, object]) -> str:
     gates = matrix["gates"]
+    gate_by_id = {gate["id"]: gate for gate in gates}
     open_ids = [gate["id"] for gate in gates if gate["status"] != "green"]
     lines = [README_NOTICE_START]
     if "shell_and_reference_hooks" in open_ids:
         inventory = json.loads(artifact_path("docs/.data/pr249-reference-inventory.json").read_text())
+        scan_relative = pr249_scan_path(gate_by_id["shell_and_reference_hooks"])
         summary = inventory["summary"]
         lines.append(
             "- PR-249 reference tail: "
             f"**{summary['blocked']}** files remain blocked on shell/JIT evidence; "
             f"**{summary['terminal_disposition']}** JSC-private or incompatible premises have terminal dispositions "
-            "([inventory](docs/.data/pr249-reference-inventory.json))."
+            f"([inventory](docs/.data/pr249-reference-inventory.json) · [scan]({scan_relative}))."
         )
     release_gate_labels = [
         README_NOTICE_GATE_LABELS[gate_id]
@@ -416,6 +418,89 @@ def generated_readme_notice(matrix: dict[str, object]) -> str:
         README_NOTICE_END,
     ])
     return "\n".join(lines)
+
+
+def pr249_scan_path(gate: dict[str, object]) -> str:
+    scans = [
+        relative
+        for relative in gate.get("evidence", [])
+        if isinstance(relative, str)
+        and relative.startswith("docs/.data/pr249-unpromoted-scan-")
+        and relative.endswith(".json")
+    ]
+    require(len(scans) == 1, "shell/reference gate must cite exactly one PR-249 unpromoted scan")
+    return scans[0]
+
+
+def validate_pr249_tail(gate: dict[str, object]) -> None:
+    inventory = json.loads(artifact_path("docs/.data/pr249-reference-inventory.json").read_text())
+    summary = inventory["summary"]
+    files = inventory["files"]
+    blocked = sorted(
+        entry["case"]
+        for entry in files
+        if entry.get("execution_state") == "blocked"
+    )
+    terminal = sorted(
+        entry["case"]
+        for entry in files
+        if entry.get("execution_state") == "terminal-disposition"
+    )
+    helpers = sorted(
+        entry["case"]
+        for entry in files
+        if entry.get("execution_state") == "helper/preload"
+    )
+    require(summary["blocked"] == len(blocked), "PR-249 blocked summary drift")
+    require(summary["terminal_disposition"] == len(terminal), "PR-249 terminal summary drift")
+    require(summary["helper_preload"] == len(helpers), "PR-249 helper summary drift")
+
+    scan_relative = pr249_scan_path(gate)
+    scan = json.loads(artifact_path(scan_relative).read_text())
+    allowlist = scan.get("allowlist", {})
+    require(allowlist.get("executable_passed") == summary["promoted"], "PR-249 scan promoted count drift")
+    require(allowlist.get("executable_total") == summary["executable"], "PR-249 scan executable count drift")
+    require(scan.get("blocked_executable") == summary["blocked"], "PR-249 scan blocked count drift")
+    require(scan.get("terminal_disposition_executable") == summary["terminal_disposition"], "PR-249 scan terminal count drift")
+    require(scan.get("helper_preload") == summary["helper_preload"], "PR-249 scan helper count drift")
+    require(scan.get("missing_allowlist_entries") == [], "PR-249 scan has missing allowlist entries")
+    require(scan.get("uncategorized") == [], "PR-249 scan has uncategorized entries")
+    require(scan.get("unpromoted_scan_disposition_drift") == 0, "PR-249 unpromoted scan found disposition drift")
+
+    unpromoted = scan.get("unpromoted", {})
+    require(unpromoted.get("blocked") == blocked, "PR-249 scan blocked file list drift")
+    require(sorted(unpromoted.get("terminal_dispositions", {}).keys()) == terminal, "PR-249 scan terminal file list drift")
+    require(unpromoted.get("helper_preload") == helpers, "PR-249 scan helper file list drift")
+
+    results = scan.get("unpromoted_scan_results")
+    require(isinstance(results, list), "PR-249 scan results must be a list")
+    by_case = {
+        entry.get("case"): entry
+        for entry in results
+        if isinstance(entry, dict) and isinstance(entry.get("case"), str)
+    }
+    expected_scanned = set(blocked) | set(terminal)
+    require(set(by_case) == expected_scanned, "PR-249 scan result coverage drift")
+    for case in terminal:
+        entry = by_case[case]
+        require(entry.get("status") == "terminal-disposition-confirmed", f"{case}: terminal disposition is not confirmed")
+        disposition = entry.get("terminal_disposition", {})
+        expected_status = disposition.get("verification", {}).get("default", {}).get("status")
+        require(entry.get("observed_status") == expected_status, f"{case}: terminal observed status drift")
+    for case in blocked:
+        entry = by_case[case]
+        status = entry.get("status")
+        require(status in {
+            "timeout",
+            "fail",
+            "expected-blocked-serialized-pass",
+            "expected-blocked-no-optimizer-evidence",
+        }, f"{case}: blocked scan status is not accounted")
+        require(entry.get("terminal_disposition") is None, f"{case}: blocked case has terminal disposition")
+        if status == "expected-blocked-serialized-pass":
+            require(entry.get("expected_blocked_serialized_pass"), f"{case}: serialized pass lacks blocker reason")
+        if status == "expected-blocked-no-optimizer-evidence":
+            require(entry.get("expected_blocked_no_optimizer_evidence"), f"{case}: optimizer pass lacks blocker reason")
 
 
 def private_abi_count(relative: str) -> int:
@@ -602,6 +687,7 @@ def main() -> int:
     for gate_id in ("public_jsc_c_api", "objective_c_bridge", "inspector"):
         inventory = json.loads(artifact_path(gate_by_id[gate_id]["evidence"][0]).read_text())
         require(statuses(inventory) == {"implemented"}, f"{gate_id}: inventory is not fully implemented")
+    validate_pr249_tail(gate_by_id["shell_and_reference_hooks"])
 
     private_pending = 0
     for relative in gate_by_id["private_abi_profiles"]["evidence"]:
