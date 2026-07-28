@@ -1,9 +1,9 @@
 {
   "allowlist": {
-    "executable_passed": 251,
+    "executable_passed": 252,
     "executable_total": 259
   },
-  "blocked_executable": 2,
+  "blocked_executable": 1,
   "categories": {
     "$vm shared-heap/shell hooks": [
       "congc-t2-lockorder-lint.js",
@@ -20,9 +20,6 @@
     ],
     "JSC-specific spawned-thread WebAssembly refusal contract": [
       "api/wasm-refused-sd7.js"
-    ],
-    "checktraps / haveBadTime shell controls": [
-      "checktraps-invalidation.js"
     ],
     "detached ArrayBuffer fresh-view construction race": [
       "cve/mc-life-creator-thread-dies.js"
@@ -136,12 +133,11 @@
   "executable_total": 259,
   "helper_preload": 5,
   "missing_allowlist_entries": [],
-  "promoted_executable": 251,
+  "promoted_executable": 252,
   "terminal_disposition_executable": 6,
   "uncategorized": [],
   "unpromoted": {
     "blocked": [
-      "checktraps-invalidation.js",
       "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "helper_preload": [
@@ -274,18 +270,18 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (68 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (39 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (68 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (39 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x102a4dd6b in main (threads-test)",
-          "                printHeapBudget(ctx);",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1027822f7 in main (threads-test)",
+          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
           "                                ^"
         ]
       },
@@ -310,21 +306,6 @@
       }
     },
     {
-      "case": "checktraps-invalidation.js",
-      "categories": [
-        "checktraps / haveBadTime shell controls"
-      ],
-      "exit_code": null,
-      "output": {
-        "evidence": [],
-        "tail": [
-          "  RUN   1/1 checktraps-invalidation.js"
-        ]
-      },
-      "status": "timeout",
-      "terminal_disposition": null
-    },
-    {
       "case": "congc-t2-lockorder-lint.js",
       "categories": [
         "$vm shared-heap/shell hooks"
@@ -333,12 +314,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t2-lockorder-lint.js (12 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (14 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t2-lockorder-lint.js",
-          "  PASS  congc-t2-lockorder-lint.js (12 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (14 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -422,8 +403,8 @@
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x100c41d6b in main (threads-test)",
-          "                printHeapBudget(ctx);",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1027b22f7 in main (threads-test)",
+          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
           "                                ^"
         ]
       },
@@ -472,18 +453,18 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1318 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1156 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1318 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (1156 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "------------------------",
           "0/1 corpus files passed",
           "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1286:33: 0x102f39d6b in main (threads-test)",
-          "                printHeapBudget(ctx);",
+          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1009922f7 in main (threads-test)",
+          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
           "                                ^"
         ]
       },
@@ -517,12 +498,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (2674 ms)",
+          "  PASS  w16-c1-prevent-collection.js (3871 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (2674 ms)",
+          "  PASS  w16-c1-prevent-collection.js (3871 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]

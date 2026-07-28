@@ -1,12 +1,5 @@
 {
   "dependency_catalog": {
-    "jit-trap-polling": {
-      "description": "Optimized-tier trap polling, invalidation, and resume",
-      "owner_issues": [
-        146,
-        429
-      ]
-    },
     "jsc-butterfly-verifier": {
       "description": "JSC-private butterfly verification and indexing-mode invariants",
       "owner_issues": [
@@ -1010,16 +1003,8 @@
     {
       "bytes": 8705,
       "case": "checktraps-invalidation.js",
-      "dependencies": [
-        "jit-trap-polling",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        146,
-        429
-      ],
       "path": "threads-tests/checktraps-invalidation.js",
       "required_shell_hooks": [
         "global:load",
@@ -4218,12 +4203,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 2,
+    "blocked": 1,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 251,
+    "promoted": 252,
     "promoted_with_terminal_premises": 7,
     "terminal_disposition": 6
   }

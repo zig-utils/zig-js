@@ -17513,6 +17513,35 @@ test "vm admission: safe sloppy loops and strict dynamic calls tier safely" {
     }
 }
 
+test "vm admission: strict named-property loops reach the optimizer" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = true });
+    defer ctx.destroy();
+
+    const hot = try ctx.evaluate(
+        \\function hotDot(p, spins) {
+        \\  "use strict";
+        \\  let s = 0;
+        \\  let i = 0;
+        \\  while (i < spins) {
+        \\    s = s + p.x * p.x + p.y * p.y;
+        \\    i = i + 1;
+        \\  }
+        \\  return s;
+        \\}
+        \\globalThis.hotPoint = { x: 3, y: 4 };
+        \\for (let warm = 0; warm < 64; ++warm) hotDot(hotPoint, 32);
+        \\hotDot
+    );
+    const hot_raw = hot.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+    const hot_func: *interp.Function = @ptrCast(@alignCast(hot_raw));
+    try std.testing.expect(hot_func.chunk != null);
+    if (jit.supported and builtin.cpu.arch == .aarch64) {
+        try std.testing.expectEqual(jit.OptimizerTierState.ready, hot_func.chunk.?.optimizer_tier.state.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 1), hot_func.chunk.?.optimizer_tier.compileCount());
+        try std.testing.expectEqual(@as(u64, 1), ctx.jit_owner.optimizerPublications());
+    }
+}
+
 test "deep stack: main-realm non-tail recursion runs under the stack guard" {
     // Bounded witness for non-tail recursion on the main realm. Proper tail calls
     // now intentionally avoid native-stack growth for tail recursion, so the old

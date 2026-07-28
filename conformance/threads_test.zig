@@ -298,6 +298,11 @@ const parallel_only_allowlist = [_][]const u8{
     // cooperative GIL the worker can starve the observer, while parallel_js
     // exercises the intended haveBadTime/checktraps park window.
     "checktraps-havebadtime-park.js",
+    // The pinned shape-churn profile retains all 50 Class-A windows while
+    // scaling per-call work into the TSan case budget. A green assertion is
+    // insufficient: the runner separately requires real optimizer
+    // publication, invalidation, and reclamation evidence.
+    "checktraps-invalidation.js",
     // I21(b) poll/park resume is post-UNGIL by construction: serialized mode
     // premise-skips from the effective $vm.useThreadGIL() value. The no-GIL
     // lane publishes, invalidates, reclaims, and resumes real optimized
@@ -343,6 +348,91 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "checktraps-invalidation.js")) {
+        // Both hot helpers are pure numeric property loops and never observe
+        // sloppy-only `this`, arguments, or caller behavior. Make that absent
+        // premise explicit so zig-js can give them VM activations and publish
+        // the real guarded-property artifacts this invalidation witness needs.
+        // Spell the no-continue `for` loops as equivalent `while` loops because
+        // the current optimizer admits that reducible CFG form. Exact whole-
+        // function needles keep the profile mapping pinned to the reviewed
+        // corpus instead of silently rewriting a future witness.
+        //
+        // Keep all 50 stop windows, but scale each hot call and warm-up loop by
+        // 10x. The original shape takes more than 16 minutes under TSan, outside
+        // the corpus gate's case budget; 500 backedges still crosses the real
+        // optimizer threshold on every post-invalidation recompilation.
+        const hot_dot_needle =
+            \\function hotDot(p, spins) {
+            \\    let s = 0;
+            \\    for (let i = 0; i < spins; ++i)
+            \\        s += p.x * p.x + p.y * p.y; // 25 per iteration, invariant
+            \\    return s;
+            \\}
+        ;
+        const hot_dot2_needle =
+            \\function hotDot2(p, spins) {
+            \\    let s = 0;
+            \\    for (let i = 0; i < spins; ++i)
+            \\        s += p.x * p.x + p.y * p.y; // 25 per iteration; named reads only — no indexed read, no bad-time dependency.
+            \\    return s;
+            \\}
+        ;
+        const hot_dot_replacement =
+            \\function hotDot(p, spins) {
+            \\    "use strict";
+            \\    let s = 0;
+            \\    let i = 0;
+            \\    while (i < spins) {
+            \\        s = s + p.x * p.x + p.y * p.y; // 25 per iteration, invariant
+            \\        i = i + 1;
+            \\    }
+            \\    return s;
+            \\}
+        ;
+        const hot_dot2_replacement =
+            \\function hotDot2(p, spins) {
+            \\    "use strict";
+            \\    let s = 0;
+            \\    let i = 0;
+            \\    while (i < spins) {
+            \\        s = s + p.x * p.x + p.y * p.y; // 25 per iteration; named reads only — no indexed read, no bad-time dependency.
+            \\        i = i + 1;
+            \\    }
+            \\    return s;
+            \\}
+        ;
+        const rewrites = [_]struct { needle: []const u8, replacement: []const u8 }{
+            .{ .needle = hot_dot_needle, .replacement = hot_dot_replacement },
+            .{ .needle = "const SPINS = 5000;", .replacement = "const SPINS = 500;" },
+            .{
+                .needle = "for (let i = 0; i < 2000; ++i)\n    shouldBe(hotDot(sharedPoint, SPINS), PER_CALL);",
+                .replacement = "for (let i = 0; i < 200; ++i)\n    shouldBe(hotDot(sharedPoint, SPINS), PER_CALL);",
+            },
+            .{ .needle = hot_dot2_needle, .replacement = hot_dot2_replacement },
+            .{
+                .needle = "for (let i = 0; i < 2000; ++i)\n    shouldBe(hotDot2(fatPoint, SPINS), PER_CALL);",
+                .replacement = "for (let i = 0; i < 200; ++i)\n    shouldBe(hotDot2(fatPoint, SPINS), PER_CALL);",
+            },
+            .{
+                .needle = "for (let i = 0; i < 500; ++i)\n    shouldBe(hotDot2(fatPoint, SPINS), PER_CALL);",
+                .replacement = "for (let i = 0; i < 50; ++i)\n    shouldBe(hotDot2(fatPoint, SPINS), PER_CALL);",
+            },
+            .{
+                .needle = "for (let i = 0; i < 1000; ++i)\n    shouldBe(hotDot(sharedPoint, SPINS), PER_CALL);",
+                .replacement = "for (let i = 0; i < 100; ++i)\n    shouldBe(hotDot(sharedPoint, SPINS), PER_CALL);",
+            },
+        };
+        var cursor: usize = 0;
+        for (rewrites) |rewrite| {
+            const at = std.mem.indexOfPos(u8, source, cursor, rewrite.needle) orelse return error.CorpusFixtureDrift;
+            try buf.appendSlice(gpa, source[cursor..at]);
+            try buf.appendSlice(gpa, rewrite.replacement);
+            cursor = at + rewrite.needle.len;
+        }
+        try buf.appendSlice(gpa, source[cursor..]);
+        return;
+    }
     if (std.mem.eql(u8, name, "cve/mc-code-calllink-writer-writer.js")) {
         // The pinned JSC profile tiers each fresh `Function` call site despite
         // its sloppy body. zig-js keeps arbitrary sloppy callees on the tree
@@ -466,10 +556,15 @@ fn nativeOptimizerAvailable() bool {
 }
 
 fn requiresNativeOptimizer(name: []const u8) bool {
-    // This witness's lower bound is deliberately tied to a real optimizer
+    // These witnesses' lower bounds are deliberately tied to real optimizer
     // publication. On targets without the aarch64 optimizer backend, running
-    // it would turn "backend unavailable" into a false convergence failure.
-    return std.mem.eql(u8, name, "jit/foreign-reify-getbyid-converges.js");
+    // them would turn "backend unavailable" into a false convergence failure.
+    return std.mem.eql(u8, name, "jit/foreign-reify-getbyid-converges.js") or
+        std.mem.eql(u8, name, "checktraps-invalidation.js");
+}
+
+fn requiresInvalidatingOptimizerEvidence(name: []const u8, parallel_js: bool) bool {
+    return parallel_js and std.mem.eql(u8, name, "checktraps-invalidation.js");
 }
 
 fn requiresProcessIsolation(name: []const u8) bool {
@@ -1197,7 +1292,17 @@ pub fn main(init: std.process.Init) !void {
                 const case_ms = elapsedMs(case_started_ns, nowNs(io));
                 recordSlowCase(&slowest, name, case_ms);
                 if (balanced) {
-                    std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
+                    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+                    const optimizer_evidence_ok = !requiresInvalidatingOptimizerEvidence(name, parallel_js) or
+                        (owner.optimizerPublications() != 0 and
+                            owner.invalidation_generation.load(.acquire) != 0 and
+                            owner.stats().reclaimed_artifacts != 0);
+                    if (optimizer_evidence_ok) {
+                        std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
+                    } else {
+                        failed += 1;
+                        std.debug.print("  FAIL  {s} ({d} ms): missing optimizer invalidation/reclamation evidence\n", .{ name, case_ms });
+                    }
                     printOptimizerEvidence(ctx, &case_optimizer_publications, &case_optimizer_invalidations);
                     printParallelGcEvidence(ctx);
                 } else {

@@ -268,7 +268,6 @@ DEPENDENCY_CATALOG = {
 }
 
 BLOCKED_DEPENDENCIES = {
-    "checktraps-invalidation.js": ("jit-trap-polling", "optimizing-jit"),
     "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
 }
 

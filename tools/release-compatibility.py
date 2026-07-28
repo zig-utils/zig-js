@@ -393,9 +393,12 @@ def generated_readme_notice(matrix: dict[str, object]) -> str:
         inventory = json.loads(artifact_path("docs/.data/pr249-reference-inventory.json").read_text())
         scan_relative = pr249_scan_path(gate_by_id["shell_and_reference_hooks"])
         summary = inventory["summary"]
+        blocked = summary["blocked"]
+        blocked_noun = "file" if blocked == 1 else "files"
+        blocked_verb = "remains" if blocked == 1 else "remain"
         lines.append(
             "- PR-249 reference tail: "
-            f"**{summary['blocked']}** files remain blocked on shell/JIT evidence; "
+            f"**{blocked}** {blocked_noun} {blocked_verb} blocked on shell/JIT evidence; "
             f"**{summary['terminal_disposition']}** JSC-private or incompatible premises have terminal dispositions "
             f"([inventory](docs/.data/pr249-reference-inventory.json) · [scan]({scan_relative}))."
         )
