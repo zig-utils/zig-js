@@ -5924,9 +5924,10 @@ pub const Context = struct {
         const automatic = self.gc_auto_compaction_pending.load(.acquire);
         if (automatic) _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
         const result = self.compactGarbageWithConductor(allowed_active_interpreter);
-        if (automatic and result.status != .unsupported) {
+        if (automatic) {
             self.recordAutomaticCompactionResult(result);
-            self.gc_auto_compaction_pending.store(false, .release);
+            if (result.status != .unsupported)
+                self.gc_auto_compaction_pending.store(false, .release);
         }
         return result;
     }
@@ -17070,6 +17071,73 @@ test "enable_gc automatic quiescent compaction follows full-GC slab pressure" {
     const backing_after = ctx.gc_cell_backing.?.stats();
     try std.testing.expect(backing_after.chunks < backing_before.chunks);
     try std.testing.expect(backing_after.capacity_bytes < backing_before.capacity_bytes);
+}
+
+test "automatic compaction concurrent-marker conflict is observable and retryable" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .concurrent_gc = true,
+    });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+
+    _ = try ctx.evaluate(
+        \\globalThis.concurrentCompactDiscard = [];
+        \\for (let i = 0; i < 8192; i++)
+        \\  concurrentCompactDiscard.push({ dead: i, child: { value: i + 1 } });
+        \\globalThis.concurrentCompactKeep = { marker: 367, child: { live: true } };
+        \\0;
+    );
+    ctx.collectGarbage();
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("concurrentCompactKeep").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const keep_before = handle.get().asObj();
+    _ = try ctx.evaluate("concurrentCompactDiscard = null; 0");
+    ctx.collectGarbage();
+
+    const stats_before = ctx.automaticGcCompactionStats();
+    try std.testing.expect(ctx.scheduleAutomaticCompactionIfNeeded());
+    try std.testing.expect(ctx.gc_auto_compaction_pending.load(.acquire));
+    try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expectEqual(stats_before.requests + 1, ctx.automaticGcCompactionStats().requests);
+
+    // This is a real concurrent mark cycle, not a synthetic flag. Movement at
+    // an otherwise exact checkpoint must leave every address and request
+    // unchanged until the marker closes.
+    heap.beginConcurrentMark();
+    try std.testing.expect(heap.concurrent.load(.acquire));
+    var machine = ctx.interpreter();
+    machine.gc_precise_safepoint = true;
+    machine.gc_moving_safepoint = true;
+    try ctx.pushActiveInterpreter(&machine);
+    const blocked = ctx.compactGarbageAtMovingSafepoint(&machine);
+    ctx.popActiveInterpreter(&machine);
+
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.unsupported, blocked.status);
+    const stats_blocked = ctx.automaticGcCompactionStats();
+    try std.testing.expectEqual(stats_before.attempts + 1, stats_blocked.attempts);
+    try std.testing.expectEqual(stats_before.unsupported + 1, stats_blocked.unsupported);
+    try std.testing.expectEqual(keep_before, handle.get().asObj());
+    try std.testing.expect(ctx.gc_auto_compaction_pending.load(.acquire));
+    try std.testing.expect(ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+
+    heap.finishConcurrentMark();
+    try std.testing.expect(!heap.concurrent.load(.acquire));
+    const retried = ctx.compactGarbage();
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, retried.status);
+    try std.testing.expect(retried.moved_cells > 0 and retried.moved_bytes > 0);
+    const stats_after = ctx.automaticGcCompactionStats();
+    try std.testing.expectEqual(stats_before.attempts + 2, stats_after.attempts);
+    try std.testing.expectEqual(stats_before.unsupported + 1, stats_after.unsupported);
+    try std.testing.expectEqual(stats_before.compacted + 1, stats_after.compacted);
+    try std.testing.expect(keep_before != handle.get().asObj());
+    try std.testing.expectEqual(@as(f64, 367), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expect(!ctx.gc_auto_compaction_pending.load(.acquire));
+    try std.testing.expect(!ctx.gc_compaction_requested.load(.acquire));
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
 }
 
 test "parallel_js moving stop rejects a peer parked outside a moving safepoint" {
