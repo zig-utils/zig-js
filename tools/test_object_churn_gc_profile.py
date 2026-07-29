@@ -59,8 +59,26 @@ class ProfileTests(unittest.TestCase):
         report = profile.render(rows, [1, 2, 4, 8], 1, "zig-js-rev", "zig-gc-rev")
         self.assertIn("## Finding", report)
         self.assertIn("Nursery sweep", report)
-        self.assertIn("zig-js/issues/427", report)
-        self.assertIn("zig-gc/issues/42", report)
+
+    def test_render_attributes_zero_pause_interval_to_publication(self) -> None:
+        rows = [profile.parse_output(output(lane), 0) for lane in (1, 2, 4, 8)]
+        for row in rows:
+            row["attempts"] = 0
+            row["collections"] = 0
+            row["minor_cycles"] = 0
+            row["heap_collections"] = 0
+            row["heap_minor_collections"] = 0
+            row["pause_ns_total"] = 0
+            row["minor_prepare_ns"] = 0
+            row["minor_trace_ns"] = 0
+            row["minor_sweep_ns"] = 0
+            row["minor_post_sweep_ns"] = 0
+            row["object_batch_calls"] = 100
+            row["object_batch_cells"] = 1000
+            row["object_batch_ns_total"] = 200
+        report = profile.render(rows, [1, 2, 4, 8], 1, "zig-js-rev", "zig-gc-rev")
+        self.assertIn("no cooperative collection or rendezvous", report)
+        self.assertIn("Allocation/publication", report)
 
 
 if __name__ == "__main__":

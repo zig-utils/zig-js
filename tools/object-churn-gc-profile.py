@@ -128,20 +128,26 @@ def render(rows: list[dict[str, int | str]], lanes: list[int], samples: int, rev
         trace = median(eight, "minor_trace_ns")
         reclaimed = median(eight, "last_minor_reclaimed_bytes")
         survived = median(eight, "last_minor_survived_cells")
-        lines.extend([
-            "",
-            "## Finding",
-            "",
-            f"At eight lanes, cooperative GC accounts for {pause / elapsed * 100:.1f}% of wall time. "
-            f"Nursery sweep is {sweep / pause * 100:.1f}% of that pause "
-            f"({sweep / 1e6:,.3f} ms), versus {rendezvous / 1e6:,.3f} ms of rendezvous and "
-            f"{trace / 1e6:,.3f} ms of trace. The median cycle reclaims "
-            f"{reclaimed / 1e9:,.3f} GB while retaining only {survived:,.0f} young cells. "
-            "The next measured candidate is whole-run dead nursery backing reclamation "
-            "([zig-js #427](https://github.com/zig-utils/zig-js/issues/427), "
-            "[zig-gc #42](https://github.com/zig-utils/zig-gc/issues/42)), not another "
-            "rendezvous or tracing optimization.",
-        ])
+        lines.extend(["", "## Finding", ""])
+        if pause:
+            lines.append(
+                f"At eight lanes, cooperative GC accounts for {pause / elapsed * 100:.1f}% of wall time. "
+                f"Nursery sweep is {sweep / pause * 100:.1f}% of that pause "
+                f"({sweep / 1e6:,.3f} ms), versus {rendezvous / 1e6:,.3f} ms of rendezvous and "
+                f"{trace / 1e6:,.3f} ms of trace. The median cycle reclaims "
+                f"{reclaimed / 1e9:,.3f} GB while retaining only {survived:,.0f} young cells."
+            )
+        else:
+            batch = median(eight, "object_batch_ns_total")
+            calls = median(eight, "object_batch_calls")
+            cells = median(eight, "object_batch_cells")
+            lines.append(
+                "The eight-lane interval performs no cooperative collection or rendezvous. "
+                f"Allocation/publication consumes {batch / 1e9:,.3f} aggregate CPU seconds "
+                f"across {calls:,.0f} batches and {cells:,.0f} cells "
+                f"({batch / elapsed:.2f} aggregate CPU seconds per wall second), so collector "
+                "phase tuning cannot explain this interval."
+            )
     lines.extend([
         "",
         "`object-batch CPU` sums allocation/publication time across workers and may exceed wall time. Cooperative pause and phase columns are collector wall time while peers are stopped.",
