@@ -201,7 +201,7 @@ The compared modes are intentionally explicit:
 | direct single | one warmed context; one exact host evaluation call per sample |
 | independent steady | one warmed creator-thread-owned context and persistent OS worker per lane; identical semaphore dispatch/evaluation/completion boundary in both runners |
 | independent cold | one newly spawned OS worker and newly created context per lane; thread/context/source setup through context destruction and join is timed in both runners |
-| zig-js shared | one warmed context with the shipping no-GIL shared-realm `Thread` API; JavaScript thread creation, work, and join are timed |
+| zig-js shared | one context with an unrecorded full-work no-GIL shared-realm `Thread` invocation; recorded JavaScript thread creation, work, and join are timed |
 
 The first three modes are cross-engine comparisons. JSC's public API does not expose zig-js's shared-realm `Thread` semantics, so the shared panel has no JSC ratio: zig-js lanes can see one object graph, while the comparable JSC embedding surface is isolated contexts.
 
@@ -228,7 +228,7 @@ For every result group:
 2. In direct single mode, create/configure one context and make ten reduced-size warm-up calls outside the timer, then time the exact same `__benchmarkSelected(__benchmarkJobs, __benchmarkLane)` invocation bytes. Ten calls carry both runners past zig-js's current eight-entry optimizer threshold before scoring.
 3. In independent steady mode, let every persistent OS worker create, configure, and warm its own thread-affine context. Time identical semaphore dispatch, one exact invocation per lane, and completion waits. Destroy workers and contexts after all samples.
 4. In independent cold mode, perform no warm-up. Time OS-thread spawn, worker-owned context creation, source/configuration evaluation, the exact invocation, context destruction, and join.
-5. In shared mode, configure and warm one zig-js realm outside the timer, then time creation, execution, and join of JavaScript `Thread`s. Use the same shared path at one lane as its scaling baseline.
+5. In shared mode, configure one zig-js realm and run one unrecorded full-work shared `Thread` invocation outside the timer, then time creation, execution, and join of JavaScript `Thread`s. Use the same shared path at one lane as its scaling baseline.
 6. Alternate runner-process order deterministically for each directly compared matrix row, instead of always running one engine first.
 7. Run seven samples sequentially and report median, min/max, and relative standard deviation. Preserve every sample in TSV form.
 8. Reject a full row whose median is below 50 ms, then validate the exact expected matrix, sample indexes, within-run stability, and cross-engine checksum equality before rendering any table.
