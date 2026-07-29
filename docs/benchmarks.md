@@ -127,6 +127,31 @@ The property rows favor zig-js directly by 1.63x (monomorphic) and 2.22x (four-s
 Object churn is the one eight-lane loss: zig-js records 3,548.104 ms warmed and 3,438.036 ms cold versus JSC at 195.609 ms and 198.845 ms. [#445](https://github.com/zig-utils/zig-js/issues/445) tracks that current scaling bottleneck; the aggregate does not hide it. Cross-session changes are not causal evidence because the Zig, zig-gc, and zig-regex revisions differ from the July 17 run.
 The historical [exact-parent slab A/B](.data/object-churn-128-byte-slab-ab-2026-07-15.md) and [amortized-publication A/B](.data/object-churn-amortized-publication-ab-2026-07-16.md) remain causal evidence for accepted changes. Three later candidates were rejected: [owned enumeration](.data/object-churn-owned-enumeration-ab-2026-07-18.md) and [sharded enumeration](.data/object-churn-sharded-enumeration-ab-2026-07-18.md) failed the eight-lane gate, while [sharded pressure accounting](.data/object-churn-pressure-accounting-ab-2026-07-18.md) regressed every lane. These focused runs do not replace the current complete matrix. Read the per-workload rows first; geometric means summarize one exact matrix and do not predict an application.
 
+The July 29 [stable-identity exact-parent A/B](.data/object-churn-independent-id-block-ab-2026-07-29.md)
+attributes that independent-context collapse to one process-global cell-ID CAS.
+Non-recycled per-thread ID blocks improve the eight-lane steady median by
+13.71x and cold by 14.14x, restore 4.12x/4.44x throughput scaling, preserve
+checksums, and retain within 3.1%/1.1% of parent RSS. Its
+[collapsed leaf profile](.data/object-churn-independent-profile-2026-07-29.tsv)
+separates the publication hotspot from allocator, rendezvous, nursery, and
+worker-lifecycle paths. The focused A/B does not replace the complete
+zig-js/JavaScriptCore matrix.
+
+Reproduce an exact-parent pair with:
+
+```sh
+python3 tools/independent-object-churn-profile.py /path/to/parent-runner \
+  /path/to/candidate-runner \
+  --parent-sample /tmp/parent.sample.txt \
+  --candidate-sample /tmp/candidate.sample.txt \
+  --raw-out /tmp/object-churn-independent.tsv \
+  --profile-out /tmp/object-churn-independent-profile.tsv \
+  --markdown-out /tmp/object-churn-independent.md \
+  --zig-js-revision <revision> \
+  --parent-gc-revision <revision> \
+  --candidate-gc-revision <revision>
+```
+
 The opt-in #426 phase profiler keeps those exact workload bytes and checksums
 while timing cooperative rendezvous, nursery prepare/trace/sweep, object-batch
 allocation/publication, worker lifetime, and creator join. It does not enable

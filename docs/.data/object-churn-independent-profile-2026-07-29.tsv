@@ -1,0 +1,70 @@
+variant	category	symbol	samples
+parent	cell publication	heap.Heap(gc.Binding).create__anon_270653	6301
+parent	mutator execution	vm.tryQuickArrayLoop	1678
+parent	worker lifecycle/wait	__ulock_wait2	1323
+parent	cell publication	context.GcCellBacking.takeFreedSlotFromChunkLocked	583
+parent	nursery collection	gc.Binding.realmForCell	543
+parent	cell publication	gc.allocObject	337
+parent	mutator execution	vm.runChunk	211
+parent	nursery collection	heap.Heap(gc.Binding).collectYoungInternal	187
+parent	other	context.GcCellBacking.ownedChunkIndexLocked	96
+parent	other	_tlv_get_addr	85
+parent	cell publication	context.GcCellBacking.allocFn	80
+parent	nursery collection	heap.Heap(gc.Binding).sweepPhaseLocked	73
+parent	nursery collection	gc.Binding.freeCellStorageBatch	66
+parent	mutator execution	heap.Heap(gc.Binding).writeBarrierFromManaged	63
+parent	nursery collection	gc.Binding.finalize	49
+parent	mutator execution	interpreter.Interpreter.objectProto	46
+parent	other	context.Context.collectMidScript	25
+parent	mutator execution	vm.quickArrayBoundValue	17
+parent	nursery collection	heap.Heap(gc.Binding).Visitor.markConservativeWord	13
+parent	cell publication	heap.Heap(gc.Binding).indexPayloadLocked	13
+parent	mutator execution	vm.advanceQuickSteps	13
+parent	cell publication	heap.Heap(gc.Binding).unindexPayloadLocked	12
+parent	nursery collection	gc.Binding.trace__anon_39621	9
+parent	other	context.Context.runDeferredPostSweepCallbacks	7
+parent	other	heap.Heap(gc.Binding).shouldCollectOld	7
+parent	other	value.Object.appendSlot	7
+parent	nursery collection	context.Context.collectYoungMidScriptIfNeeded	6
+parent	other	context.GcCellBacking.classifyInteriorInBucketLocked	6
+parent	mutator execution	vm.quickArrayPlan	5
+candidate	worker lifecycle/wait	__ulock_wait2	2155
+candidate	nursery collection	gc.Binding.realmForCell	1606
+candidate	mutator execution	vm.tryQuickArrayLoop	1555
+candidate	nursery collection	heap.Heap(gc.Binding).collectYoungInternal	862
+candidate	cell publication	heap.Heap(gc.Binding).create__anon_270655	541
+candidate	cell publication	context.GcCellBacking.takeFreedSlotFromChunkLocked	507
+candidate	mutator execution	vm.runChunk	310
+candidate	nursery collection	heap.Heap(gc.Binding).sweepPhaseLocked	288
+candidate	other	context.GcCellBacking.ownedChunkIndexLocked	250
+candidate	nursery collection	gc.Binding.freeCellStorageBatch	179
+candidate	nursery collection	gc.Binding.finalize	174
+candidate	cell publication	gc.allocObject	145
+candidate	cell publication	context.GcCellBacking.allocFn	135
+candidate	other	_tlv_get_addr	129
+candidate	mutator execution	heap.Heap(gc.Binding).writeBarrierFromManaged	86
+candidate	other	_dyld_start	61
+candidate	nursery collection	gc.Binding.trace__anon_39621	46
+candidate	cell publication	heap.Heap(gc.Binding).unindexPayloadLocked	39
+candidate	cell publication	heap.Heap(gc.Binding).indexPayloadLocked	37
+candidate	mutator execution	interpreter.Interpreter.objectProto	29
+candidate	other	value.Object.traceColdSnapshot	19
+candidate	mutator execution	vm.advanceQuickSteps	18
+candidate	other	context.Context.collectMidScript	16
+candidate	nursery collection	heap.Heap(gc.Binding).Visitor.mark	14
+candidate	other	heap.Heap(gc.Binding).headerForPayload	13
+candidate	other	gc.traceEnv__anon_40406	12
+candidate	mutator execution	interpreter.Interpreter.effectiveProto	12
+candidate	mutator execution	vm.quickArrayBoundValue	12
+candidate	nursery collection	context.Context.collectYoungMidScriptIfNeeded	8
+candidate	other	heap.Heap(gc.Binding).shouldCollectOld	8
+candidate	mutator execution	vm.quickArrayPlan	8
+candidate	other	heap.Heap(gc.Binding).runAfterSweep	6
+candidate	other	value.Object.appendSlot	6
+candidate	other	value.Value.toBoolean	6
+candidate	mutator execution	vm.quickArrayPrototypeData	6
+candidate	other	_platform_memmove	5
+candidate	other	context.Context.evaluate	5
+candidate	mutator execution	interpreter.Interpreter.arrayProtoChainCleanForDenseAppend	5
+candidate	other	mach_absolute_time	5
+candidate	other	mach_msg2_trap	5
