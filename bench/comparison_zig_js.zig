@@ -400,11 +400,11 @@ fn runShared(
     });
     if (!std.mem.eql(u8, workload, "wasm_threads_wait_notify")) {
         try warm(ctx, @max(@as(usize, 1), jobs / 10), jobs, 0);
-        // Warm the actual Thread lifecycle and leave allocation-heavy rows at
-        // their steady collector pressure before sample zero. Warming only the
-        // creator-thread invocation made the first recorded sample structurally
-        // different from every later persistent-realm sample.
-        _ = try ctx.evaluate(shared_invocation);
+        // Warm the actual Thread lifecycle, then complete one collect/reuse
+        // cycle before sample zero. One shared invocation only armed the first
+        // cooperative collection, leaving the first recorded sample slower than
+        // every later persistent-realm sample.
+        for (0..2) |_| _ = try ctx.evaluate(shared_invocation);
     }
     if (gc_telemetry) try writer.writeAll(gc_telemetry_header);
     for (0..samples) |sample| {
