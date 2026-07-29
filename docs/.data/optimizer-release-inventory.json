@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-29",
+  "implementation_commit": "f4f1ebcdede852fc736269db688a476e739f33a2",
+  "contract": {
+    "supported": [
+      {
+        "os": "macos",
+        "architecture": "aarch64",
+        "backend": "macos_aarch64",
+        "executable_memory": "MAP_JIT plus pthread_jit_write_protect_np and sys_icache_invalidate",
+        "status": "gated"
+      }
+    ],
+    "fallback": [
+      {
+        "os": "macos",
+        "architecture": "x86_64",
+        "reason": "no optimizer x86_64 emitter",
+        "behavior": "baseline or bytecode; optimizer publication count remains zero"
+      },
+      {
+        "os": "linux",
+        "architecture": "aarch64",
+        "reason": "no supported executable-memory implementation",
+        "behavior": "baseline or bytecode; optimizer publication count remains zero"
+      },
+      {
+        "os": "linux",
+        "architecture": "x86_64",
+        "reason": "no supported executable-memory implementation or optimizer x86_64 emitter",
+        "behavior": "baseline or bytecode; optimizer publication count remains zero"
+      },
+      {
+        "os": "darwin-family-other-than-macos",
+        "architecture": "aarch64",
+        "reason": "JIT entitlement and execution are not in the declared release matrix",
+        "behavior": "baseline or bytecode; optimizer publication count remains zero"
+      },
+      {
+        "os": "other",
+        "architecture": "other",
+        "reason": "outside the declared optimizer backend matrix",
+        "behavior": "baseline or bytecode; optimizer publication count remains zero"
+      }
+    ]
+  },
+  "correctness": {
+    "seed": "0x434f4445585f3433",
+    "seeded_cases_per_mode": 12,
+    "surfaces": [
+      "numeric and dynamic arithmetic",
+      "branches and reducible loop OSR",
+      "representation guards and exact deoptimization",
+      "calls, construction, exceptions, catch, and finally",
+      "named own and inherited properties",
+      "packed array reads, writes, append, and growth",
+      "precise roots and moving-GC safepoints",
+      "trap polling, invalidation, call links, and epoch retirement"
+    ],
+    "source_anchors": [
+      {
+        "path": "src/jit.zig",
+        "text": "pub fn optimizerBackend"
+      },
+      {
+        "path": "src/context.zig",
+        "text": "optimizer seeded source differential covers IR guards and deoptimization"
+      },
+      {
+        "path": "src/context.zig",
+        "text": "optimizer packed index and property regions match bytecode and survive a moving GC checkpoint"
+      },
+      {
+        "path": "src/context.zig",
+        "text": "optimizer allocating array loops match bytecode and survive moving GC"
+      },
+      {
+        "path": "src/jit.zig",
+        "text": "optimizer call-link writer writer and reader reset stay coherent"
+      },
+      {
+        "path": "src/vm.zig",
+        "text": "vm: optimizer deoptimization frame reconstruction is exact"
+      }
+    ],
+    "suites": [
+      {
+        "id": "focused-jit-debug",
+        "command": "zig build test-jit --summary all",
+        "configuration": "Debug",
+        "passed": 176,
+        "skipped": 0,
+        "failed": 0,
+        "leaked": 0
+      },
+      {
+        "id": "focused-jit-tsan",
+        "command": "zig build test-jit -Dtsan=true --summary all",
+        "configuration": "Debug+TSan",
+        "passed": 176,
+        "skipped": 0,
+        "failed": 0,
+        "leaked": 0
+      },
+      {
+        "id": "seeded-differential-debug",
+        "command": "zig build test -Dtest-filter='optimizer seeded source differential' --summary all",
+        "configuration": "Debug serialized and no-GIL",
+        "selected_tests": 2,
+        "seed_executions": 24,
+        "passed": 4,
+        "skipped": 0,
+        "failed": 0,
+        "leaked": 0
+      },
+      {
+        "id": "seeded-differential-tsan",
+        "command": "zig build test -Dtsan=true -Dtest-filter='optimizer seeded source differential' --summary all",
+        "configuration": "Debug+TSan serialized and no-GIL",
+        "selected_tests": 2,
+        "seed_executions": 24,
+        "passed": 4,
+        "skipped": 0,
+        "failed": 0,
+        "leaked": 0
+      },
+      {
+        "id": "full-unit-debug",
+        "command": "zig build test-parallel --summary all",
+        "configuration": "Debug, 10 shards",
+        "passed": 1452,
+        "skipped": 0,
+        "failed": 0,
+        "leaked": 0
+      },
+      {
+        "id": "fallback-build-macos-x86_64",
+        "command": "zig build -Dtarget=x86_64-macos --summary all",
+        "configuration": "Debug compile-only",
+        "passed": 7,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "id": "fallback-build-linux-x86_64",
+        "command": "zig build -Dtarget=x86_64-linux-gnu --summary all",
+        "configuration": "Debug compile-only",
+        "passed": 5,
+        "skipped": 0,
+        "failed": 0
+      },
+      {
+        "id": "pr249-terminal-release-safe",
+        "command": "python3 tools/pr249-terminal-execution.py --check",
+        "configuration": "ReleaseSafe serialized and no-GIL",
+        "executables": 259,
+        "promoted": 253,
+        "terminal_disposition": 6,
+        "failed": 0
+      }
+    ]
+  },
+  "sanitizers": {
+    "engine": [
+      "ThreadSanitizer",
+      "Debug safety checks",
+      "ReleaseSafe safety checks",
+      "allocator leak checks",
+      "fault-injection tests"
+    ],
+    "not_claimed": [
+      "AddressSanitizer for Zig engine code"
+    ],
+    "note": "The repository ASan/UBSan build step covers the Objective-C bridge, not Zig engine code."
+  },
+  "performance": {
+    "comparison_engine": "system JavaScriptCore",
+    "report": "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+    "raw_samples": "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+    "measured_zig_js_commit": "0c9b329aaa61b1ddb8f0018a82ed69173ded7f8d",
+    "modes": [
+      "single warmed context",
+      "independent warmed contexts",
+      "independent cold contexts",
+      "zig-js shared realm without a direct JSC ratio"
+    ],
+    "scope": "The benchmark artifact covers its ten named kernels. It is performance evidence for those workloads, not correctness coverage for the full optimizer surface.",
+    "publication_gate": {
+      "command": "zig build benchmark-comparison-test --summary all",
+      "passed": 29,
+      "failed": 0
+    }
+  }
+}

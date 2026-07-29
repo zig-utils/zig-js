@@ -1553,11 +1553,14 @@ pub fn build(b: *std.Build) void {
     const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
+    const optimizer_release_inventory_check = b.addSystemCommand(&.{ "python3", "tools/optimizer-release-inventory.py" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&comparison_harness_test.step);
     comparison_harness_test_step.dependOn(&comparison_publication_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
+    const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
+    optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");

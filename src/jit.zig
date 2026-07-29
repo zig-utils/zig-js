@@ -26,11 +26,11 @@ pub const supported = isDarwin(builtin.os.tag) and switch (builtin.cpu.arch) {
 /// `supported`: Darwin x86-64 can allocate executable mappings, but no x86-64
 /// optimizer emitter exists and it must therefore remain on baseline/bytecode.
 pub const OptimizerBackend = enum {
-    darwin_aarch64,
+    macos_aarch64,
 };
 
 pub fn optimizerBackend(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) ?OptimizerBackend {
-    if (isDarwin(os) and arch == .aarch64) return .darwin_aarch64;
+    if (os == .macos and arch == .aarch64) return .macos_aarch64;
     return null;
 }
 
@@ -1457,12 +1457,13 @@ test "CodeMemory rejects empty mappings" {
     try std.testing.expectError(error.InvalidCapacity, CodeMemory.init(0));
 }
 
-test "optimizer backend matrix declares only Darwin AArch64" {
+test "optimizer backend matrix declares only macOS AArch64" {
     try std.testing.expectEqual(
-        OptimizerBackend.darwin_aarch64,
+        OptimizerBackend.macos_aarch64,
         optimizerBackend(.macos, .aarch64).?,
     );
     try std.testing.expect(optimizerBackend(.macos, .x86_64) == null);
+    try std.testing.expect(optimizerBackend(.ios, .aarch64) == null);
     try std.testing.expect(optimizerBackend(.linux, .aarch64) == null);
     try std.testing.expect(optimizerBackend(.linux, .x86_64) == null);
     try std.testing.expectEqual(optimizer_backend != null, optimizer_supported);

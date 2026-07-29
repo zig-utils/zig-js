@@ -132,9 +132,15 @@
     {
       "id": "optimizing_jit",
       "issue": 146,
-      "status": "open",
-      "evidence": ["docs/.data/optimizer-property-profile-2026-07-21.md", "docs/optimizing-jit.md"],
-      "blockers": ["complete packed arrays, concurrent artifact lifetime, backend coverage, and differential evidence"]
+      "status": "green",
+      "evidence": [
+        "docs/.data/optimizer-release-inventory.json",
+        "docs/.data/jit-concurrency-2026-07-22.md",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
+        "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
+        "docs/optimizing-jit.md"
+      ],
+      "blockers": []
     },
     {
       "id": "readme_generation",

@@ -1,6 +1,38 @@
 # Optimizing JIT
 
-The optimizing tier is under construction in [#146](https://github.com/zig-utils/zig-js/issues/146). The baseline numeric tier remains the general native tier; unsupported optimizer plans always retain baseline or bytecode execution.
+The optimizing tier is a released, deliberately bounded subset. The baseline
+numeric tier remains the general native tier; unsupported optimizer plans
+always retain baseline or bytecode execution.
+
+## Release contract and evidence
+
+The declared optimizer code-generation matrix contains one backend:
+
+| OS | architecture | optimizer backend | status |
+| --- | --- | --- | --- |
+| macOS | AArch64 | `macos_aarch64` | correctness, no-GIL, TSan, and performance evidence published |
+
+macOS x86-64, Linux, other Darwin-family platforms, and other architectures do
+not publish optimizer artifacts. They remain on baseline or bytecode and report
+zero optimizing-tier compilations. This is distinct from the lower executable
+memory layer: a host being able to allocate code pages does not imply that an
+optimizer emitter exists or is supported there.
+
+The machine-readable
+[optimizer release inventory](.data/optimizer-release-inventory.json) binds the
+backend matrix to source anchors, the complete focused normal/TSan gates, 24
+seeded serialized/no-GIL guard and deoptimization differentials, the full unit
+suite, the terminal PR-249 inventory, and the accepted JavaScriptCore
+comparison. Validate it with:
+
+```sh
+zig build optimizer-release-inventory-check
+```
+
+Correctness coverage and benchmark coverage are intentionally separate. The
+correctness inventory spans the documented optimizer surface. The dated
+JavaScriptCore report covers only its ten named kernels and must not be read as
+a performance claim for every optimizer operation.
 
 ## Current foundation
 
@@ -17,9 +49,9 @@ The optimizing tier is under construction in [#146](https://github.com/zig-utils
 
 ## Executable subset
 
-On supported AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by arithmetic, relational comparisons, and equality. Parameters used only for recovery need no Number guard. Instruction-profiled dynamic arithmetic/comparisons/equality; unary, exponentiation, bitwise, and shift coercions; property reads/writes; membership; ordinary, method, direct-eval, explicit-`this`, spread, and proper-tail calls; ordinary/spread construction; literal object/array allocation and initialization; and five-way finally completion dispatch execute through the runtime-operation ABI. Named properties carry immutable four-shape IC snapshots. Isolated AArch64 named reads and existing-slot writes revalidate the cache pair, NaN-box tag, live shape, inline storage, and ordinary-object flags before touching the slot directly. Packed Array reads, existing-index writes, exact-end assignment, literal append, and intrinsic `push` likewise require ordinary dense storage with no holes or indexed hooks. Push with zero through eight values publishes spare-capacity elements directly after every GC barrier, then publishes length and the indexed-own witness once; wider or reallocating push uses one narrow callback whose exact scratch range roots the receiver and every value. Storage reserve is the only fallible mutation step and happens before barriers or publication, so OOM leaves length, elements, and the witness untouched. Shared mode, overrides, sparse or special storage, oversized lengths, and every guard miss use canonical dispatch. Global-scope identifier reads are modelled values rather than opaque ones: `load_var` stages a zero-input runtime operation whose only operand is the artifact-owned name, and the callback resolves it through the same `lookupIdent`/global-property/ReferenceError sequence bytecode uses, so an intervening `with` and an unresolvable name behave identically and the exceptional edge resumes the exact recorded handler. The published assumption is "resolve this name", never "this name has this value", so a rebound global is observed without invalidation. Before this the whole of `return typeof String.raw;` — every function rooted at a builtin constructor — was refused, and a single global operand also refused Number specialization for the enclosing binary. Remaining iterator, class, and closure effects, and the other environment forms (`this`, `new.target`, upvalues, stores), still side-exit. Zero-cost `dup`/`swap` aliases let the compiler-generated method sequence read a callable once and invoke it with the original receiver. The tier also accepts one Boolean branch into two terminal returns. Runtime operations in the common prefix retain exact step ownership before that branch; equal-cost paths execute only the selected arm and complete natively, while unequal-cost paths resume the selected successor in bytecode.
+On supported macOS AArch64 hosts, a guarded numeric SSA region lowers to immutable native code. The subset includes primitive constants and returns plus Number parameters used by arithmetic, relational comparisons, and equality. Parameters used only for recovery need no Number guard. Instruction-profiled dynamic arithmetic/comparisons/equality; unary, exponentiation, bitwise, and shift coercions; property reads/writes; membership; ordinary, method, direct-eval, explicit-`this`, spread, and proper-tail calls; ordinary/spread construction; literal object/array allocation and initialization; and five-way finally completion dispatch execute through the runtime-operation ABI. Named properties carry immutable four-shape IC snapshots. Isolated AArch64 named reads and existing-slot writes revalidate the cache pair, NaN-box tag, live shape, inline storage, and ordinary-object flags before touching the slot directly. Packed Array reads, existing-index writes, exact-end assignment, literal append, and intrinsic `push` likewise require ordinary dense storage with no holes or indexed hooks. Push with zero through eight values publishes spare-capacity elements directly after every GC barrier, then publishes length and the indexed-own witness once; wider or reallocating push uses one narrow callback whose exact scratch range roots the receiver and every value. Storage reserve is the only fallible mutation step and happens before barriers or publication, so OOM leaves length, elements, and the witness untouched. Shared mode, overrides, sparse or special storage, oversized lengths, and every guard miss use canonical dispatch. Global-scope identifier reads are modelled values rather than opaque ones: `load_var` stages a zero-input runtime operation whose only operand is the artifact-owned name, and the callback resolves it through the same `lookupIdent`/global-property/ReferenceError sequence bytecode uses, so an intervening `with` and an unresolvable name behave identically and the exceptional edge resumes the exact recorded handler. The published assumption is "resolve this name", never "this name has this value", so a rebound global is observed without invalidation. Before this the whole of `return typeof String.raw;` — every function rooted at a builtin constructor — was refused, and a single global operand also refused Number specialization for the enclosing binary. Remaining iterator, class, and closure effects, and the other environment forms (`this`, `new.target`, upvalues, stores), still side-exit. Zero-cost `dup`/`swap` aliases let the compiler-generated method sequence read a callable once and invoke it with the original receiver. The tier also accepts one Boolean branch into two terminal returns. Runtime operations in the common prefix retain exact step ownership before that branch; equal-cost paths execute only the selected arm and complete natively, while unequal-cost paths resume the selected successor in bytecode.
 
-Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. A ready managed baseline loop keeps precedence over a slower generic optimizer region; effect/property chunks that baseline cannot compile still reach the optimizer. Remaining work includes irreducible control, iterator/class/closure effects, broader array regions, and additional backends. `numberOfDFGCompiles(fn)` reports the optimizing tier's own installed-code count for that function's chunk, so PR-249 convergence witnesses can assert both that a function tiered up and that it did not sit in a recompile loop; no other JSC-compatible optimizing-tier counters are exposed yet.
+Every representation guard runs before step accounting; a mismatch immediately retries baseline or bytecode with the untouched activation and budget. Optimizer-native and fallback executions therefore preserve the same result and exact bytecode-step delta. A ready managed baseline loop keeps precedence over a slower generic optimizer region; effect/property chunks that baseline cannot compile still reach the optimizer. Irreducible control, iterator/class/closure effects, broader array regions, and additional backends are possible future expansion, not part of the released subset. `numberOfDFGCompiles(fn)` reports the optimizing tier's own installed-code count for that function's chunk, so PR-249 convergence witnesses can assert both that a function tiered up and that it did not sit in a recompile loop; no other JSC-compatible optimizing-tier counters are exposed yet.
 
 ## Deoptimization foundation
 
