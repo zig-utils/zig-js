@@ -11,7 +11,7 @@ zig-js keeps five benchmark families separate:
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
 - `python3 tools/wasm-simd-benchmark.py` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
-- `zig build gc-generation-benchmark` compares age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, automatic-threshold, and shared no-GIL workloads with exact cumulative generation telemetry.
+- `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
 
@@ -29,6 +29,25 @@ large discard group followed by a smaller live tail, drops the first group, and
 alternates non-moving control and explicit-compaction process order. It rejects
 unequal starting heaps, backing growth, live-slot or checksum drift, missing
 movement, and failure to reach an immediate dense `no_candidates` fixed point.
+
+## Latest moving-nursery comparison
+
+The [July 29, 2026 report](.data/gc-generation-2026-07-29.md) preserves all
+[112 raw samples](.data/gc-generation-2026-07-29.tsv) from clean benchmark
+commit `7e71eecff7a43bfb3a0b020d57231a7094790fb9`. Every moving row has an exact
+non-moving parent with the same trigger, workload, age, sample, and checksum.
+Across the forced single-mutator rows, moving age three measured 0.63–1.01x its
+non-moving parents and 0.84–1.02x moving age one. The recorded moving age-three
+rows copied 480.42 MiB with zero movement failures.
+
+The shared rows run three mutators without a context GIL. Their moving age-three
+median was 1,174.15 ms versus 939.65 ms for the exact non-moving parent
+(0.80x), and the maximum recorded moving pause was 110.56 ms. The 14 shared
+moving samples made 26 rendezvous attempts and completed 14 moving minors after
+12 bounded retries; each row stayed within the enforced two-retry ceiling. Each
+moving shared row also includes its one production automatic-compaction
+follow-on, while conservative parents record no full collection or timeout.
+Maximum elapsed RSD across the accepted matrix was 13.32%.
 
 Use quick mode while changing the harness. A dated full run can preserve every
 sample and its rendered report:

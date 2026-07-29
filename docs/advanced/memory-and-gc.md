@@ -83,10 +83,13 @@ by pointer without the collector tracing it.
 
 A nursery with an age-based promotion policy is implemented and benchmarked. The
 current published evidence
-([report](https://github.com/zig-utils/zig-js/blob/main/docs/.data/gc-generation-2026-07-20.md))
-shows the age-three policy at 0.96–1.01× the age-one control across accepted
-single-mutator rows, with a shared no-GIL minor pause max of 0.39 ms and zero
-timeouts.
+([report](https://github.com/zig-utils/zig-js/blob/main/docs/.data/gc-generation-2026-07-29.md))
+pairs moving and non-moving age-one and age-three parents. Across the accepted
+single-mutator rows, moving age three is 0.63–1.01× its exact non-moving parent
+and 0.84–1.02× moving age one. The recorded moving age-three rows copied
+480.42 MiB with zero movement failures. The shared three-mutator rows recorded
+a 110.56 ms maximum moving pause and 12 bounded retries across 14 samples; every
+sample completed within the enforced two-retry ceiling.
 
 Reproduce with:
 
@@ -95,7 +98,11 @@ zig build gc-generation-benchmark
 zig build gc-generation-benchmark -Dgc-generation-benchmark-quick=true
 ```
 
-A **moving nursery** for the multi-age collector is an open release gate.
+The **moving nursery** relocates multi-age survivors at exact quiescent, VM,
+optimizer, and shared no-GIL safepoints. Opaque peers retain the moving request
+and fall back conservatively after a bounded allocation window; shared exact
+rendezvous retries are bounded rather than making unrewritable native frames
+movable.
 
 ## Compaction and relocation
 

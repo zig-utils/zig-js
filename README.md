@@ -54,7 +54,7 @@ Ratios above 1.00x favor zig-js. JSC has no public shared-realm embedding equiva
 ### Garbage collection
 
 <!-- gc-generation:start -->
-- **Generational GC:** age-three policy is 0.96–1.01x the age-one control across accepted single-mutator rows; shared no-GIL minor pause max 0.39 ms with 0 timeouts ([report](docs/.data/gc-generation-2026-07-20.md) · [samples](docs/.data/gc-generation-2026-07-20.tsv)).
+- **Generational GC:** moving age-three is 0.63–1.01x its exact non-moving parents and 0.84–1.02x moving age-one across accepted single-mutator rows; 480.42 MiB copied in the recorded moving age-three rows; shared no-GIL minor pause max 110.56 ms with 12 timeouts ([report](docs/.data/gc-generation-2026-07-29.md) · [samples](docs/.data/gc-generation-2026-07-29.tsv)).
 <!-- gc-generation:end -->
 <!-- release-compatibility:gc-compaction:start -->
 - **Explicit compaction:** 90.8% less retained fragmented backing (8.81 → 0.81 MiB) with a 0.99 ms median pause and unchanged post-action throughput ([report](docs/.data/gc-compaction-2026-07-19.md) · [samples](docs/.data/gc-compaction-2026-07-19.tsv)).
