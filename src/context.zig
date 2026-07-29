@@ -38,6 +38,7 @@ const finalization_cleanup_queue_reserve_granularity = 16;
 const module_queue_reserve_granularity = 16;
 const module_namespace_waiter_reserve_granularity = 16;
 const runtime_gc_tenuring_age: u8 = 3;
+const precise_gc_nursery_threshold_bytes: usize = 2 * 1024 * 1024;
 const gc_auto_compaction_min_reclaimable_bytes: usize = 512 * 1024;
 
 /// Serializes calls into an embedder allocator that may not itself be safe for
@@ -6252,8 +6253,14 @@ pub const Context = struct {
     /// A full or concurrent cycle already in progress keeps ownership of the checkpoint.
     fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap, machine: *interp.Interpreter) bool {
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire)) return false;
-        if (!h.shouldCollectYoung()) return false;
         const precise_roots = machine.gc_precise_safepoint;
+        // Exact single-mutator checkpoints have no conservative false roots,
+        // so reclaim a cache-local young batch before the wider general nursery
+        // threshold. Generic, concurrent, and shared checkpoints keep zig-gc's
+        // established cadence to avoid repeated promotion of ambiguous roots.
+        const precise_cache_batch =
+            precise_roots and !h.parallel and h.young_bytes >= precise_gc_nursery_threshold_bytes;
+        if (!h.shouldCollectYoung() and !precise_cache_batch) return false;
         self.gc_scan_native_stack = !precise_roots;
         defer self.gc_scan_native_stack = false;
         self.gc_scan_parked_stacks = !precise_roots;
@@ -16245,6 +16252,9 @@ test "GC compaction preserves quiescent pointer-free baseline JIT tiers" {
         .enable_jit = true,
     });
     defer ctx.destroy();
+    // This test constructs tail fragmentation for an explicit full compaction;
+    // keep automatic nursery policy from relocating its witness first.
+    ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
 
     // Keep dead Object and Function cells live until the next evaluation has
     // started. The target function and witness are then allocated behind them,
@@ -16320,6 +16330,9 @@ test "GC requested compaction resumes the same baseline tier from a precise nati
         .enable_jit = true,
     });
     defer ctx.destroy();
+    // Preserve the deliberate pre-compaction placement independently of the
+    // production nursery threshold.
+    ctx.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
 
     _ = try ctx.evaluate(
         \\globalThis.preciseDiscardFunctions = [];
@@ -18232,6 +18245,29 @@ test "enable_gc: mid-script collection reclaims garbage during a running loop (b
     // The heap stayed bounded: nothing like the ~150k object graphs a leak would
     // accumulate over 50k iterations survived.
     try std.testing.expect(ctx.gc.?.live_cells < 20000);
+}
+
+test "enable_gc: precise checkpoints reclaim a cache-local nursery batch" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
+    defer ctx.destroy();
+    const heap = ctx.gc.?;
+    try std.testing.expect(heap.nursery_threshold_bytes > precise_gc_nursery_threshold_bytes);
+
+    const saved = gc_mod.setActiveContext(ctx);
+    defer gc_mod.restoreActiveContext(saved);
+    while (heap.young_bytes < precise_gc_nursery_threshold_bytes) {
+        const object = try heap.create(value.Object, .object);
+        object.* = .{};
+        object.initInlineSlots();
+    }
+    try std.testing.expect(!heap.shouldCollectYoung());
+
+    var machine = ctx.interpreter();
+    machine.gc_precise_safepoint = true;
+    const minor_before = heap.minor_collections;
+    try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+    try std.testing.expectEqual(minor_before + 1, heap.minor_collections);
+    try std.testing.expect(heap.young_bytes < precise_gc_nursery_threshold_bytes);
 }
 
 test "enable_gc: mid-script safepoints collect nursery before old heap" {
