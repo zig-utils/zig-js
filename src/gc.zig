@@ -2913,6 +2913,10 @@ pub const Binding = struct {
 
     fn realmForCell(self: *Binding, cell: *anyopaque) ?*ContextMod.Context {
         const state = self.context.gc_state orelse return null;
+        // A heap that has never admitted a sibling attributes every cell to
+        // its immutable owner. Avoid backing-address and registry lookup locks
+        // for the common independent-context finalization path.
+        if (!state.realms.requiresCellRouting()) return self.context;
         const backing = self.context.gc_cell_backing orelse return null;
         const realm_id = backing.realmIdForCellAddress(@intFromPtr(cell));
         return state.realms.realmForId(realm_id);
@@ -3432,6 +3436,7 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     }
     try std.testing.expectEqual(ContextMod.GcCellBacking.owner_realm, owner.gc_realm_id);
     try std.testing.expectEqual(ContextMod.GcCellBacking.no_realm, sibling.gc_realm_id);
+    try std.testing.expect(!state.realms.requiresCellRouting());
     try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
     state.realms.acquire();
     try std.testing.expect(gc_runtime.inTraceSensitiveLock());
@@ -3462,6 +3467,7 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     sibling.gc_cell_backing = owner.gc_cell_backing;
     sibling.gc_state = owner.gc_state;
     try state.realms.beginBootstrap(owner.gpa, sibling);
+    try std.testing.expect(state.realms.requiresCellRouting());
     const sibling_realm_id = sibling.gc_realm_id;
     try std.testing.expect(sibling_realm_id > ContextMod.GcCellBacking.owner_realm);
     try std.testing.expectEqual(sibling, state.realms.realmForId(sibling_realm_id).?);
@@ -3600,6 +3606,8 @@ test "precise heap realm registry traces relocates and retires one sibling exact
     try std.testing.expectEqual(@as(usize, 0), sibling.gc_string_bytes_live);
     try state.realms.releaseRetired(sibling);
     try std.testing.expectEqual(@as(?*ContextMod.Context, null), state.realms.realmForId(sibling_realm_id));
+    // Routing remains monotonic: old IDs must never become owner aliases.
+    try std.testing.expect(state.realms.requiresCellRouting());
 
     const failed = try ContextMod.Context.create(std.testing.allocator);
     const failed_heap = .{

@@ -3528,6 +3528,14 @@ pub const Context = struct {
         /// cells while this callback-routing tombstone remains registered.
         bootstrapping: std.ArrayListUnmanaged(*Context) = .empty,
         next_realm_id: GcCellBacking.RealmId = GcCellBacking.owner_realm + 1,
+        /// Once any non-owner realm can own heap cells, collector callbacks
+        /// must route by the stable per-cell realm ID forever. Owner-only heaps
+        /// keep this false and avoid two metadata locks per finalized cell.
+        cell_routing_required: std.atomic.Value(bool) = .init(false),
+
+        pub fn requiresCellRouting(self: *const GcRealmRegistry) bool {
+            return self.cell_routing_required.load(.acquire);
+        }
 
         pub fn acquire(self: *GcRealmRegistry) void {
             var spins: usize = 0;
@@ -3556,6 +3564,10 @@ pub const Context = struct {
             if (realm == self.owner) return error.OwnerCannotBeSibling;
             if (realm.gc != self.owner.gc or realm.gc_state != self.owner.gc_state)
                 return error.ForeignPreciseHeap;
+            // Publish before registration can expose the realm. False positives
+            // after a later validation/allocation failure are safe; reverting
+            // to the owner-only path after attributed cells existed is not.
+            self.cell_routing_required.store(true, .release);
             self.acquire();
             defer self.release();
             for (self.siblings.items) |registered|
@@ -3584,6 +3596,7 @@ pub const Context = struct {
             if (realm == self.owner) return error.OwnerCannotBeSibling;
             if (realm.gc != self.owner.gc or realm.gc_state != self.owner.gc_state)
                 return error.ForeignPreciseHeap;
+            self.cell_routing_required.store(true, .release);
             self.acquire();
             defer self.release();
             if (realm.gc_realm_id != GcCellBacking.no_realm)
