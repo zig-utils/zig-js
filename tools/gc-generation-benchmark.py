@@ -176,7 +176,7 @@ def configurations(quick: bool) -> list[tuple[str, str, int, int, int, int]]:
         for threshold in (4 * MIB,)
         for moving in (0, 1)
     ] + [
-        ("shared", "mixed", moving, tranche, 6, 8000)
+        ("shared", "mixed", moving, tranche, 12, 8000)
         for tranche in (43 * MIB,)
         for moving in (0, 1)
     ]
