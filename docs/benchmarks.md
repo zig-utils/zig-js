@@ -113,18 +113,23 @@ were produced with pinned WABT 1.0.39 and have SHA-256
 
 ## Latest JavaScriptCore comparison
 
-The [July 22, 2026 property-OSR report](.data/benchmark-comparison-2026-07-22-property-osr.md) preserves all [1,540 raw samples](.data/benchmark-comparison-2026-07-22-property-osr.tsv). It was collected on AC power from clean zig-js commit `0c9b329aaa61b1ddb8f0018a82ed69173ded7f8d`, zig-gc `88ea25433d1841483a57567c80557df04146a53d`, and zig-regex `b8ca89df644976801e0b6444419444b708eeaa25` using Zig `0.17.0-dev.1441+d5181a9c9` and system JavaScriptCore `22625.1.20.11.3`.
+The [July 29, 2026 report](.data/benchmark-comparison-2026-07-29.md) preserves all [1,540 raw samples](.data/benchmark-comparison-2026-07-29.tsv). It was collected on AC power from clean zig-js commit `0f8b33c882eb53ad4d3111410d09fd71b15a10e9`, zig-gc `a09c01555f8b5e1485d8be5757864967942f699d`, and zig-regex `2de46683b948ec895e5fa9a9e7e4c384aceccdfe` using Zig `0.17.0-dev.1441+d5181a9c9` and system JavaScriptCore `22625.1.24.11.2`.
 
 | mode | lanes | wins vs JSC | zig-js / JSC throughput | zig-js scaling | JSC scaling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| direct warmed context | 1 | 10 / 10 | **2.16x** | — | — |
-| independent steady contexts | 8 | 9 / 10 | **1.79x** | **3.86x** | 4.73x |
-| independent cold lifecycles | 8 | 9 / 10 | **1.95x** | **4.04x** | 4.75x |
-| shared realm, no GIL | 8 | no public-JSC equivalent | — | **3.85x** | — |
+| direct warmed context | 1 | 10 / 10 | **2.29x** | — | — |
+| independent steady contexts | 8 | 9 / 10 | **2.51x** | **5.31x** | 4.83x |
+| independent cold lifecycles | 8 | 9 / 10 | **2.61x** | **5.53x** | 4.89x |
+| shared realm, no GIL | 8 | no public-JSC equivalent | — | **4.42x** | — |
 
-The property rows favor zig-js directly by 1.63x (monomorphic) and 2.22x (four-shape polymorphic), and at eight warmed contexts by 1.64x and 2.18x. The [property CPU profile](.data/optimizer-property-profile-2026-07-21.md) attributes 46.2% of property leaves to generated code. The [exact-parent packed-array profile](.data/optimizer-array-profile-2026-07-22.md) confirms that the published arrays row still selects its guarded VM kernels, so the accepted score is unchanged. Ten reduced-size warm calls happen outside scored steady-state timers for both engines; cold lifecycle remains intentionally unwarmed. Equal checksums, alternating runner order, seven samples, and the 50 ms timing floor are enforced. Read per-row RSD in the report before interpreting small differences.
+The property rows favor zig-js directly by 2.79x (monomorphic) and 2.15x (four-shape polymorphic), and at eight warmed contexts by 3.06x and 2.32x. The [property CPU profile](.data/optimizer-property-profile-2026-07-21.md) attributes 46.2% of property leaves to generated code. The [exact-parent packed-array profile](.data/optimizer-array-profile-2026-07-22.md) confirms that the published arrays row still selects its guarded VM kernels. Ten reduced-size warm calls happen outside scored steady-state timers for both engines; cold lifecycle remains intentionally unwarmed. Equal checksums, alternating runner order, seven samples, and the 50 ms timing floor are enforced. Read per-row RSD in the report before interpreting small differences.
 
-Object churn is the one eight-lane loss: zig-js records 3,548.104 ms warmed and 3,438.036 ms cold versus JSC at 195.609 ms and 198.845 ms. [#445](https://github.com/zig-utils/zig-js/issues/445) tracks that current scaling bottleneck; the aggregate does not hide it. Cross-session changes are not causal evidence because the Zig, zig-gc, and zig-regex revisions differ from the July 17 run.
+Object churn now wins directly at 130.957 ms versus JSC at 133.573 ms and
+scales monotonically to 4.32x warmed and 4.62x cold. It remains the one
+eight-lane independent loss: 242.790/255.224 ms versus JSC at
+210.873/213.364 ms. The distinct shared-realm row reaches 0.74x at eight
+lanes; [#97](https://github.com/zig-utils/zig-js/issues/97) tracks that final
+sub-1.0x lane.
 The historical [exact-parent slab A/B](.data/object-churn-128-byte-slab-ab-2026-07-15.md) and [amortized-publication A/B](.data/object-churn-amortized-publication-ab-2026-07-16.md) remain causal evidence for accepted changes. Three later candidates were rejected: [owned enumeration](.data/object-churn-owned-enumeration-ab-2026-07-18.md) and [sharded enumeration](.data/object-churn-sharded-enumeration-ab-2026-07-18.md) failed the eight-lane gate, while [sharded pressure accounting](.data/object-churn-pressure-accounting-ab-2026-07-18.md) regressed every lane. These focused runs do not replace the current complete matrix. Read the per-workload rows first; geometric means summarize one exact matrix and do not predict an application.
 
 The July 29 [stable-identity exact-parent A/B](.data/object-churn-independent-id-block-ab-2026-07-29.md)
