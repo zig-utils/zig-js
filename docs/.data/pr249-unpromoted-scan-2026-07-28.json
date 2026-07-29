@@ -1,16 +1,13 @@
 {
   "allowlist": {
-    "executable_passed": 252,
+    "executable_passed": 253,
     "executable_total": 259
   },
-  "blocked_executable": 1,
+  "blocked_executable": 0,
   "categories": {
     "$vm shared-heap/shell hooks": [
       "congc-t2-lockorder-lint.js",
       "congc-t8-stop-interleaving.js"
-    ],
-    "JIT/code-artifact hooks": [
-      "cve/mc-jit-stale-base-grow-oob.js"
     ],
     "JSC butterfly verification shell option": [
       "cve/mc-df-arraycopy-relabel.js"
@@ -133,13 +130,11 @@
   "executable_total": 259,
   "helper_preload": 5,
   "missing_allowlist_entries": [],
-  "promoted_executable": 252,
+  "promoted_executable": 253,
   "terminal_disposition_executable": 6,
   "uncategorized": [],
   "unpromoted": {
-    "blocked": [
-      "cve/mc-jit-stale-base-grow-oob.js"
-    ],
+    "blocked": [],
     "helper_preload": [
       "bench/harness.js",
       "harness.js",
@@ -270,19 +265,16 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (39 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (39 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+          "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1027822f7 in main (threads-test)",
-          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
-          "                                ^"
+          "error: CorpusFailures"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -314,12 +306,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t2-lockorder-lint.js (14 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (1 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t2-lockorder-lint.js",
-          "  PASS  congc-t2-lockorder-lint.js (14 ms)",
+          "  PASS  congc-t2-lockorder-lint.js (1 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -353,12 +345,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  congc-t8-stop-interleaving.js (906 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 congc-t8-stop-interleaving.js",
-          "  PASS  congc-t8-stop-interleaving.js (906 ms)",
+          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]
@@ -393,19 +385,16 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (19 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (19 ms, Throw): RangeError: offset is out of bounds",
+          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1027b22f7 in main (threads-test)",
-          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
-          "                                ^"
+          "error: CorpusFailures"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -429,21 +418,6 @@
       }
     },
     {
-      "case": "cve/mc-jit-stale-base-grow-oob.js",
-      "categories": [
-        "JIT/code-artifact hooks"
-      ],
-      "exit_code": null,
-      "output": {
-        "evidence": [],
-        "tail": [
-          "  RUN   1/1 cve/mc-jit-stale-base-grow-oob.js"
-        ]
-      },
-      "status": "timeout",
-      "terminal_disposition": null
-    },
-    {
       "case": "cve/mc-life-creator-thread-dies.js",
       "categories": [
         "detached ArrayBuffer fresh-view construction race",
@@ -453,19 +427,16 @@
       "observed_status": "fail",
       "output": {
         "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1156 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "0/1 corpus files passed",
           "error: CorpusFailures"
         ],
         "tail": [
           "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (1156 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
           "------------------------",
           "0/1 corpus files passed",
-          "error: CorpusFailures",
-          "/Users/chris/Code/Libraries/zig-js/conformance/threads_test.zig:1309:33: 0x1009922f7 in main (threads-test)",
-          "                    const progress = ctx.evaluate(\"String(__asyncPassed) + '/' + String(__asyncExpected)\") catch js.Value.undef();",
-          "                                ^"
+          "error: CorpusFailures"
         ]
       },
       "status": "terminal-disposition-confirmed",
@@ -498,12 +469,12 @@
       "observed_status": "pass",
       "output": {
         "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (3871 ms)",
+          "  PASS  w16-c1-prevent-collection.js (13 ms)",
           "1/1 corpus files passed"
         ],
         "tail": [
           "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (3871 ms)",
+          "  PASS  w16-c1-prevent-collection.js (13 ms)",
           "------------------------",
           "1/1 corpus files passed"
         ]

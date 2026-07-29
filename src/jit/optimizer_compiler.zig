@@ -3517,6 +3517,33 @@ fn emitDirectDenseArrayRead(
     return direct;
 }
 
+fn emitDirectDenseArrayLengthRead(
+    assembler: *aarch64.Assembler,
+    program: *const Program,
+    operation: Operation,
+    descriptor: jit.NativeOperationDescriptor,
+) !?DirectRuntimeAccess {
+    if (descriptor.bytecode_op != @backingInt(bc.Op.get_prop) or descriptor.input_count != 1 or
+        operation.immediate >= program.native_operation_names.len)
+        return null;
+    const name = program.native_operation_names[operation.immediate] orelse return null;
+    if (!std.mem.eql(u8, name, "length")) return null;
+
+    var direct = DirectRuntimeAccess{};
+    // Array length is protected by the element lock in shared realms. The
+    // common dense-array guard rejects whenever parallel inline caches are on,
+    // before loading either the list base or length; bytecode then performs the
+    // canonical locked read. Isolated ordinary dense arrays with no cold length
+    // floor have list.len as their exact exotic Array length.
+    try emitDirectDenseArrayGuards(assembler, &direct, descriptor, descriptor.first_input, false);
+    try assembler.load64(16, 10, try objectElementsByteOffset("len"));
+    try assembler.convertUnsigned64ToFloat64(0, 16);
+    try assembler.moveRegisterFromFloat64(17, 0);
+    try assembler.store64(17, 14, try slotOffset(operation.destination));
+    try direct.addCompletion(try assembler.branchPlaceholder());
+    return direct;
+}
+
 fn emitDenseArrayWriteBarrier(
     assembler: *aarch64.Assembler,
     direct: *DirectRuntimeAccess,
@@ -3792,6 +3819,7 @@ fn emitRuntimeOperation(
     const numeric_result = descriptor.flags & jit.NativeOperationDescriptor.numeric_result != 0;
     if (numeric_result) {
         var direct = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
+            (try emitDirectDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
             (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
             return error.UnsupportedChunk;
         try direct.patchCompletions(assembler, assembler.position());
@@ -3819,6 +3847,7 @@ fn emitRuntimeOperation(
 
     const direct_runtime_access = (try emitDirectNamedPropertyRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectNamedPropertyWrite(assembler, program, operation, descriptor)) orelse
+        (try emitDirectDenseArrayLengthRead(assembler, program, operation, descriptor)) orelse
         (try emitDirectDenseArrayRead(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayWrite(assembler, operation, descriptor)) orelse
         (try emitDirectDenseArrayAppend(assembler, operation, descriptor)) orelse
@@ -5272,7 +5301,7 @@ test "optimizer lowering stages a zero-input environment load" {
     defer program.deinit();
     var saw_descriptor = false;
     for (program.native_operations) |descriptor| {
-        if (descriptor.bytecode_op != @intFromEnum(bc.Op.load_var)) continue;
+        if (descriptor.bytecode_op != @backingInt(bc.Op.load_var)) continue;
         try std.testing.expectEqual(@as(u16, 0), descriptor.input_count);
         try std.testing.expectEqual(@as(u32, 0), descriptor.origin);
         try std.testing.expect(descriptor.step_delta != 0);

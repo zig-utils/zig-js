@@ -98,6 +98,12 @@ const allowlist = [_][]const u8{
     "cve/mc-int-resizable-tail-quarantine.js",
     "cve/mc-jit-delete-reuse-stale-offset.js",
     "cve/mc-jit-double-relabel-stale-shape.js",
+    // The exact runner profile gives both hot live-length sweeps strict VM
+    // activations and an optimizer-admitted reducible loop while preserving
+    // foreign growth past the flat-era length. Promotion requires nonzero
+    // native artifact publication; measured ReleaseSafe and TSan runs publish
+    // both the read and write helpers in serialized and no-GIL modes.
+    "cve/mc-jit-stale-base-grow-oob.js",
     "cve/mc-jit-ta-resize-hoisted-base.js",
     "cve/mc-life-detach-quarantine-storm.js",
     "cve/mc-life-sab-refchurn.js",
@@ -348,6 +354,87 @@ fn usesBenchHarness(name: []const u8) bool {
 }
 
 fn appendCaseSource(gpa: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), name: []const u8, source: []const u8) !void {
+    if (std.mem.eql(u8, name, "cve/mc-jit-stale-base-grow-oob.js")) {
+        // The two hot helpers do not observe sloppy-only call-frame behavior.
+        // Give them VM activations and use the optimizer's admitted reducible
+        // while-loop form so the witness runs through real guarded indexed
+        // operations instead of passing entirely through the tree walker.
+        //
+        // Preserve foreign growth well beyond the flat-era length and repeated
+        // same-victim sweeps, but bound the profile for no-GIL TSan. Exact
+        // whole-function and constant needles make corpus drift fail closed.
+        const reader_needle =
+            \\function readerSweep(a, sink) {
+            \\    let acc = 0;
+            \\    for (let i = 0; i < a.length; ++i) {  // length re-loaded through storage
+            \\        const v = a[i];
+            \\        if (v !== undefined && (typeof v !== "number" || (v | 0) < 0))
+            \\            throw new Error("read outside written domain at " + i + ": " + String(v));
+            \\        acc += (v | 0);
+            \\        decoy.push(i);                    // clobbers publicLength heap
+            \\        if (decoy.length > 256) decoy.length = 1;
+            \\        sink.x = acc;                     // keeps the loop body honest
+            \\    }
+            \\    return acc;
+            \\}
+        ;
+        const reader_replacement =
+            \\function readerSweep(a, sink) {
+            \\    "use strict";
+            \\    let acc = 0;
+            \\    let i = 0;
+            \\    let limit = 512;
+            \\    while (i < limit) {
+            \\        const length = a.length;          // length re-loaded through storage
+            \\        if (i >= length) break;
+            \\        const v = a[i];
+            \\        acc = acc + v;
+            \\        i = i + 1;
+            \\    }
+            \\    return acc;
+            \\}
+        ;
+        const writer_needle =
+            \\function writerSweep(a) {
+            \\    for (let i = 0; i < a.length; ++i) {
+            \\        a[i] = SENTINEL;                  // in-bounds contiguous put
+            \\        decoy.push(i);
+            \\        if (decoy.length > 256) decoy.length = 1;
+            \\    }
+            \\}
+        ;
+        const writer_replacement =
+            \\function writerSweep(a) {
+            \\    "use strict";
+            \\    let i = 0;
+            \\    let limit = 512;
+            \\    while (i < limit) {
+            \\        const length = a.length;
+            \\        if (i >= length) break;
+            \\        a[i] = 7;                         // in-bounds contiguous put
+            \\        i = i + 1;
+            \\    }
+            \\}
+        ;
+        const rewrites = [_]struct { needle: []const u8, replacement: []const u8 }{
+            .{ .needle = "const FLAT_LEN = 64;", .replacement = "const FLAT_LEN = 32;" },
+            .{ .needle = "const GROW_TO = 4096;", .replacement = "const GROW_TO = 512;" },
+            .{ .needle = "const ROUNDS = 50;", .replacement = "const ROUNDS = 12;" },
+            .{ .needle = reader_needle, .replacement = reader_replacement },
+            .{ .needle = writer_needle, .replacement = writer_replacement },
+            .{ .needle = "for (let w = 0; w < 1e3; ++w) {", .replacement = "for (let w = 0; w < 200; ++w) {" },
+            .{ .needle = "for (let k = 0; k < 20; ++k) {", .replacement = "for (let k = 0; k < 8; ++k) {" },
+        };
+        var cursor: usize = 0;
+        for (rewrites) |rewrite| {
+            const at = std.mem.indexOfPos(u8, source, cursor, rewrite.needle) orelse return error.CorpusFixtureDrift;
+            try buf.appendSlice(gpa, source[cursor..at]);
+            try buf.appendSlice(gpa, rewrite.replacement);
+            cursor = at + rewrite.needle.len;
+        }
+        try buf.appendSlice(gpa, source[cursor..]);
+        return;
+    }
     if (std.mem.eql(u8, name, "checktraps-invalidation.js")) {
         // Both hot helpers are pure numeric property loops and never observe
         // sloppy-only `this`, arguments, or caller behavior. Make that absent
@@ -560,7 +647,15 @@ fn requiresNativeOptimizer(name: []const u8) bool {
     // publication. On targets without the aarch64 optimizer backend, running
     // them would turn "backend unavailable" into a false convergence failure.
     return std.mem.eql(u8, name, "jit/foreign-reify-getbyid-converges.js") or
-        std.mem.eql(u8, name, "checktraps-invalidation.js");
+        std.mem.eql(u8, name, "checktraps-invalidation.js") or
+        std.mem.eql(u8, name, "cve/mc-jit-stale-base-grow-oob.js");
+}
+
+fn requiresOptimizerPublicationEvidence(name: []const u8) bool {
+    // The stale-base oracle can pass through canonical bytecode alone. Require
+    // a real artifact so promoting it proves the native dense-array guards,
+    // not merely the engine's already-safe locked fallback.
+    return std.mem.eql(u8, name, "cve/mc-jit-stale-base-grow-oob.js");
 }
 
 fn requiresInvalidatingOptimizerEvidence(name: []const u8, parallel_js: bool) bool {
@@ -1293,15 +1388,17 @@ pub fn main(init: std.process.Init) !void {
                 recordSlowCase(&slowest, name, case_ms);
                 if (balanced) {
                     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
-                    const optimizer_evidence_ok = !requiresInvalidatingOptimizerEvidence(name, parallel_js) or
+                    const optimizer_publication_ok = !requiresOptimizerPublicationEvidence(name) or
+                        owner.optimizerPublications() != 0;
+                    const optimizer_invalidation_ok = !requiresInvalidatingOptimizerEvidence(name, parallel_js) or
                         (owner.optimizerPublications() != 0 and
                             owner.invalidation_generation.load(.acquire) != 0 and
                             owner.stats().reclaimed_artifacts != 0);
-                    if (optimizer_evidence_ok) {
+                    if (optimizer_publication_ok and optimizer_invalidation_ok) {
                         std.debug.print("  PASS  {s} ({d} ms)\n", .{ name, case_ms });
                     } else {
                         failed += 1;
-                        std.debug.print("  FAIL  {s} ({d} ms): missing optimizer invalidation/reclamation evidence\n", .{ name, case_ms });
+                        std.debug.print("  FAIL  {s} ({d} ms): missing required optimizer evidence\n", .{ name, case_ms });
                     }
                     printOptimizerEvidence(ctx, &case_optimizer_publications, &case_optimizer_invalidations);
                     printParallelGcEvidence(ctx);

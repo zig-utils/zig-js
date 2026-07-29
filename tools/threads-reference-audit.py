@@ -267,9 +267,7 @@ DEPENDENCY_CATALOG = {
     },
 }
 
-BLOCKED_DEPENDENCIES = {
-    "cve/mc-jit-stale-base-grow-oob.js": ("jsc-butterfly-verifier", "optimizing-jit"),
-}
+BLOCKED_DEPENDENCIES = {}
 
 SHELL_GLOBAL_HOOKS = (
     "MemoryFootprint",
@@ -738,9 +736,9 @@ def self_test_reference_inventory(*, emit: bool) -> bool:
     missing = copy.deepcopy(generated)
     reference = next(
         entry for entry in missing["files"]
-        if entry.get("execution_state") == "blocked"
+        if entry.get("execution_state") == "promoted"
     )
-    reference.pop("dependencies")
+    reference["execution_state"] = "blocked"
     cases.append(("missing disposition", missing, True))
 
     missing_terminal = copy.deepcopy(generated)

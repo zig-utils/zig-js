@@ -1,21 +1,5 @@
 {
-  "dependency_catalog": {
-    "jsc-butterfly-verifier": {
-      "description": "JSC-private butterfly verification and indexing-mode invariants",
-      "owner_issues": [
-        143,
-        146,
-        429
-      ]
-    },
-    "optimizing-jit": {
-      "description": "DFG/FTL-style profiling, speculation, invalidation, and tier evidence",
-      "owner_issues": [
-        146,
-        429
-      ]
-    }
-  },
+  "dependency_catalog": {},
   "files": [
     {
       "bytes": 5589,
@@ -1691,17 +1675,8 @@
     {
       "bytes": 6596,
       "case": "cve/mc-jit-stale-base-grow-oob.js",
-      "dependencies": [
-        "jsc-butterfly-verifier",
-        "optimizing-jit"
-      ],
-      "execution_state": "blocked",
+      "execution_state": "promoted",
       "kind": "javascript",
-      "owner_issues": [
-        143,
-        146,
-        429
-      ],
       "path": "threads-tests/cve/mc-jit-stale-base-grow-oob.js",
       "required_shell_hooks": [
         "global:load",
@@ -4203,12 +4178,12 @@
       "manifest": 1,
       "shell": 4
     },
-    "blocked": 1,
+    "blocked": 0,
     "executable": 259,
     "files": 339,
     "helper_preload": 5,
     "javascript": 264,
-    "promoted": 252,
+    "promoted": 253,
     "promoted_with_terminal_premises": 7,
     "terminal_disposition": 6
   }

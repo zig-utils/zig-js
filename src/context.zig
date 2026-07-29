@@ -17542,6 +17542,66 @@ test "vm admission: strict named-property loops reach the optimizer" {
     }
 }
 
+test "vm admission: live-length indexed loops reach the optimizer" {
+    const source =
+        \\function liveLengthRead(a) {
+        \\  "use strict";
+        \\  let acc = 0;
+        \\  let i = 0;
+        \\  let limit = 64;
+        \\  while (i < limit) {
+        \\    const length = a.length;
+        \\    if (i >= length) break;
+        \\    acc = acc + a[i];
+        \\    i = i + 1;
+        \\  }
+        \\  return acc;
+        \\}
+        \\function liveLengthWrite(a) {
+        \\  "use strict";
+        \\  let i = 0;
+        \\  let limit = 64;
+        \\  while (i < limit) {
+        \\    const length = a.length;
+        \\    if (i >= length) break;
+        \\    a[i] = 7;
+        \\    i = i + 1;
+        \\  }
+        \\}
+        \\globalThis.liveLengthArray = new Array(32);
+        \\for (let i = 0; i < 32; ++i) liveLengthArray[i] = i;
+        \\for (let warm = 0; warm < 64; ++warm) liveLengthRead(liveLengthArray);
+        \\for (let warm = 0; warm < 64; ++warm) liveLengthWrite(liveLengthArray);
+    ;
+
+    var results: [2]f64 = undefined;
+    for ([_]bool{ false, true }, 0..) |enable_jit, index| {
+        const ctx = try Context.createWith(std.testing.allocator, .{ .enable_jit = enable_jit });
+        defer ctx.destroy();
+        _ = try ctx.evaluate(source);
+        results[index] = (try ctx.evaluate("liveLengthRead(liveLengthArray) * 10000 + liveLengthArray.length * 100 + liveLengthArray[31]")).asNum();
+
+        const reader = try ctx.evaluate("liveLengthRead");
+        const reader_raw = reader.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+        const reader_func: *interp.Function = @ptrCast(@alignCast(reader_raw));
+        try std.testing.expect(reader_func.chunk != null);
+        const writer = try ctx.evaluate("liveLengthWrite");
+        const writer_raw = writer.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+        const writer_func: *interp.Function = @ptrCast(@alignCast(writer_raw));
+        try std.testing.expect(writer_func.chunk != null);
+
+        if (enable_jit and jit.supported and builtin.cpu.arch == .aarch64) {
+            try std.testing.expectEqual(jit.OptimizerTierState.ready, reader_func.chunk.?.optimizer_tier.state.load(.acquire));
+            try std.testing.expectEqual(jit.OptimizerTierState.ready, writer_func.chunk.?.optimizer_tier.state.load(.acquire));
+            try std.testing.expectEqual(@as(u64, 1), reader_func.chunk.?.optimizer_tier.compileCount());
+            try std.testing.expectEqual(@as(u64, 1), writer_func.chunk.?.optimizer_tier.compileCount());
+            try std.testing.expectEqual(@as(u64, 2), ctx.jit_owner.optimizerPublications());
+        }
+    }
+    try std.testing.expectEqual(@as(f64, 2243207), results[0]);
+    try std.testing.expectEqual(results[0], results[1]);
+}
+
 test "deep stack: main-realm non-tail recursion runs under the stack guard" {
     // Bounded witness for non-tail recursion on the main realm. Proper tail calls
     // now intentionally avoid native-stack growth for tail recursion, so the old
