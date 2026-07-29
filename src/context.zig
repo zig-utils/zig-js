@@ -765,6 +765,12 @@ pub const GcCellBacking = struct {
     /// collector resets it only after every mutator is frozen.
     parallel_cell_bytes_since_collection: std.atomic.Value(usize) = .init(0),
     parallel_cell_tracking_enabled: std.atomic.Value(bool) = .init(false),
+    /// Wake optimizer moving checkpoints when the shared allocation tranche
+    /// crosses its live Context-configured threshold. The request word is
+    /// distinct from full-compaction policy: the checkpoint decides whether
+    /// the pending work is a moving minor or an old-generation evacuation.
+    moving_checkpoint_request: ?*std.atomic.Value(bool) = null,
+    moving_checkpoint_threshold: ?*const usize = null,
     /// Last chunk with unbumped fresh slots for each bucket. Lazy allocation
     /// keeps this hot so object-heavy scripts do not rescan filled chunks.
     bucket_bump_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
@@ -1288,7 +1294,7 @@ pub const GcCellBacking = struct {
             out[allocated] = @ptrCast(ptr);
         }
         if (self.parallel and allocated != 0 and self.parallel_cell_tracking_enabled.load(.monotonic))
-            _ = self.parallel_cell_bytes_since_collection.fetchAdd(len * allocated, .monotonic);
+            self.recordParallelCellAllocation(len * allocated);
         return allocated;
     }
 
@@ -1403,7 +1409,7 @@ pub const GcCellBacking = struct {
             if (self.bulk_teardown) return null;
             const ptr = self.takeFreedSlotLocked(idx) orelse self.bumpFreshSlotLocked(idx);
             if (self.parallel and ptr != null and self.parallel_cell_tracking_enabled.load(.monotonic))
-                _ = self.parallel_cell_bytes_since_collection.fetchAdd(len, .monotonic);
+                self.recordParallelCellAllocation(len);
             return ptr;
         }
         self.acquireInner();
@@ -1413,6 +1419,17 @@ pub const GcCellBacking = struct {
 
     fn parallelCellBytesSinceCollection(self: *GcCellBacking) usize {
         return self.parallel_cell_bytes_since_collection.load(.acquire);
+    }
+
+    fn recordParallelCellAllocation(self: *GcCellBacking, bytes: usize) void {
+        const previous = self.parallel_cell_bytes_since_collection.fetchAdd(bytes, .monotonic);
+        const threshold = if (self.moving_checkpoint_threshold) |pointer|
+            pointer.*
+        else
+            return;
+        if (previous < threshold and previous +| bytes >= threshold) {
+            if (self.moving_checkpoint_request) |request| request.store(true, .release);
+        }
     }
 
     fn resetParallelCellBytesSinceCollection(self: *GcCellBacking) usize {
@@ -2906,6 +2923,10 @@ pub const Context = struct {
     /// pointer needed after resumption. Unsupported checkpoints leave it pending
     /// for a later declared safepoint or a direct quiescent `compactGarbage` call.
     gc_compaction_requested: std.atomic.Value(bool) = .init(false),
+    /// Wake word consumed by generated optimizer safepoints. It covers either
+    /// the explicit/full request above or allocation-triggered moving nursery
+    /// work; the collector inspects both policies after entering the checkpoint.
+    gc_moving_checkpoint_requested: std.atomic.Value(bool) = .init(false),
     /// Set only for the duration of a guarded mid-script collection so the GC
     /// binding (`gc.zig` `traceRoots`) conservatively scans the collecting
     /// thread's live native stack + spilled registers. Quiescent collection
@@ -4027,6 +4048,11 @@ pub const Context = struct {
                 .inner = context_gpa,
                 .parallel = false,
                 .expanded_chunks = true,
+                .moving_checkpoint_request = if (options.enable_jit and jit.supported)
+                    &self.gc_moving_checkpoint_requested
+                else
+                    null,
+                .moving_checkpoint_threshold = &self.gc_cooperative_tranche_bytes,
             };
             const cell_backing = gc_state.backing.allocator();
             gc_state.heap = GcHeap.init(cell_backing, &gc_state.binding);
@@ -4045,6 +4071,7 @@ pub const Context = struct {
             h.setAuxAllocator(if (private_gc_scratch) gpa else std.heap.page_allocator);
             h.setNurseryTenuringAge(runtime_gc_tenuring_age);
             h.setNurseryEnabled(true);
+            h.setMovingNurseryEnabled(true);
             self.gc = h;
             self.gc_binding = &gc_state.binding;
             self.gc_cell_backing = &gc_state.backing;
@@ -4268,7 +4295,7 @@ pub const Context = struct {
             .gc_environment_name_bytes_live = if (self.gc != null) &self.gc_environment_name_bytes_live else null,
             .gc_weak_work = if (self.gc != null) &self.gc_weak_work else null,
             .gc_requested = &self.gc_requested,
-            .gc_moving_requested = if (self.gc != null) &self.gc_compaction_requested else null,
+            .gc_moving_requested = if (self.gc != null) self.movingCheckpointRequest() else null,
             .gc_checkpoint_ctx = self,
             .gc_checkpoint_fn = serviceRequestedGcCheckpoint,
             .gc_recover_allocation_fn = recoverAllocationFailure,
@@ -5465,6 +5492,12 @@ pub const Context = struct {
         if (self.gc != null) self.gc_requested.store(true, .release);
     }
 
+    fn movingCheckpointRequest(self: *Context) *std.atomic.Value(bool) {
+        if (self.gc_cell_backing) |backing|
+            if (backing.moving_checkpoint_request) |request| return request;
+        return &self.gc_moving_checkpoint_requested;
+    }
+
     /// Request one moving collection at the next engine checkpoint that has
     /// published every managed value in precise registered roots and declared
     /// it can resume without raw managed pointers. Generic interpreter/native/
@@ -5475,6 +5508,7 @@ pub const Context = struct {
     pub fn requestGarbageCompaction(self: *Context) bool {
         if (self.gc == null) return false;
         self.gc_compaction_requested.store(true, .release);
+        self.movingCheckpointRequest().store(true, .release);
         return true;
     }
 
@@ -5961,8 +5995,27 @@ pub const Context = struct {
             _ = backing.trimCompactedTailChunks();
         self.gc_requested.store(false, .monotonic);
         self.gc_compaction_requested.store(false, .release);
+        self.movingCheckpointRequest().store(false, .release);
         if (builtin.is_test and moving_safepoint)
             _ = self.gc_moving_safepoint_compactions.fetchAdd(1, .monotonic);
+        return result;
+    }
+
+    /// Relocate the exact survivor set of one nursery cycle. Unlike full-heap
+    /// compaction, this does not open a dense-prefix evacuation plan: the
+    /// reusable backing reserves ordinary unpublished destinations, while the
+    /// Context relocation token keeps every typed root rewriteable.
+    fn collectYoungAfterRootValidation(self: *Context, h: *GcHeap) GcHeap.CompactionResult {
+        if (h.marking.load(.acquire) or h.concurrent.load(.acquire))
+            return .{ .status = .unsupported };
+        if (self.gc_relocation_active.cmpxchgStrong(false, true, .acq_rel, .acquire) != null)
+            return .{ .status = .unsupported };
+        defer self.gc_relocation_active.store(false, .release);
+
+        const result = h.collectYoungAndCompact();
+        if (result.status == .compacted or result.status == .no_candidates) {
+            if (self.gc_cell_backing) |backing| _ = backing.trimEmptyTailChunks();
+        }
         return result;
     }
 
@@ -5979,6 +6032,7 @@ pub const Context = struct {
             return false;
         _ = self.gc_auto_compaction_requests.fetchAdd(1, .monotonic);
         self.gc_compaction_requested.store(true, .release);
+        self.movingCheckpointRequest().store(true, .release);
         return true;
     }
 
@@ -6022,7 +6076,8 @@ pub const Context = struct {
             h.collect();
             full_collection = true;
         } else if (h.shouldCollectYoung()) {
-            h.collectYoung();
+            const result = self.collectYoungAfterRootValidation(h);
+            if (result.status == .unsupported) h.collectYoung();
         } else {
             return;
         }
@@ -6152,15 +6207,20 @@ pub const Context = struct {
     /// paths conservatively scan temporary host/register roots; a specialized
     /// path may prove those roots fully materialized and request precise tracing.
     /// A full or concurrent cycle already in progress keeps ownership of the checkpoint.
-    fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap, precise_roots: bool) bool {
+    fn collectYoungMidScriptIfNeeded(self: *Context, h: *GcHeap, machine: *interp.Interpreter) bool {
         if (h.marking.load(.acquire) or h.concurrent.load(.acquire)) return false;
         if (!h.shouldCollectYoung()) return false;
+        const precise_roots = machine.gc_precise_safepoint;
         self.gc_scan_native_stack = !precise_roots;
         defer self.gc_scan_native_stack = false;
         self.gc_scan_parked_stacks = !precise_roots;
         defer self.gc_scan_parked_stacks = false;
         const started_ns = parallelGcNowNs();
-        h.collectYoung();
+        const result = if (precise_roots and machine.gc_moving_safepoint)
+            self.collectYoungAfterRootValidation(h)
+        else
+            GcHeap.CompactionResult{ .status = .unsupported };
+        if (result.status == .unsupported) h.collectYoung();
         const elapsed = parallelGcNowNs() -| started_ns;
         _ = self.gc_minor_pause_ns_total.fetchAdd(elapsed, .monotonic);
         self.recordParallelGcMax(&self.gc_minor_pause_ns_max, elapsed);
@@ -6280,20 +6340,41 @@ pub const Context = struct {
             return;
         }
         if (machine.gc_parked.load(.acquire) or self.shouldDeferParallelGcRetry()) return;
-        const moving_request =
-            machine.gc_precise_safepoint and machine.gc_moving_safepoint and
-            self.gc_compaction_requested.load(.acquire);
         const backing = self.gc_cell_backing orelse return;
-        if (!moving_request and
-            backing.parallelCellBytesSinceCollection() < self.gc_cooperative_tranche_bytes) return;
+        const tranche_ready =
+            backing.parallelCellBytesSinceCollection() >= self.gc_cooperative_tranche_bytes;
+        const pending_compaction = self.gc_compaction_requested.load(.acquire);
+        const exact_moving_checkpoint =
+            machine.gc_precise_safepoint and machine.gc_moving_safepoint;
+        const compaction_request =
+            exact_moving_checkpoint and pending_compaction;
+        const nursery_checkpoint_pending =
+            !pending_compaction and tranche_ready and h.movingNurseryEnabled() and
+            h.shouldCollectYoung() and
+            self.movingCheckpointRequest().load(.acquire);
+        const moving_nursery_request =
+            nursery_checkpoint_pending and exact_moving_checkpoint;
+        const moving_request = compaction_request or moving_nursery_request;
+        if (!moving_request and !tranche_ready) return;
+        // A JIT-enabled heap that crossed the normal tranche gets a bounded
+        // chance to reach a declared exact native checkpoint. If it remains in
+        // an opaque/tree-walker path for four tranches, fall back to the
+        // conservative non-moving minor rather than allowing unbounded growth.
+        if (nursery_checkpoint_pending and !exact_moving_checkpoint and
+            backing.parallelCellBytesSinceCollection() <
+                self.gc_cooperative_tranche_bytes *| 4)
+        {
+            return;
+        }
         // A lone running mutator is faster collecting precisely at the host
         // boundary. Forget its tranche so it pays this registry check only once
         // per GiB rather than at every later VM checkpoint. A pending moving
         // request is different: a live Thread record blocks the host boundary,
         // while this interpreter checkpoint can safely service it by itself.
-        if (!moving_request and !self.hasCooperativeRunningPeer(machine)) {
+        if (!moving_request and !pending_compaction and !self.hasCooperativeRunningPeer(machine)) {
             const reset_bytes = backing.resetParallelCellBytesSinceCollection();
             _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
+            self.movingCheckpointRequest().store(false, .release);
             return;
         }
         if (!self.tryEnterJitGcConductor()) {
@@ -6309,10 +6390,10 @@ pub const Context = struct {
         defer self.gc_par_collector.store(null, .release);
         const started_ns = parallelGcNowNs();
         const automatic_moving_request =
-            moving_request and self.gc_auto_compaction_pending.load(.acquire);
-        if (!moving_request)
+            compaction_request and self.gc_auto_compaction_pending.load(.acquire);
+        if (!compaction_request)
             _ = self.gc_cooperative_attempts.fetchAdd(1, .monotonic);
-        defer if (!moving_request) self.recordCooperativeGcPause(started_ns);
+        defer if (!compaction_request) self.recordCooperativeGcPause(started_ns);
         defer if (automatic_moving_request)
             self.recordAutomaticSharedCompactionPause(started_ns);
 
@@ -6333,6 +6414,9 @@ pub const Context = struct {
                     if (automatic_moving_request) {
                         _ = self.gc_auto_compaction_shared_timeouts.fetchAdd(1, .monotonic);
                         self.recordAutomaticSharedCompactionRendezvous(started_ns);
+                    } else {
+                        _ = self.gc_cooperative_timeouts.fetchAdd(1, .monotonic);
+                        self.recordCooperativeGcRendezvous(started_ns);
                     }
                 } else {
                     _ = self.gc_cooperative_timeouts.fetchAdd(1, .monotonic);
@@ -6344,8 +6428,22 @@ pub const Context = struct {
             if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
         if (moving_request) {
-            if (automatic_moving_request)
+            if (automatic_moving_request) {
                 self.recordAutomaticSharedCompactionRendezvous(started_ns);
+            } else {
+                self.recordCooperativeGcRendezvous(started_ns);
+            }
+            if (moving_nursery_request) {
+                const result = self.collectYoungAfterRootValidation(h);
+                if (result.status == .unsupported) h.collectYoung();
+                const reset_bytes = backing.resetParallelCellBytesSinceCollection();
+                _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
+                self.movingCheckpointRequest().store(false, .release);
+                self.gc_par_retry_after_ns.store(0, .release);
+                _ = self.gc_cooperative_collections.fetchAdd(1, .monotonic);
+                _ = self.scheduleAutomaticCompactionIfNeeded();
+                return;
+            }
             const automatic = self.gc_auto_compaction_pending.load(.acquire);
             if (automatic) {
                 _ = self.gc_auto_compaction_attempts.fetchAdd(1, .monotonic);
@@ -6360,6 +6458,7 @@ pub const Context = struct {
             if (result.status != .unsupported) {
                 const reset_bytes = backing.resetParallelCellBytesSinceCollection();
                 _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
+                self.movingCheckpointRequest().store(false, .release);
                 self.gc_par_retry_after_ns.store(0, .release);
             }
             return;
@@ -6373,6 +6472,8 @@ pub const Context = struct {
         self.gc_scan_native_stack = false;
         const reset_bytes = backing.resetParallelCellBytesSinceCollection();
         _ = self.gc_cooperative_bytes_reset_total.fetchAdd(reset_bytes, .monotonic);
+        if (!pending_compaction)
+            self.movingCheckpointRequest().store(false, .release);
         self.gc_par_retry_after_ns.store(0, .release);
         _ = self.gc_cooperative_collections.fetchAdd(1, .monotonic);
         _ = self.scheduleAutomaticCompactionIfNeeded();
@@ -6421,7 +6522,7 @@ pub const Context = struct {
         // can reclaim it before returning to a host boundary. A single mutator
         // is stopped here, so collect young garbage directly instead of
         // repeatedly starting full-heap cycles from total live bytes.
-        if (self.collectYoungMidScriptIfNeeded(h, precise_roots)) return;
+        if (self.collectYoungMidScriptIfNeeded(h, machine)) return;
         // M3 concurrent driver (single-mutator, opt-in): begin a concurrent mark
         // at one safepoint and close it at the next, a dedicated marker thread
         // tracing during the window while the mutator runs. Stores feed the marker
@@ -17249,6 +17350,200 @@ test "enable_gc nursery: quiescent minor collection reclaims young garbage" {
     try std.testing.expectEqual(full_before, heap.full_collections);
 }
 
+test "moving nursery rewrites persistent roots across staggered age promotion" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    const moving_before = heap.accounting().moving_minor_collections;
+    _ = try ctx.evaluate("globalThis.movingParent = { marker: 40 };");
+    const parent_handle = try ctx.protectValue(ctx.global_object.getOwn("movingParent").?);
+    defer std.debug.assert(ctx.unprotectValue(parent_handle));
+    const first_parent = parent_handle.get().asObj();
+    const parent_id = heap.cellMetadata(first_parent).?.id;
+    var c_handle_value = Value.obj(first_parent);
+    try ctx.reserveCApiHandlesLocked(1);
+    ctx.c_api_handles.appendAssumeCapacity(.{ .ref = &c_handle_value, .count = 1 });
+    defer ctx.c_api_handles.clearRetainingCapacity();
+
+    const first = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, first.status);
+    const second_parent = parent_handle.get().asObj();
+    try std.testing.expect(first_parent != second_parent);
+    try std.testing.expectEqual(parent_id, heap.cellMetadata(second_parent).?.id);
+    try std.testing.expectEqual(second_parent, c_handle_value.asObj());
+
+    _ = try ctx.evaluate(
+        \\movingParent.child = { marker: 2 };
+        \\globalThis.movingWeak = new WeakRef(movingParent.child);
+    );
+    const first_child = parent_handle.get().asObj().getOwn("child").?.asObj();
+    const child_id = heap.cellMetadata(first_child).?.id;
+    var private_weak = Context.PrivateWeakRoot{};
+    private_weak.target.store(first_child, .release);
+    try ctx.private_weak_roots.append(ctx.gpa, &private_weak);
+    defer ctx.private_weak_roots.clearRetainingCapacity();
+
+    const second = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
+    const third_parent = parent_handle.get().asObj();
+    const second_child = third_parent.getOwn("child").?.asObj();
+    try std.testing.expect(second_parent != third_parent);
+    try std.testing.expect(first_child != second_child);
+    try std.testing.expectEqual(child_id, heap.cellMetadata(second_child).?.id);
+    try std.testing.expectEqual(@as(?*anyopaque, second_child), private_weak.target.load(.acquire));
+    try std.testing.expectEqual(third_parent, c_handle_value.asObj());
+
+    const third = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, third.status);
+    const promoted_parent = parent_handle.get().asObj();
+    const third_child = promoted_parent.getOwn("child").?.asObj();
+    try std.testing.expect(third_parent != promoted_parent);
+    try std.testing.expect(second_child != third_child);
+    try std.testing.expectEqual(parent_id, heap.cellMetadata(promoted_parent).?.id);
+    try std.testing.expectEqual(child_id, heap.cellMetadata(third_child).?.id);
+    try std.testing.expectEqual(promoted_parent, c_handle_value.asObj());
+
+    // The parent promoted one cycle before the child. Its promotion-created
+    // remembered card is now the child's only strong old-generation frontier.
+    const fourth = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, fourth.status);
+    const promoted_child = parent_handle.get().asObj().getOwn("child").?.asObj();
+    try std.testing.expect(third_child != promoted_child);
+    try std.testing.expectEqual(child_id, heap.cellMetadata(promoted_child).?.id);
+    try std.testing.expectEqual(@as(?*anyopaque, promoted_child), private_weak.target.load(.acquire));
+    try std.testing.expectEqual(parent_handle.get().asObj(), c_handle_value.asObj());
+    try std.testing.expect((try ctx.evaluate(
+        "movingWeak.deref() === movingParent.child && movingParent.marker + movingParent.child.marker === 42",
+    )).asBool());
+
+    const accounting = heap.accounting();
+    try std.testing.expectEqual(moving_before + 4, accounting.moving_minor_collections);
+    try std.testing.expect(accounting.total_minor_moved_cells > 4);
+    try std.testing.expect(accounting.total_minor_moved_bytes > 0);
+    try std.testing.expectEqual(@as(usize, 0), accounting.minor_move_failures);
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+}
+
+test "moving nursery preserves live ephemerons and clears weak finalization state" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        \\globalThis.movingWeakMap = new WeakMap();
+        \\globalThis.movingCleanup = [];
+        \\globalThis.movingRegistry = new FinalizationRegistry(
+        \\  held => movingCleanup.push(held)
+        \\);
+        \\globalThis.movingKey = { marker: 40 };
+        \\globalThis.movingValue = { marker: 2 };
+        \\movingWeakMap.set(movingKey, movingValue);
+        \\globalThis.movingValueRef = new WeakRef(movingValue);
+        \\globalThis.movingDeadRef = new WeakRef({ marker: 99 });
+        \\movingRegistry.register({}, 7);
+        \\movingValue = undefined;
+    );
+
+    const first = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, first.status);
+    _ = try ctx.evaluate("$drainFinalizationCleanup()");
+    try std.testing.expect((try ctx.evaluate(
+        "movingWeakMap.get(movingKey).marker === 2",
+    )).asBool());
+    try std.testing.expect((try ctx.evaluate(
+        "movingValueRef.deref().marker === 2",
+    )).asBool());
+    try std.testing.expect((try ctx.evaluate(
+        "movingDeadRef.deref() === undefined",
+    )).asBool());
+    try std.testing.expect((try ctx.evaluate(
+        "movingCleanup.length === 1 && movingCleanup[0] === 7",
+    )).asBool());
+
+    _ = try ctx.evaluate("movingKey = undefined");
+    const second = ctx.collectYoungAfterRootValidation(heap);
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.compacted, second.status);
+    try std.testing.expect((try ctx.evaluate(
+        "movingValueRef.deref() === undefined",
+    )).asBool());
+    try std.testing.expectEqual(@as(usize, 0), heap.accounting().minor_move_failures);
+}
+
+test "moving nursery pins a conservative checkpoint and moves at an exact checkpoint" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate("globalThis.movingCheckpointRoot = { marker: 42 };");
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("movingCheckpointRoot").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const original = handle.get().asObj();
+    const stable_id = heap.cellMetadata(original).?.id;
+
+    var machine = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&machine);
+    defer ctx.popActiveInterpreter(&machine);
+    heap.nursery_threshold_bytes = 1;
+    const moving_before = heap.accounting().moving_minor_collections;
+    try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+    try std.testing.expectEqual(original, handle.get().asObj());
+    try std.testing.expectEqual(moving_before, heap.accounting().moving_minor_collections);
+
+    heap.nursery_threshold_bytes = 1;
+    machine.gc_precise_safepoint = true;
+    machine.gc_moving_safepoint = true;
+    try std.testing.expect(ctx.collectYoungMidScriptIfNeeded(heap, &machine));
+    const moved = handle.get().asObj();
+    try std.testing.expect(original != moved);
+    try std.testing.expectEqual(stable_id, heap.cellMetadata(moved).?.id);
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expectEqual(@as(f64, 42), moved.getOwn("marker").?.asNum());
+}
+
+test "moving nursery scratch OOM preserves survivor addresses and stable identities" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate(
+        "globalThis.movingOomRoot = { child: { marker: 42 } };",
+    );
+    const root_before = ctx.global_object.getOwn("movingOomRoot").?.asObj();
+    const child_before = root_before.getOwn("child").?.asObj();
+    const root_id = heap.cellMetadata(root_before).?.id;
+    const child_id = heap.cellMetadata(child_before).?.id;
+    const failures_before = heap.accounting().minor_move_failures;
+
+    var no_scratch: [1]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&no_scratch);
+    const saved_aux = heap.aux;
+    heap.aux = fixed.allocator();
+    const result = ctx.collectYoungAfterRootValidation(heap);
+    heap.aux = saved_aux;
+
+    try std.testing.expectEqual(Context.GcHeap.CompactionStatus.out_of_memory, result.status);
+    const root_after = ctx.global_object.getOwn("movingOomRoot").?.asObj();
+    const child_after = root_after.getOwn("child").?.asObj();
+    try std.testing.expectEqual(root_before, root_after);
+    try std.testing.expectEqual(child_before, child_after);
+    try std.testing.expectEqual(root_id, heap.cellMetadata(root_after).?.id);
+    try std.testing.expectEqual(child_id, heap.cellMetadata(child_after).?.id);
+    try std.testing.expectEqual(failures_before + 1, heap.accounting().minor_move_failures);
+    try std.testing.expect(!ctx.gc_relocation_active.load(.acquire));
+}
+
 test "enable_gc nursery: old roots retain multi-age strong and weak graphs" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
     defer ctx.destroy();
@@ -19025,6 +19320,159 @@ test "parallel_js: cooperative shared nursery rendezvous bounds object churn" {
     try std.testing.expect(profile.minor_prepare_ns_total > 0);
     try std.testing.expect(profile.minor_trace_ns_total > 0);
     try std.testing.expect(profile.minor_sweep_ns_total > 0);
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
+    try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+}
+
+test "parallel_js moving nursery copies survivors at a shared exact rendezvous" {
+    if (builtin.single_threaded or !jit.supported or builtin.cpu.arch != .aarch64)
+        return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.gc_cooperative_tranche_bytes = 1024 * 1024;
+
+    _ = try ctx.evaluate(
+        \\globalThis.movingNurseryWitness = { marker: 0, child: { warm: true } };
+        \\globalThis.movingNurseryGate = new Int32Array(new SharedArrayBuffer(4));
+        \\function movingNurserySpin(limit, held) {
+        \\  var cursor = 0;
+        \\  while (cursor < limit) cursor = cursor + 1;
+        \\  return held.marker;
+        \\}
+        \\function movingNurseryLane(lane) {
+        \\  var ring = [];
+        \\  for (var i = 0; i < 64; i = i + 1)
+        \\    ring.push({ value: i, lane: lane, prior: 0 });
+        \\  for (var i = 0; i < 6000; i = i + 1) {
+        \\    var index = i & 63;
+        \\    var old = ring[index];
+        \\    ring[index] = { value: old.value + i + lane, lane: lane, prior: old.value };
+        \\  }
+        \\  Atomics.add(movingNurseryGate, 0, 1);
+        \\  while (Atomics.load(movingNurseryGate, 0) !== 3) {}
+        \\  return movingNurserySpin(2000000, movingNurseryWitness) + lane;
+        \\}
+        \\for (var warm = 0; warm < 10; warm = warm + 1)
+        \\  movingNurserySpin(6, movingNurseryWitness);
+    );
+    const spin_object = ctx.global_object.getOwn("movingNurserySpin").?.asObj();
+    const spin_function: *interp.Function = @ptrCast(@alignCast(spin_object.jsFunction().?));
+    const spin_chunk = spin_function.chunk orelse return error.TestUnexpectedResult;
+    const spin_artifact = spin_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(jit.CodeKind.optimizer, spin_artifact.kind);
+    try std.testing.expect(spin_artifact.osr != null and spin_artifact.stack_maps != null);
+
+    // Code, global infrastructure, and the SharedArrayBuffer side records are
+    // old before the moving-minor witness is introduced. The cycle below then
+    // moves the live young data graph while native frames keep executing the
+    // already-tenured function metadata.
+    ctx.collectGarbage();
+    const heap = ctx.gc.?;
+    heap.nursery_threshold_bytes = 1024 * 1024;
+    _ = try ctx.evaluate(
+        "globalThis.movingNurseryWitness = { marker: 365, child: { live: true } };",
+    );
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("movingNurseryWitness").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const witness_before = @intFromPtr(handle.get().asObj());
+    const accounting_before = heap.accounting();
+    const attempts_before = ctx.gc_cooperative_attempts.load(.monotonic);
+    const collections_before = ctx.gc_cooperative_collections.load(.monotonic);
+    const parks_before = ctx.gc_cooperative_peer_parks.load(.monotonic);
+    const timeouts_before = ctx.gc_cooperative_timeouts.load(.monotonic);
+    const osr_before = vm.optimizerOsrEntriesForTesting();
+
+    const result = try ctx.evaluate(
+        \\var movingNurseryFirst = new Thread(movingNurseryLane, 1);
+        \\var movingNurserySecond = new Thread(movingNurseryLane, 2);
+        \\var movingNurseryMain = movingNurseryLane(3);
+        \\movingNurseryMain + movingNurseryFirst.join() + movingNurserySecond.join();
+    );
+    try std.testing.expectEqual(@as(f64, 1101), result.asNum());
+
+    const accounting_after = heap.accounting();
+    try std.testing.expect(accounting_after.moving_minor_collections > accounting_before.moving_minor_collections);
+    try std.testing.expect(accounting_after.total_minor_moved_cells > accounting_before.total_minor_moved_cells);
+    try std.testing.expect(accounting_after.total_minor_moved_bytes > accounting_before.total_minor_moved_bytes);
+    try std.testing.expect(ctx.gc_cooperative_attempts.load(.monotonic) > attempts_before);
+    try std.testing.expect(ctx.gc_cooperative_collections.load(.monotonic) > collections_before);
+    try std.testing.expect(ctx.gc_cooperative_peer_parks.load(.monotonic) > parks_before);
+    try std.testing.expect(ctx.gc_cooperative_timeouts.load(.monotonic) - timeouts_before <= 2);
+    try std.testing.expect(vm.optimizerOsrEntriesForTesting() > osr_before);
+    try std.testing.expect(witness_before != @intFromPtr(handle.get().asObj()));
+    try std.testing.expectEqual(@as(f64, 365), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expect(!ctx.gc_moving_checkpoint_requested.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
+    try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
+}
+
+test "parallel_js moving nursery retries after a bounded opaque-peer timeout" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = false,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    ctx.collectGarbage();
+
+    const heap = ctx.gc.?;
+    heap.threshold_bytes = std.math.maxInt(usize);
+    heap.nursery_threshold_bytes = std.math.maxInt(usize);
+    _ = try ctx.evaluate("globalThis.movingRetryRoot = { marker: 366 };");
+    const handle = try ctx.protectValue(ctx.global_object.getOwn("movingRetryRoot").?);
+    defer std.debug.assert(ctx.unprotectValue(handle));
+    const root_before = handle.get().asObj();
+    const moving_before = heap.accounting().moving_minor_collections;
+    const timeouts_before = ctx.gc_cooperative_timeouts.load(.monotonic);
+
+    ctx.gc_cooperative_tranche_bytes = 1;
+    heap.nursery_threshold_bytes = 1;
+    const backing = ctx.gc_cell_backing.?;
+    backing.parallel_cell_bytes_since_collection.store(1, .release);
+    ctx.gc_moving_checkpoint_requested.store(true, .release);
+
+    var collector = ctx.interpreter();
+    var peer = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&collector);
+    defer ctx.popActiveInterpreter(&collector);
+    try ctx.pushActiveInterpreter(&peer);
+    defer ctx.popActiveInterpreter(&peer);
+    collector.gc_precise_safepoint = true;
+    collector.gc_moving_safepoint = true;
+    peer.gc_parked.store(true, .release);
+    defer peer.gc_parked.store(false, .release);
+
+    // This peer is frozen at an opaque/native boundary. The 100 ms rendezvous
+    // must abort without consuming the moving request or changing any address.
+    ctx.serviceCooperativeYoungGc(heap, &collector);
+    try std.testing.expectEqual(timeouts_before + 1, ctx.gc_cooperative_timeouts.load(.monotonic));
+    try std.testing.expectEqual(root_before, handle.get().asObj());
+    try std.testing.expectEqual(moving_before, heap.accounting().moving_minor_collections);
+    try std.testing.expect(ctx.gc_moving_checkpoint_requested.load(.acquire));
+    try std.testing.expect(backing.parallelCellBytesSinceCollection() >= 1);
+
+    // Publish the next exact generation and retry. No allocation or graph
+    // mutation occurred during the aborted attempt, so the same request can
+    // complete and rewrite the protected root.
+    ctx.gc_par_retry_after_ns.store(0, .release);
+    peer.gc_moving_parked.store(true, .release);
+    defer peer.gc_moving_parked.store(false, .release);
+    peer.gc_published_gen.store(ctx.gc_par_next_request.load(.monotonic), .release);
+    ctx.serviceCooperativeYoungGc(heap, &collector);
+
+    try std.testing.expect(root_before != handle.get().asObj());
+    try std.testing.expectEqual(moving_before + 1, heap.accounting().moving_minor_collections);
+    try std.testing.expectEqual(@as(f64, 366), handle.get().asObj().getOwn("marker").?.asNum());
+    try std.testing.expect(!ctx.gc_moving_checkpoint_requested.load(.acquire));
     try std.testing.expectEqual(@as(u64, 0), ctx.gc_par_request.load(.acquire));
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
 }

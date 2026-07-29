@@ -3019,6 +3019,15 @@ pub const Binding = struct {
         return backing.shouldRelocateCell(cell);
     }
 
+    /// Nursery relocation is selected by zig-gc's exact survivor set rather
+    /// than the old-generation tail plan. The Context token still proves that
+    /// every live execution root can be rewritten; all managed cells use the
+    /// owned backing, whose reservation hook supplies failure atomicity.
+    pub fn canRelocateYoung(self: *Binding, _: *anyopaque, _: Kind) bool {
+        return self.context.gc_relocation_active.load(.acquire) and
+            self.context.gc_cell_backing != null;
+    }
+
     pub fn relocateRoots(self: *Binding, v: anytype) void {
         const state = self.context.gc_state orelse {
             relocateContextRoots(self.context, v);
