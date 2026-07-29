@@ -104,6 +104,14 @@ class RowTests(unittest.TestCase):
         benchmark.validate_row(moving, quick=False)
         with self.assertRaisesRegex(ValueError, "moving-minor"):
             benchmark.validate_row(dataclasses.replace(moving, moved_bytes=0), quick=False)
+        benchmark.validate_row(
+            row(
+                scenario="ephemeral",
+                moving=1,
+                moving_minor_collections=3,
+            ),
+            quick=False,
+        )
 
     def test_nonmoving_rows_reject_copy_telemetry(self) -> None:
         with self.assertRaisesRegex(ValueError, "unexpected moving-minor"):

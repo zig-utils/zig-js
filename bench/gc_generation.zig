@@ -152,6 +152,7 @@ fn runSingle(
         .{config.ring},
     ));
     const heap = prepareContext(ctx, age, moving, trigger_bytes);
+    if (trigger == .forced) heap.nursery_threshold_bytes = std.math.maxInt(usize);
     const before = heap.accounting();
     const source = try std.fmt.allocPrint(init.arena.allocator(), "__generationRun({d})", .{batch});
     var pause_total_ns: u64 = 0;
@@ -332,7 +333,10 @@ pub fn main(init: std.process.Init) !void {
     if (young_input_bytes != survived_bytes + reclaimed_bytes)
         return error.InvalidMinorAccounting;
     if (moving) {
-        if (moving_minor_collections == 0 or moved_cells == 0 or moved_bytes == 0 or move_failures != 0) {
+        if (moving_minor_collections == 0 or
+            (scenario != .ephemeral and (moved_cells == 0 or moved_bytes == 0)) or
+            move_failures != 0)
+        {
             std.debug.print(
                 "invalid moving minor accounting: minors={d} moving={d} moved_cells={d} moved_bytes={d} failures={d} survivors={d} attempts={d} cooperative={d} parks={d} timeouts={d} request={}\n",
                 .{

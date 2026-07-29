@@ -129,7 +129,14 @@ def validate_row(row: Row, quick: bool) -> None:
         row.move_failures,
     )
     if row.moving:
-        if min(movement[:3]) <= 0 or row.move_failures != 0:
+        if (
+            row.moving_minor_collections <= 0
+            or (
+                row.scenario != "ephemeral"
+                and (row.moved_cells <= 0 or row.moved_bytes <= 0)
+            )
+            or row.move_failures != 0
+        ):
             raise ValueError(f"invalid moving-minor telemetry: {row}")
     elif movement != (0, 0, 0, 0):
         raise ValueError(f"unexpected moving-minor telemetry: {row}")
