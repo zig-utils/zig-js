@@ -412,6 +412,10 @@
     {
       "bytes": 6527,
       "case": "api/blocking-gate.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/blocking-gate.js",
@@ -425,6 +429,10 @@
     {
       "bytes": 6830,
       "case": "api/condition-async-wait.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/condition-async-wait.js",
@@ -437,6 +445,10 @@
     {
       "bytes": 4545,
       "case": "api/condition-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/condition-basic.js",
@@ -449,6 +461,10 @@
     {
       "bytes": 1815,
       "case": "api/condition-wait-termination.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/condition-wait-termination.js",
@@ -464,6 +480,10 @@
     {
       "bytes": 8165,
       "case": "api/lock-async-hold.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/lock-async-hold.js",
@@ -476,6 +496,10 @@
     {
       "bytes": 3368,
       "case": "api/lock-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/lock-basic.js",
@@ -488,6 +512,10 @@
     {
       "bytes": 1983,
       "case": "api/lock-hold-termination.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/lock-hold-termination.js",
@@ -503,6 +531,10 @@
     {
       "bytes": 4044,
       "case": "api/park-no-microtask-drain.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/park-no-microtask-drain.js",
@@ -515,6 +547,10 @@
     {
       "bytes": 3751,
       "case": "api/thread-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-basic.js",
@@ -527,6 +563,10 @@
     {
       "bytes": 5175,
       "case": "api/thread-ctor-errors.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-ctor-errors.js",
@@ -539,6 +579,10 @@
     {
       "bytes": 2721,
       "case": "api/thread-exc.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-exc.js",
@@ -551,6 +595,10 @@
     {
       "bytes": 3241,
       "case": "api/thread-id-bounds.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-id-bounds.js",
@@ -564,6 +612,10 @@
     {
       "bytes": 2823,
       "case": "api/thread-lifecycle.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-lifecycle.js",
@@ -576,6 +628,10 @@
     {
       "bytes": 10256,
       "case": "api/thread-restrict.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/thread-restrict.js",
@@ -588,6 +644,10 @@
     {
       "bytes": 2800,
       "case": "api/threadlocal-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/api/threadlocal-basic.js",
@@ -600,6 +660,10 @@
     {
       "bytes": 2470,
       "case": "api/wasm-refused-sd7.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/api/wasm-refused-sd7.js",
@@ -630,6 +694,10 @@
     {
       "bytes": 4399,
       "case": "arrays/copy-on-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/arrays/copy-on-write.js",
@@ -642,6 +710,10 @@
     {
       "bytes": 4441,
       "case": "arrays/holes.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/arrays/holes.js",
@@ -654,6 +726,10 @@
     {
       "bytes": 5047,
       "case": "arrays/push-resize-multithread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/arrays/push-resize-multithread.js",
@@ -666,6 +742,10 @@
     {
       "bytes": 4128,
       "case": "arrays/shared-element-read-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/arrays/shared-element-read-write.js",
@@ -678,6 +758,10 @@
     {
       "bytes": 5563,
       "case": "arrays/typed-arrays-sab.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/arrays/typed-arrays-sab.js",
@@ -690,6 +774,10 @@
     {
       "bytes": 3262,
       "case": "atomics/property-cas-delete-undefined-sentinel-u5.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-cas-delete-undefined-sentinel-u5.js",
@@ -702,6 +790,10 @@
     {
       "bytes": 3102,
       "case": "atomics/property-cas-dictionary-delete-u5.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-cas-dictionary-delete-u5.js",
@@ -714,6 +806,10 @@
     {
       "bytes": 3300,
       "case": "atomics/property-cas-samevaluezero.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-cas-samevaluezero.js",
@@ -726,6 +822,10 @@
     {
       "bytes": 3233,
       "case": "atomics/property-cas-storm-u28-flat.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-cas-storm-u28-flat.js",
@@ -738,6 +838,10 @@
     {
       "bytes": 3272,
       "case": "atomics/property-cas-storm-u5-as.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-cas-storm-u5-as.js",
@@ -750,6 +854,10 @@
     {
       "bytes": 7674,
       "case": "atomics/property-errors.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-errors.js",
@@ -762,6 +870,10 @@
     {
       "bytes": 3807,
       "case": "atomics/property-load-store.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-load-store.js",
@@ -774,6 +886,10 @@
     {
       "bytes": 3514,
       "case": "atomics/property-rmw.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-rmw.js",
@@ -786,6 +902,10 @@
     {
       "bytes": 2595,
       "case": "atomics/property-store-missing-define-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-store-missing-define-race.js",
@@ -798,6 +918,10 @@
     {
       "bytes": 4296,
       "case": "atomics/property-wait-notify.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-wait-notify.js",
@@ -810,6 +934,10 @@
     {
       "bytes": 1798,
       "case": "atomics/property-wait-termination.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-wait-termination.js",
@@ -825,6 +953,10 @@
     {
       "bytes": 2507,
       "case": "atomics/property-waitasync-timeout.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-waitasync-timeout.js",
@@ -837,6 +969,10 @@
     {
       "bytes": 3637,
       "case": "atomics/property-wtr-isolation.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/property-wtr-isolation.js",
@@ -849,6 +985,10 @@
     {
       "bytes": 10156,
       "case": "atomics/ta-path-unchanged.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/ta-path-unchanged.js",
@@ -861,6 +1001,10 @@
     {
       "bytes": 2340,
       "case": "atomics/ta-wait-thread-gate.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/atomics/ta-wait-thread-gate.js",
@@ -873,6 +1017,10 @@
     {
       "bytes": 889,
       "case": "bench/array-element-read.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/array-element-read.js",
@@ -884,6 +1032,10 @@
     {
       "bytes": 1069,
       "case": "bench/array-element-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/array-element-write.js",
@@ -895,6 +1047,10 @@
     {
       "bytes": 1575,
       "case": "bench/flat-butterfly-read.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/flat-butterfly-read.js",
@@ -906,6 +1062,10 @@
     {
       "bytes": 1506,
       "case": "bench/flat-butterfly-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/flat-butterfly-write.js",
@@ -930,6 +1090,10 @@
     {
       "bytes": 755,
       "case": "bench/inline-property-read.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/inline-property-read.js",
@@ -941,6 +1105,10 @@
     {
       "bytes": 788,
       "case": "bench/inline-property-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/inline-property-write.js",
@@ -952,6 +1120,10 @@
     {
       "bytes": 1155,
       "case": "bench/megamorphic-access.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/megamorphic-access.js",
@@ -963,6 +1135,10 @@
     {
       "bytes": 2209,
       "case": "bench/transition-heavy-constructor.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/bench/transition-heavy-constructor.js",
@@ -974,6 +1150,9 @@
     {
       "bytes": 3464,
       "case": "checktraps-havebadtime-park.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/checktraps-havebadtime-park.js",
@@ -987,6 +1166,9 @@
     {
       "bytes": 8705,
       "case": "checktraps-invalidation.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/checktraps-invalidation.js",
@@ -1000,6 +1182,10 @@
     {
       "bytes": 3046,
       "case": "congc-t1-window-split.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t1-window-split.js",
@@ -1016,6 +1202,10 @@
     {
       "bytes": 5584,
       "case": "congc-t11-diagnostics.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t11-diagnostics.js",
@@ -1042,6 +1232,10 @@
     {
       "bytes": 2265,
       "case": "congc-t2-lockorder-lint.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/congc-t2-lockorder-lint.js",
@@ -1075,6 +1269,10 @@
     {
       "bytes": 6206,
       "case": "congc-t3-barrier-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t3-barrier-storm.js",
@@ -1101,6 +1299,10 @@
     {
       "bytes": 5360,
       "case": "congc-t4-alloc-steal-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t4-alloc-steal-storm.js",
@@ -1127,6 +1329,10 @@
     {
       "bytes": 8259,
       "case": "congc-t5-celllock-audit.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t5-celllock-audit.js",
@@ -1152,6 +1358,10 @@
     {
       "bytes": 12775,
       "case": "congc-t8-stop-interleaving.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/congc-t8-stop-interleaving.js",
@@ -1192,6 +1402,10 @@
     {
       "bytes": 7896,
       "case": "congc-t9-attach-exit-churn.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/congc-t9-attach-exit-churn.js",
@@ -1217,6 +1431,9 @@
     {
       "bytes": 10892,
       "case": "cve/mc-aint-poll-resume-stale-elided.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
@@ -1237,6 +1454,10 @@
     {
       "bytes": 3986,
       "case": "cve/mc-aint-terminate-notify-park-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-aint-terminate-notify-park-race.js",
@@ -1252,6 +1473,10 @@
     {
       "bytes": 4294,
       "case": "cve/mc-code-calllink-writer-writer.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-code-calllink-writer-writer.js",
@@ -1267,6 +1492,10 @@
     {
       "bytes": 4495,
       "case": "cve/mc-code-deferred-fire-stale-window.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-code-deferred-fire-stale-window.js",
@@ -1281,6 +1510,10 @@
     {
       "bytes": 4258,
       "case": "cve/mc-code-sleep-through-jettison-isb.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-code-sleep-through-jettison-isb.js",
@@ -1295,6 +1528,10 @@
     {
       "bytes": 4444,
       "case": "cve/mc-df-arraycopy-relabel.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-arraycopy-relabel.js",
@@ -1326,6 +1563,10 @@
     {
       "bytes": 3292,
       "case": "cve/mc-df-delete-reuse.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-delete-reuse.js",
@@ -1338,6 +1579,10 @@
     {
       "bytes": 3012,
       "case": "cve/mc-df-segmented-length.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-segmented-length.js",
@@ -1352,6 +1597,10 @@
     {
       "bytes": 3910,
       "case": "cve/mc-df-ta-detach-resize.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-ta-detach-resize.js",
@@ -1365,6 +1614,10 @@
     {
       "bytes": 3113,
       "case": "cve/mc-df-ta-sort-inplace.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-ta-sort-inplace.js",
@@ -1377,6 +1630,10 @@
     {
       "bytes": 4039,
       "case": "cve/mc-df-wasm-compile-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-df-wasm-compile-race.js",
@@ -1391,6 +1648,9 @@
     {
       "bytes": 7974,
       "case": "cve/mc-dos-retired-artifact-churn.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-dos-retired-artifact-churn.js",
@@ -1410,6 +1670,10 @@
     {
       "bytes": 7986,
       "case": "cve/mc-dos-waiter-table-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-dos-waiter-table-storm.js",
@@ -1427,6 +1691,10 @@
     {
       "bytes": 4928,
       "case": "cve/mc-gc-blocked-native-roots.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-gc-blocked-native-roots.js",
@@ -1444,6 +1712,10 @@
     {
       "bytes": 4549,
       "case": "cve/mc-gc-finreg-cross-thread-gc.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-gc-finreg-cross-thread-gc.js",
@@ -1461,6 +1733,10 @@
     {
       "bytes": 4419,
       "case": "cve/mc-gc-thread-shell-finalizer-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-gc-thread-shell-finalizer-storm.js",
@@ -1479,6 +1755,10 @@
     {
       "bytes": 6506,
       "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-gc-weakgcmap-registry-vs-prune.js",
@@ -1497,6 +1777,10 @@
     {
       "bytes": 9309,
       "case": "cve/mc-grow-buffer-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-grow-buffer-storm.js",
@@ -1511,6 +1795,10 @@
     {
       "bytes": 3334,
       "case": "cve/mc-grow-s4-detach-nullvec-repro.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-grow-s4-detach-nullvec-repro.js",
@@ -1528,6 +1816,10 @@
     {
       "bytes": 5145,
       "case": "cve/mc-grow-wasm-relocating-grow.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-grow-wasm-relocating-grow.js",
@@ -1543,6 +1835,10 @@
     {
       "bytes": 5172,
       "case": "cve/mc-hand-dead-registrant-settle.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-hand-dead-registrant-settle.js",
@@ -1556,6 +1852,10 @@
     {
       "bytes": 5292,
       "case": "cve/mc-hand-restrict-claim.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-hand-restrict-claim.js",
@@ -1568,6 +1868,10 @@
     {
       "bytes": 3851,
       "case": "cve/mc-init-butterfly-grow-slack.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-init-butterfly-grow-slack.js",
@@ -1581,6 +1885,10 @@
     {
       "bytes": 3543,
       "case": "cve/mc-init-cloned-arguments-specials.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-init-cloned-arguments-specials.js",
@@ -1593,6 +1901,10 @@
     {
       "bytes": 3423,
       "case": "cve/mc-init-direct-arguments-override.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-init-direct-arguments-override.js",
@@ -1606,6 +1918,10 @@
     {
       "bytes": 4977,
       "case": "cve/mc-init-lazy-global-first-touch.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-init-lazy-global-first-touch.js",
@@ -1618,6 +1934,10 @@
     {
       "bytes": 4443,
       "case": "cve/mc-init-rope-resolve-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-init-rope-resolve-race.js",
@@ -1630,6 +1950,10 @@
     {
       "bytes": 12087,
       "case": "cve/mc-int-resizable-tail-quarantine.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-int-resizable-tail-quarantine.js",
@@ -1646,6 +1970,10 @@
     {
       "bytes": 5091,
       "case": "cve/mc-jit-delete-reuse-stale-offset.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-jit-delete-reuse-stale-offset.js",
@@ -1661,6 +1989,10 @@
     {
       "bytes": 4739,
       "case": "cve/mc-jit-double-relabel-stale-shape.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-jit-double-relabel-stale-shape.js",
@@ -1675,6 +2007,10 @@
     {
       "bytes": 6596,
       "case": "cve/mc-jit-stale-base-grow-oob.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-jit-stale-base-grow-oob.js",
@@ -1689,6 +2025,10 @@
     {
       "bytes": 5245,
       "case": "cve/mc-jit-ta-resize-hoisted-base.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-jit-ta-resize-hoisted-base.js",
@@ -1703,6 +2043,10 @@
     {
       "bytes": 6166,
       "case": "cve/mc-life-creator-thread-dies.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-life-creator-thread-dies.js",
@@ -1734,6 +2078,10 @@
     {
       "bytes": 6199,
       "case": "cve/mc-life-detach-quarantine-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-life-detach-quarantine-storm.js",
@@ -1746,6 +2094,10 @@
     {
       "bytes": 5108,
       "case": "cve/mc-life-sab-refchurn.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-life-sab-refchurn.js",
@@ -1758,6 +2110,10 @@
     {
       "bytes": 4090,
       "case": "cve/mc-life-wasm-grow-relocate.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-life-wasm-grow-relocate.js",
@@ -1772,6 +2128,10 @@
     {
       "bytes": 3980,
       "case": "cve/mc-lock-cow-materialize-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-lock-cow-materialize-race.js",
@@ -1784,6 +2144,10 @@
     {
       "bytes": 5137,
       "case": "cve/mc-lock-n3-install-vs-owner-add.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-lock-n3-install-vs-owner-add.js",
@@ -1797,6 +2161,10 @@
     {
       "bytes": 4478,
       "case": "cve/mc-lock-stop-vs-park.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-lock-stop-vs-park.js",
@@ -1809,6 +2177,10 @@
     {
       "bytes": 4650,
       "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
@@ -1821,6 +2193,10 @@
     {
       "bytes": 4483,
       "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
@@ -1833,6 +2209,10 @@
     {
       "bytes": 5911,
       "case": "cve/mc-prim-async-generator-resume-claim.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-async-generator-resume-claim.js",
@@ -1846,6 +2226,10 @@
     {
       "bytes": 3333,
       "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-generator-claim-leak-stack-overflow.js",
@@ -1859,6 +2243,10 @@
     {
       "bytes": 4506,
       "case": "cve/mc-prim-generator-resume-claim.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-generator-resume-claim.js",
@@ -1871,6 +2259,10 @@
     {
       "bytes": 4421,
       "case": "cve/mc-prim-indexed-missing-define-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-prim-indexed-missing-define-race.js",
@@ -1883,6 +2275,10 @@
     {
       "bytes": 4587,
       "case": "cve/mc-reent-coercion-order.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-reent-coercion-order.js",
@@ -1895,6 +2291,10 @@
     {
       "bytes": 4081,
       "case": "cve/mc-reent-store-missing-indexed-define-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-reent-store-missing-indexed-define-race.js",
@@ -1907,6 +2307,10 @@
     {
       "bytes": 1777,
       "case": "cve/mc-safe-gcwait-rope-repro.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-safe-gcwait-rope-repro.js",
@@ -1924,6 +2328,9 @@
     {
       "bytes": 2247,
       "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
@@ -1944,6 +2351,9 @@
     {
       "bytes": 3421,
       "case": "cve/mc-safe-gcwait-vs-classa-stop.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop.js",
@@ -1964,6 +2374,10 @@
     {
       "bytes": 4243,
       "case": "cve/mc-safe-regexp-tts-watchdog.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-safe-regexp-tts-watchdog.js",
@@ -1985,6 +2399,10 @@
     {
       "bytes": 4208,
       "case": "cve/mc-safe-spin-vs-classa-stop.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-safe-spin-vs-classa-stop.js",
@@ -2005,6 +2423,9 @@
     {
       "bytes": 4240,
       "case": "cve/mc-spec-timer-capability.js",
+      "execution_modes": [
+        "parallel-js"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-spec-timer-capability.js",
@@ -2019,6 +2440,10 @@
     {
       "bytes": 5091,
       "case": "cve/mc-tdwn-exit-vs-settle.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tdwn-exit-vs-settle.js",
@@ -2031,6 +2456,10 @@
     {
       "bytes": 5395,
       "case": "cve/mc-tdwn-tid-recycle-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tdwn-tid-recycle-storm.js",
@@ -2047,6 +2476,10 @@
     {
       "bytes": 2652,
       "case": "cve/mc-tdwn-vm-teardown-unjoined.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tdwn-vm-teardown-unjoined.js",
@@ -2059,6 +2492,10 @@
     {
       "bytes": 3394,
       "case": "cve/mc-tear-date-cache.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tear-date-cache.js",
@@ -2072,6 +2509,10 @@
     {
       "bytes": 4546,
       "case": "cve/mc-tear-generator-resume.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tear-generator-resume.js",
@@ -2085,6 +2526,10 @@
     {
       "bytes": 6409,
       "case": "cve/mc-tear-rope-resolve-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tear-rope-resolve-race.js",
@@ -2098,6 +2543,10 @@
     {
       "bytes": 5702,
       "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-tear-typedarray-detach-grow-shrink.js",
@@ -2111,6 +2560,10 @@
     {
       "bytes": 3260,
       "case": "cve/mc-val-atom-identity.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-val-atom-identity.js",
@@ -2123,6 +2576,10 @@
     {
       "bytes": 4062,
       "case": "cve/mc-val-fire-vs-link.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-val-fire-vs-link.js",
@@ -2135,6 +2592,10 @@
     {
       "bytes": 5070,
       "case": "cve/mc-val-llint-cache-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-val-llint-cache-storm.js",
@@ -2149,6 +2610,10 @@
     {
       "bytes": 5525,
       "case": "cve/mc-val-multislot-clone.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-val-multislot-clone.js",
@@ -2163,6 +2628,10 @@
     {
       "bytes": 8106,
       "case": "cve/mc-val-tid-reissue-false-owner.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-val-tid-reissue-false-owner.js",
@@ -2181,6 +2650,10 @@
     {
       "bytes": 5708,
       "case": "cve/mc-wait-property-wait-lost-wakeup.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/cve/mc-wait-property-wait-lost-wakeup.js",
@@ -2198,6 +2671,10 @@
     {
       "bytes": 3331,
       "case": "dw1-sort-comparator-callsite-shapes.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/dw1-sort-comparator-callsite-shapes.js",
@@ -2209,6 +2686,10 @@
     {
       "bytes": 1668,
       "case": "dw1-sort-comparator-iterator-host.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/dw1-sort-comparator-iterator-host.js",
@@ -2221,6 +2702,10 @@
     {
       "bytes": 5602,
       "case": "dw1-sort-comparator-osr.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/dw1-sort-comparator-osr.js",
@@ -2234,6 +2719,10 @@
     {
       "bytes": 4834,
       "case": "dw2-marklistset-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/dw2-marklistset-storm.js",
@@ -2255,6 +2744,10 @@
     {
       "bytes": 7739,
       "case": "gc-stress/conservative-scan-register.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/gc-stress/conservative-scan-register.js",
@@ -2271,6 +2764,10 @@
     {
       "bytes": 10175,
       "case": "gc-stress/havebadtime-vs-indexed-fastpath.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/gc-stress/havebadtime-vs-indexed-fastpath.js",
@@ -2287,6 +2784,10 @@
     {
       "bytes": 8797,
       "case": "gc-stress/watchpoint-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/gc-stress/watchpoint-storm.js",
@@ -2305,6 +2806,10 @@
     {
       "bytes": 15145,
       "case": "gc-stress/zombie-uaf-canary.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/gc-stress/zombie-uaf-canary.js",
@@ -2333,6 +2838,10 @@
     {
       "bytes": 1290,
       "case": "heap-access-blocking.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-access-blocking.js",
@@ -2348,6 +2857,10 @@
     {
       "bytes": 1599,
       "case": "heap-allocation-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-allocation-storm.js",
@@ -2363,6 +2876,10 @@
     {
       "bytes": 2563,
       "case": "heap-bench-allocation.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-bench-allocation.js",
@@ -2374,6 +2891,10 @@
     {
       "bytes": 1414,
       "case": "heap-client-churn.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-client-churn.js",
@@ -2389,6 +2910,10 @@
     {
       "bytes": 1255,
       "case": "heap-deferral-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-deferral-storm.js",
@@ -2404,6 +2929,10 @@
     {
       "bytes": 1897,
       "case": "heap-epoch-reclaim.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-epoch-reclaim.js",
@@ -2419,6 +2948,10 @@
     {
       "bytes": 1656,
       "case": "heap-iss-revert.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-iss-revert.js",
@@ -2434,6 +2967,10 @@
     {
       "bytes": 4007,
       "case": "heap-option-off.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-option-off.js",
@@ -2450,6 +2987,10 @@
     {
       "bytes": 1228,
       "case": "heap-precise-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-precise-storm.js",
@@ -2465,6 +3006,10 @@
     {
       "bytes": 1731,
       "case": "heap-stop-interleavings.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/heap-stop-interleavings.js",
@@ -2480,6 +3025,10 @@
     {
       "bytes": 3541,
       "case": "invariants/delete-quarantine-dictionary.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/delete-quarantine-dictionary.js",
@@ -2492,6 +3041,10 @@
     {
       "bytes": 4319,
       "case": "invariants/delete-quarantine.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/delete-quarantine.js",
@@ -2504,6 +3057,10 @@
     {
       "bytes": 3354,
       "case": "invariants/no-lost-elements.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/no-lost-elements.js",
@@ -2516,6 +3073,10 @@
     {
       "bytes": 3128,
       "case": "invariants/no-lost-properties-same-name.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/no-lost-properties-same-name.js",
@@ -2528,6 +3089,10 @@
     {
       "bytes": 2421,
       "case": "invariants/no-lost-properties.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/no-lost-properties.js",
@@ -2540,6 +3105,10 @@
     {
       "bytes": 3669,
       "case": "invariants/no-time-travel.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/no-time-travel.js",
@@ -2552,6 +3121,10 @@
     {
       "bytes": 3058,
       "case": "invariants/no-torn-shapes.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/invariants/no-torn-shapes.js",
@@ -2576,6 +3149,10 @@
     {
       "bytes": 3234,
       "case": "jit/construction-shared-constructor.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/construction-shared-constructor.js",
@@ -2587,6 +3164,10 @@
     {
       "bytes": 2166,
       "case": "jit/fires-per-sec.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/fires-per-sec.js",
@@ -2596,6 +3177,10 @@
     {
       "bytes": 6225,
       "case": "jit/foreign-reify-getbyid-converges.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/foreign-reify-getbyid-converges.js",
@@ -2615,6 +3200,10 @@
     {
       "bytes": 2758,
       "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/ftl-direct-tailcall-dataic-arg-clobber.js",
@@ -2629,6 +3218,10 @@
     {
       "bytes": 4036,
       "case": "jit/ftl-osr-entry-catch-loop-amplifier.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/ftl-osr-entry-catch-loop-amplifier.js",
@@ -2646,6 +3239,10 @@
     {
       "bytes": 2533,
       "case": "jit/golden-disasm-corpus.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/golden-disasm-corpus.js",
@@ -2666,6 +3263,10 @@
     {
       "bytes": 4336,
       "case": "jit/ic-publish-reset-loops.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/ic-publish-reset-loops.js",
@@ -2691,6 +3292,10 @@
     {
       "bytes": 4620,
       "case": "jit/int-gate-direct-call-relink.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/int-gate-direct-call-relink.js",
@@ -2708,6 +3313,10 @@
     {
       "bytes": 4586,
       "case": "jit/int-gate-epoch-reclaim.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/int-gate-epoch-reclaim.js",
@@ -2728,6 +3337,10 @@
     {
       "bytes": 5237,
       "case": "jit/int-gate-fire-vs-execute.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/int-gate-fire-vs-execute.js",
@@ -2748,6 +3361,10 @@
     {
       "bytes": 3866,
       "case": "jit/int-gate-jettison-vs-execute.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/int-gate-jettison-vs-execute.js",
@@ -2767,6 +3384,10 @@
     {
       "bytes": 3784,
       "case": "jit/int-gate-stop-budget.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/int-gate-stop-budget.js",
@@ -2797,6 +3418,10 @@
     {
       "bytes": 6331,
       "case": "jit/shared-arraystorage-stress.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/shared-arraystorage-stress.js",
@@ -2815,6 +3440,10 @@
     {
       "bytes": 4789,
       "case": "jit/spawned-thread-butterfly-stress.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/spawned-thread-butterfly-stress.js",
@@ -2831,6 +3460,10 @@
     {
       "bytes": 3184,
       "case": "jit/tag-discipline.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/tag-discipline.js",
@@ -2849,6 +3482,10 @@
     {
       "bytes": 6555,
       "case": "jit/tid-tag-3-threads.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/jit/tid-tag-3-threads.js",
@@ -2863,6 +3500,10 @@
     {
       "bytes": 2363,
       "case": "lifecycle/async-join.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/async-join.js",
@@ -2875,6 +3516,10 @@
     {
       "bytes": 3168,
       "case": "lifecycle/create-basics.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/create-basics.js",
@@ -2887,6 +3532,10 @@
     {
       "bytes": 3185,
       "case": "lifecycle/current-and-id.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/current-and-id.js",
@@ -2899,6 +3548,10 @@
     {
       "bytes": 3962,
       "case": "lifecycle/exceptions-cross-join.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/exceptions-cross-join.js",
@@ -2911,6 +3564,10 @@
     {
       "bytes": 2286,
       "case": "lifecycle/join-semantics.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/join-semantics.js",
@@ -2923,6 +3580,10 @@
     {
       "bytes": 3063,
       "case": "lifecycle/nested-threads.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/nested-threads.js",
@@ -2935,6 +3596,10 @@
     {
       "bytes": 1662,
       "case": "lifecycle/restrict-foreign-access.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/restrict-foreign-access.js",
@@ -2947,6 +3612,10 @@
     {
       "bytes": 3776,
       "case": "lifecycle/restrict.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/restrict.js",
@@ -2959,6 +3628,10 @@
     {
       "bytes": 3363,
       "case": "lifecycle/return-values.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/lifecycle/return-values.js",
@@ -2971,6 +3644,10 @@
     {
       "bytes": 5049,
       "case": "objectmodel/array-storage-property-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/array-storage-property-transition.js",
@@ -2983,6 +3660,10 @@
     {
       "bytes": 3517,
       "case": "objectmodel/cow-named-property-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/cow-named-property-transition.js",
@@ -2995,6 +3676,10 @@
     {
       "bytes": 4060,
       "case": "objectmodel/i03-array-resize-cas.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-array-resize-cas.js",
@@ -3007,6 +3692,10 @@
     {
       "bytes": 3176,
       "case": "objectmodel/i03-as-shift-unshift.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-as-shift-unshift.js",
@@ -3019,6 +3708,10 @@
     {
       "bytes": 3279,
       "case": "objectmodel/i03-as-sparse-holes.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-as-sparse-holes.js",
@@ -3031,6 +3724,10 @@
     {
       "bytes": 3158,
       "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
@@ -3043,6 +3740,10 @@
     {
       "bytes": 4262,
       "case": "objectmodel/i03-convert-grow-gc-read.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-convert-grow-gc-read.js",
@@ -3056,6 +3757,10 @@
     {
       "bytes": 3278,
       "case": "objectmodel/i03-cow-materialize-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-cow-materialize-race.js",
@@ -3068,6 +3773,10 @@
     {
       "bytes": 4248,
       "case": "objectmodel/i03-i37-same-shape-add-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-i37-same-shape-add-storm.js",
@@ -3080,6 +3789,10 @@
     {
       "bytes": 2949,
       "case": "objectmodel/i03-n2-inline-add-races.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-n2-inline-add-races.js",
@@ -3092,6 +3805,10 @@
     {
       "bytes": 2130,
       "case": "objectmodel/i03-n3-first-install-races.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-n3-first-install-races.js",
@@ -3104,6 +3821,10 @@
     {
       "bytes": 3788,
       "case": "objectmodel/i03-pa-global-races.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-pa-global-races.js",
@@ -3116,6 +3837,10 @@
     {
       "bytes": 4952,
       "case": "objectmodel/i03-quarantine-readd-across-gc.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-quarantine-readd-across-gc.js",
@@ -3129,6 +3854,10 @@
     {
       "bytes": 3342,
       "case": "objectmodel/i03-restart-locked-vs-conversion.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-restart-locked-vs-conversion.js",
@@ -3141,6 +3870,10 @@
     {
       "bytes": 3501,
       "case": "objectmodel/i03-selftest.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-selftest.js",
@@ -3155,6 +3888,10 @@
     {
       "bytes": 5224,
       "case": "objectmodel/i03-shared-double.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-shared-double.js",
@@ -3167,6 +3904,10 @@
     {
       "bytes": 3056,
       "case": "objectmodel/i03-single-threaded-flag-on.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-single-threaded-flag-on.js",
@@ -3180,6 +3921,10 @@
     {
       "bytes": 5150,
       "case": "objectmodel/i03-single-threaded-no-change.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-single-threaded-no-change.js",
@@ -3195,6 +3940,10 @@
     {
       "bytes": 4103,
       "case": "objectmodel/i03-stale-spine-reader-vs-grow.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-stale-spine-reader-vs-grow.js",
@@ -3208,6 +3957,10 @@
     {
       "bytes": 3191,
       "case": "objectmodel/i03-stress-force-segmented.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-stress-force-segmented.js",
@@ -3224,6 +3977,10 @@
     {
       "bytes": 3179,
       "case": "objectmodel/i03-stress-force-sw.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-stress-force-sw.js",
@@ -3240,6 +3997,10 @@
     {
       "bytes": 3237,
       "case": "objectmodel/i03-t1-vs-sw-flip.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-t1-vs-sw-flip.js",
@@ -3253,6 +4014,10 @@
     {
       "bytes": 3498,
       "case": "objectmodel/i03-t5-racing-growers.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-t5-racing-growers.js",
@@ -3266,6 +4031,10 @@
     {
       "bytes": 4075,
       "case": "objectmodel/i03-visit-range-outofline.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i03-visit-range-outofline.js",
@@ -3280,6 +4049,10 @@
     {
       "bytes": 3577,
       "case": "objectmodel/i08-named-vs-indexed-first-install.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/i08-named-vs-indexed-first-install.js",
@@ -3293,6 +4066,10 @@
     {
       "bytes": 4996,
       "case": "objectmodel/r47-foreign-dictionary-flatten.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/r47-foreign-dictionary-flatten.js",
@@ -3306,6 +4083,10 @@
     {
       "bytes": 4879,
       "case": "objectmodel/r47-typedarray-slowdown-wastememory.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/r47-typedarray-slowdown-wastememory.js",
@@ -3318,6 +4099,10 @@
     {
       "bytes": 3267,
       "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/objectmodel/r48-typedarray-segmented-arraybuffer.js",
@@ -3330,6 +4115,10 @@
     {
       "bytes": 2032,
       "case": "races/counter-atomics.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/counter-atomics.js",
@@ -3343,6 +4132,10 @@
     {
       "bytes": 2146,
       "case": "races/counter-lock.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/counter-lock.js",
@@ -3356,6 +4149,10 @@
     {
       "bytes": 3503,
       "case": "races/forin-enumerator-cache.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/forin-enumerator-cache.js",
@@ -3368,6 +4165,10 @@
     {
       "bytes": 2256,
       "case": "races/join-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/join-storm.js",
@@ -3380,6 +4181,10 @@
     {
       "bytes": 3264,
       "case": "races/transition-vs-read.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/transition-vs-read.js",
@@ -3392,6 +4197,10 @@
     {
       "bytes": 5349,
       "case": "races/transition-vs-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/transition-vs-write.js",
@@ -3404,6 +4213,10 @@
     {
       "bytes": 1787,
       "case": "races/wait-notify-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/races/wait-notify-storm.js",
@@ -3439,6 +4252,10 @@
     {
       "bytes": 21882,
       "case": "scaling/lock-fairness.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/lock-fairness.js",
@@ -3452,6 +4269,10 @@
     {
       "bytes": 4529,
       "case": "scaling/map-heavy.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/map-heavy.js",
@@ -3464,6 +4285,10 @@
     {
       "bytes": 6925,
       "case": "scaling/raytrace-like.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/raytrace-like.js",
@@ -3477,6 +4302,10 @@
     {
       "bytes": 7067,
       "case": "scaling/richards-like.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/richards-like.js",
@@ -3490,6 +4319,10 @@
     {
       "bytes": 6882,
       "case": "scaling/splay-like.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/splay-like.js",
@@ -3502,6 +4335,10 @@
     {
       "bytes": 4548,
       "case": "scaling/string-heavy.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/scaling/string-heavy.js",
@@ -3514,6 +4351,10 @@
     {
       "bytes": 7402,
       "case": "semantics/atom-rope-torture.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/atom-rope-torture.js",
@@ -3527,6 +4368,10 @@
     {
       "bytes": 6527,
       "case": "semantics/date-cache-churn.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/date-cache-churn.js",
@@ -3540,6 +4385,10 @@
     {
       "bytes": 7089,
       "case": "semantics/frozen-seal-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/frozen-seal-race.js",
@@ -3553,6 +4402,10 @@
     {
       "bytes": 8233,
       "case": "semantics/ic-delete_by_id-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-delete_by_id-vs-transition.js",
@@ -3567,6 +4420,10 @@
     {
       "bytes": 9283,
       "case": "semantics/ic-get_by_id-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-get_by_id-vs-transition.js",
@@ -3581,6 +4438,10 @@
     {
       "bytes": 9200,
       "case": "semantics/ic-get_by_val-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-get_by_val-vs-transition.js",
@@ -3595,6 +4456,10 @@
     {
       "bytes": 7808,
       "case": "semantics/ic-in_by_id-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-in_by_id-vs-transition.js",
@@ -3609,6 +4474,10 @@
     {
       "bytes": 12470,
       "case": "semantics/ic-instanceof-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-instanceof-vs-transition.js",
@@ -3623,6 +4492,10 @@
     {
       "bytes": 7948,
       "case": "semantics/ic-put_by_id-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-put_by_id-vs-transition.js",
@@ -3637,6 +4510,10 @@
     {
       "bytes": 7524,
       "case": "semantics/ic-put_by_val-vs-transition.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/ic-put_by_val-vs-transition.js",
@@ -3651,6 +4528,10 @@
     {
       "bytes": 9112,
       "case": "semantics/oom-one-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/oom-one-thread.js",
@@ -3665,6 +4546,10 @@
     {
       "bytes": 6623,
       "case": "semantics/private-fields-shared.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/private-fields-shared.js",
@@ -3678,6 +4563,10 @@
     {
       "bytes": 4725,
       "case": "semantics/proto-cycle-race.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/proto-cycle-race.js",
@@ -3691,6 +4580,10 @@
     {
       "bytes": 8001,
       "case": "semantics/regexp-lastindex-shared.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/regexp-lastindex-shared.js",
@@ -3704,6 +4597,10 @@
     {
       "bytes": 5360,
       "case": "semantics/stack-overflow-per-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/stack-overflow-per-thread.js",
@@ -3716,6 +4613,10 @@
     {
       "bytes": 5858,
       "case": "semantics/symbol-registry-cross-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/symbol-registry-cross-thread.js",
@@ -3729,6 +4630,10 @@
     {
       "bytes": 1915,
       "case": "semantics/termination-storm.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/semantics/termination-storm.js",
@@ -3738,6 +4643,10 @@
     {
       "bytes": 5713,
       "case": "shared-objects/dictionary-mode.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/dictionary-mode.js",
@@ -3750,6 +4659,10 @@
     {
       "bytes": 6843,
       "case": "shared-objects/frozen-sealed.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/frozen-sealed.js",
@@ -3762,6 +4675,10 @@
     {
       "bytes": 5483,
       "case": "shared-objects/getters-setters.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/getters-setters.js",
@@ -3774,6 +4691,10 @@
     {
       "bytes": 5635,
       "case": "shared-objects/property-add.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/property-add.js",
@@ -3786,6 +4707,10 @@
     {
       "bytes": 5112,
       "case": "shared-objects/property-delete.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/property-delete.js",
@@ -3798,6 +4723,10 @@
     {
       "bytes": 4897,
       "case": "shared-objects/property-read-write.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/property-read-write.js",
@@ -3810,6 +4739,10 @@
     {
       "bytes": 5957,
       "case": "shared-objects/prototype-chain.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/shared-objects/prototype-chain.js",
@@ -3822,6 +4755,10 @@
     {
       "bytes": 4440,
       "case": "smoke.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/smoke.js",
@@ -3835,6 +4772,10 @@
     {
       "bytes": 6048,
       "case": "sync/atomics-futex-lock.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/atomics-futex-lock.js",
@@ -3847,6 +4788,10 @@
     {
       "bytes": 6097,
       "case": "sync/atomics-object-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/atomics-object-basic.js",
@@ -3859,6 +4804,10 @@
     {
       "bytes": 4204,
       "case": "sync/condition-notify-all-multi-waiter.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-notify-all-multi-waiter.js",
@@ -3871,6 +4820,10 @@
     {
       "bytes": 2018,
       "case": "sync/condition-notify-all-shared-lock.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-notify-all-shared-lock.js",
@@ -3883,6 +4836,10 @@
     {
       "bytes": 3084,
       "case": "sync/condition-notify-all.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-notify-all.js",
@@ -3895,6 +4852,10 @@
     {
       "bytes": 9139,
       "case": "sync/condition-wait-notify.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-wait-notify.js",
@@ -3907,6 +4868,10 @@
     {
       "bytes": 2218,
       "case": "sync/condition-worker-waiter.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/condition-worker-waiter.js",
@@ -3919,6 +4884,10 @@
     {
       "bytes": 3783,
       "case": "sync/lock-async-hold.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/lock-async-hold.js",
@@ -3933,6 +4902,10 @@
     {
       "bytes": 2717,
       "case": "sync/lock-hold-basic.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/lock-hold-basic.js",
@@ -3945,6 +4918,10 @@
     {
       "bytes": 3443,
       "case": "sync/lock-hold-mutual-exclusion.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/lock-hold-mutual-exclusion.js",
@@ -3957,6 +4934,10 @@
     {
       "bytes": 3610,
       "case": "sync/thread-local-isolation.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/sync/thread-local-isolation.js",
@@ -3981,6 +4962,10 @@
     {
       "bytes": 1482,
       "case": "vmstate/all-flags-identity.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/all-flags-identity.js",
@@ -3993,6 +4978,10 @@
     {
       "bytes": 2670,
       "case": "vmstate/exception-state-per-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/exception-state-per-thread.js",
@@ -4006,6 +4995,10 @@
     {
       "bytes": 921,
       "case": "vmstate/flags-off-baseline.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/flags-off-baseline.js",
@@ -4017,6 +5010,10 @@
     {
       "bytes": 4294,
       "case": "vmstate/globalthis-postpublication-negative.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/globalthis-postpublication-negative.js",
@@ -4034,6 +5031,10 @@
     {
       "bytes": 2180,
       "case": "vmstate/microtask-ordering.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/microtask-ordering.js",
@@ -4047,6 +5048,10 @@
     {
       "bytes": 2994,
       "case": "vmstate/regexp-churn-threads.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/regexp-churn-threads.js",
@@ -4071,6 +5076,10 @@
     {
       "bytes": 1884,
       "case": "vmstate/stack-limits-per-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/stack-limits-per-thread.js",
@@ -4083,6 +5092,10 @@
     {
       "bytes": 3826,
       "case": "vmstate/structure-churn-dictionary.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/structure-churn-dictionary.js",
@@ -4096,6 +5109,10 @@
     {
       "bytes": 2610,
       "case": "vmstate/structure-churn-threads.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/structure-churn-threads.js",
@@ -4109,6 +5126,10 @@
     {
       "bytes": 1983,
       "case": "vmstate/structure-lock-single-thread.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/structure-lock-single-thread.js",
@@ -4121,6 +5142,10 @@
     {
       "bytes": 1107,
       "case": "vmstate/vmlite-single-thread-identity.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "promoted",
       "kind": "javascript",
       "path": "threads-tests/vmstate/vmlite-single-thread-identity.js",
@@ -4133,6 +5158,10 @@
     {
       "bytes": 6296,
       "case": "w16-c1-prevent-collection.js",
+      "execution_modes": [
+        "parallel-js",
+        "serialized"
+      ],
       "execution_state": "terminal-disposition",
       "kind": "javascript",
       "path": "threads-tests/w16-c1-prevent-collection.js",

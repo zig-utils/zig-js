@@ -770,18 +770,29 @@ fn writeExecutionInventory(
     var passed: usize = 0;
     var failed: usize = 0;
     var skipped: usize = 0;
+    var cases_reaching_optimizer: usize = 0;
     var total_ms: u64 = 0;
     for (records) |record| {
         total_ms += record.ms;
         if (std.mem.eql(u8, record.result, "pass")) passed += 1;
         if (std.mem.eql(u8, record.result, "fail")) failed += 1;
         if (std.mem.eql(u8, record.result, "skip")) skipped += 1;
+        if (record.optimizer_publications != 0) cases_reaching_optimizer += 1;
     }
     try Emit.print(
         &buffer,
         gpa,
-        "{{\n  \"mode\": \"{s}\",\n  \"summary\": {{ \"cases\": {d}, \"passed\": {d}, \"failed\": {d}, \"skipped\": {d}, \"total_ms\": {d} }},\n  \"cases\": [\n",
-        .{ if (parallel_js) "parallel-js" else "serialized", records.len, passed, failed, skipped, total_ms },
+        "{{\n  \"schema_version\": 2,\n  \"build_mode\": \"{s}\",\n  \"mode\": \"{s}\",\n  \"summary\": {{ \"cases\": {d}, \"cases_reaching_optimizer\": {d}, \"passed\": {d}, \"failed\": {d}, \"skipped\": {d}, \"total_ms\": {d} }},\n  \"cases\": [\n",
+        .{
+            @tagName(builtin.mode),
+            if (parallel_js) "parallel-js" else "serialized",
+            records.len,
+            cases_reaching_optimizer,
+            passed,
+            failed,
+            skipped,
+            total_ms,
+        },
     );
     for (records, 0..) |record, index| {
         try Emit.print(

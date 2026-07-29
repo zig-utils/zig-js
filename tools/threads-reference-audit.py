@@ -20,6 +20,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -308,10 +309,21 @@ def declares_thread_gil_off(src: str) -> bool:
     return "--useThreadGILOffUnsafe=1" in src
 
 
-def load_allowlist() -> set[str]:
+def load_named_allowlist(name: str) -> set[str]:
     src = RUNNER.read_text()
-    before_helpers = src.split("fn runsWithoutThreadGlobal", 1)[0]
-    return set(re.findall(r'"([^"]+\.js)"', before_helpers))
+    marker = f"const {name} = [_][]const u8{{"
+    start = src.index(marker) + len(marker)
+    end = src.index("\n};", start)
+    return set(re.findall(r'"([^"]+\.js)"', src[start:end]))
+
+
+def load_mode_allowlists() -> tuple[set[str], set[str]]:
+    return load_named_allowlist("allowlist"), load_named_allowlist("parallel_only_allowlist")
+
+
+def load_allowlist() -> set[str]:
+    serialized, parallel_only = load_mode_allowlists()
+    return serialized | parallel_only
 
 
 def all_cases() -> list[str]:
@@ -368,7 +380,8 @@ def build_reference_inventory() -> dict[str, object]:
     if missing_allowlist:
         raise ValueError(f"allowlist paths missing from corpus: {missing_allowlist}")
 
-    allowlist = load_allowlist()
+    serialized_allowlist, parallel_only_allowlist = load_mode_allowlists()
+    allowlist = serialized_allowlist | parallel_only_allowlist
     remaining_set = set(remaining)
     unpromoted_executable = remaining_set - HELPERS
     disposition_set = set(BLOCKED_DEPENDENCIES) | set(TERMINAL_DISPOSITIONS)
@@ -413,6 +426,14 @@ def build_reference_inventory() -> dict[str, object]:
             entry["required_shell_hooks"] = required_shell_hooks(
                 data.decode(errors="replace")
             )
+            if state == "promoted":
+                entry["execution_modes"] = (
+                    ["parallel-js"]
+                    if case in parallel_only_allowlist
+                    else ["parallel-js", "serialized"]
+                )
+            elif state == "terminal-disposition":
+                entry["execution_modes"] = ["parallel-js", "serialized"]
             if state == "blocked":
                 dependencies = list(BLOCKED_DEPENDENCIES[case])
                 entry["dependencies"] = dependencies
@@ -464,6 +485,7 @@ def build_reference_inventory() -> dict[str, object]:
 
 def validate_reference_inventory(inventory: dict[str, object]) -> list[str]:
     errors: list[str] = []
+    serialized_allowlist, parallel_only_allowlist = load_mode_allowlists()
     if inventory.get("schema_version") != 2:
         errors.append("schema_version must be 2")
     files = inventory.get("files")
@@ -500,6 +522,7 @@ def validate_reference_inventory(inventory: dict[str, object]) -> list[str]:
         owners = entry.get("owner_issues", [])
         terminal_disposition = entry.get("terminal_disposition")
         terminal_premises = entry.get("terminal_premises", [])
+        execution_modes = entry.get("execution_modes")
         if state == "blocked":
             if not isinstance(dependencies, list) or not dependencies:
                 errors.append(f"{path}: blocked case lacks dependencies")
@@ -514,6 +537,8 @@ def validate_reference_inventory(inventory: dict[str, object]) -> list[str]:
             if terminal_disposition is not None or terminal_premises:
                 errors.append(f"{path}: blocked case has a terminal disposition")
         elif state == "terminal-disposition":
+            if execution_modes != ["parallel-js", "serialized"]:
+                errors.append(f"{path}: terminal execution_modes must cover parallel-js and serialized")
             if dependencies or owners or terminal_premises:
                 errors.append(f"{path}: terminal case has stale blocked/promoted metadata")
             if not isinstance(terminal_disposition, dict):
@@ -523,6 +548,15 @@ def validate_reference_inventory(inventory: dict[str, object]) -> list[str]:
                     if not terminal_disposition.get(field):
                         errors.append(f"{path}: terminal disposition lacks {field}")
         elif state == "promoted":
+            expected_modes = (
+                ["parallel-js"]
+                if entry.get("case") in parallel_only_allowlist
+                else ["parallel-js", "serialized"]
+            )
+            if execution_modes != expected_modes:
+                errors.append(f"{path}: expected execution_modes {expected_modes}, found {execution_modes!r}")
+            if entry.get("case") not in serialized_allowlist | parallel_only_allowlist:
+                errors.append(f"{path}: promoted case is absent from the runner allowlists")
             if dependencies or owners or terminal_disposition is not None:
                 errors.append(f"{path}: promoted case has stale disposition metadata")
             if terminal_premises:
@@ -534,7 +568,7 @@ def validate_reference_inventory(inventory: dict[str, object]) -> list[str]:
                             premise.get(field) for field in ("category", "hook", "reason")
                         ):
                             errors.append(f"{path}: invalid promoted terminal premise")
-        elif dependencies or owners:
+        elif dependencies or owners or execution_modes is not None:
             errors.append(f"{path}: helper has stale disposition metadata")
         if state not in {"promoted", "blocked", "terminal-disposition", "helper/preload"}:
             errors.append(f"{path}: invalid execution_state {state!r}")
@@ -1028,7 +1062,8 @@ def print_probe_output_tail(output: str | bytes, *, prefix: str = "      ") -> N
         print(f"{prefix}{line}")
 
 
-def run_probe_command(cmd: list[str], timeout_s: float) -> tuple[str, int | None, str]:
+def run_probe_command(cmd: list[str], timeout_s: float) -> tuple[str, int | None, str, int]:
+    started_ns = time.monotonic_ns()
     proc = subprocess.Popen(
         cmd,
         cwd=REPO,
@@ -1039,7 +1074,8 @@ def run_probe_command(cmd: list[str], timeout_s: float) -> tuple[str, int | None
     )
     try:
         stdout, _ = proc.communicate(timeout=timeout_s)
-        return "done", proc.returncode, stdout or ""
+        elapsed_ms = (time.monotonic_ns() - started_ns) // 1_000_000
+        return "done", proc.returncode, stdout or "", elapsed_ms
     except subprocess.TimeoutExpired:
         try:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -1053,7 +1089,8 @@ def run_probe_command(cmd: list[str], timeout_s: float) -> tuple[str, int | None
             except ProcessLookupError:
                 pass
             stdout, _ = proc.communicate()
-        return "timeout", None, stdout or ""
+        elapsed_ms = (time.monotonic_ns() - started_ns) // 1_000_000
+        return "timeout", None, stdout or "", elapsed_ms
 
 
 def check_disposition_expectation(
@@ -1129,7 +1166,7 @@ def run_disposition_probes(
         cmd = probe_command(case)
         if emit:
             print(f"  - {case}: {reason}")
-        run_status, returncode, output = run_probe_command(cmd, timeout_s)
+        run_status, returncode, output, elapsed_ms = run_probe_command(cmd, timeout_s)
         if run_status == "timeout":
             if emit:
                 print("    TIMEOUT")
@@ -1137,6 +1174,7 @@ def run_disposition_probes(
                 "case": case,
                 "status": "timeout",
                 "exit_code": None,
+                "ms": elapsed_ms,
                 "expected_terminal_disposition": expect_terminal_dispositions,
                 "output": probe_output_summary(output),
             }
@@ -1159,6 +1197,7 @@ def run_disposition_probes(
                 "case": case,
                 "status": "pass",
                 "exit_code": returncode,
+                "ms": elapsed_ms,
                 "expected_terminal_disposition": expect_terminal_dispositions,
                 "output": probe_output_summary(output),
             }
@@ -1177,6 +1216,7 @@ def run_disposition_probes(
                 "case": case,
                 "status": "fail",
                 "exit_code": returncode,
+                "ms": elapsed_ms,
                 "expected_terminal_disposition": expect_terminal_dispositions,
                 "output": probe_output_summary(output),
             }
@@ -1218,7 +1258,65 @@ def run_unpromoted_scan(
         if emit:
             print(f"  - {case}: {reason}")
 
-        run_status, returncode, output = run_probe_command(
+        terminal = TERMINAL_DISPOSITIONS.get(case)
+        if terminal is not None:
+            mode_results: dict[str, object] = {}
+            disposition_drift = False
+            for mode, verification_key, cmd in (
+                ("serialized", "default", probe_command(case)),
+                ("parallel-js", "parallel_js", parallel_probe_command(case)),
+            ):
+                run_status, returncode, output, elapsed_ms = run_probe_command(cmd, timeout_s)
+                observed_status = (
+                    "timeout"
+                    if run_status == "timeout"
+                    else "pass" if returncode == 0 else "fail"
+                )
+                expected_status = terminal["verification"][verification_key]["status"]
+                expectation_matched = observed_status == expected_status
+                if expectation_matched:
+                    expectation_matched = check_disposition_expectation(
+                        case,
+                        observed_status,
+                        output,
+                        emit=False,
+                    )
+                if not expectation_matched:
+                    disposition_drift = True
+                    if emit:
+                        print(
+                            f"    {mode} TERMINAL DRIFT: "
+                            f"expected {expected_status}, got {observed_status}"
+                        )
+                        if output:
+                            print_probe_output_tail(output)
+                elif emit:
+                    print(f"    {mode} terminal disposition confirmed ({observed_status})")
+                mode_results[mode] = {
+                    "command": cmd,
+                    "exit_code": returncode,
+                    "expected_status": expected_status,
+                    "expectation_matched": expectation_matched,
+                    "ms": elapsed_ms,
+                    "observed_status": observed_status,
+                    "output": probe_output_summary(output),
+                }
+            if disposition_drift:
+                unexpected_passes += 1
+            results.append({
+                "case": case,
+                "status": (
+                    "terminal-disposition-drift"
+                    if disposition_drift
+                    else "terminal-disposition-confirmed"
+                ),
+                "categories": cats,
+                "terminal_disposition": terminal,
+                "mode_results": mode_results,
+            })
+            continue
+
+        run_status, returncode, output, elapsed_ms = run_probe_command(
             probe_command(case),
             timeout_s,
         )
@@ -1235,6 +1333,7 @@ def run_unpromoted_scan(
                 "case": case,
                 "status": "terminal-disposition-drift" if terminal is not None else "timeout",
                 "exit_code": None,
+                "ms": elapsed_ms,
                 "categories": cats,
                 "terminal_disposition": terminal,
                 "output": output_summary,
@@ -1259,6 +1358,7 @@ def run_unpromoted_scan(
                 "status": status,
                 "observed_status": observed_status,
                 "exit_code": returncode,
+                "ms": elapsed_ms,
                 "categories": cats,
                 "terminal_disposition": terminal,
                 "output": output_summary,
@@ -1295,6 +1395,7 @@ def run_unpromoted_scan(
                 "case": case,
                 "status": status,
                 "exit_code": returncode,
+                "ms": elapsed_ms,
                 "categories": cats,
                 "expected_blocked_serialized_pass": expected_pass_reason,
                 "expected_blocked_no_optimizer_evidence": no_optimizer_reason,
@@ -1317,6 +1418,7 @@ def run_unpromoted_scan(
                 "case": case,
                 "status": "fail",
                 "exit_code": returncode,
+                "ms": elapsed_ms,
                 "categories": cats,
                 "output": output_summary,
             }
@@ -1339,11 +1441,12 @@ def blocked_declared_parallel_probe(
     cmd = parallel_probe_command(case)
     if emit:
         print("    declared no-GIL probe")
-    run_status, returncode, output = run_probe_command(cmd, timeout_s)
+    run_status, returncode, output, elapsed_ms = run_probe_command(cmd, timeout_s)
     output_summary = probe_output_summary(output)
     result: dict[str, object] = {
         "command": cmd,
         "exit_code": returncode,
+        "ms": elapsed_ms,
         "output": output_summary,
     }
     if run_status == "timeout":

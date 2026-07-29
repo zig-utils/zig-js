@@ -523,8 +523,15 @@ def validate_pr249_tail(gate: dict[str, object]) -> None:
         entry = by_case[case]
         require(entry.get("status") == "terminal-disposition-confirmed", f"{case}: terminal disposition is not confirmed")
         disposition = entry.get("terminal_disposition", {})
-        expected_status = disposition.get("verification", {}).get("default", {}).get("status")
-        require(entry.get("observed_status") == expected_status, f"{case}: terminal observed status drift")
+        verification = disposition.get("verification", {})
+        mode_results = entry.get("mode_results", {})
+        require(set(mode_results) == {"parallel-js", "serialized"}, f"{case}: terminal mode coverage drift")
+        for mode, verification_key in (("serialized", "default"), ("parallel-js", "parallel_js")):
+            mode_result = mode_results.get(mode, {})
+            expected_status = verification.get(verification_key, {}).get("status")
+            require(mode_result.get("expected_status") == expected_status, f"{case}: {mode} expected status drift")
+            require(mode_result.get("observed_status") == expected_status, f"{case}: {mode} observed status drift")
+            require(mode_result.get("expectation_matched") is True, f"{case}: {mode} terminal expectation mismatch")
     for case in blocked:
         entry = by_case[case]
         status = entry.get("status")

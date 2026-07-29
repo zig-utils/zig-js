@@ -261,21 +261,60 @@
         "JSC-specific spawned-thread WebAssembly refusal contract",
         "zig-js intentionally supports WebAssembly in shared-realm Threads"
       ],
-      "exit_code": 1,
-      "observed_status": "fail",
-      "output": {
-        "evidence": [
-          "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ],
-        "tail": [
-          "  RUN   1/1 api/wasm-refused-sd7.js",
-          "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
-          "------------------------",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "api/wasm-refused-sd7.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 6,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 api/wasm-refused-sd7.js",
+              "  FAIL  api/wasm-refused-sd7.js (2 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "api/wasm-refused-sd7.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 94,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  api/wasm-refused-sd7.js (3 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 api/wasm-refused-sd7.js",
+              "  FAIL  api/wasm-refused-sd7.js (3 ms, Throw): Error: SD7: WebAssembly module on a spawned thread: expected \"TypeError\" but got \"no-throw\"",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
@@ -302,19 +341,56 @@
       "categories": [
         "$vm shared-heap/shell hooks"
       ],
-      "exit_code": 0,
-      "observed_status": "pass",
-      "output": {
-        "evidence": [
-          "  PASS  congc-t2-lockorder-lint.js (1 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 congc-t2-lockorder-lint.js",
-          "  PASS  congc-t2-lockorder-lint.js (1 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "congc-t2-lockorder-lint.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 7,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 congc-t2-lockorder-lint.js",
+              "  PASS  congc-t2-lockorder-lint.js (2 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "congc-t2-lockorder-lint.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 6,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  congc-t2-lockorder-lint.js (1 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 congc-t2-lockorder-lint.js",
+              "  PASS  congc-t2-lockorder-lint.js (1 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
@@ -341,19 +417,56 @@
       "categories": [
         "$vm shared-heap/shell hooks"
       ],
-      "exit_code": 0,
-      "observed_status": "pass",
-      "output": {
-        "evidence": [
-          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 congc-t8-stop-interleaving.js",
-          "  PASS  congc-t8-stop-interleaving.js (3 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "congc-t8-stop-interleaving.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 7,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 congc-t8-stop-interleaving.js",
+              "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "congc-t8-stop-interleaving.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 8,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 congc-t8-stop-interleaving.js",
+              "  PASS  congc-t8-stop-interleaving.js (3 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
@@ -381,21 +494,60 @@
         "JSC butterfly verification shell option",
         "typed-array set source-length snapshot covered by zig-js witnesses"
       ],
-      "exit_code": 1,
-      "observed_status": "fail",
-      "output": {
-        "evidence": [
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ],
-        "tail": [
-          "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
-          "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
-          "------------------------",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "cve/mc-df-arraycopy-relabel.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 7,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
+              "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "cve/mc-df-arraycopy-relabel.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 5,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 cve/mc-df-arraycopy-relabel.js",
+              "  FAIL  cve/mc-df-arraycopy-relabel.js (2 ms, Throw): RangeError: offset is out of bounds",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
@@ -423,21 +575,60 @@
         "detached ArrayBuffer fresh-view construction race",
         "portable creator-owned buffer survival already covered"
       ],
-      "exit_code": 1,
-      "observed_status": "fail",
-      "output": {
-        "evidence": [
-          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ],
-        "tail": [
-          "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
-          "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
-          "------------------------",
-          "0/1 corpus files passed",
-          "error: CorpusFailures"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "cve/mc-life-creator-thread-dies.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 10,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
+              "  FAIL  cve/mc-life-creator-thread-dies.js (6 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "cve/mc-life-creator-thread-dies.js"
+          ],
+          "exit_code": 1,
+          "expectation_matched": true,
+          "expected_status": "fail",
+          "ms": 9,
+          "observed_status": "fail",
+          "output": {
+            "evidence": [
+              "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ],
+            "tail": [
+              "  RUN   1/1 cve/mc-life-creator-thread-dies.js",
+              "  FAIL  cve/mc-life-creator-thread-dies.js (5 ms, Throw): TypeError: Cannot construct a TypedArray on a detached buffer",
+              "------------------------",
+              "0/1 corpus files passed",
+              "error: CorpusFailures"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
@@ -465,19 +656,56 @@
         "portable snapshot graph/parse/ownership promoted by test-private-heap-snapshot",
         "JSC shared-collector preventCollection election hook has a terminal disposition"
       ],
-      "exit_code": 0,
-      "observed_status": "pass",
-      "output": {
-        "evidence": [
-          "  PASS  w16-c1-prevent-collection.js (13 ms)",
-          "1/1 corpus files passed"
-        ],
-        "tail": [
-          "  RUN   1/1 w16-c1-prevent-collection.js",
-          "  PASS  w16-c1-prevent-collection.js (13 ms)",
-          "------------------------",
-          "1/1 corpus files passed"
-        ]
+      "mode_results": {
+        "parallel-js": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "parallel-js",
+            "one",
+            "w16-c1-prevent-collection.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 17,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  w16-c1-prevent-collection.js (13 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 w16-c1-prevent-collection.js",
+              "  PASS  w16-c1-prevent-collection.js (13 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        },
+        "serialized": {
+          "command": [
+            "/Users/chris/Code/Libraries/zig-js/zig-out/bin/threads-test",
+            "one",
+            "w16-c1-prevent-collection.js"
+          ],
+          "exit_code": 0,
+          "expectation_matched": true,
+          "expected_status": "pass",
+          "ms": 17,
+          "observed_status": "pass",
+          "output": {
+            "evidence": [
+              "  PASS  w16-c1-prevent-collection.js (13 ms)",
+              "1/1 corpus files passed"
+            ],
+            "tail": [
+              "  RUN   1/1 w16-c1-prevent-collection.js",
+              "  PASS  w16-c1-prevent-collection.js (13 ms)",
+              "------------------------",
+              "1/1 corpus files passed"
+            ]
+          }
+        }
       },
       "status": "terminal-disposition-confirmed",
       "terminal_disposition": {
