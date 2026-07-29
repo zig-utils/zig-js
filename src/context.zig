@@ -777,7 +777,8 @@ pub const GcCellBacking = struct {
     /// Lowest chunk index that can still have never-issued slots. Freed slots
     /// are tracked by per-chunk bitmaps, so filled chunks never become fresh.
     bucket_bump_start: [bucket_count]usize = .{ 0, 0, 0, 0, 0, 0 },
-    /// A chunk known to contain reusable issued slots for each size class.
+    /// Cyclic search cursor for reusable issued slots in each size class.
+    /// Draining many reclaimed chunks must not restart every search at zero.
     bucket_free_hint: [bucket_count]?usize = .{ null, null, null, null, null, null },
     /// Explicit compaction packs each size class into this many leading chunks.
     /// Targets are computed lazily after the collector's pre-move sweep, then
@@ -1261,19 +1262,23 @@ pub const GcCellBacking = struct {
         const slot = self.bucket_free_bitmaps[idx].items[chunk_idx].takeFirst() orelse return null;
         self.bucket_free_counts[idx] -= 1;
         self.recordReusedSlotLocked(idx, chunk_idx);
-        self.bucket_free_hint[idx] = if (self.bucket_free_bitmaps[idx].items[chunk_idx].any()) chunk_idx else null;
+        self.bucket_free_hint[idx] = if (self.bucket_free_bitmaps[idx].items[chunk_idx].any())
+            chunk_idx
+        else if (self.bucket_free_counts[idx] == 0)
+            null
+        else
+            (chunk_idx + 1) % self.bucket_free_bitmaps[idx].items.len;
         return self.bucket_chunks[idx].items[chunk_idx].ptr + slot * bucket_sizes[idx];
     }
 
     fn takeFreedSlotLocked(self: *GcCellBacking, idx: usize) ?[*]u8 {
         if (self.bucket_free_counts[idx] == 0) return null;
-        if (self.bucket_free_hint[idx]) |hint| {
-            if (hint < self.bucket_free_bitmaps[idx].items.len) {
-                if (self.takeFreedSlotFromChunkLocked(idx, hint)) |ptr| return ptr;
-            }
-        }
-        for (0..self.bucket_free_bitmaps[idx].items.len) |chunk_idx| {
+        const chunks = self.bucket_free_bitmaps[idx].items.len;
+        var chunk_idx = self.bucket_free_hint[idx] orelse 0;
+        for (0..chunks) |_| {
             if (self.takeFreedSlotFromChunkLocked(idx, chunk_idx)) |ptr| return ptr;
+            chunk_idx += 1;
+            if (chunk_idx == chunks) chunk_idx = 0;
         }
         unreachable;
     }
@@ -1897,6 +1902,30 @@ test "GC cell backing batches reused and fresh slabs under one bucket lock" {
         const cell: []align(16) u8 = ptr[0..len];
         a.free(cell);
     }
+}
+
+test "GC cell backing advances reuse cursor across drained chunks" {
+    var backing = GcCellBacking{ .inner = std.testing.allocator };
+    defer backing.deinit();
+    const a = backing.allocator();
+    const len = 200;
+    const idx = GcCellBacking.bucketIndex(len, .@"16").?;
+    const slots = GcCellBacking.chunk_bytes / GcCellBacking.bucket_sizes[idx];
+    const cells = try std.testing.allocator.alloc([]align(16) u8, 3 * slots);
+    defer std.testing.allocator.free(cells);
+
+    for (cells) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
+    for (cells) |cell| a.free(cell);
+    try std.testing.expectEqual(@as(?usize, 2), backing.bucket_free_hint[idx]);
+
+    for (cells[0..slots]) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
+    try std.testing.expectEqual(@as(?usize, 0), backing.bucket_free_hint[idx]);
+    try std.testing.expectEqual(@as(usize, 2 * slots), backing.bucket_free_counts[idx]);
+    for (cells[slots..]) |*cell| cell.* = try a.alignedAlloc(u8, .@"16", len);
+    try std.testing.expectEqual(@as(?usize, null), backing.bucket_free_hint[idx]);
+    try std.testing.expectEqual(@as(usize, 0), backing.bucket_free_counts[idx]);
+
+    for (cells) |cell| a.free(cell);
 }
 
 test "GC cell backing relocation reservation rolls back and commits exact publication accounting" {
