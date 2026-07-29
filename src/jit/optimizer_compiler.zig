@@ -2798,7 +2798,7 @@ fn emitLoopRegionTarget(
 }
 
 fn compileAarch64(program: *const Program) !jit.CompiledCode {
-    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.UnsupportedTarget;
+    if (!jit.optimizer_supported) return error.UnsupportedTarget;
     var memory = try jit.CodeMemory.init(
         @as(usize, program.operations.len) * 192 + @as(usize, program.loop_region_blocks.len) * 256 + 2048,
     );

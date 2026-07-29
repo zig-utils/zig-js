@@ -10,15 +10,32 @@ const builtin = @import("builtin");
 
 const aarch64 = @import("jit/aarch64.zig");
 
-const is_darwin = switch (builtin.os.tag) {
-    .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
-    else => false,
-};
+fn isDarwin(os: std.Target.Os.Tag) bool {
+    return switch (os) {
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => true,
+        else => false,
+    };
+}
 
-pub const supported = is_darwin and switch (builtin.cpu.arch) {
+pub const supported = isDarwin(builtin.os.tag) and switch (builtin.cpu.arch) {
     .aarch64, .x86_64 => true,
     else => false,
 };
+
+/// The exact public optimizer code-generation matrix. Keep this narrower than
+/// `supported`: Darwin x86-64 can allocate executable mappings, but no x86-64
+/// optimizer emitter exists and it must therefore remain on baseline/bytecode.
+pub const OptimizerBackend = enum {
+    darwin_aarch64,
+};
+
+pub fn optimizerBackend(os: std.Target.Os.Tag, arch: std.Target.Cpu.Arch) ?OptimizerBackend {
+    if (isDarwin(os) and arch == .aarch64) return .darwin_aarch64;
+    return null;
+}
+
+pub const optimizer_backend = optimizerBackend(builtin.os.tag, builtin.cpu.arch);
+pub const optimizer_supported = optimizer_backend != null;
 
 pub const TierState = enum(u8) { cold, compiling, ready, rejected };
 
@@ -861,7 +878,7 @@ pub const CompiledCode = struct {
     }
 
     pub fn run(self: *const CompiledCode, frame: *NativeFrame) ExitStatus {
-        return @enumFromInt(self.entry(frame));
+        return @fromBackingInt(@intCast(self.entry(frame)));
     }
 };
 
@@ -1424,7 +1441,7 @@ pub fn compileConstantEntry(result_bits: u64) !CompiledCode {
     var assembler = aarch64.Assembler.init(memory.writableBytes());
     try assembler.movImmediate64(1, result_bits);
     try assembler.store64(1, 0, @offsetOf(NativeFrame, "result_bits"));
-    try assembler.movImmediate32(0, @intFromEnum(ExitStatus.complete));
+    try assembler.movImmediate32(0, @backingInt(ExitStatus.complete));
     try assembler.ret();
     try memory.publish(assembler.bytes().len);
 
@@ -1438,6 +1455,17 @@ extern "c" fn sys_icache_invalidate(start: *anyopaque, len: usize) void;
 test "CodeMemory rejects empty mappings" {
     if (!supported) return error.SkipZigTest;
     try std.testing.expectError(error.InvalidCapacity, CodeMemory.init(0));
+}
+
+test "optimizer backend matrix declares only Darwin AArch64" {
+    try std.testing.expectEqual(
+        OptimizerBackend.darwin_aarch64,
+        optimizerBackend(.macos, .aarch64).?,
+    );
+    try std.testing.expect(optimizerBackend(.macos, .x86_64) == null);
+    try std.testing.expect(optimizerBackend(.linux, .aarch64) == null);
+    try std.testing.expect(optimizerBackend(.linux, .x86_64) == null);
+    try std.testing.expectEqual(optimizer_backend != null, optimizer_supported);
 }
 
 test "Tier claims compilation exactly at its hot threshold" {

@@ -16488,6 +16488,112 @@ test "parallel_js named property mutation fires Class-A invalidation" {
     }, true);
 }
 
+fn verifySeededOptimizerDifferential(options: Context.TestingOptions, seed_count: usize) !void {
+    if (!jit.optimizer_supported) return error.SkipZigTest;
+
+    var native_options = options;
+    native_options.enable_jit = true;
+    const native_ctx = try Context.createWithTestingOptions(std.testing.allocator, native_options);
+    defer native_ctx.destroy();
+
+    var bytecode_options = options;
+    bytecode_options.enable_jit = false;
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, bytecode_options);
+    defer bytecode_ctx.destroy();
+
+    const Seed = struct {
+        fn next(state: *u64) u32 {
+            // Fixed LCG: the inventory names the seed, so this is randomized
+            // coverage without making a failing IR/guard shape irreproducible.
+            state.* = state.* *% 6364136223846793005 +% 1442695040888963407;
+            return @truncate(state.* >> 32);
+        }
+    };
+
+    var state: u64 = 0x434f_4445_585f_3433;
+    for (0..seed_count) |seed_index| {
+        const bias = Seed.next(&state) % 31 + 1;
+        const addend = Seed.next(&state) % 97 + 1;
+        const multiplier = Seed.next(&state) % 7 + 2;
+        const subtract = Seed.next(&state) % 13 + 1;
+        const left = Seed.next(&state) % 1000 + 1;
+        const right = Seed.next(&state) % 1000 + 1;
+        const iterations = Seed.next(&state) % 96 + 64;
+
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\function optimizerSeeded(box, a, b, n) {{
+            \\  "use strict";
+            \\  let x = a;
+            \\  let y = b;
+            \\  let i = 0;
+            \\  while (i < n) {{
+            \\    x = (x + y + box.bias + {d}) % 1000003;
+            \\    y = (y + x * {d} + box.bias - {d}) % 1000033;
+            \\    i = i + 1;
+            \\  }}
+            \\  return x + y;
+            \\}}
+            \\globalThis.optimizerSeededBox = {{ bias: {d} }};
+            \\for (let warm = 0; warm < 32; warm++)
+            \\  optimizerSeeded(optimizerSeededBox, warm + 1, warm + 3, 48);
+            \\0;
+        , .{
+            addend + @as(u32, @intCast(seed_index)),
+            multiplier,
+            subtract,
+            bias,
+        });
+        defer std.testing.allocator.free(source);
+
+        _ = try native_ctx.evaluate(source);
+        _ = try bytecode_ctx.evaluate(source);
+
+        const numeric_expression = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "optimizerSeeded(optimizerSeededBox, {d}, {d}, {d})",
+            .{ left, right, iterations },
+        );
+        defer std.testing.allocator.free(numeric_expression);
+        const native_numeric = try native_ctx.evaluate(numeric_expression);
+        const bytecode_numeric = try bytecode_ctx.evaluate(numeric_expression);
+        try std.testing.expectEqual(bytecode_numeric.rawBits(), native_numeric.rawBits());
+
+        // The profile saw Numbers. A String input must fail the representation
+        // guard before doing work, reconstruct the exact activation, and let
+        // bytecode perform the coercions once.
+        const guard_expression = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "optimizerSeeded(optimizerSeededBox, \"{d}\", {d}, {d})",
+            .{ left, right, multiplier + 2 },
+        );
+        defer std.testing.allocator.free(guard_expression);
+        const native_guard = try native_ctx.evaluate(guard_expression);
+        const bytecode_guard = try bytecode_ctx.evaluate(guard_expression);
+        try std.testing.expectEqual(bytecode_guard.rawBits(), native_guard.rawBits());
+
+        const function_object = native_ctx.global_object.getOwn("optimizerSeeded").?.asObj();
+        const function: *interp.Function = @ptrCast(@alignCast(function_object.jsFunction().?));
+        const chunk = function.chunk orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(jit.OptimizerTierState.ready, chunk.optimizer_tier.state.load(.acquire));
+        try std.testing.expectEqual(@as(u64, 1), chunk.optimizer_tier.compileCount());
+        try std.testing.expectEqual(jit.CodeKind.optimizer, chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?.kind);
+    }
+}
+
+test "optimizer seeded source differential covers IR guards and deoptimization" {
+    try verifySeededOptimizerDifferential(.{ .enable_gc = true }, 12);
+}
+
+test "parallel_js: optimizer seeded source differential covers IR guards and deoptimization" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    try verifySeededOptimizerDifferential(.{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    }, 12);
+}
+
 test "optimizer live safepoint relocates a recovery-only object local" {
     try verifyOptimizerLiveSafepointRelocation(.{ .enable_gc = true, .enable_jit = true });
 }
