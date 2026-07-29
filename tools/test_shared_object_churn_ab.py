@@ -50,6 +50,9 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(8, row["lanes"])
         self.assertEqual(123456, row["max_rss_bytes"])
         self.assertEqual("candidate", row["variant"])
+        self.assertEqual(3, row["pair_sample"])
+        self.assertEqual(1, row["order"])
+        self.assertEqual(1, row["sample"])
 
     def test_validation_rejects_checksum_drift(self) -> None:
         rows = [

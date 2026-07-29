@@ -17,7 +17,7 @@ import sys
 
 
 INTEGER_FIELDS = {
-    "lanes", "jobs", "elapsed_ns", "checksum", "attempts", "collections",
+    "lanes", "jobs", "sample", "elapsed_ns", "checksum", "attempts", "collections",
     "timeouts", "peer_parks", "exit_cleanups", "pause_ns_total",
     "pause_ns_max", "rendezvous_ns_total", "rendezvous_ns_max",
     "tranche_bytes", "bytes_issued", "bytes_reset", "bytes_current",
@@ -66,7 +66,7 @@ def parse_output(
         raise ValueError("benchmark and telemetry lane counts disagree")
     return {
         "variant": variant,
-        "sample": sample,
+        "pair_sample": sample,
         "order": order,
         "max_rss_bytes": int(rss.group(1)),
         **telemetry,
@@ -102,7 +102,7 @@ def validate(rows: list[dict[str, int | str]], samples: int, lanes: list[int]) -
         for lane in lanes
         for sample in range(samples)
     }
-    actual = {(str(row["variant"]), int(row["lanes"]), int(row["sample"])) for row in rows}
+    actual = {(str(row["variant"]), int(row["lanes"]), int(row["pair_sample"])) for row in rows}
     if actual != expected or len(rows) != len(expected):
         raise ValueError("A/B sample inventory drift")
     for lane in lanes:
@@ -110,7 +110,7 @@ def validate(rows: list[dict[str, int | str]], samples: int, lanes: list[int]) -
         if len({row["checksum"] for row in group}) != 1:
             raise ValueError(f"lane {lane} checksum drift")
         for sample in range(samples):
-            pair = [row for row in group if row["sample"] == sample]
+            pair = [row for row in group if row["pair_sample"] == sample]
             if sorted(int(row["order"]) for row in pair) != [0, 1]:
                 raise ValueError(f"lane {lane} sample {sample} order drift")
         for row in group:
@@ -167,8 +167,8 @@ def render(
         parent_wall = median(parent, "elapsed_ns")
         candidate_wall = median(candidate, "elapsed_ns")
         wins = sum(
-            next(row for row in candidate if row["sample"] == sample)["elapsed_ns"]
-            < next(row for row in parent if row["sample"] == sample)["elapsed_ns"]
+            next(row for row in candidate if row["pair_sample"] == sample)["elapsed_ns"]
+            < next(row for row in parent if row["pair_sample"] == sample)["elapsed_ns"]
             for sample in range(samples)
         )
         lines.append(
