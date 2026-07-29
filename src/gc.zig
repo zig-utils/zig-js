@@ -40,6 +40,7 @@ const StringCell = strcell.StringCell;
 
 var object_batch_cells_for_testing: std.atomic.Value(u64) = .init(0);
 var relocation_verifications_for_testing: std.atomic.Value(u64) = .init(0);
+var plain_object_finalizer_skips_for_testing: std.atomic.Value(u64) = .init(0);
 
 pub fn objectBatchCellsForTesting() u64 {
     return object_batch_cells_for_testing.load(.monotonic);
@@ -47,6 +48,10 @@ pub fn objectBatchCellsForTesting() u64 {
 
 pub fn relocationVerificationsForTesting() u64 {
     return relocation_verifications_for_testing.load(.monotonic);
+}
+
+pub fn plainObjectFinalizerSkipsForTesting() u64 {
+    return plain_object_finalizer_skips_for_testing.load(.monotonic);
 }
 
 /// The engine's GC cell taxonomy. Each `Heap.create(T, kind)` tags its cell so
@@ -3330,6 +3335,21 @@ pub const Binding = struct {
     /// slabs individually. A SharedArrayBuffer wrapper owns one realm retain
     /// that must be released when the wrapper cell dies.
     pub fn finalize(self: *Binding, cell: *anyopaque, kind: Kind) void {
+        if (kind == .object) {
+            const state = self.context.gc_state orelse return;
+            const object: *Object = @ptrCast(@alignCast(cell));
+            // An owner-only plain inline object has no side allocation, host
+            // owner, external resource, or rare state to release. Skip realm
+            // routing and six empty sidecar probes unless test telemetry needs
+            // the per-kind count. Shared heaps retain exact per-cell routing.
+            if (!state.realms.requiresCellRouting() and
+                self.context.gc_finalizer_stats_out == null and
+                object.storageState() == null)
+            {
+                if (builtin.is_test) _ = plain_object_finalizer_skips_for_testing.fetchAdd(1, .monotonic);
+                return;
+            }
+        }
         const ctx = self.realmForCell(cell) orelse return;
         if (ctx.gc_finalizer_stats_out) |stats| stats.addKind(kind);
         switch (kind) {
@@ -3418,6 +3438,35 @@ pub const Binding = struct {
         }
     }
 };
+
+test "owner-only plain object finalization skips empty sidecar probes" {
+    const owner = try ContextMod.Context.createWith(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+    });
+    defer owner.destroy();
+    owner.collectGarbage();
+    owner.gc.?.threshold_bytes = std.math.maxInt(usize);
+    owner.gc.?.nursery_threshold_bytes = std.math.maxInt(usize);
+
+    const skips_before = plainObjectFinalizerSkipsForTesting();
+    _ = try owner.evaluate(
+        \\for (var i = 0; i < 64; i = i + 1) ({ value: i, stamp: i & 7, previous: i - 1 });
+    );
+    owner.collectGarbage();
+    try std.testing.expect(plainObjectFinalizerSkipsForTesting() >= skips_before + 64);
+
+    var stats = ContextMod.Context.GcFinalizerStats{};
+    owner.gc_finalizer_stats_out = &stats;
+    defer owner.gc_finalizer_stats_out = null;
+    const skips_with_stats = plainObjectFinalizerSkipsForTesting();
+    _ = try owner.evaluate(
+        \\for (var i = 0; i < 64; i = i + 1) ({ value: i, stamp: i & 7, previous: i - 1 });
+    );
+    owner.collectGarbage();
+    try std.testing.expect(stats.objects >= 64);
+    try std.testing.expectEqual(skips_with_stats, plainObjectFinalizerSkipsForTesting());
+}
 
 test "precise heap realm registry traces relocates and retires one sibling exactly once" {
     const owner = try ContextMod.Context.createWith(std.testing.allocator, .{ .enable_gc = true });
