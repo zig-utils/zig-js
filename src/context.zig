@@ -19709,7 +19709,7 @@ test "parallel_js: fixed-shape object allocation quickens across shared Thread w
     // The four creator-thread oracle calls intentionally stay on 17-cell
     // checkpoint batches; the four concurrent worker calls use the larger
     // reserve, keeping the total far below the ~242 all-small-batch baseline.
-    try std.testing.expect(reserve_refills <= 160);
+    try std.testing.expectEqual(@as(u64, 128), reserve_refills);
     try std.testing.expectEqual(precise_before, ctx.gc_precise_safepoints.load(.monotonic));
 }
 

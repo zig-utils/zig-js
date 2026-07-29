@@ -2702,11 +2702,11 @@ fn tryQuickObjectAllocationLoopMode(
     // lock again for every fresh literal below.
     const object_proto = vm.objectProto();
     // Seventeen 61-step iterations can straddle one 1,024-step checkpoint.
-    // Reserve up to sixteen checkpoint tranches at once and keep the unused
-    // suffix in the owning Interpreter's explicit GC roots. This reduces the
+    // Reserve up to 1,024 checkpoint tranches at once and keep the unused suffix
+    // in the owning Interpreter's explicit GC roots. This reduces the
     // shared heap/backing publication rate without delaying a checkpoint or
     // publishing more objects than this guarded loop can still consume.
-    const max_allocation_batch = 17 * 16;
+    const max_allocation_batch = 17 * 1024;
     var fresh_batch: [if (parallel_sync) max_allocation_batch else 0]*value.Object = undefined;
     var fresh_batch_len: usize = 0;
     var iterations: u64 = 0;
@@ -2752,9 +2752,8 @@ fn tryQuickObjectAllocationLoopMode(
                 const workers = if (vm.parallel_worker_count) |count| count.load(.acquire) else 1;
                 // The first spawned worker is already concurrent with its
                 // creator (or can shortly overlap another worker). Waiting for
-                // a second worker made the batching decision depend on startup
-                // scheduling and intermittently fell back to 17-cell refills
-                // for an entire lane on slower CI runners.
+                // a second worker makes the batching decision depend on startup
+                // scheduling and can strand an entire lane on smaller refills.
                 const reserve_limit: usize = if (workers != 0) max_allocation_batch else 17;
                 var wanted: usize = 0;
                 var probe = counter;
