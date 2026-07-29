@@ -1,2011 +1,261 @@
 {
-  "cases": [
-    {
-      "case": "api/blocking-gate.js",
-      "mode": "parallel-js",
-      "ms": 1351,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-async-wait.js",
-      "mode": "parallel-js",
-      "ms": 1366,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-basic.js",
-      "mode": "parallel-js",
-      "ms": 1410,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-wait-termination.js",
-      "mode": "parallel-js",
-      "ms": 1839,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-async-hold.js",
-      "mode": "parallel-js",
-      "ms": 1390,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-basic.js",
-      "mode": "parallel-js",
-      "ms": 7725,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-hold-termination.js",
-      "mode": "parallel-js",
-      "ms": 1844,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/park-no-microtask-drain.js",
-      "mode": "parallel-js",
-      "ms": 1582,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-basic.js",
-      "mode": "parallel-js",
-      "ms": 1347,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-ctor-errors.js",
-      "mode": "parallel-js",
-      "ms": 1384,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-exc.js",
-      "mode": "parallel-js",
-      "ms": 1342,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-id-bounds.js",
-      "mode": "parallel-js",
-      "ms": 1360,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-lifecycle.js",
-      "mode": "parallel-js",
-      "ms": 1335,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-restrict.js",
-      "mode": "parallel-js",
-      "ms": 3448,
-      "optimizer_invalidations": 8,
-      "optimizer_publications": 8,
-      "result": "pass"
-    },
-    {
-      "case": "api/threadlocal-basic.js",
-      "mode": "parallel-js",
-      "ms": 1335,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/copy-on-write.js",
-      "mode": "parallel-js",
-      "ms": 1391,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/holes.js",
-      "mode": "parallel-js",
-      "ms": 1566,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/push-resize-multithread.js",
-      "mode": "parallel-js",
-      "ms": 24406,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/shared-element-read-write.js",
-      "mode": "parallel-js",
-      "ms": 3711,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/typed-arrays-sab.js",
-      "mode": "parallel-js",
-      "ms": 2116,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-delete-undefined-sentinel-u5.js",
-      "mode": "parallel-js",
-      "ms": 2260,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-dictionary-delete-u5.js",
-      "mode": "parallel-js",
-      "ms": 1608,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-samevaluezero.js",
-      "mode": "parallel-js",
-      "ms": 1373,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-storm-u28-flat.js",
-      "mode": "parallel-js",
-      "ms": 2012,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-storm-u5-as.js",
-      "mode": "parallel-js",
-      "ms": 5682,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-errors.js",
-      "mode": "parallel-js",
-      "ms": 1436,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-load-store.js",
-      "mode": "parallel-js",
-      "ms": 1400,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-rmw.js",
-      "mode": "parallel-js",
-      "ms": 5541,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-store-missing-define-race.js",
-      "mode": "parallel-js",
-      "ms": 2577,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wait-notify.js",
-      "mode": "parallel-js",
-      "ms": 1652,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wait-termination.js",
-      "mode": "parallel-js",
-      "ms": 1856,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-waitasync-timeout.js",
-      "mode": "parallel-js",
-      "ms": 1526,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wtr-isolation.js",
-      "mode": "parallel-js",
-      "ms": 1347,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/ta-path-unchanged.js",
-      "mode": "parallel-js",
-      "ms": 1502,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/ta-wait-thread-gate.js",
-      "mode": "parallel-js",
-      "ms": 1387,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/array-element-read.js",
-      "mode": "parallel-js",
-      "ms": 1400,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/array-element-write.js",
-      "mode": "parallel-js",
-      "ms": 1413,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/flat-butterfly-read.js",
-      "mode": "parallel-js",
-      "ms": 1369,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/flat-butterfly-write.js",
-      "mode": "parallel-js",
-      "ms": 1383,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/inline-property-read.js",
-      "mode": "parallel-js",
-      "ms": 1372,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/inline-property-write.js",
-      "mode": "parallel-js",
-      "ms": 1380,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/megamorphic-access.js",
-      "mode": "parallel-js",
-      "ms": 1596,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/transition-heavy-constructor.js",
-      "mode": "parallel-js",
-      "ms": 3368,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "checktraps-havebadtime-park.js",
-      "mode": "parallel-js",
-      "ms": 242487,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t1-window-split.js",
-      "mode": "parallel-js",
-      "ms": 1312,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t11-diagnostics.js",
-      "mode": "parallel-js",
-      "ms": 2417,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t3-barrier-storm.js",
-      "mode": "parallel-js",
-      "ms": 163299,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t4-alloc-steal-storm.js",
-      "mode": "parallel-js",
-      "ms": 90210,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t5-celllock-audit.js",
-      "mode": "parallel-js",
-      "ms": 146040,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t9-attach-exit-churn.js",
-      "mode": "parallel-js",
-      "ms": 32811,
-      "optimizer_invalidations": 6,
-      "optimizer_publications": 18,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-aint-terminate-notify-park-race.js",
-      "mode": "parallel-js",
-      "ms": 1966,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-code-deferred-fire-stale-window.js",
-      "mode": "parallel-js",
-      "ms": 4645,
-      "optimizer_invalidations": 13,
-      "optimizer_publications": 84,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-code-sleep-through-jettison-isb.js",
-      "mode": "parallel-js",
-      "ms": 7206,
-      "optimizer_invalidations": 200,
-      "optimizer_publications": 596,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-delete-reuse.js",
-      "mode": "parallel-js",
-      "ms": 14115,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-segmented-length.js",
-      "mode": "parallel-js",
-      "ms": 1578,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-ta-detach-resize.js",
-      "mode": "parallel-js",
-      "ms": 15301,
-      "optimizer_invalidations": 155,
-      "optimizer_publications": 155,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-ta-sort-inplace.js",
-      "mode": "parallel-js",
-      "ms": 403286,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-wasm-compile-race.js",
-      "mode": "parallel-js",
-      "ms": 3254,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-dos-retired-artifact-churn.js",
-      "mode": "parallel-js",
-      "ms": 33340,
-      "optimizer_invalidations": 24575,
-      "optimizer_publications": 46735,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-dos-waiter-table-storm.js",
-      "mode": "parallel-js",
-      "ms": 4394,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-blocked-native-roots.js",
-      "mode": "parallel-js",
-      "ms": 54723,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-finreg-cross-thread-gc.js",
-      "mode": "parallel-js",
-      "ms": 1629,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-thread-shell-finalizer-storm.js",
-      "mode": "parallel-js",
-      "ms": 2169,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
-      "mode": "parallel-js",
-      "ms": 230144,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-buffer-storm.js",
-      "mode": "parallel-js",
-      "ms": 63576,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-s4-detach-nullvec-repro.js",
-      "mode": "parallel-js",
-      "ms": 30177,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-wasm-relocating-grow.js",
-      "mode": "parallel-js",
-      "ms": 33058,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-hand-dead-registrant-settle.js",
-      "mode": "parallel-js",
-      "ms": 1418,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-hand-restrict-claim.js",
-      "mode": "parallel-js",
-      "ms": 6079,
-      "optimizer_invalidations": 399,
-      "optimizer_publications": 993,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-butterfly-grow-slack.js",
-      "mode": "parallel-js",
-      "ms": 2272,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-cloned-arguments-specials.js",
-      "mode": "parallel-js",
-      "ms": 308576,
-      "optimizer_invalidations": 23,
-      "optimizer_publications": 14,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-direct-arguments-override.js",
-      "mode": "parallel-js",
-      "ms": 14314,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-lazy-global-first-touch.js",
-      "mode": "parallel-js",
-      "ms": 3751,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-rope-resolve-race.js",
-      "mode": "parallel-js",
-      "ms": 60005,
-      "optimizer_invalidations": 66,
-      "optimizer_publications": 93,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-int-resizable-tail-quarantine.js",
-      "mode": "parallel-js",
-      "ms": 6100,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-delete-reuse-stale-offset.js",
-      "mode": "parallel-js",
-      "ms": 4688,
-      "optimizer_invalidations": 4,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-double-relabel-stale-shape.js",
-      "mode": "parallel-js",
-      "ms": 37334,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-ta-resize-hoisted-base.js",
-      "mode": "parallel-js",
-      "ms": 2808,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-detach-quarantine-storm.js",
-      "mode": "parallel-js",
-      "ms": 32267,
-      "optimizer_invalidations": 24,
-      "optimizer_publications": 20,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-sab-refchurn.js",
-      "mode": "parallel-js",
-      "ms": 4292,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-wasm-grow-relocate.js",
-      "mode": "parallel-js",
-      "ms": 3588,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-cow-materialize-race.js",
-      "mode": "parallel-js",
-      "ms": 8587,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-n3-install-vs-owner-add.js",
-      "mode": "parallel-js",
-      "ms": 6800,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-stop-vs-park.js",
-      "mode": "parallel-js",
-      "ms": 2675,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
-      "mode": "parallel-js",
-      "ms": 3634,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
-      "mode": "parallel-js",
-      "ms": 2147,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-async-generator-resume-claim.js",
-      "mode": "parallel-js",
-      "ms": 6778,
-      "optimizer_invalidations": 1836,
-      "optimizer_publications": 1836,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js",
-      "mode": "parallel-js",
-      "ms": 1573,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-generator-resume-claim.js",
-      "mode": "parallel-js",
-      "ms": 2787,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-indexed-missing-define-race.js",
-      "mode": "parallel-js",
-      "ms": 3685,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-reent-coercion-order.js",
-      "mode": "parallel-js",
-      "ms": 1350,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-reent-store-missing-indexed-define-race.js",
-      "mode": "parallel-js",
-      "ms": 3452,
-      "optimizer_invalidations": 393,
-      "optimizer_publications": 786,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-gcwait-rope-repro.js",
-      "mode": "parallel-js",
-      "ms": 1487,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
-      "mode": "parallel-js",
-      "ms": 1404,
-      "optimizer_invalidations": 13,
-      "optimizer_publications": 18,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-gcwait-vs-classa-stop.js",
-      "mode": "parallel-js",
-      "ms": 1438,
-      "optimizer_invalidations": 13,
-      "optimizer_publications": 18,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-regexp-tts-watchdog.js",
-      "mode": "parallel-js",
-      "ms": 1837,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-spin-vs-classa-stop.js",
-      "mode": "parallel-js",
-      "ms": 1490,
-      "optimizer_invalidations": 5,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-spec-timer-capability.js",
-      "mode": "parallel-js",
-      "ms": 80047,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-exit-vs-settle.js",
-      "mode": "parallel-js",
-      "ms": 1619,
-      "optimizer_invalidations": 5,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-tid-recycle-storm.js",
-      "mode": "parallel-js",
-      "ms": 72070,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-vm-teardown-unjoined.js",
-      "mode": "parallel-js",
-      "ms": 1743,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-date-cache.js",
-      "mode": "parallel-js",
-      "ms": 1444,
-      "optimizer_invalidations": 23,
-      "optimizer_publications": 13,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-generator-resume.js",
-      "mode": "parallel-js",
-      "ms": 3135,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-rope-resolve-race.js",
-      "mode": "parallel-js",
-      "ms": 6679,
-      "optimizer_invalidations": 81,
-      "optimizer_publications": 100,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
-      "mode": "parallel-js",
-      "ms": 893196,
-      "note": "cause known: TypeError: Atomics.wait: object has no own data property at ~894,000 ms. Not a hang and not a TypedArray issue. Instrumenting the rejection shows the key is `0` on a non-array with no elements \u2014 i.e. harness.js sleepMs took its `else` branch, `Atomics.wait(lane, 0, 0, ms)`, on a lane built as `{v: 0}`. Both the lane's construction and that branch test `typeof Thread === \"function\"`, so the global resolved at startup and stopped resolving later. Shares a likely root cause with dw2-marklistset-storm.js: a binding that exists stops resolving under concurrent no-GIL execution.",
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "fail"
-    },
-    {
-      "case": "cve/mc-val-atom-identity.js",
-      "mode": "parallel-js",
-      "ms": 2168,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-fire-vs-link.js",
-      "mode": "parallel-js",
-      "modes": {
-        "debug": {
-          "note": "exceeds the 600 s deadline in Debug only; ReleaseSafe passes in 43,002 ms and the ReleaseSafe leg gates it",
-          "result": "did-not-finish"
-        },
-        "releasesafe": {
-          "ms": 43002,
-          "result": "pass"
-        }
-      },
-      "ms": 43002,
-      "note": "Passes no-GIL in 43,002 ms at ReleaseSafe with publications=271244 invalidations=271244 collections=1. Does not finish inside the 600 s deadline at Debug, whose allocator captures a stack trace per allocation (32.3 s vs 3.3 s serialized on this case), so the Debug leg carries an explicit non-pass expectation and the ReleaseSafe leg enforces the pass. The counters name a real defect rather than excusing it: 271,244 compile/jettison rounds where the workload needs 40, because Class-A invalidation jettisons every tier instead of the artifacts speculating on the mutated shape. Owned by #49.",
-      "optimizer_invalidations": 271244,
-      "optimizer_publications": 271244,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-llint-cache-storm.js",
-      "mode": "parallel-js",
-      "ms": 70532,
-      "optimizer_invalidations": 3731,
-      "optimizer_publications": 14658,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-multislot-clone.js",
-      "mode": "parallel-js",
-      "ms": 28330,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-tid-reissue-false-owner.js",
-      "mode": "parallel-js",
-      "ms": 80941,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-wait-property-wait-lost-wakeup.js",
-      "mode": "parallel-js",
-      "ms": 1707,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-callsite-shapes.js",
-      "mode": "parallel-js",
-      "ms": 10992,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 6,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-iterator-host.js",
-      "mode": "parallel-js",
-      "ms": 84689,
-      "optimizer_invalidations": 100199,
-      "optimizer_publications": 200393,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-osr.js",
-      "mode": "parallel-js",
-      "ms": 600042,
-      "note": "expected: upstream marks this KNOWN RED GIL-OFF until K4.II.8 lands; the header states a red run here is not a DW-1 regression",
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "did-not-finish"
-    },
-    {
-      "case": "dw2-marklistset-storm.js",
-      "mode": "parallel-js",
-      "ms": 1473547,
-      "note": "cause partly known: ReferenceError on `threads` at ~1.4e6 ms, not a concurrency assertion. Instrumenting the four ReferenceError sites separately identified the TREE-WALKER path with the binding ABSENT (not TDZ): a block-scoped const initialised two statements earlier, with main-thread GC pressure in between. A reduction of that shape PASSES (unit test 'parallel_js: a block-scoped binding survives concurrent collection'), so scale or the corpus harness matters. Shares a likely root cause with dw2-marklistset-storm.js: a binding that exists stops resolving under concurrent no-GIL execution.",
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "fail"
-    },
-    {
-      "case": "gc-stress/conservative-scan-register.js",
-      "mode": "parallel-js",
-      "ms": 14999,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/havebadtime-vs-indexed-fastpath.js",
-      "mode": "parallel-js",
-      "ms": 6787,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/watchpoint-storm.js",
-      "mode": "parallel-js",
-      "ms": 1897,
-      "optimizer_invalidations": 104,
-      "optimizer_publications": 118,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/zombie-uaf-canary.js",
-      "mode": "parallel-js",
-      "ms": 10618,
-      "optimizer_invalidations": 880,
-      "optimizer_publications": 979,
-      "result": "pass"
-    },
-    {
-      "case": "heap-access-blocking.js",
-      "mode": "parallel-js",
-      "ms": 1314,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-allocation-storm.js",
-      "mode": "parallel-js",
-      "ms": 1314,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-bench-allocation.js",
-      "mode": "parallel-js",
-      "ms": 7059,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-client-churn.js",
-      "mode": "parallel-js",
-      "ms": 1313,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-deferral-storm.js",
-      "mode": "parallel-js",
-      "ms": 1316,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-epoch-reclaim.js",
-      "mode": "parallel-js",
-      "ms": 1314,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-iss-revert.js",
-      "mode": "parallel-js",
-      "ms": 1316,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-option-off.js",
-      "mode": "parallel-js",
-      "ms": 13072,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-precise-storm.js",
-      "mode": "parallel-js",
-      "ms": 1323,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-stop-interleavings.js",
-      "mode": "parallel-js",
-      "ms": 1370,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/delete-quarantine-dictionary.js",
-      "mode": "parallel-js",
-      "ms": 6517,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/delete-quarantine.js",
-      "mode": "parallel-js",
-      "ms": 9100,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-elements.js",
-      "mode": "parallel-js",
-      "ms": 11785,
-      "optimizer_invalidations": 13,
-      "optimizer_publications": 24,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-properties-same-name.js",
-      "mode": "parallel-js",
-      "ms": 5313,
-      "optimizer_invalidations": 10,
-      "optimizer_publications": 9,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-properties.js",
-      "mode": "parallel-js",
-      "ms": 5594,
-      "optimizer_invalidations": 19,
-      "optimizer_publications": 21,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-time-travel.js",
-      "mode": "parallel-js",
-      "ms": 12075,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-torn-shapes.js",
-      "mode": "parallel-js",
-      "ms": 37751,
-      "optimizer_invalidations": 12,
-      "optimizer_publications": 17,
-      "result": "pass"
-    },
-    {
-      "case": "jit/construction-shared-constructor.js",
-      "mode": "parallel-js",
-      "ms": 2035,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/fires-per-sec.js",
-      "mode": "parallel-js",
-      "ms": 1326,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
-      "mode": "parallel-js",
-      "ms": 13546,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "jit/ftl-osr-entry-catch-loop-amplifier.js",
-      "mode": "parallel-js",
-      "ms": 1910,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "jit/golden-disasm-corpus.js",
-      "mode": "parallel-js",
-      "ms": 2535,
-      "optimizer_invalidations": 6,
-      "optimizer_publications": 13,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-direct-call-relink.js",
-      "mode": "parallel-js",
-      "ms": 1693,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-epoch-reclaim.js",
-      "mode": "parallel-js",
-      "ms": 1565,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-fire-vs-execute.js",
-      "mode": "parallel-js",
-      "ms": 1535,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-jettison-vs-execute.js",
-      "mode": "parallel-js",
-      "ms": 1566,
-      "optimizer_invalidations": 4,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-stop-budget.js",
-      "mode": "parallel-js",
-      "ms": 2314,
-      "optimizer_invalidations": 3,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/shared-arraystorage-stress.js",
-      "mode": "parallel-js",
-      "ms": 12698,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/spawned-thread-butterfly-stress.js",
-      "mode": "parallel-js",
-      "ms": 6985,
-      "optimizer_invalidations": 3,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "jit/tag-discipline.js",
-      "mode": "parallel-js",
-      "ms": 3168,
-      "optimizer_invalidations": 4,
-      "optimizer_publications": 10,
-      "result": "pass"
-    },
-    {
-      "case": "jit/tid-tag-3-threads.js",
-      "mode": "parallel-js",
-      "ms": 394086,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/async-join.js",
-      "mode": "parallel-js",
-      "ms": 1347,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/create-basics.js",
-      "mode": "parallel-js",
-      "ms": 1373,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/current-and-id.js",
-      "mode": "parallel-js",
-      "ms": 1347,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/exceptions-cross-join.js",
-      "mode": "parallel-js",
-      "ms": 1400,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/join-semantics.js",
-      "mode": "parallel-js",
-      "ms": 1341,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/nested-threads.js",
-      "mode": "parallel-js",
-      "ms": 1361,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/restrict-foreign-access.js",
-      "mode": "parallel-js",
-      "ms": 1323,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/restrict.js",
-      "mode": "parallel-js",
-      "ms": 1348,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/return-values.js",
-      "mode": "parallel-js",
-      "ms": 1385,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/array-storage-property-transition.js",
-      "mode": "parallel-js",
-      "ms": 2572,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/cow-named-property-transition.js",
-      "mode": "parallel-js",
-      "ms": 1434,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-array-resize-cas.js",
-      "mode": "parallel-js",
-      "ms": 14903,
-      "optimizer_invalidations": 4,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-as-shift-unshift.js",
-      "mode": "parallel-js",
-      "ms": 6132,
-      "optimizer_invalidations": 84,
-      "optimizer_publications": 84,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-as-sparse-holes.js",
-      "mode": "parallel-js",
-      "ms": 7154,
-      "optimizer_invalidations": 5,
-      "optimizer_publications": 6,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
-      "mode": "parallel-js",
-      "ms": 1971,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-convert-grow-gc-read.js",
-      "mode": "parallel-js",
-      "ms": 7464,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-cow-materialize-race.js",
-      "mode": "parallel-js",
-      "ms": 1626,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-i37-same-shape-add-storm.js",
-      "mode": "parallel-js",
-      "ms": 14998,
-      "optimizer_invalidations": 31,
-      "optimizer_publications": 32,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-n2-inline-add-races.js",
-      "mode": "parallel-js",
-      "ms": 4160,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-n3-first-install-races.js",
-      "mode": "parallel-js",
-      "ms": 2579,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-pa-global-races.js",
-      "mode": "parallel-js",
-      "ms": 3195,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-quarantine-readd-across-gc.js",
-      "mode": "parallel-js",
-      "ms": 6623,
-      "optimizer_invalidations": 6,
-      "optimizer_publications": 6,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-restart-locked-vs-conversion.js",
-      "mode": "parallel-js",
-      "ms": 5888,
-      "optimizer_invalidations": 6,
-      "optimizer_publications": 8,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-selftest.js",
-      "mode": "parallel-js",
-      "ms": 1457,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-shared-double.js",
-      "mode": "parallel-js",
-      "ms": 7935,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-single-threaded-flag-on.js",
-      "mode": "parallel-js",
-      "ms": 1509,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-single-threaded-no-change.js",
-      "mode": "parallel-js",
-      "ms": 1481,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stale-spine-reader-vs-grow.js",
-      "mode": "parallel-js",
-      "ms": 2753,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stress-force-segmented.js",
-      "mode": "parallel-js",
-      "ms": 1979,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stress-force-sw.js",
-      "mode": "parallel-js",
-      "ms": 1905,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-t1-vs-sw-flip.js",
-      "mode": "parallel-js",
-      "ms": 1378,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-t5-racing-growers.js",
-      "mode": "parallel-js",
-      "ms": 2125,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-visit-range-outofline.js",
-      "mode": "parallel-js",
-      "ms": 3129,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i08-named-vs-indexed-first-install.js",
-      "mode": "parallel-js",
-      "ms": 1920,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r47-foreign-dictionary-flatten.js",
-      "mode": "parallel-js",
-      "ms": 7772,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r47-typedarray-slowdown-wastememory.js",
-      "mode": "parallel-js",
-      "ms": 4396,
-      "optimizer_invalidations": 100,
-      "optimizer_publications": 202,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js",
-      "mode": "parallel-js",
-      "ms": 2020,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "races/counter-atomics.js",
-      "mode": "parallel-js",
-      "ms": 3175,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/counter-lock.js",
-      "mode": "parallel-js",
-      "ms": 61454,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/forin-enumerator-cache.js",
-      "mode": "parallel-js",
-      "ms": 23145,
-      "optimizer_invalidations": 35,
-      "optimizer_publications": 98,
-      "result": "pass"
-    },
-    {
-      "case": "races/join-storm.js",
-      "mode": "parallel-js",
-      "ms": 1366,
-      "optimizer_invalidations": 3,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "races/transition-vs-read.js",
-      "mode": "parallel-js",
-      "ms": 2231,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/transition-vs-write.js",
-      "mode": "parallel-js",
-      "ms": 6957,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "races/wait-notify-storm.js",
-      "mode": "parallel-js",
-      "ms": 1419,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/lock-fairness.js",
-      "mode": "parallel-js",
-      "ms": 4321,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/map-heavy.js",
-      "mode": "parallel-js",
-      "ms": 1368,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/raytrace-like.js",
-      "mode": "parallel-js",
-      "ms": 1378,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/richards-like.js",
-      "mode": "parallel-js",
-      "ms": 4237,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/splay-like.js",
-      "mode": "parallel-js",
-      "ms": 11118,
-      "optimizer_invalidations": 1896,
-      "optimizer_publications": 2307,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/string-heavy.js",
-      "mode": "parallel-js",
-      "ms": 13569,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/atom-rope-torture.js",
-      "mode": "parallel-js",
-      "ms": 12591,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/date-cache-churn.js",
-      "mode": "parallel-js",
-      "ms": 4969,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/frozen-seal-race.js",
-      "mode": "parallel-js",
-      "ms": 1973,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-delete_by_id-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 6657,
-      "optimizer_invalidations": 153,
-      "optimizer_publications": 307,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-get_by_id-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 4001,
-      "optimizer_invalidations": 103,
-      "optimizer_publications": 103,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-get_by_val-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 14840,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-in_by_id-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 10482,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-instanceof-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 11045,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-put_by_id-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 8062,
-      "optimizer_invalidations": 873,
-      "optimizer_publications": 2653,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-put_by_val-vs-transition.js",
-      "mode": "parallel-js",
-      "ms": 16941,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/oom-one-thread.js",
-      "mode": "parallel-js",
-      "ms": 9489,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/private-fields-shared.js",
-      "mode": "parallel-js",
-      "ms": 1827,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/proto-cycle-race.js",
-      "mode": "parallel-js",
-      "ms": 1523,
-      "optimizer_invalidations": 21,
-      "optimizer_publications": 21,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/regexp-lastindex-shared.js",
-      "mode": "parallel-js",
-      "ms": 2909,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/stack-overflow-per-thread.js",
-      "mode": "parallel-js",
-      "ms": 1485,
-      "optimizer_invalidations": 3,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/symbol-registry-cross-thread.js",
-      "mode": "parallel-js",
-      "ms": 2831,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/termination-storm.js",
-      "mode": "parallel-js",
-      "ms": 1322,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/dictionary-mode.js",
-      "mode": "parallel-js",
-      "ms": 2226,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/frozen-sealed.js",
-      "mode": "parallel-js",
-      "ms": 1361,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/getters-setters.js",
-      "mode": "parallel-js",
-      "ms": 1573,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-add.js",
-      "mode": "parallel-js",
-      "ms": 2130,
-      "optimizer_invalidations": 2,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-delete.js",
-      "mode": "parallel-js",
-      "ms": 1469,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-read-write.js",
-      "mode": "parallel-js",
-      "ms": 2227,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/prototype-chain.js",
-      "mode": "parallel-js",
-      "ms": 1402,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "smoke.js",
-      "mode": "parallel-js",
-      "ms": 4559,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/atomics-futex-lock.js",
-      "mode": "parallel-js",
-      "ms": 2665,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/atomics-object-basic.js",
-      "mode": "parallel-js",
-      "ms": 1399,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all-multi-waiter.js",
-      "mode": "parallel-js",
-      "ms": 1315,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all-shared-lock.js",
-      "mode": "parallel-js",
-      "ms": 1327,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all.js",
-      "mode": "parallel-js",
-      "ms": 1328,
-      "note": "expected: the file states it is written for the cooperative GIL scheduler ('no preemption'), so its single-parked-waiter wake count is not a no-GIL claim",
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "fail"
-    },
-    {
-      "case": "sync/condition-wait-notify.js",
-      "mode": "parallel-js",
-      "ms": 1390,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-worker-waiter.js",
-      "mode": "parallel-js",
-      "ms": 1318,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-async-hold.js",
-      "mode": "parallel-js",
-      "ms": 1356,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-hold-basic.js",
-      "mode": "parallel-js",
-      "ms": 1292,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-hold-mutual-exclusion.js",
-      "mode": "parallel-js",
-      "ms": 2845,
-      "optimizer_invalidations": 1,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/thread-local-isolation.js",
-      "mode": "parallel-js",
-      "ms": 1786,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/all-flags-identity.js",
-      "mode": "parallel-js",
-      "ms": 3512,
-      "optimizer_invalidations": 4,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/exception-state-per-thread.js",
-      "mode": "parallel-js",
-      "ms": 1878,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/flags-off-baseline.js",
-      "mode": "parallel-js",
-      "ms": 2218,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/globalthis-postpublication-negative.js",
-      "mode": "parallel-js",
-      "ms": 3938,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/microtask-ordering.js",
-      "mode": "parallel-js",
-      "ms": 1541,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/regexp-churn-threads.js",
-      "mode": "parallel-js",
-      "ms": 2895,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/stack-limits-per-thread.js",
-      "mode": "parallel-js",
-      "ms": 1609,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-churn-dictionary.js",
-      "mode": "parallel-js",
-      "ms": 2354,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-churn-threads.js",
-      "mode": "parallel-js",
-      "ms": 3566,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-lock-single-thread.js",
-      "mode": "parallel-js",
-      "ms": 2896,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/vmlite-single-thread-identity.js",
-      "mode": "parallel-js",
-      "ms": 2222,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    }
-  ],
-  "isolation": "per-case",
+  "schema_version": 2,
+  "build_mode": "ReleaseSafe",
   "mode": "parallel-js",
-  "summary": {
-    "build_mode_scoped": 1,
-    "cases": 247,
-    "cases_reaching_optimizer": 106,
-    "deadline_policy": "max(600s, 4x serialized duration) per case; cve/mc-tear-typedarray-detach-grow-shrink.js needs 893s and was measured separately",
-    "did_not_finish": 1,
-    "failed": 3,
-    "non_pass_cause_known": 2,
-    "non_pass_expected": 2,
-    "non_pass_uncharacterised": 0,
-    "passed": 243,
-    "skipped": 0,
-    "total_ms": 6691396
-  }
+  "summary": { "cases": 253, "cases_reaching_optimizer": 39, "passed": 253, "failed": 0, "skipped": 0, "total_ms": 168166 },
+  "cases": [
+    { "case": "smoke.js", "mode": "parallel-js", "ms": 30, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "dw1-sort-comparator-callsite-shapes.js", "mode": "parallel-js", "ms": 760, "optimizer_invalidations": 0, "optimizer_publications": 4502, "result": "pass" },
+    { "case": "dw1-sort-comparator-iterator-host.js", "mode": "parallel-js", "ms": 3233, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "dw1-sort-comparator-osr.js", "mode": "parallel-js", "ms": 6002, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "dw2-marklistset-storm.js", "mode": "parallel-js", "ms": 9955, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-basic.js", "mode": "parallel-js", "ms": 71, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-async-wait.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-wait-termination.js", "mode": "parallel-js", "ms": 504, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-basic.js", "mode": "parallel-js", "ms": 79, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-async-hold.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-hold-termination.js", "mode": "parallel-js", "ms": 510, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/park-no-microtask-drain.js", "mode": "parallel-js", "ms": 210, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-basic.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-ctor-errors.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-exc.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-id-bounds.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-restrict.js", "mode": "parallel-js", "ms": 203, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/blocking-gate.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-lifecycle.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/threadlocal-basic.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/create-basics.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/current-and-id.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/exceptions-cross-join.js", "mode": "parallel-js", "ms": 16, "optimizer_invalidations": 1, "optimizer_publications": 1, "result": "pass" },
+    { "case": "lifecycle/join-semantics.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/nested-threads.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/restrict.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/restrict-foreign-access.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/return-values.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/async-join.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/copy-on-write.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "arrays/holes.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/push-resize-multithread.js", "mode": "parallel-js", "ms": 185, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/shared-element-read-write.js", "mode": "parallel-js", "ms": 24, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/typed-arrays-sab.js", "mode": "parallel-js", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/array-element-read.js", "mode": "parallel-js", "ms": 39, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/array-element-write.js", "mode": "parallel-js", "ms": 35, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/flat-butterfly-read.js", "mode": "parallel-js", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/flat-butterfly-write.js", "mode": "parallel-js", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/inline-property-read.js", "mode": "parallel-js", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/inline-property-write.js", "mode": "parallel-js", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/megamorphic-access.js", "mode": "parallel-js", "ms": 16, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/transition-heavy-constructor.js", "mode": "parallel-js", "ms": 835, "optimizer_invalidations": 4993, "optimizer_publications": 4993, "result": "pass" },
+    { "case": "congc-t1-window-split.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t3-barrier-storm.js", "mode": "parallel-js", "ms": 1363, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t4-alloc-steal-storm.js", "mode": "parallel-js", "ms": 917, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t5-celllock-audit.js", "mode": "parallel-js", "ms": 552, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t9-attach-exit-churn.js", "mode": "parallel-js", "ms": 199, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t11-diagnostics.js", "mode": "parallel-js", "ms": 133, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-aint-terminate-notify-park-race.js", "mode": "parallel-js", "ms": 531, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-code-calllink-writer-writer.js", "mode": "parallel-js", "ms": 1759, "optimizer_invalidations": 300, "optimizer_publications": 1500, "result": "pass" },
+    { "case": "cve/mc-code-deferred-fire-stale-window.js", "mode": "parallel-js", "ms": 17, "optimizer_invalidations": 13, "optimizer_publications": 70, "result": "pass" },
+    { "case": "cve/mc-code-sleep-through-jettison-isb.js", "mode": "parallel-js", "ms": 1173, "optimizer_invalidations": 200, "optimizer_publications": 201, "result": "pass" },
+    { "case": "cve/mc-df-delete-reuse.js", "mode": "parallel-js", "ms": 367, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-segmented-length.js", "mode": "parallel-js", "ms": 15, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-ta-detach-resize.js", "mode": "parallel-js", "ms": 891, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-ta-sort-inplace.js", "mode": "parallel-js", "ms": 4597, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-wasm-compile-race.js", "mode": "parallel-js", "ms": 18, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-dos-waiter-table-storm.js", "mode": "parallel-js", "ms": 99, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-blocked-native-roots.js", "mode": "parallel-js", "ms": 278, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-finreg-cross-thread-gc.js", "mode": "parallel-js", "ms": 31, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-thread-shell-finalizer-storm.js", "mode": "parallel-js", "ms": 19, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js", "mode": "parallel-js", "ms": 381, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-buffer-storm.js", "mode": "parallel-js", "ms": 1311, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-s4-detach-nullvec-repro.js", "mode": "parallel-js", "ms": 108, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-wasm-relocating-grow.js", "mode": "parallel-js", "ms": 172, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-hand-dead-registrant-settle.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-hand-restrict-claim.js", "mode": "parallel-js", "ms": 2013, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-butterfly-grow-slack.js", "mode": "parallel-js", "ms": 307, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-cloned-arguments-specials.js", "mode": "parallel-js", "ms": 843, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-direct-arguments-override.js", "mode": "parallel-js", "ms": 32, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-lazy-global-first-touch.js", "mode": "parallel-js", "ms": 18, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-rope-resolve-race.js", "mode": "parallel-js", "ms": 373, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-int-resizable-tail-quarantine.js", "mode": "parallel-js", "ms": 230, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-delete-reuse-stale-offset.js", "mode": "parallel-js", "ms": 35, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-double-relabel-stale-shape.js", "mode": "parallel-js", "ms": 116, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-stale-base-grow-oob.js", "mode": "parallel-js", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "cve/mc-jit-ta-resize-hoisted-base.js", "mode": "parallel-js", "ms": 131, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-detach-quarantine-storm.js", "mode": "parallel-js", "ms": 416, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-sab-refchurn.js", "mode": "parallel-js", "ms": 19, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-wasm-grow-relocate.js", "mode": "parallel-js", "ms": 451, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-lock-cow-materialize-race.js", "mode": "parallel-js", "ms": 52, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "cve/mc-lock-n3-install-vs-owner-add.js", "mode": "parallel-js", "ms": 100, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-lock-stop-vs-park.js", "mode": "parallel-js", "ms": 19, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js", "mode": "parallel-js", "ms": 104, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-async-generator-resume-claim.js", "mode": "parallel-js", "ms": 42, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-generator-resume-claim.js", "mode": "parallel-js", "ms": 33, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-indexed-missing-define-race.js", "mode": "parallel-js", "ms": 16, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-reent-coercion-order.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-reent-store-missing-indexed-define-race.js", "mode": "parallel-js", "ms": 136, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-gcwait-rope-repro.js", "mode": "parallel-js", "ms": 11, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-regexp-tts-watchdog.js", "mode": "parallel-js", "ms": 504, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-spin-vs-classa-stop.js", "mode": "parallel-js", "ms": 23, "optimizer_invalidations": 8, "optimizer_publications": 8, "result": "pass" },
+    { "case": "cve/mc-tdwn-exit-vs-settle.js", "mode": "parallel-js", "ms": 75, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tdwn-tid-recycle-storm.js", "mode": "parallel-js", "ms": 7048, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tdwn-vm-teardown-unjoined.js", "mode": "parallel-js", "ms": 30, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-date-cache.js", "mode": "parallel-js", "ms": 11, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-generator-resume.js", "mode": "parallel-js", "ms": 25, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-rope-resolve-race.js", "mode": "parallel-js", "ms": 88, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-typedarray-detach-grow-shrink.js", "mode": "parallel-js", "ms": 15336, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-atom-identity.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-fire-vs-link.js", "mode": "parallel-js", "ms": 50382, "optimizer_invalidations": 294094, "optimizer_publications": 294094, "result": "pass" },
+    { "case": "cve/mc-val-llint-cache-storm.js", "mode": "parallel-js", "ms": 246, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-multislot-clone.js", "mode": "parallel-js", "ms": 375, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-tid-reissue-false-owner.js", "mode": "parallel-js", "ms": 4226, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-wait-property-wait-lost-wakeup.js", "mode": "parallel-js", "ms": 19, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/conservative-scan-register.js", "mode": "parallel-js", "ms": 143, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/havebadtime-vs-indexed-fastpath.js", "mode": "parallel-js", "ms": 48, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/watchpoint-storm.js", "mode": "parallel-js", "ms": 30, "optimizer_invalidations": 4, "optimizer_publications": 8, "result": "pass" },
+    { "case": "gc-stress/zombie-uaf-canary.js", "mode": "parallel-js", "ms": 79, "optimizer_invalidations": 558, "optimizer_publications": 377, "result": "pass" },
+    { "case": "jit/construction-shared-constructor.js", "mode": "parallel-js", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/fires-per-sec.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 9, "optimizer_publications": 10, "result": "pass" },
+    { "case": "jit/foreign-reify-getbyid-converges.js", "mode": "parallel-js", "ms": 160, "optimizer_invalidations": 1, "optimizer_publications": 3, "result": "pass" },
+    { "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js", "mode": "parallel-js", "ms": 65, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/ftl-osr-entry-catch-loop-amplifier.js", "mode": "parallel-js", "ms": 174, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/golden-disasm-corpus.js", "mode": "parallel-js", "ms": 16, "optimizer_invalidations": 8, "optimizer_publications": 34, "result": "pass" },
+    { "case": "jit/int-gate-epoch-reclaim.js", "mode": "parallel-js", "ms": 25, "optimizer_invalidations": 1, "optimizer_publications": 2, "result": "pass" },
+    { "case": "jit/int-gate-fire-vs-execute.js", "mode": "parallel-js", "ms": 21, "optimizer_invalidations": 2, "optimizer_publications": 3, "result": "pass" },
+    { "case": "jit/int-gate-direct-call-relink.js", "mode": "parallel-js", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/int-gate-jettison-vs-execute.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/int-gate-stop-budget.js", "mode": "parallel-js", "ms": 571, "optimizer_invalidations": 2962, "optimizer_publications": 4599, "result": "pass" },
+    { "case": "jit/ic-publish-reset-loops.js", "mode": "parallel-js", "ms": 10563, "optimizer_invalidations": 40001, "optimizer_publications": 79494, "result": "pass" },
+    { "case": "jit/shared-arraystorage-stress.js", "mode": "parallel-js", "ms": 60, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "jit/spawned-thread-butterfly-stress.js", "mode": "parallel-js", "ms": 92, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/tag-discipline.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 3, "optimizer_publications": 12, "result": "pass" },
+    { "case": "jit/tid-tag-3-threads.js", "mode": "parallel-js", "ms": 13879, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-delete-undefined-sentinel-u5.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-dictionary-delete-u5.js", "mode": "parallel-js", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-samevaluezero.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-storm-u28-flat.js", "mode": "parallel-js", "ms": 79, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-storm-u5-as.js", "mode": "parallel-js", "ms": 21, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-errors.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-load-store.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-rmw.js", "mode": "parallel-js", "ms": 41, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-store-missing-define-race.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wait-notify.js", "mode": "parallel-js", "ms": 280, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wait-termination.js", "mode": "parallel-js", "ms": 513, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-waitasync-timeout.js", "mode": "parallel-js", "ms": 165, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wtr-isolation.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/ta-path-unchanged.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/ta-wait-thread-gate.js", "mode": "parallel-js", "ms": 56, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/atomics-futex-lock.js", "mode": "parallel-js", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/atomics-object-basic.js", "mode": "parallel-js", "ms": 37, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all-multi-waiter.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all-shared-lock.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-wait-notify.js", "mode": "parallel-js", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-worker-waiter.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-async-hold.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-hold-basic.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-hold-mutual-exclusion.js", "mode": "parallel-js", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/thread-local-isolation.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/dictionary-mode.js", "mode": "parallel-js", "ms": 21, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/frozen-sealed.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/getters-setters.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-add.js", "mode": "parallel-js", "ms": 49, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-delete.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-read-write.js", "mode": "parallel-js", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/prototype-chain.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/counter-atomics.js", "mode": "parallel-js", "ms": 76, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/counter-lock.js", "mode": "parallel-js", "ms": 335, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/forin-enumerator-cache.js", "mode": "parallel-js", "ms": 269, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/join-storm.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/transition-vs-read.js", "mode": "parallel-js", "ms": 43, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/transition-vs-write.js", "mode": "parallel-js", "ms": 797, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/wait-notify-storm.js", "mode": "parallel-js", "ms": 36, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-access-blocking.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-allocation-storm.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-bench-allocation.js", "mode": "parallel-js", "ms": 62, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-client-churn.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-deferral-storm.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-epoch-reclaim.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-iss-revert.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-option-off.js", "mode": "parallel-js", "ms": 43, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-precise-storm.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-stop-interleavings.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/delete-quarantine-dictionary.js", "mode": "parallel-js", "ms": 33, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/delete-quarantine.js", "mode": "parallel-js", "ms": 34, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-elements.js", "mode": "parallel-js", "ms": 69, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-properties-same-name.js", "mode": "parallel-js", "ms": 29, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-properties.js", "mode": "parallel-js", "ms": 28, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-time-travel.js", "mode": "parallel-js", "ms": 53, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-torn-shapes.js", "mode": "parallel-js", "ms": 151, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-array-resize-cas.js", "mode": "parallel-js", "ms": 97, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-as-shift-unshift.js", "mode": "parallel-js", "ms": 136, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-as-sparse-holes.js", "mode": "parallel-js", "ms": 83, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js", "mode": "parallel-js", "ms": 61, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-convert-grow-gc-read.js", "mode": "parallel-js", "ms": 36, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-cow-materialize-race.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-i37-same-shape-add-storm.js", "mode": "parallel-js", "ms": 96, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-n2-inline-add-races.js", "mode": "parallel-js", "ms": 21, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-n3-first-install-races.js", "mode": "parallel-js", "ms": 20, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-pa-global-races.js", "mode": "parallel-js", "ms": 55, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-quarantine-readd-across-gc.js", "mode": "parallel-js", "ms": 77, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-restart-locked-vs-conversion.js", "mode": "parallel-js", "ms": 26, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-selftest.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-shared-double.js", "mode": "parallel-js", "ms": 89, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-single-threaded-flag-on.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-single-threaded-no-change.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stale-spine-reader-vs-grow.js", "mode": "parallel-js", "ms": 27, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stress-force-segmented.js", "mode": "parallel-js", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stress-force-sw.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-t1-vs-sw-flip.js", "mode": "parallel-js", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-t5-racing-growers.js", "mode": "parallel-js", "ms": 24, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-visit-range-outofline.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i08-named-vs-indexed-first-install.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/array-storage-property-transition.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/cow-named-property-transition.js", "mode": "parallel-js", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r47-foreign-dictionary-flatten.js", "mode": "parallel-js", "ms": 66, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r47-typedarray-slowdown-wastememory.js", "mode": "parallel-js", "ms": 41, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/atom-rope-torture.js", "mode": "parallel-js", "ms": 70, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/date-cache-churn.js", "mode": "parallel-js", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/frozen-seal-race.js", "mode": "parallel-js", "ms": 22, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/ic-delete_by_id-vs-transition.js", "mode": "parallel-js", "ms": 35, "optimizer_invalidations": 35, "optimizer_publications": 70, "result": "pass" },
+    { "case": "semantics/ic-get_by_id-vs-transition.js", "mode": "parallel-js", "ms": 20, "optimizer_invalidations": 15, "optimizer_publications": 16, "result": "pass" },
+    { "case": "semantics/ic-get_by_val-vs-transition.js", "mode": "parallel-js", "ms": 33, "optimizer_invalidations": 3, "optimizer_publications": 4, "result": "pass" },
+    { "case": "semantics/ic-in_by_id-vs-transition.js", "mode": "parallel-js", "ms": 40, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/ic-instanceof-vs-transition.js", "mode": "parallel-js", "ms": 35, "optimizer_invalidations": 1, "optimizer_publications": 1, "result": "pass" },
+    { "case": "semantics/ic-put_by_id-vs-transition.js", "mode": "parallel-js", "ms": 268, "optimizer_invalidations": 597, "optimizer_publications": 1439, "result": "pass" },
+    { "case": "semantics/ic-put_by_val-vs-transition.js", "mode": "parallel-js", "ms": 35, "optimizer_invalidations": 3, "optimizer_publications": 7, "result": "pass" },
+    { "case": "semantics/private-fields-shared.js", "mode": "parallel-js", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/proto-cycle-race.js", "mode": "parallel-js", "ms": 44, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/regexp-lastindex-shared.js", "mode": "parallel-js", "ms": 11, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/oom-one-thread.js", "mode": "parallel-js", "ms": 479, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/stack-overflow-per-thread.js", "mode": "parallel-js", "ms": 80, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/symbol-registry-cross-thread.js", "mode": "parallel-js", "ms": 20, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/termination-storm.js", "mode": "parallel-js", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/lock-fairness.js", "mode": "parallel-js", "ms": 2236, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/map-heavy.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/raytrace-like.js", "mode": "parallel-js", "ms": 15, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/richards-like.js", "mode": "parallel-js", "ms": 47, "optimizer_invalidations": 12, "optimizer_publications": 10, "result": "pass" },
+    { "case": "scaling/splay-like.js", "mode": "parallel-js", "ms": 563, "optimizer_invalidations": 4649, "optimizer_publications": 3501, "result": "pass" },
+    { "case": "scaling/string-heavy.js", "mode": "parallel-js", "ms": 363, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/all-flags-identity.js", "mode": "parallel-js", "ms": 29, "optimizer_invalidations": 3, "optimizer_publications": 5, "result": "pass" },
+    { "case": "vmstate/globalthis-postpublication-negative.js", "mode": "parallel-js", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/exception-state-per-thread.js", "mode": "parallel-js", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/flags-off-baseline.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "vmstate/microtask-ordering.js", "mode": "parallel-js", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/regexp-churn-threads.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/stack-limits-per-thread.js", "mode": "parallel-js", "ms": 48, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-churn-dictionary.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-churn-threads.js", "mode": "parallel-js", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-lock-single-thread.js", "mode": "parallel-js", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/vmlite-single-thread-identity.js", "mode": "parallel-js", "ms": 10, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "checktraps-havebadtime-park.js", "mode": "parallel-js", "ms": 1708, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "checktraps-invalidation.js", "mode": "parallel-js", "ms": 251, "optimizer_invalidations": 49, "optimizer_publications": 50, "result": "pass" },
+    { "case": "cve/mc-aint-poll-resume-stale-elided.js", "mode": "parallel-js", "ms": 7355, "optimizer_invalidations": 1337, "optimizer_publications": 1332, "result": "pass" },
+    { "case": "cve/mc-spec-timer-capability.js", "mode": "parallel-js", "ms": 420, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-gcwait-vs-classa-stop.js", "mode": "parallel-js", "ms": 24, "optimizer_invalidations": 24, "optimizer_publications": 24, "result": "pass" },
+    { "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js", "mode": "parallel-js", "ms": 22, "optimizer_invalidations": 13, "optimizer_publications": 24, "result": "pass" },
+    { "case": "cve/mc-dos-retired-artifact-churn.js", "mode": "parallel-js", "ms": 1554, "optimizer_invalidations": 2946, "optimizer_publications": 5890, "result": "pass" }
+  ]
 }

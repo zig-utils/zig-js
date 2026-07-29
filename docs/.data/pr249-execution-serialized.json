@@ -1,1942 +1,254 @@
 {
-  "cases": [
-    {
-      "case": "api/blocking-gate.js",
-      "mode": "serialized",
-      "ms": 23,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-async-wait.js",
-      "mode": "serialized",
-      "ms": 30,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-basic.js",
-      "mode": "serialized",
-      "ms": 99,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/condition-wait-termination.js",
-      "mode": "serialized",
-      "ms": 514,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-async-hold.js",
-      "mode": "serialized",
-      "ms": 21,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-basic.js",
-      "mode": "serialized",
-      "ms": 204,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/lock-hold-termination.js",
-      "mode": "serialized",
-      "ms": 527,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/park-no-microtask-drain.js",
-      "mode": "serialized",
-      "ms": 239,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-basic.js",
-      "mode": "serialized",
-      "ms": 16,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-ctor-errors.js",
-      "mode": "serialized",
-      "ms": 18,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-exc.js",
-      "mode": "serialized",
-      "ms": 32,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-id-bounds.js",
-      "mode": "serialized",
-      "ms": 35,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-lifecycle.js",
-      "mode": "serialized",
-      "ms": 13,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "api/thread-restrict.js",
-      "mode": "serialized",
-      "ms": 601,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "api/threadlocal-basic.js",
-      "mode": "serialized",
-      "ms": 15,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/copy-on-write.js",
-      "mode": "serialized",
-      "ms": 19,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/holes.js",
-      "mode": "serialized",
-      "ms": 27,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/push-resize-multithread.js",
-      "mode": "serialized",
-      "ms": 938,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/shared-element-read-write.js",
-      "mode": "serialized",
-      "ms": 117,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "arrays/typed-arrays-sab.js",
-      "mode": "serialized",
-      "ms": 97,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-delete-undefined-sentinel-u5.js",
-      "mode": "serialized",
-      "ms": 90,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-dictionary-delete-u5.js",
-      "mode": "serialized",
-      "ms": 70,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-samevaluezero.js",
-      "mode": "serialized",
-      "ms": 17,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-storm-u28-flat.js",
-      "mode": "serialized",
-      "ms": 174,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-cas-storm-u5-as.js",
-      "mode": "serialized",
-      "ms": 202,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-errors.js",
-      "mode": "serialized",
-      "ms": 21,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-load-store.js",
-      "mode": "serialized",
-      "ms": 17,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-rmw.js",
-      "mode": "serialized",
-      "ms": 450,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-store-missing-define-race.js",
-      "mode": "serialized",
-      "ms": 73,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wait-notify.js",
-      "mode": "serialized",
-      "ms": 317,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wait-termination.js",
-      "mode": "serialized",
-      "ms": 512,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-waitasync-timeout.js",
-      "mode": "serialized",
-      "ms": 176,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/property-wtr-isolation.js",
-      "mode": "serialized",
-      "ms": 18,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/ta-path-unchanged.js",
-      "mode": "serialized",
-      "ms": 45,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "atomics/ta-wait-thread-gate.js",
-      "mode": "serialized",
-      "ms": 67,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/array-element-read.js",
-      "mode": "serialized",
-      "ms": 2642,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/array-element-write.js",
-      "mode": "serialized",
-      "ms": 2899,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/flat-butterfly-read.js",
-      "mode": "serialized",
-      "ms": 1642,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/flat-butterfly-write.js",
-      "mode": "serialized",
-      "ms": 2175,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/inline-property-read.js",
-      "mode": "serialized",
-      "ms": 1798,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/inline-property-write.js",
-      "mode": "serialized",
-      "ms": 1893,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/megamorphic-access.js",
-      "mode": "serialized",
-      "ms": 1185,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "bench/transition-heavy-constructor.js",
-      "mode": "serialized",
-      "ms": 2384,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t1-window-split.js",
-      "mode": "serialized",
-      "ms": 1340,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t11-diagnostics.js",
-      "mode": "serialized",
-      "ms": 2137,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t3-barrier-storm.js",
-      "mode": "serialized",
-      "ms": 195502,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t4-alloc-steal-storm.js",
-      "mode": "serialized",
-      "ms": 83897,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t5-celllock-audit.js",
-      "mode": "serialized",
-      "ms": 140164,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "congc-t9-attach-exit-churn.js",
-      "mode": "serialized",
-      "ms": 30462,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-aint-terminate-notify-park-race.js",
-      "mode": "serialized",
-      "ms": 514,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-code-deferred-fire-stale-window.js",
-      "mode": "serialized",
-      "ms": 98,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 7,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-code-sleep-through-jettison-isb.js",
-      "mode": "serialized",
-      "ms": 1401,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-delete-reuse.js",
-      "mode": "serialized",
-      "ms": 3252,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-segmented-length.js",
-      "mode": "serialized",
-      "ms": 42650,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-ta-detach-resize.js",
-      "mode": "serialized",
-      "ms": 5586,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-ta-sort-inplace.js",
-      "mode": "serialized",
-      "ms": 21550,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-df-wasm-compile-race.js",
-      "mode": "serialized",
-      "ms": 829,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-dos-waiter-table-storm.js",
-      "mode": "serialized",
-      "ms": 63526,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-blocked-native-roots.js",
-      "mode": "serialized",
-      "ms": 45668,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-finreg-cross-thread-gc.js",
-      "mode": "serialized",
-      "ms": 1826,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-thread-shell-finalizer-storm.js",
-      "mode": "serialized",
-      "ms": 3001,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
-      "mode": "serialized",
-      "ms": 221292,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-buffer-storm.js",
-      "mode": "serialized",
-      "ms": 61323,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-s4-detach-nullvec-repro.js",
-      "mode": "serialized",
-      "ms": 638,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-grow-wasm-relocating-grow.js",
-      "mode": "serialized",
-      "ms": 32052,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-hand-dead-registrant-settle.js",
-      "mode": "serialized",
-      "ms": 16,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-hand-restrict-claim.js",
-      "mode": "serialized",
-      "ms": 2700,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-butterfly-grow-slack.js",
-      "mode": "serialized",
-      "ms": 4350,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-cloned-arguments-specials.js",
-      "mode": "serialized",
-      "ms": 4076,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-direct-arguments-override.js",
-      "mode": "serialized",
-      "ms": 2598,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-lazy-global-first-touch.js",
-      "mode": "serialized",
-      "ms": 71,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-init-rope-resolve-race.js",
-      "mode": "serialized",
-      "ms": 1023,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-int-resizable-tail-quarantine.js",
-      "mode": "serialized",
-      "ms": 5721,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-delete-reuse-stale-offset.js",
-      "mode": "serialized",
-      "ms": 4399,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-double-relabel-stale-shape.js",
-      "mode": "serialized",
-      "ms": 3069,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-jit-ta-resize-hoisted-base.js",
-      "mode": "serialized",
-      "ms": 2036,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-detach-quarantine-storm.js",
-      "mode": "serialized",
-      "ms": 2473,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-sab-refchurn.js",
-      "mode": "serialized",
-      "ms": 132,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-life-wasm-grow-relocate.js",
-      "mode": "serialized",
-      "ms": 1435,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-cow-materialize-race.js",
-      "mode": "serialized",
-      "ms": 1198,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-n3-install-vs-owner-add.js",
-      "mode": "serialized",
-      "ms": 3854,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-lock-stop-vs-park.js",
-      "mode": "serialized",
-      "ms": 2517,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
-      "mode": "serialized",
-      "ms": 115,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
-      "mode": "serialized",
-      "ms": 84,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-async-generator-resume-claim.js",
-      "mode": "serialized",
-      "ms": 204,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js",
-      "mode": "serialized",
-      "ms": 147,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-generator-resume-claim.js",
-      "mode": "serialized",
-      "ms": 140,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-prim-indexed-missing-define-race.js",
-      "mode": "serialized",
-      "ms": 147,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-reent-coercion-order.js",
-      "mode": "serialized",
-      "ms": 22,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-reent-store-missing-indexed-define-race.js",
-      "mode": "serialized",
-      "ms": 76,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-gcwait-rope-repro.js",
-      "mode": "serialized",
-      "ms": 2461,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-regexp-tts-watchdog.js",
-      "mode": "serialized",
-      "ms": 514,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-safe-spin-vs-classa-stop.js",
-      "mode": "serialized",
-      "ms": 2017,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 21,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-exit-vs-settle.js",
-      "mode": "serialized",
-      "ms": 92,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-tid-recycle-storm.js",
-      "mode": "serialized",
-      "ms": 4828,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tdwn-vm-teardown-unjoined.js",
-      "mode": "serialized",
-      "ms": 82,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-date-cache.js",
-      "mode": "serialized",
-      "ms": 464,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-generator-resume.js",
-      "mode": "serialized",
-      "ms": 489,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-rope-resolve-race.js",
-      "mode": "serialized",
-      "ms": 293,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
-      "mode": "serialized",
-      "ms": 148066,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-atom-identity.js",
-      "mode": "serialized",
-      "ms": 41,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-llint-cache-storm.js",
-      "mode": "serialized",
-      "ms": 45036,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-multislot-clone.js",
-      "mode": "serialized",
-      "ms": 18439,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-val-tid-reissue-false-owner.js",
-      "mode": "serialized",
-      "ms": 18,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "cve/mc-wait-property-wait-lost-wakeup.js",
-      "mode": "serialized",
-      "ms": 663,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-callsite-shapes.js",
-      "mode": "serialized",
-      "ms": 507,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 6,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-iterator-host.js",
-      "mode": "serialized",
-      "ms": 9128,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "dw1-sort-comparator-osr.js",
-      "mode": "serialized",
-      "ms": 8447,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "dw2-marklistset-storm.js",
-      "mode": "serialized",
-      "ms": 1733495,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/conservative-scan-register.js",
-      "mode": "serialized",
-      "ms": 14610,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/havebadtime-vs-indexed-fastpath.js",
-      "mode": "serialized",
-      "ms": 14707,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/watchpoint-storm.js",
-      "mode": "serialized",
-      "ms": 1859,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "gc-stress/zombie-uaf-canary.js",
-      "mode": "serialized",
-      "ms": 9461,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "heap-access-blocking.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-allocation-storm.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-bench-allocation.js",
-      "mode": "serialized",
-      "ms": 103,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-client-churn.js",
-      "mode": "serialized",
-      "ms": 12,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-deferral-storm.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-epoch-reclaim.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-iss-revert.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-option-off.js",
-      "mode": "serialized",
-      "ms": 13307,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-precise-storm.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "heap-stop-interleavings.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/delete-quarantine-dictionary.js",
-      "mode": "serialized",
-      "ms": 331,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/delete-quarantine.js",
-      "mode": "serialized",
-      "ms": 290,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-elements.js",
-      "mode": "serialized",
-      "ms": 368,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-properties-same-name.js",
-      "mode": "serialized",
-      "ms": 203,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-lost-properties.js",
-      "mode": "serialized",
-      "ms": 177,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-time-travel.js",
-      "mode": "serialized",
-      "ms": 681,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "invariants/no-torn-shapes.js",
-      "mode": "serialized",
-      "ms": 796,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/construction-shared-constructor.js",
-      "mode": "serialized",
-      "ms": 1123,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "jit/fires-per-sec.js",
-      "mode": "serialized",
-      "ms": 46,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 51,
-      "result": "pass"
-    },
-    {
-      "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
-      "mode": "serialized",
-      "ms": 6294,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "jit/ftl-osr-entry-catch-loop-amplifier.js",
-      "mode": "serialized",
-      "ms": 36752,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "jit/golden-disasm-corpus.js",
-      "mode": "serialized",
-      "ms": 16728,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-direct-call-relink.js",
-      "mode": "serialized",
-      "ms": 2153,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-epoch-reclaim.js",
-      "mode": "serialized",
-      "ms": 1802,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-fire-vs-execute.js",
-      "mode": "serialized",
-      "ms": 200,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-jettison-vs-execute.js",
-      "mode": "serialized",
-      "ms": 1928,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "jit/int-gate-stop-budget.js",
-      "mode": "serialized",
-      "ms": 1004,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 24,
-      "result": "pass"
-    },
-    {
-      "case": "jit/shared-arraystorage-stress.js",
-      "mode": "serialized",
-      "ms": 717,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "jit/spawned-thread-butterfly-stress.js",
-      "mode": "serialized",
-      "ms": 5286,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "jit/tag-discipline.js",
-      "mode": "serialized",
-      "ms": 15398,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 4,
-      "result": "pass"
-    },
-    {
-      "case": "jit/tid-tag-3-threads.js",
-      "mode": "serialized",
-      "ms": 157276,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/async-join.js",
-      "mode": "serialized",
-      "ms": 14,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/create-basics.js",
-      "mode": "serialized",
-      "ms": 18,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/current-and-id.js",
-      "mode": "serialized",
-      "ms": 18,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/exceptions-cross-join.js",
-      "mode": "serialized",
-      "ms": 46,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/join-semantics.js",
-      "mode": "serialized",
-      "ms": 14,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/nested-threads.js",
-      "mode": "serialized",
-      "ms": 17,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/restrict-foreign-access.js",
-      "mode": "serialized",
-      "ms": 12,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/restrict.js",
-      "mode": "serialized",
-      "ms": 16,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "lifecycle/return-values.js",
-      "mode": "serialized",
-      "ms": 19,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/array-storage-property-transition.js",
-      "mode": "serialized",
-      "ms": 54,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/cow-named-property-transition.js",
-      "mode": "serialized",
-      "ms": 23,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-array-resize-cas.js",
-      "mode": "serialized",
-      "ms": 553,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-as-shift-unshift.js",
-      "mode": "serialized",
-      "ms": 605,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-as-sparse-holes.js",
-      "mode": "serialized",
-      "ms": 374,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
-      "mode": "serialized",
-      "ms": 119,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-convert-grow-gc-read.js",
-      "mode": "serialized",
-      "ms": 7370,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-cow-materialize-race.js",
-      "mode": "serialized",
-      "ms": 25,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-i37-same-shape-add-storm.js",
-      "mode": "serialized",
-      "ms": 534,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-n2-inline-add-races.js",
-      "mode": "serialized",
-      "ms": 155,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-n3-first-install-races.js",
-      "mode": "serialized",
-      "ms": 54,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-pa-global-races.js",
-      "mode": "serialized",
-      "ms": 203,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-quarantine-readd-across-gc.js",
-      "mode": "serialized",
-      "ms": 6227,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-restart-locked-vs-conversion.js",
-      "mode": "serialized",
-      "ms": 171,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-selftest.js",
-      "mode": "serialized",
-      "ms": 1404,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-shared-double.js",
-      "mode": "serialized",
-      "ms": 304,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-single-threaded-flag-on.js",
-      "mode": "serialized",
-      "ms": 1473,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-single-threaded-no-change.js",
-      "mode": "serialized",
-      "ms": 1738,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stale-spine-reader-vs-grow.js",
-      "mode": "serialized",
-      "ms": 386,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stress-force-segmented.js",
-      "mode": "serialized",
-      "ms": 2933,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-stress-force-sw.js",
-      "mode": "serialized",
-      "ms": 2584,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-t1-vs-sw-flip.js",
-      "mode": "serialized",
-      "ms": 388,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-t5-racing-growers.js",
-      "mode": "serialized",
-      "ms": 416,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i03-visit-range-outofline.js",
-      "mode": "serialized",
-      "ms": 11675,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/i08-named-vs-indexed-first-install.js",
-      "mode": "serialized",
-      "ms": 118,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r47-foreign-dictionary-flatten.js",
-      "mode": "serialized",
-      "ms": 962,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r47-typedarray-slowdown-wastememory.js",
-      "mode": "serialized",
-      "ms": 115,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js",
-      "mode": "serialized",
-      "ms": 41,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "races/counter-atomics.js",
-      "mode": "serialized",
-      "ms": 9853,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/counter-lock.js",
-      "mode": "serialized",
-      "ms": 21914,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/forin-enumerator-cache.js",
-      "mode": "serialized",
-      "ms": 1000,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "races/join-storm.js",
-      "mode": "serialized",
-      "ms": 17,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/transition-vs-read.js",
-      "mode": "serialized",
-      "ms": 183,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "races/transition-vs-write.js",
-      "mode": "serialized",
-      "ms": 10774,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "races/wait-notify-storm.js",
-      "mode": "serialized",
-      "ms": 97,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/lock-fairness.js",
-      "mode": "serialized",
-      "ms": 2089,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/map-heavy.js",
-      "mode": "serialized",
-      "ms": 1115,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/raytrace-like.js",
-      "mode": "serialized",
-      "ms": 1828,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 7,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/richards-like.js",
-      "mode": "serialized",
-      "ms": 27930,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/splay-like.js",
-      "mode": "serialized",
-      "ms": 3744,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 12,
-      "result": "pass"
-    },
-    {
-      "case": "scaling/string-heavy.js",
-      "mode": "serialized",
-      "ms": 8133,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/atom-rope-torture.js",
-      "mode": "serialized",
-      "ms": 2303,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/date-cache-churn.js",
-      "mode": "serialized",
-      "ms": 1516,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/frozen-seal-race.js",
-      "mode": "serialized",
-      "ms": 152,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-delete_by_id-vs-transition.js",
-      "mode": "serialized",
-      "ms": 2220,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-get_by_id-vs-transition.js",
-      "mode": "serialized",
-      "ms": 1092,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-get_by_val-vs-transition.js",
-      "mode": "serialized",
-      "ms": 2107,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-in_by_id-vs-transition.js",
-      "mode": "serialized",
-      "ms": 2332,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-instanceof-vs-transition.js",
-      "mode": "serialized",
-      "ms": 1410,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 3,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-put_by_id-vs-transition.js",
-      "mode": "serialized",
-      "ms": 1802,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/ic-put_by_val-vs-transition.js",
-      "mode": "serialized",
-      "ms": 1910,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/oom-one-thread.js",
-      "mode": "serialized",
-      "ms": 9979,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/private-fields-shared.js",
-      "mode": "serialized",
-      "ms": 87,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/proto-cycle-race.js",
-      "mode": "serialized",
-      "ms": 359,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/regexp-lastindex-shared.js",
-      "mode": "serialized",
-      "ms": 330,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/stack-overflow-per-thread.js",
-      "mode": "serialized",
-      "ms": 255,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/symbol-registry-cross-thread.js",
-      "mode": "serialized",
-      "ms": 225,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "semantics/termination-storm.js",
-      "mode": "serialized",
-      "ms": 11,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/dictionary-mode.js",
-      "mode": "serialized",
-      "ms": 231,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/frozen-sealed.js",
-      "mode": "serialized",
-      "ms": 21,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/getters-setters.js",
-      "mode": "serialized",
-      "ms": 24,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-add.js",
-      "mode": "serialized",
-      "ms": 543,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-delete.js",
-      "mode": "serialized",
-      "ms": 24,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/property-read-write.js",
-      "mode": "serialized",
-      "ms": 44,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "shared-objects/prototype-chain.js",
-      "mode": "serialized",
-      "ms": 19,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "smoke.js",
-      "mode": "serialized",
-      "ms": 279,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/atomics-futex-lock.js",
-      "mode": "serialized",
-      "ms": 95,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "fail"
-    },
-    {
-      "case": "sync/atomics-object-basic.js",
-      "mode": "serialized",
-      "ms": 77,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all-multi-waiter.js",
-      "mode": "serialized",
-      "ms": 20,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all-shared-lock.js",
-      "mode": "serialized",
-      "ms": 15,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-notify-all.js",
-      "mode": "serialized",
-      "ms": 15,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-wait-notify.js",
-      "mode": "serialized",
-      "ms": 23,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/condition-worker-waiter.js",
-      "mode": "serialized",
-      "ms": 13,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-async-hold.js",
-      "mode": "serialized",
-      "ms": 16,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-hold-basic.js",
-      "mode": "serialized",
-      "ms": 15,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "sync/lock-hold-mutual-exclusion.js",
-      "mode": "serialized",
-      "ms": 84,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 1,
-      "result": "pass"
-    },
-    {
-      "case": "sync/thread-local-isolation.js",
-      "mode": "serialized",
-      "ms": 24,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/all-flags-identity.js",
-      "mode": "serialized",
-      "ms": 278,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 5,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/exception-state-per-thread.js",
-      "mode": "serialized",
-      "ms": 66,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/flags-off-baseline.js",
-      "mode": "serialized",
-      "ms": 140,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/globalthis-postpublication-negative.js",
-      "mode": "serialized",
-      "ms": 27,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/microtask-ordering.js",
-      "mode": "serialized",
-      "ms": 19,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/regexp-churn-threads.js",
-      "mode": "serialized",
-      "ms": 221,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/stack-limits-per-thread.js",
-      "mode": "serialized",
-      "ms": 626,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-churn-dictionary.js",
-      "mode": "serialized",
-      "ms": 183,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-churn-threads.js",
-      "mode": "serialized",
-      "ms": 380,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/structure-lock-single-thread.js",
-      "mode": "serialized",
-      "ms": 59,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 0,
-      "result": "pass"
-    },
-    {
-      "case": "vmstate/vmlite-single-thread-identity.js",
-      "mode": "serialized",
-      "ms": 139,
-      "optimizer_invalidations": 0,
-      "optimizer_publications": 2,
-      "result": "pass"
-    }
-  ],
+  "schema_version": 2,
+  "build_mode": "ReleaseSafe",
   "mode": "serialized",
-  "shards": 4,
-  "summary": {
-    "cases": 241,
-    "cases_reaching_optimizer": 110,
-    "failed": 1,
-    "passed": 240,
-    "skipped": 0,
-    "total_ms": 3464197
-  }
+  "summary": { "cases": 246, "cases_reaching_optimizer": 34, "passed": 246, "failed": 0, "skipped": 0, "total_ms": 133440 },
+  "cases": [
+    { "case": "smoke.js", "mode": "serialized", "ms": 27, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "dw1-sort-comparator-callsite-shapes.js", "mode": "serialized", "ms": 879, "optimizer_invalidations": 0, "optimizer_publications": 4502, "result": "pass" },
+    { "case": "dw1-sort-comparator-iterator-host.js", "mode": "serialized", "ms": 2388, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "dw1-sort-comparator-osr.js", "mode": "serialized", "ms": 3469, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "dw2-marklistset-storm.js", "mode": "serialized", "ms": 8723, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-basic.js", "mode": "serialized", "ms": 80, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-async-wait.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/condition-wait-termination.js", "mode": "serialized", "ms": 507, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-basic.js", "mode": "serialized", "ms": 55, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-async-hold.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/lock-hold-termination.js", "mode": "serialized", "ms": 510, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/park-no-microtask-drain.js", "mode": "serialized", "ms": 203, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-basic.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-ctor-errors.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-exc.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-id-bounds.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-restrict.js", "mode": "serialized", "ms": 243, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/blocking-gate.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/thread-lifecycle.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "api/threadlocal-basic.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/create-basics.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/current-and-id.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/exceptions-cross-join.js", "mode": "serialized", "ms": 11, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "lifecycle/join-semantics.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/nested-threads.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/restrict.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/restrict-foreign-access.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/return-values.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "lifecycle/async-join.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/copy-on-write.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "arrays/holes.js", "mode": "serialized", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/push-resize-multithread.js", "mode": "serialized", "ms": 200, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/shared-element-read-write.js", "mode": "serialized", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "arrays/typed-arrays-sab.js", "mode": "serialized", "ms": 18, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/array-element-read.js", "mode": "serialized", "ms": 1409, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/array-element-write.js", "mode": "serialized", "ms": 1103, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/flat-butterfly-read.js", "mode": "serialized", "ms": 240, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/flat-butterfly-write.js", "mode": "serialized", "ms": 401, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/inline-property-read.js", "mode": "serialized", "ms": 276, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/inline-property-write.js", "mode": "serialized", "ms": 296, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/megamorphic-access.js", "mode": "serialized", "ms": 160, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "bench/transition-heavy-constructor.js", "mode": "serialized", "ms": 410, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "congc-t1-window-split.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t3-barrier-storm.js", "mode": "serialized", "ms": 1464, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t4-alloc-steal-storm.js", "mode": "serialized", "ms": 949, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t5-celllock-audit.js", "mode": "serialized", "ms": 585, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t9-attach-exit-churn.js", "mode": "serialized", "ms": 260, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "congc-t11-diagnostics.js", "mode": "serialized", "ms": 188, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-aint-terminate-notify-park-race.js", "mode": "serialized", "ms": 506, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-code-calllink-writer-writer.js", "mode": "serialized", "ms": 1791, "optimizer_invalidations": 0, "optimizer_publications": 1500, "result": "pass" },
+    { "case": "cve/mc-code-deferred-fire-stale-window.js", "mode": "serialized", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 7, "result": "pass" },
+    { "case": "cve/mc-code-sleep-through-jettison-isb.js", "mode": "serialized", "ms": 1141, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "cve/mc-df-delete-reuse.js", "mode": "serialized", "ms": 177, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-segmented-length.js", "mode": "serialized", "ms": 1798, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-ta-detach-resize.js", "mode": "serialized", "ms": 761, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-ta-sort-inplace.js", "mode": "serialized", "ms": 4991, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-df-wasm-compile-race.js", "mode": "serialized", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-dos-waiter-table-storm.js", "mode": "serialized", "ms": 102, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-blocked-native-roots.js", "mode": "serialized", "ms": 265, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-finreg-cross-thread-gc.js", "mode": "serialized", "ms": 39, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-thread-shell-finalizer-storm.js", "mode": "serialized", "ms": 24, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js", "mode": "serialized", "ms": 388, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-buffer-storm.js", "mode": "serialized", "ms": 1684, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-s4-detach-nullvec-repro.js", "mode": "serialized", "ms": 59, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-grow-wasm-relocating-grow.js", "mode": "serialized", "ms": 153, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-hand-dead-registrant-settle.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-hand-restrict-claim.js", "mode": "serialized", "ms": 2252, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-butterfly-grow-slack.js", "mode": "serialized", "ms": 397, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-cloned-arguments-specials.js", "mode": "serialized", "ms": 367, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-direct-arguments-override.js", "mode": "serialized", "ms": 258, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-lazy-global-first-touch.js", "mode": "serialized", "ms": 12, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-init-rope-resolve-race.js", "mode": "serialized", "ms": 337, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-int-resizable-tail-quarantine.js", "mode": "serialized", "ms": 246, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-delete-reuse-stale-offset.js", "mode": "serialized", "ms": 36, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-double-relabel-stale-shape.js", "mode": "serialized", "ms": 119, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-jit-stale-base-grow-oob.js", "mode": "serialized", "ms": 161, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "cve/mc-jit-ta-resize-hoisted-base.js", "mode": "serialized", "ms": 247, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-detach-quarantine-storm.js", "mode": "serialized", "ms": 254, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-sab-refchurn.js", "mode": "serialized", "ms": 15, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-life-wasm-grow-relocate.js", "mode": "serialized", "ms": 192, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-lock-cow-materialize-race.js", "mode": "serialized", "ms": 42, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "cve/mc-lock-n3-install-vs-owner-add.js", "mode": "serialized", "ms": 247, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-lock-stop-vs-park.js", "mode": "serialized", "ms": 237, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js", "mode": "serialized", "ms": 102, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-async-generator-resume-claim.js", "mode": "serialized", "ms": 18, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-generator-resume-claim.js", "mode": "serialized", "ms": 22, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-prim-indexed-missing-define-race.js", "mode": "serialized", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-reent-coercion-order.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-reent-store-missing-indexed-define-race.js", "mode": "serialized", "ms": 22, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-gcwait-rope-repro.js", "mode": "serialized", "ms": 57, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-regexp-tts-watchdog.js", "mode": "serialized", "ms": 501, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-safe-spin-vs-classa-stop.js", "mode": "serialized", "ms": 226, "optimizer_invalidations": 0, "optimizer_publications": 20, "result": "pass" },
+    { "case": "cve/mc-tdwn-exit-vs-settle.js", "mode": "serialized", "ms": 65, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tdwn-tid-recycle-storm.js", "mode": "serialized", "ms": 2201, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tdwn-vm-teardown-unjoined.js", "mode": "serialized", "ms": 27, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-date-cache.js", "mode": "serialized", "ms": 55, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-generator-resume.js", "mode": "serialized", "ms": 34, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-rope-resolve-race.js", "mode": "serialized", "ms": 87, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-tear-typedarray-detach-grow-shrink.js", "mode": "serialized", "ms": 19139, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-atom-identity.js", "mode": "serialized", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-fire-vs-link.js", "mode": "serialized", "ms": 3105, "optimizer_invalidations": 0, "optimizer_publications": 40, "result": "pass" },
+    { "case": "cve/mc-val-llint-cache-storm.js", "mode": "serialized", "ms": 8206, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-multislot-clone.js", "mode": "serialized", "ms": 1713, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-val-tid-reissue-false-owner.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "cve/mc-wait-property-wait-lost-wakeup.js", "mode": "serialized", "ms": 55, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/conservative-scan-register.js", "mode": "serialized", "ms": 132, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/havebadtime-vs-indexed-fastpath.js", "mode": "serialized", "ms": 1210, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "gc-stress/watchpoint-storm.js", "mode": "serialized", "ms": 28, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "gc-stress/zombie-uaf-canary.js", "mode": "serialized", "ms": 46, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "jit/construction-shared-constructor.js", "mode": "serialized", "ms": 157, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/fires-per-sec.js", "mode": "serialized", "ms": 15, "optimizer_invalidations": 0, "optimizer_publications": 50, "result": "pass" },
+    { "case": "jit/foreign-reify-getbyid-converges.js", "mode": "serialized", "ms": 130, "optimizer_invalidations": 0, "optimizer_publications": 3, "result": "pass" },
+    { "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js", "mode": "serialized", "ms": 562, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/ftl-osr-entry-catch-loop-amplifier.js", "mode": "serialized", "ms": 6868, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/golden-disasm-corpus.js", "mode": "serialized", "ms": 1292, "optimizer_invalidations": 0, "optimizer_publications": 6, "result": "pass" },
+    { "case": "jit/int-gate-epoch-reclaim.js", "mode": "serialized", "ms": 42, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "jit/int-gate-fire-vs-execute.js", "mode": "serialized", "ms": 19, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "jit/int-gate-direct-call-relink.js", "mode": "serialized", "ms": 29, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/int-gate-jettison-vs-execute.js", "mode": "serialized", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/int-gate-stop-budget.js", "mode": "serialized", "ms": 225, "optimizer_invalidations": 0, "optimizer_publications": 24, "result": "pass" },
+    { "case": "jit/ic-publish-reset-loops.js", "mode": "serialized", "ms": 2858, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "jit/shared-arraystorage-stress.js", "mode": "serialized", "ms": 162, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "jit/spawned-thread-butterfly-stress.js", "mode": "serialized", "ms": 2284, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "jit/tag-discipline.js", "mode": "serialized", "ms": 1006, "optimizer_invalidations": 0, "optimizer_publications": 4, "result": "pass" },
+    { "case": "jit/tid-tag-3-threads.js", "mode": "serialized", "ms": 15849, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-delete-undefined-sentinel-u5.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-dictionary-delete-u5.js", "mode": "serialized", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-samevaluezero.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-storm-u28-flat.js", "mode": "serialized", "ms": 48, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-cas-storm-u5-as.js", "mode": "serialized", "ms": 18, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-errors.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-load-store.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-rmw.js", "mode": "serialized", "ms": 35, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-store-missing-define-race.js", "mode": "serialized", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wait-notify.js", "mode": "serialized", "ms": 280, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wait-termination.js", "mode": "serialized", "ms": 510, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-waitasync-timeout.js", "mode": "serialized", "ms": 168, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/property-wtr-isolation.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/ta-path-unchanged.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "atomics/ta-wait-thread-gate.js", "mode": "serialized", "ms": 54, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/atomics-futex-lock.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/atomics-object-basic.js", "mode": "serialized", "ms": 35, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all-multi-waiter.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all-shared-lock.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-notify-all.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-wait-notify.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/condition-worker-waiter.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-async-hold.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-hold-basic.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/lock-hold-mutual-exclusion.js", "mode": "serialized", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "sync/thread-local-isolation.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/dictionary-mode.js", "mode": "serialized", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/frozen-sealed.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/getters-setters.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-add.js", "mode": "serialized", "ms": 45, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-delete.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/property-read-write.js", "mode": "serialized", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "shared-objects/prototype-chain.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/counter-atomics.js", "mode": "serialized", "ms": 830, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/counter-lock.js", "mode": "serialized", "ms": 5320, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/forin-enumerator-cache.js", "mode": "serialized", "ms": 253, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/join-storm.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/transition-vs-read.js", "mode": "serialized", "ms": 42, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/transition-vs-write.js", "mode": "serialized", "ms": 951, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "races/wait-notify-storm.js", "mode": "serialized", "ms": 38, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-access-blocking.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-allocation-storm.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-bench-allocation.js", "mode": "serialized", "ms": 52, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-client-churn.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-deferral-storm.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-epoch-reclaim.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-iss-revert.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-option-off.js", "mode": "serialized", "ms": 47, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-precise-storm.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "heap-stop-interleavings.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/delete-quarantine-dictionary.js", "mode": "serialized", "ms": 32, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/delete-quarantine.js", "mode": "serialized", "ms": 26, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-elements.js", "mode": "serialized", "ms": 45, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-properties-same-name.js", "mode": "serialized", "ms": 80, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-lost-properties.js", "mode": "serialized", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-time-travel.js", "mode": "serialized", "ms": 58, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "invariants/no-torn-shapes.js", "mode": "serialized", "ms": 80, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-array-resize-cas.js", "mode": "serialized", "ms": 75, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-as-shift-unshift.js", "mode": "serialized", "ms": 137, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-as-sparse-holes.js", "mode": "serialized", "ms": 80, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js", "mode": "serialized", "ms": 59, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-convert-grow-gc-read.js", "mode": "serialized", "ms": 34, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-cow-materialize-race.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-i37-same-shape-add-storm.js", "mode": "serialized", "ms": 60, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-n2-inline-add-races.js", "mode": "serialized", "ms": 16, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-n3-first-install-races.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-pa-global-races.js", "mode": "serialized", "ms": 48, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-quarantine-readd-across-gc.js", "mode": "serialized", "ms": 77, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-restart-locked-vs-conversion.js", "mode": "serialized", "ms": 17, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-selftest.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-shared-double.js", "mode": "serialized", "ms": 77, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-single-threaded-flag-on.js", "mode": "serialized", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-single-threaded-no-change.js", "mode": "serialized", "ms": 5, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stale-spine-reader-vs-grow.js", "mode": "serialized", "ms": 101, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stress-force-segmented.js", "mode": "serialized", "ms": 13, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-stress-force-sw.js", "mode": "serialized", "ms": 11, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-t1-vs-sw-flip.js", "mode": "serialized", "ms": 88, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-t5-racing-growers.js", "mode": "serialized", "ms": 132, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i03-visit-range-outofline.js", "mode": "serialized", "ms": 78, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/i08-named-vs-indexed-first-install.js", "mode": "serialized", "ms": 49, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/array-storage-property-transition.js", "mode": "serialized", "ms": 9, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/cow-named-property-transition.js", "mode": "serialized", "ms": 4, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r47-foreign-dictionary-flatten.js", "mode": "serialized", "ms": 76, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r47-typedarray-slowdown-wastememory.js", "mode": "serialized", "ms": 29, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js", "mode": "serialized", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/atom-rope-torture.js", "mode": "serialized", "ms": 358, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/date-cache-churn.js", "mode": "serialized", "ms": 151, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/frozen-seal-race.js", "mode": "serialized", "ms": 35, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/ic-delete_by_id-vs-transition.js", "mode": "serialized", "ms": 142, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "semantics/ic-get_by_id-vs-transition.js", "mode": "serialized", "ms": 88, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "semantics/ic-get_by_val-vs-transition.js", "mode": "serialized", "ms": 135, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "semantics/ic-in_by_id-vs-transition.js", "mode": "serialized", "ms": 166, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/ic-instanceof-vs-transition.js", "mode": "serialized", "ms": 104, "optimizer_invalidations": 0, "optimizer_publications": 1, "result": "pass" },
+    { "case": "semantics/ic-put_by_id-vs-transition.js", "mode": "serialized", "ms": 121, "optimizer_invalidations": 0, "optimizer_publications": 4, "result": "pass" },
+    { "case": "semantics/ic-put_by_val-vs-transition.js", "mode": "serialized", "ms": 118, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "semantics/private-fields-shared.js", "mode": "serialized", "ms": 14, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/proto-cycle-race.js", "mode": "serialized", "ms": 235, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/regexp-lastindex-shared.js", "mode": "serialized", "ms": 47, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/oom-one-thread.js", "mode": "serialized", "ms": 397, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/stack-overflow-per-thread.js", "mode": "serialized", "ms": 147, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/symbol-registry-cross-thread.js", "mode": "serialized", "ms": 61, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "semantics/termination-storm.js", "mode": "serialized", "ms": 1, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/lock-fairness.js", "mode": "serialized", "ms": 2023, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/map-heavy.js", "mode": "serialized", "ms": 103, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/raytrace-like.js", "mode": "serialized", "ms": 759, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "scaling/richards-like.js", "mode": "serialized", "ms": 2445, "optimizer_invalidations": 0, "optimizer_publications": 4, "result": "pass" },
+    { "case": "scaling/splay-like.js", "mode": "serialized", "ms": 376, "optimizer_invalidations": 0, "optimizer_publications": 4, "result": "pass" },
+    { "case": "scaling/string-heavy.js", "mode": "serialized", "ms": 1649, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/all-flags-identity.js", "mode": "serialized", "ms": 50, "optimizer_invalidations": 0, "optimizer_publications": 5, "result": "pass" },
+    { "case": "vmstate/globalthis-postpublication-negative.js", "mode": "serialized", "ms": 3, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/exception-state-per-thread.js", "mode": "serialized", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/flags-off-baseline.js", "mode": "serialized", "ms": 7, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" },
+    { "case": "vmstate/microtask-ordering.js", "mode": "serialized", "ms": 2, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/regexp-churn-threads.js", "mode": "serialized", "ms": 24, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/stack-limits-per-thread.js", "mode": "serialized", "ms": 66, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-churn-dictionary.js", "mode": "serialized", "ms": 21, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-churn-threads.js", "mode": "serialized", "ms": 39, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/structure-lock-single-thread.js", "mode": "serialized", "ms": 6, "optimizer_invalidations": 0, "optimizer_publications": 0, "result": "pass" },
+    { "case": "vmstate/vmlite-single-thread-identity.js", "mode": "serialized", "ms": 8, "optimizer_invalidations": 0, "optimizer_publications": 2, "result": "pass" }
+  ]
 }

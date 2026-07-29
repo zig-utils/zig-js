@@ -84,6 +84,8 @@ jobs:
               python3 - "$RUNNER_TEMP/pr249-exec.json" <<'PY'
               import json, sys
               d = json.load(open(sys.argv[1]))
+              assert d["schema_version"] == 2, d
+              assert d["build_mode"] == "Debug", d
               assert d["summary"]["cases"] == 2, d
               assert d["summary"]["failed"] == 0, d
               assert d["mode"] == "serialized", d
@@ -92,6 +94,7 @@ jobs:
                       assert key in c, (key, c)
               print("execution inventory witness ok:", d["summary"])
               PY
+              python3 tools/pr249-terminal-execution.py --check
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
           - name: wasm-feature-profiles

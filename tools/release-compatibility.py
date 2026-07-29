@@ -733,6 +733,14 @@ def main() -> int:
         inventory = json.loads(artifact_path(gate_by_id[gate_id]["evidence"][0]).read_text())
         require(statuses(inventory) == {"implemented"}, f"{gate_id}: inventory is not fully implemented")
     validate_pr249_tail(gate_by_id["shell_and_reference_hooks"])
+    terminal_execution = load_python_module(
+        "tools/pr249-terminal-execution.py",
+        "pr249_terminal_execution",
+    )
+    try:
+        terminal_execution.validate_checked()
+    except Exception as exc:
+        require(False, f"PR-249 terminal execution artifact failed verification: {exc}")
 
     private_pending = 0
     for relative in gate_by_id["private_abi_profiles"]["evidence"]:

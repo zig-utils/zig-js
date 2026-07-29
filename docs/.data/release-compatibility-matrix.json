@@ -98,13 +98,14 @@
     {
       "id": "shell_and_reference_hooks",
       "issue": 143,
-      "status": "open",
+      "status": "green",
       "evidence": [
         "docs/threads/testing.md",
         "docs/.data/pr249-reference-inventory.json",
-        "docs/.data/pr249-unpromoted-scan-2026-07-28.json"
+        "docs/.data/pr249-unpromoted-scan-2026-07-28.json",
+        "docs/.data/pr249-terminal-execution.json"
       ],
-      "blockers": ["promote the remaining reference-only shell, Wasm, and JIT hooks"]
+      "blockers": []
     },
     {
       "id": "moving_gc",

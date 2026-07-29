@@ -1,0 +1,6823 @@
+{
+  "cases": [
+    {
+      "case": "api/blocking-gate.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/blocking-gate.js",
+      "sha256": "8837a8a602de8d7861c9fa564c721c1a06edf0bfb7a71055caf6c519e737d0e4"
+    },
+    {
+      "case": "api/condition-async-wait.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/condition-async-wait.js",
+      "sha256": "dbac0e1be3cdd971d512dc52acca0e76bcec5ce9088a01ce7a824f54421b016d"
+    },
+    {
+      "case": "api/condition-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 71,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 80,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/condition-basic.js",
+      "sha256": "a1cde6d21fad71fc9e80d711644989108b456d8e7f15f5f3ac700f0c04bef683"
+    },
+    {
+      "case": "api/condition-wait-termination.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 504,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 507,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/condition-wait-termination.js",
+      "sha256": "df8c0f60ebbf3e6fe772a821fef3082c93c42bb18b4afd57d19706e0bc4ff1b5"
+    },
+    {
+      "case": "api/lock-async-hold.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/lock-async-hold.js",
+      "sha256": "f14c86e5d9669b255103c5ac3eb5a87d1110963239bdd0f461559f60d030554b"
+    },
+    {
+      "case": "api/lock-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 79,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 55,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/lock-basic.js",
+      "sha256": "9e7699d55927d465013780fb4c73b717c938638e374d86cd3c84ab03452839e9"
+    },
+    {
+      "case": "api/lock-hold-termination.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 510,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 510,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/lock-hold-termination.js",
+      "sha256": "26add172b5afff482a9319ada4c91b64b4b8783bed8bb9a4dd3ba786dad2ce96"
+    },
+    {
+      "case": "api/park-no-microtask-drain.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 210,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 203,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/park-no-microtask-drain.js",
+      "sha256": "ab32ed8fa98ce7799d3f72d3c5004707e7df125b407b2b9c6c344219435b693a"
+    },
+    {
+      "case": "api/thread-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-basic.js",
+      "sha256": "fbd4e0481dae78a255ff46edaa70207115026959ce663e5c0b120ec7499c2432"
+    },
+    {
+      "case": "api/thread-ctor-errors.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-ctor-errors.js",
+      "sha256": "1eaf8a440070b3351a4adc88b8dc7c09b4746c63720cf990aa54260ffc61e6d7"
+    },
+    {
+      "case": "api/thread-exc.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-exc.js",
+      "sha256": "ac3a73916b981622bf383fb098ed4879286dba1cce4a8b51bac80646eb45b3be"
+    },
+    {
+      "case": "api/thread-id-bounds.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-id-bounds.js",
+      "sha256": "912c403a3030f7cdf37f0248d63cd46091e8badc3f0b57007f27101f4dff6483"
+    },
+    {
+      "case": "api/thread-lifecycle.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-lifecycle.js",
+      "sha256": "6ba032f13aac40c2f2bdddc322858151ca2f4aab822b2fe43cf3a6e2dc6493de"
+    },
+    {
+      "case": "api/thread-restrict.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 203,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 243,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/thread-restrict.js",
+      "sha256": "f81c4984883742d66840bc4b7e3e8748c162ecd65075ea99f30938b2b511d3f8"
+    },
+    {
+      "case": "api/threadlocal-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/api/threadlocal-basic.js",
+      "sha256": "0330427fee3a746fc4a615e616ca27ec76a8dd90a3a11e75b5304b12f1dc25e8"
+    },
+    {
+      "case": "api/wasm-refused-sd7.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "fail",
+          "ms": 6,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        },
+        "serialized": {
+          "expected_result": "fail",
+          "ms": 94,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/api/wasm-refused-sd7.js",
+      "sha256": "4bec416e0ec046172f7a892b8529baedfd1ac1248580474b2a79e2974422a29f",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "premise": "Every WebAssembly entry point must throw TypeError on a spawned shared-realm thread.",
+        "zig_js_contract": "WebAssembly is intentionally available from shared-realm Thread workers."
+      }
+    },
+    {
+      "case": "arrays/copy-on-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/arrays/copy-on-write.js",
+      "sha256": "908b8fe7e9cabb61c1cd255dce439625f42d2bcfafa0d66b75fe1019d03322d3"
+    },
+    {
+      "case": "arrays/holes.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/arrays/holes.js",
+      "sha256": "616f96fc5e05c94b6a3d4ad7032d1f829b180d44fa091e5d8ba5b01e9c5d73e5"
+    },
+    {
+      "case": "arrays/push-resize-multithread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 185,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 200,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/arrays/push-resize-multithread.js",
+      "sha256": "11220f937017cb2556b88647d4db4a19dafc5563f729349a3c9c02d98d6ec1b1"
+    },
+    {
+      "case": "arrays/shared-element-read-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 24,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/arrays/shared-element-read-write.js",
+      "sha256": "8e7849b708378600e7e30e73424f01ef1123611755f6a090276f6366a20f00a3"
+    },
+    {
+      "case": "arrays/typed-arrays-sab.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 18,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/arrays/typed-arrays-sab.js",
+      "sha256": "a6c490eb0e30233f4c2a193b7970d3a9b128a52c586b4f09f183f3077cf045ba"
+    },
+    {
+      "case": "atomics/property-cas-delete-undefined-sentinel-u5.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-cas-delete-undefined-sentinel-u5.js",
+      "sha256": "ad34b721d0701f930b49b586aa2df17b09c8da0d7a99bd4cd8ea1be4aa48f7bf"
+    },
+    {
+      "case": "atomics/property-cas-dictionary-delete-u5.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-cas-dictionary-delete-u5.js",
+      "sha256": "7ffdbbcd37f600397eb12b4c44d367568d567d350d674382b6383c6162a2daa5"
+    },
+    {
+      "case": "atomics/property-cas-samevaluezero.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-cas-samevaluezero.js",
+      "sha256": "de2ea191f555e453948efabee4bf433145cd2476413242de30b924c8e413f15c"
+    },
+    {
+      "case": "atomics/property-cas-storm-u28-flat.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 79,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 48,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-cas-storm-u28-flat.js",
+      "sha256": "28136c0d274d796cc81bb1cc6ca5b19c5782430912e1c7efdf8d294cef58feab"
+    },
+    {
+      "case": "atomics/property-cas-storm-u5-as.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 21,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 18,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-cas-storm-u5-as.js",
+      "sha256": "054c73025caf54df70c040c0cef891e5d79397a9a7584a5608ba4897b9a99fda"
+    },
+    {
+      "case": "atomics/property-errors.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-errors.js",
+      "sha256": "9114c279c564bc29e54d1852117c0d6cabf83c3e5d7d0b145c60c3ec0c60320a"
+    },
+    {
+      "case": "atomics/property-load-store.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-load-store.js",
+      "sha256": "8e7084f90a60deefa843e56765aab05667c0395fe9254ed66d967d6d61cce2a9"
+    },
+    {
+      "case": "atomics/property-rmw.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 41,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 35,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-rmw.js",
+      "sha256": "c6ff08c9929755aba8a74b402c74c47064c9c752675e930e6d3b514ccc1b658d"
+    },
+    {
+      "case": "atomics/property-store-missing-define-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-store-missing-define-race.js",
+      "sha256": "72a0feab98bf035de2e57810672b75d2a2570a9efe4832229ea43dce268e4947"
+    },
+    {
+      "case": "atomics/property-wait-notify.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 280,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 280,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-wait-notify.js",
+      "sha256": "90b3d10fc667b0218371b9d9eb1f3e253743faf163617cb2e23b2c241b604263"
+    },
+    {
+      "case": "atomics/property-wait-termination.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 513,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 510,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-wait-termination.js",
+      "sha256": "f86d7a13adbb5686a8620a62f85f66804ef4beea64c9ddb1d3c7201bd029fa30"
+    },
+    {
+      "case": "atomics/property-waitasync-timeout.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 165,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 168,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-waitasync-timeout.js",
+      "sha256": "ad9cc5f2f7d5f14fee837b082586babb76186ac3f52dd4266c194d1edc7b6c73"
+    },
+    {
+      "case": "atomics/property-wtr-isolation.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/property-wtr-isolation.js",
+      "sha256": "afd2a72e8dd10eea9940fb4af70c776ebf409af996248ff05c5c25f2ec0f2b81"
+    },
+    {
+      "case": "atomics/ta-path-unchanged.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/ta-path-unchanged.js",
+      "sha256": "53d451cdf964c9916d97d74ab4173d4ace6e4f41d4a8ca439dc55227dfcb766b"
+    },
+    {
+      "case": "atomics/ta-wait-thread-gate.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 56,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 54,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/atomics/ta-wait-thread-gate.js",
+      "sha256": "332766c352b47902ac0435ee23ef214a95d7c7fa61424265801533b8cdfc365b"
+    },
+    {
+      "case": "bench/array-element-read.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 39,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1409,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/array-element-read.js",
+      "sha256": "0e7e38edee68757dfb812034d5f7835260845b880c5e99367952e8b5e2a4df30"
+    },
+    {
+      "case": "bench/array-element-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 35,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1103,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/array-element-write.js",
+      "sha256": "0ea5456a5c53a7212d3f0bf170ae63bdd32fb057a49585b94dfc3189eef3e8c3"
+    },
+    {
+      "case": "bench/flat-butterfly-read.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 240,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/flat-butterfly-read.js",
+      "sha256": "d1cd27c9dae9e05fef1a75f195cecd3c4aa7242d7edc006497122d736b146b33"
+    },
+    {
+      "case": "bench/flat-butterfly-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 401,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/flat-butterfly-write.js",
+      "sha256": "48841d1df2a7154cafbc1ff0365f79cf095c7026a18eba6f1f2336951e9ea25c"
+    },
+    {
+      "case": "bench/inline-property-read.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 276,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/inline-property-read.js",
+      "sha256": "06f1b9120394a11bdec6ddeab3a26067fee64c24be1489c98bb98275dc0a353e"
+    },
+    {
+      "case": "bench/inline-property-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 296,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/inline-property-write.js",
+      "sha256": "7548f2be400849b85a1b8563e35cec9aeef55a40de413bab935c4f0ca2da74e5"
+    },
+    {
+      "case": "bench/megamorphic-access.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 16,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 160,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/megamorphic-access.js",
+      "sha256": "50a0ee817c1ce8a260c5bbe0b03fa7fd87946473d8c51a00fc0233d4dd7284b8"
+    },
+    {
+      "case": "bench/transition-heavy-constructor.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 835,
+          "optimizer_invalidations": 4993,
+          "optimizer_publications": 4993,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 410,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/bench/transition-heavy-constructor.js",
+      "sha256": "4db28ea11fb1218f508613b4c01d4a4918b09eea7e3b9d4fbef8ecfdd4889553"
+    },
+    {
+      "case": "checktraps-havebadtime-park.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1708,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/checktraps-havebadtime-park.js",
+      "sha256": "edea83fc8f7161ba5c4c2418a85dd118d8c5b67bc2373b479cf080c35981488e"
+    },
+    {
+      "case": "checktraps-invalidation.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 251,
+          "optimizer_invalidations": 49,
+          "optimizer_publications": 50,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/checktraps-invalidation.js",
+      "sha256": "6abbfea3f4d1aabae8c38ff87425941e5b06906fc83bd0ce905204137dd5e759"
+    },
+    {
+      "case": "congc-t1-window-split.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t1-window-split.js",
+      "sha256": "f79ba7623ba069472eceefc443f3bf96631a96d09a479ac4b86b8a429c38e3a4"
+    },
+    {
+      "case": "congc-t11-diagnostics.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 133,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 188,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t11-diagnostics.js",
+      "sha256": "6234b562490d2e0a5eeed226aecc6c0a0ac1a2b50558cb889463b0ba18425f8f",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
+    },
+    {
+      "case": "congc-t2-lockorder-lint.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "pass",
+          "ms": 7,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        },
+        "serialized": {
+          "expected_result": "pass",
+          "ms": 6,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/congc-t2-lockorder-lint.js",
+      "sha256": "1d5d503c686a3952e761c06c1f777de8095cf4564b7ca50db9d1b4b8de7d4cb6",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "premise": "The meaningful arms call JSC's $vm.sharedHeapTest lock-order diagnostics.",
+        "zig_js_contract": "zig-js tests its collector lock order through native stress/fault gates and does not emulate JSC internal lock classes."
+      }
+    },
+    {
+      "case": "congc-t3-barrier-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1363,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1464,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t3-barrier-storm.js",
+      "sha256": "b14d8b60f509bc220e318ed7562b354f1a0df2a6d0657f07f4c0a45d11fc6ecc",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
+    },
+    {
+      "case": "congc-t4-alloc-steal-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 917,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 949,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t4-alloc-steal-storm.js",
+      "sha256": "4c28cc552f1eec32c19dcca983efca77535e41dbab8bfa00a1ffed640de13cb3",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
+    },
+    {
+      "case": "congc-t5-celllock-audit.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 552,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 585,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t5-celllock-audit.js",
+      "sha256": "27cf95d04ad4a26a3a52f7d97c01c4e4bb453dfc043e94827321dfa0fcdd0056",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
+    },
+    {
+      "case": "congc-t8-stop-interleaving.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "pass",
+          "ms": 7,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        },
+        "serialized": {
+          "expected_result": "pass",
+          "ms": 8,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/congc-t8-stop-interleaving.js",
+      "sha256": "1210134831117551e17212e5ce49584e575b83d9eac4fbd74c7a3d07c85c2e6f",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "premise": "All collector-stop arms require JSC's $vm.sharedHeapTest dispatcher and its internal stop counters.",
+        "zig_js_contract": "zig-js verifies stop/GC interleavings through maintained collector and debugger stress gates, not JSC's private dispatcher."
+      }
+    },
+    {
+      "case": "congc-t9-attach-exit-churn.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 199,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 260,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/congc-t9-attach-exit-churn.js",
+      "sha256": "e16c28ef49bcdc49623f0eddf6dd49fb1137df51c8c19c33012e4de9550ddd91",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.sharedHeapTest",
+          "reason": "JSC-internal diagnostic sub-arms are terminal; the maintained Thread/$vm.gc stress arm executes real zig-js behavior."
+        }
+      ]
+    },
+    {
+      "case": "cve/mc-aint-poll-resume-stale-elided.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7355,
+          "optimizer_invalidations": 1337,
+          "optimizer_publications": 1332,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-aint-poll-resume-stale-elided.js",
+      "sha256": "7bef349d44d70bf76f429687e5051b491ab999e04924827be4484bfa9761e2ec"
+    },
+    {
+      "case": "cve/mc-aint-terminate-notify-park-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 531,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 506,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-aint-terminate-notify-park-race.js",
+      "sha256": "cf20e55068fad413d17890d13f1aad93a94456438d0923c84d699b8427139914"
+    },
+    {
+      "case": "cve/mc-code-calllink-writer-writer.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1759,
+          "optimizer_invalidations": 300,
+          "optimizer_publications": 1500,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1791,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1500,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-code-calllink-writer-writer.js",
+      "sha256": "88dd97787c332b1660dbed4f64fcf6c8f559e5af74ee8f2388983723b81c2c11"
+    },
+    {
+      "case": "cve/mc-code-deferred-fire-stale-window.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 17,
+          "optimizer_invalidations": 13,
+          "optimizer_publications": 70,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 7,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-code-deferred-fire-stale-window.js",
+      "sha256": "1005a24e69ab4af6ba4286cf75504e52d59914b66c21f1536138d54d80161cce"
+    },
+    {
+      "case": "cve/mc-code-sleep-through-jettison-isb.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1173,
+          "optimizer_invalidations": 200,
+          "optimizer_publications": 201,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1141,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-code-sleep-through-jettison-isb.js",
+      "sha256": "ae47eb6abe046a9ae5b3fa86ec84a8192847c4f3152fb6d0e82173f6c59fcc08"
+    },
+    {
+      "case": "cve/mc-df-arraycopy-relabel.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "fail",
+          "ms": 7,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        },
+        "serialized": {
+          "expected_result": "fail",
+          "ms": 5,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/cve/mc-df-arraycopy-relabel.js",
+      "sha256": "c567020ed0e1a2e01ba16418229b085344186b82112f5082a84ae8c594d5f8d5",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "premise": "A racing Array growth must not be observed by TypedArray.prototype.set and JSC's butterfly verifier must be present.",
+        "zig_js_contract": "The source length is snapshotted at the specified set operation point; growth before that snapshot may correctly make the copy reject with RangeError."
+      }
+    },
+    {
+      "case": "cve/mc-df-delete-reuse.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 367,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 177,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-df-delete-reuse.js",
+      "sha256": "dfe568b6b1d6f7f17af9b7c457080d184bbae8b535ae8d8d512b04916d1b18fc"
+    },
+    {
+      "case": "cve/mc-df-segmented-length.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 15,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1798,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-df-segmented-length.js",
+      "sha256": "e491e72640f89e487cef7e485e3dcb4a1f7f6f94625e71f67216df79c59d9f92"
+    },
+    {
+      "case": "cve/mc-df-ta-detach-resize.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 891,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 761,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-df-ta-detach-resize.js",
+      "sha256": "b027b06b507817ef8d78668bff6d52e0681e3e8b6b595a080805c72b0bb9a110"
+    },
+    {
+      "case": "cve/mc-df-ta-sort-inplace.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4597,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4991,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-df-ta-sort-inplace.js",
+      "sha256": "fc84ac5d6f99496c580b3adeb746b03783b09cb510cd2c7601ef7ee55e89f0f2"
+    },
+    {
+      "case": "cve/mc-df-wasm-compile-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 18,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-df-wasm-compile-race.js",
+      "sha256": "7f8237c60cfe7ddb50d640e15ec91b0a32ef4e27ccce832c1e80dd2465280290"
+    },
+    {
+      "case": "cve/mc-dos-retired-artifact-churn.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1554,
+          "optimizer_invalidations": 2946,
+          "optimizer_publications": 5890,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-dos-retired-artifact-churn.js",
+      "sha256": "86952a506a35797d94f2a5a760d266b521f67519fe46b501e062d3c66621c1ee"
+    },
+    {
+      "case": "cve/mc-dos-waiter-table-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 99,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 102,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-dos-waiter-table-storm.js",
+      "sha256": "e7179fc4c9893c2703725de27f691813280fd2bece2c773d032c6f2d5d5cad1d"
+    },
+    {
+      "case": "cve/mc-gc-blocked-native-roots.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 278,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 265,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-gc-blocked-native-roots.js",
+      "sha256": "4a46e115af5e1e5bf9f9b1e924607c4ff3c320d208114c9113a054993b37bc7b"
+    },
+    {
+      "case": "cve/mc-gc-finreg-cross-thread-gc.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 31,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 39,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-gc-finreg-cross-thread-gc.js",
+      "sha256": "99adf5275a5a552081c55cb5ab0703c79bda8c0d4d012aad2c5116f356e0a21d"
+    },
+    {
+      "case": "cve/mc-gc-thread-shell-finalizer-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 19,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 24,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-gc-thread-shell-finalizer-storm.js",
+      "sha256": "46808548f37cddea67ab40771176d0012c5e8702c8aea7998b93ec25f67cb036"
+    },
+    {
+      "case": "cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 381,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 388,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-gc-weakgcmap-registry-vs-prune.js",
+      "sha256": "a283caf5e1faee5886a3c6a212fa83a18da427a2121c34ea1262182344ad4249"
+    },
+    {
+      "case": "cve/mc-grow-buffer-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 1311,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1684,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-grow-buffer-storm.js",
+      "sha256": "17716e5c93cee9ef530de052e3e2f5ee1de1534327d5fa6c2b59346d26e11974"
+    },
+    {
+      "case": "cve/mc-grow-s4-detach-nullvec-repro.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 108,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 59,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-grow-s4-detach-nullvec-repro.js",
+      "sha256": "2c1b7a223c340374a84e075ef2593e2995ef35e95b81ea52c09b749d62a7f7b5"
+    },
+    {
+      "case": "cve/mc-grow-wasm-relocating-grow.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 172,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 153,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-grow-wasm-relocating-grow.js",
+      "sha256": "97699ccfc67a2f46bddc827b476852c831b3a7ae02ac55b7270e6b78eb6b39d3"
+    },
+    {
+      "case": "cve/mc-hand-dead-registrant-settle.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-hand-dead-registrant-settle.js",
+      "sha256": "e990fc759a18a7bbab8d5a80699797e9644819310c4ddc5f3791aa0fea3e8cde"
+    },
+    {
+      "case": "cve/mc-hand-restrict-claim.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2013,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2252,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-hand-restrict-claim.js",
+      "sha256": "67b2cf872e16af4930db643e2d9e9f6a35ea47c8bb3c89867f171d4109284450"
+    },
+    {
+      "case": "cve/mc-init-butterfly-grow-slack.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 307,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 397,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-init-butterfly-grow-slack.js",
+      "sha256": "930f07fd1a516c2a3a330d856cc374d5918440cd8245d5fe4c71df7f707e3f09"
+    },
+    {
+      "case": "cve/mc-init-cloned-arguments-specials.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 843,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 367,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-init-cloned-arguments-specials.js",
+      "sha256": "7ca3be972de035e1a9b6baf6a6f4798422fe7f1c4b86e6b78e824a2647fd49ff"
+    },
+    {
+      "case": "cve/mc-init-direct-arguments-override.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 32,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 258,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-init-direct-arguments-override.js",
+      "sha256": "1746d96a0ae54ea68d73935dcc5504345c74390ad0ba7af4ca08243d34c3e498"
+    },
+    {
+      "case": "cve/mc-init-lazy-global-first-touch.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 18,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-init-lazy-global-first-touch.js",
+      "sha256": "d4e970c209fce322acc95f78809d6e78180601f5c728bb54ae2d655e2418b93e"
+    },
+    {
+      "case": "cve/mc-init-rope-resolve-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 373,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 337,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-init-rope-resolve-race.js",
+      "sha256": "7b19c64c8a8dd9829be4bce093548cdaf7cf00a1050205ce6089b3f33ad902fa"
+    },
+    {
+      "case": "cve/mc-int-resizable-tail-quarantine.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 230,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 246,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-int-resizable-tail-quarantine.js",
+      "sha256": "24c551ebfa7c9227556d5b63fe564aff753919ca376e5577f8749d42e7040870"
+    },
+    {
+      "case": "cve/mc-jit-delete-reuse-stale-offset.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 35,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 36,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-jit-delete-reuse-stale-offset.js",
+      "sha256": "db765d5d7eeb69124b363b3ec040e8db91516499032ccf162dd4873533dca965"
+    },
+    {
+      "case": "cve/mc-jit-double-relabel-stale-shape.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 116,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 119,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-jit-double-relabel-stale-shape.js",
+      "sha256": "5f9fea98e543e3e0b3494d23ea51ae93bc57afd10df30c9229db62974b8528d2"
+    },
+    {
+      "case": "cve/mc-jit-stale-base-grow-oob.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 161,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-jit-stale-base-grow-oob.js",
+      "sha256": "b4e8cbad046e3184362ac32404cc811174f28d8b1696665b9865a19fadac85bf"
+    },
+    {
+      "case": "cve/mc-jit-ta-resize-hoisted-base.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 131,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 247,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-jit-ta-resize-hoisted-base.js",
+      "sha256": "7bd305265a95ac3be67fcac79f6712c4a19c734687b35b4374f06bc86b8577fa"
+    },
+    {
+      "case": "cve/mc-life-creator-thread-dies.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "fail",
+          "ms": 10,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        },
+        "serialized": {
+          "expected_result": "fail",
+          "ms": 9,
+          "observed_result": "fail",
+          "result": "intentional-incompatibility"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/cve/mc-life-creator-thread-dies.js",
+      "sha256": "07c0e9996c5fd2a666a76d99324aa10c7be62bc1915a290c1c5b8daaf3deba38",
+      "terminal_disposition": {
+        "category": "intentionally-incompatible",
+        "premise": "A reader repeatedly constructs a new TypedArray from a buffer after a concurrent transfer has detached it.",
+        "zig_js_contract": "Constructing any TypedArray over an already detached ArrayBuffer throws TypeError; creator-owned backing lifetime is tested separately."
+      }
+    },
+    {
+      "case": "cve/mc-life-detach-quarantine-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 416,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 254,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-life-detach-quarantine-storm.js",
+      "sha256": "60e99eae673ae0a6e313a7b770a1aa4152bd3152d210f3fd540521cfcea1c0fc"
+    },
+    {
+      "case": "cve/mc-life-sab-refchurn.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 19,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 15,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-life-sab-refchurn.js",
+      "sha256": "aeaa4f8b4ddf0762e82329b9af5b07d1ce87b282f50012ebb57075dd1472d753"
+    },
+    {
+      "case": "cve/mc-life-wasm-grow-relocate.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 451,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 192,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-life-wasm-grow-relocate.js",
+      "sha256": "a6f0ff7f1a9000306145919dfe88fbf3c4ead386aca7adfc90eae0a8bb51bed0"
+    },
+    {
+      "case": "cve/mc-lock-cow-materialize-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 52,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 42,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-lock-cow-materialize-race.js",
+      "sha256": "0b9e93e13c4993203ff05e246041d02559446f2005ade9508980a6d8e2f29aa8"
+    },
+    {
+      "case": "cve/mc-lock-n3-install-vs-owner-add.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 100,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 247,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-lock-n3-install-vs-owner-add.js",
+      "sha256": "37bcb417929a33097439654bbc9978de22dbf933d444d868a56c4917bb55eb3b"
+    },
+    {
+      "case": "cve/mc-lock-stop-vs-park.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 19,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 237,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-lock-stop-vs-park.js",
+      "sha256": "909776eedf9583db2f6e3123a6dbdf59de525abd4a2c5b5bb5616b60202e4c50"
+    },
+    {
+      "case": "cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 104,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 102,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-arraybuffer-resize-vs-copywithin.js",
+      "sha256": "b7cfc509ddd50b96babe8aed43c3ea0b5f8907780c17c58441649593b97184b5"
+    },
+    {
+      "case": "cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-arraybuffer-transfer-vs-atomics.js",
+      "sha256": "4f5373641547612479d4d9096a340ffa2b7ac86f6a53695b6c240fa61f551e86"
+    },
+    {
+      "case": "cve/mc-prim-async-generator-resume-claim.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 42,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 18,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-async-generator-resume-claim.js",
+      "sha256": "8c173008684c8ad053cd80d1e3862b2c786ab1360e146b678e49b2fc460767a6"
+    },
+    {
+      "case": "cve/mc-prim-generator-claim-leak-stack-overflow.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-generator-claim-leak-stack-overflow.js",
+      "sha256": "c001aa0a26f44490659451837a1e6d9aaeab5adc431eb9d45d4729f925173c64"
+    },
+    {
+      "case": "cve/mc-prim-generator-resume-claim.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 33,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 22,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-generator-resume-claim.js",
+      "sha256": "0a862384504cfaf8a20fc68eb8c0d5ddee518eb4f052d990cb354afe7256eb79"
+    },
+    {
+      "case": "cve/mc-prim-indexed-missing-define-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 16,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-prim-indexed-missing-define-race.js",
+      "sha256": "943632e466e72a40e42b210e4a6ea95dc51abe1a4dcb70f363bac7fdf0a38041"
+    },
+    {
+      "case": "cve/mc-reent-coercion-order.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-reent-coercion-order.js",
+      "sha256": "1cf7a948cbe88e2c378245f55e98e7954ced2ee2170c31ae87a3abf59712c90e"
+    },
+    {
+      "case": "cve/mc-reent-store-missing-indexed-define-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 136,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 22,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-reent-store-missing-indexed-define-race.js",
+      "sha256": "89af1f50e01ef522652f86e892f2f5e148c21d01139af0ac736c96fd5bd570fa"
+    },
+    {
+      "case": "cve/mc-safe-gcwait-rope-repro.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 11,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 57,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-safe-gcwait-rope-repro.js",
+      "sha256": "288939d9a9e69c8e2ee4073c7adbc89295afd48a7311bbfbea34cee89136f387"
+    },
+    {
+      "case": "cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 22,
+          "optimizer_invalidations": 13,
+          "optimizer_publications": 24,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop-noropevariant.js",
+      "sha256": "f9bbd0c122edf94ecaef3628c063e52a1040fe8f2ff649e34303d5bc951a105e"
+    },
+    {
+      "case": "cve/mc-safe-gcwait-vs-classa-stop.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 24,
+          "optimizer_invalidations": 24,
+          "optimizer_publications": 24,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-safe-gcwait-vs-classa-stop.js",
+      "sha256": "5b6bedb0acaeabaa4afbb4c5e58e43e5e40b351efa079b25d242cbd1776bc05b"
+    },
+    {
+      "case": "cve/mc-safe-regexp-tts-watchdog.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 504,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 501,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-safe-regexp-tts-watchdog.js",
+      "sha256": "1e7cbf1cfb18c42e633e57d37d7e1141c6e79c021220a4cb86a719fbad552198"
+    },
+    {
+      "case": "cve/mc-safe-spin-vs-classa-stop.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 23,
+          "optimizer_invalidations": 8,
+          "optimizer_publications": 8,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 226,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 20,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-safe-spin-vs-classa-stop.js",
+      "sha256": "5dd5d8a3812cc3c6343ad0243be2b2a22d088db4afd917a145d88268b524a865"
+    },
+    {
+      "case": "cve/mc-spec-timer-capability.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 420,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-spec-timer-capability.js",
+      "sha256": "93fe3c7d5dace0aa78c99128df6a1e57c92a04fca6f8be0f44b6703a79d3fba1"
+    },
+    {
+      "case": "cve/mc-tdwn-exit-vs-settle.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 75,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 65,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tdwn-exit-vs-settle.js",
+      "sha256": "1316967426035058523b1c0375b354d0af2b58d578d6838b892895affa7f4404"
+    },
+    {
+      "case": "cve/mc-tdwn-tid-recycle-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7048,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2201,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tdwn-tid-recycle-storm.js",
+      "sha256": "938d4cc8727b2c127c164482ae0d7965e2ec68991ad01160cbbbc9be498b01ca"
+    },
+    {
+      "case": "cve/mc-tdwn-vm-teardown-unjoined.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 30,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 27,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tdwn-vm-teardown-unjoined.js",
+      "sha256": "3dc6f566f690562a58eedf3a0379275c7355a32c82375153022c13cc8b86e397"
+    },
+    {
+      "case": "cve/mc-tear-date-cache.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 11,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 55,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tear-date-cache.js",
+      "sha256": "9e0ffdf0bd7ddb9c5a14ae45dad817bec111513a68ef6fcca4bb43db52b797b3"
+    },
+    {
+      "case": "cve/mc-tear-generator-resume.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 25,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 34,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tear-generator-resume.js",
+      "sha256": "a58b420c96dd9d061a61461442e5eb991cc7af14f1ffc0de7e350ef6392a2378"
+    },
+    {
+      "case": "cve/mc-tear-rope-resolve-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 88,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 87,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tear-rope-resolve-race.js",
+      "sha256": "73cb069eb26ae20a79e8a7ef57e5ef51301a901b68293161f5a9f4647850ac00"
+    },
+    {
+      "case": "cve/mc-tear-typedarray-detach-grow-shrink.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 15336,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 19139,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-tear-typedarray-detach-grow-shrink.js",
+      "sha256": "06f51202cfd537c91013411f7ebc13e3e2eba0cdf85a8608b74bbde6c0fd108e"
+    },
+    {
+      "case": "cve/mc-val-atom-identity.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-val-atom-identity.js",
+      "sha256": "0461b4cec1c5c991e616a5b0043340f3804e9c50d23bc4f56ac7fb2cd705a02e"
+    },
+    {
+      "case": "cve/mc-val-fire-vs-link.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 50382,
+          "optimizer_invalidations": 294094,
+          "optimizer_publications": 294094,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3105,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 40,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-val-fire-vs-link.js",
+      "sha256": "3186501c0ea9809298fba1d27542409ce6d2c34c175a0551fee784c6454e375e"
+    },
+    {
+      "case": "cve/mc-val-llint-cache-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 246,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8206,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-val-llint-cache-storm.js",
+      "sha256": "890231913f75f1c731a5bf91542449cc65bcb738d011caf3d0ee49d65e4074b7"
+    },
+    {
+      "case": "cve/mc-val-multislot-clone.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 375,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1713,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-val-multislot-clone.js",
+      "sha256": "0ebf717057cf8d1f335aaefc36a79d091f5e27740e058d2ddf61d8585c57994d"
+    },
+    {
+      "case": "cve/mc-val-tid-reissue-false-owner.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4226,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-val-tid-reissue-false-owner.js",
+      "sha256": "89bb69477a6682dcb284b7b151f84f2589b44c8ee268a79b34553cb2c7f7331f"
+    },
+    {
+      "case": "cve/mc-wait-property-wait-lost-wakeup.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 19,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 55,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/cve/mc-wait-property-wait-lost-wakeup.js",
+      "sha256": "9cb2e5911b315440394dc1c5b21ea3fe1c7488a3cf0832b3ede7ca152e037fe4"
+    },
+    {
+      "case": "dw1-sort-comparator-callsite-shapes.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 760,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4502,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 879,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4502,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/dw1-sort-comparator-callsite-shapes.js",
+      "sha256": "4924e51c00df665eab219d5645878189d77aed31d0597f4a1b1f2c22cff48fa2"
+    },
+    {
+      "case": "dw1-sort-comparator-iterator-host.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3233,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2388,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/dw1-sort-comparator-iterator-host.js",
+      "sha256": "236fe41b462d4f1e4aef7a21787c7f36e7ba3d79f72f63d3fce99ea00c82a880"
+    },
+    {
+      "case": "dw1-sort-comparator-osr.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6002,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3469,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/dw1-sort-comparator-osr.js",
+      "sha256": "e4edd0ff83a3e0d35e02cc2659001f50102c25e9ed3c2965e5a2db920feec673"
+    },
+    {
+      "case": "dw2-marklistset-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9955,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8723,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/dw2-marklistset-storm.js",
+      "sha256": "6d7566588bbe0e9d2c51b0b6108c373602c513a51158e34b969c6986463dd46a",
+      "terminal_premises": [
+        {
+          "category": "implementation-private-premise",
+          "hook": "JSC MarkedVector/MarkListSet internals",
+          "reason": "The portable sort/apply/GC root-pressure witness is maintained; zig-js does not claim JSC's private marker-container implementation."
+        }
+      ]
+    },
+    {
+      "case": "gc-stress/conservative-scan-register.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 143,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 132,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/gc-stress/conservative-scan-register.js",
+      "sha256": "3c998e3bf59b67a7dca8d7a45763dc5a29f83f9604bfb1d1a73ecb3aa7d7e5b0"
+    },
+    {
+      "case": "gc-stress/havebadtime-vs-indexed-fastpath.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 48,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1210,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/gc-stress/havebadtime-vs-indexed-fastpath.js",
+      "sha256": "25e4a63bf776d24620653a0783ecdeb177712bdb6579ddce2c27cac16b9c753f"
+    },
+    {
+      "case": "gc-stress/watchpoint-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 30,
+          "optimizer_invalidations": 4,
+          "optimizer_publications": 8,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 28,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/gc-stress/watchpoint-storm.js",
+      "sha256": "64164986336d03186083bbcf8cc518e326465382bcb3b6c2e1b909f705d435a7"
+    },
+    {
+      "case": "gc-stress/zombie-uaf-canary.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 79,
+          "optimizer_invalidations": 558,
+          "optimizer_publications": 377,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 46,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/gc-stress/zombie-uaf-canary.js",
+      "sha256": "d8c8adff0ac4413663477168392121e4a9d8eff671f98ddd29c0aa1ac08c205f"
+    },
+    {
+      "case": "heap-access-blocking.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-access-blocking.js",
+      "sha256": "83a20d96700a5a23f1cba2580c2310fe4c85afd526300d7484bc34c0a8485dc1"
+    },
+    {
+      "case": "heap-allocation-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-allocation-storm.js",
+      "sha256": "4a0746bb9d30620d20c739ced514d93cdd8fe2cff718fa672d8cf24dab9edf83"
+    },
+    {
+      "case": "heap-bench-allocation.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 62,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 52,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-bench-allocation.js",
+      "sha256": "adc726b3525ecdc4a2d15c92bd125dd21172e2e1a5e15677bb28e17e4fd3386a"
+    },
+    {
+      "case": "heap-client-churn.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-client-churn.js",
+      "sha256": "e0e08956a4d5735081b8d44f8baba7685349c04668d89f4bada0ac60fee065b1"
+    },
+    {
+      "case": "heap-deferral-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-deferral-storm.js",
+      "sha256": "e0e94a897f0c333dcc738e9128135fd478d5a3d8635711746de1b8f52628af56"
+    },
+    {
+      "case": "heap-epoch-reclaim.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-epoch-reclaim.js",
+      "sha256": "03dccd86be6e85226f1660613164eed362cf60344534cefadb4fd746ee1e3379"
+    },
+    {
+      "case": "heap-iss-revert.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-iss-revert.js",
+      "sha256": "ce4a75e081940b254824b7eb2ebd2f8c0065fbe1ebab5b4423bc549f31e8ffe9"
+    },
+    {
+      "case": "heap-option-off.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 43,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 47,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-option-off.js",
+      "sha256": "f8bb70c89053827150109546d131f268b6bb382bb64bb918a5f9a9394f427877"
+    },
+    {
+      "case": "heap-precise-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-precise-storm.js",
+      "sha256": "0bf67a8d19715c824e170262b7bc726d00ed9b3576afc7e9a5f4a8f9edc4c747"
+    },
+    {
+      "case": "heap-stop-interleavings.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/heap-stop-interleavings.js",
+      "sha256": "a57a519d64b4667d1af6ac82203038c07e525296dea2eaec0fd66286023cced2"
+    },
+    {
+      "case": "invariants/delete-quarantine-dictionary.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 33,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 32,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/delete-quarantine-dictionary.js",
+      "sha256": "d019c34b4bfb12a63aae914159362af08c9e8afb967a4ec0a7279831cd865f49"
+    },
+    {
+      "case": "invariants/delete-quarantine.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 34,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 26,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/delete-quarantine.js",
+      "sha256": "908c6362722423d9b3935fe6b591933d8a7f9a8602688d828e114b17d1d374df"
+    },
+    {
+      "case": "invariants/no-lost-elements.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 69,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 45,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/no-lost-elements.js",
+      "sha256": "ab80a7d95bf8be488eaa38cf0718ca715ad38cc894135e4780c4af789be8db54"
+    },
+    {
+      "case": "invariants/no-lost-properties-same-name.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 29,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 80,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/no-lost-properties-same-name.js",
+      "sha256": "7141e6ebc8a72f542adbc055746a95c7402f5dd01df2d9dc188b3b1971778267"
+    },
+    {
+      "case": "invariants/no-lost-properties.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 28,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/no-lost-properties.js",
+      "sha256": "85e26c622ea397ce59fa149b331336d9e11d0d8c53fb1de582ecf8f3730d221c"
+    },
+    {
+      "case": "invariants/no-time-travel.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 53,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 58,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/no-time-travel.js",
+      "sha256": "682c19687de14511854ba26b6d5ea093992739679d84745d661b649870959b05"
+    },
+    {
+      "case": "invariants/no-torn-shapes.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 151,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 80,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/invariants/no-torn-shapes.js",
+      "sha256": "b54bb553fd70d984ad29479c4c5f671afb65dcb8f9a26683e86a4e3267661bfc"
+    },
+    {
+      "case": "jit/construction-shared-constructor.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 157,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/construction-shared-constructor.js",
+      "sha256": "65356883fa05ae3146d9bfc55ef69beae129e250efe90a7dfef118948f1bdf17"
+    },
+    {
+      "case": "jit/fires-per-sec.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 9,
+          "optimizer_publications": 10,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 15,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 50,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/fires-per-sec.js",
+      "sha256": "991ee5aee2f863e1cf32be1a02604727d95a8b2d0a8b63a246df5a841440e7f7"
+    },
+    {
+      "case": "jit/foreign-reify-getbyid-converges.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 160,
+          "optimizer_invalidations": 1,
+          "optimizer_publications": 3,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 130,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 3,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/foreign-reify-getbyid-converges.js",
+      "sha256": "0fb5153f184076cecd03dec8f845e55436cf66095f2f5e9a1d1155768849468f"
+    },
+    {
+      "case": "jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 65,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 562,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/ftl-direct-tailcall-dataic-arg-clobber.js",
+      "sha256": "71b9cb63682d1f5dd3a0de300dd59f6f008229d436c88926f997ee72f370e770"
+    },
+    {
+      "case": "jit/ftl-osr-entry-catch-loop-amplifier.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 174,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6868,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/ftl-osr-entry-catch-loop-amplifier.js",
+      "sha256": "eed086e6bebd857ea95ef4f9c91584f5ecd1c16ffbb7ffa39ed018da71c3a7a1"
+    },
+    {
+      "case": "jit/golden-disasm-corpus.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 16,
+          "optimizer_invalidations": 8,
+          "optimizer_publications": 34,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1292,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 6,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/golden-disasm-corpus.js",
+      "sha256": "04ab46d3326d913079d6a09dde197e2adee70d8012f5d5559544ccbf3b8b5772"
+    },
+    {
+      "case": "jit/ic-publish-reset-loops.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10563,
+          "optimizer_invalidations": 40001,
+          "optimizer_publications": 79494,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2858,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/ic-publish-reset-loops.js",
+      "sha256": "b0a34f223aff98a692e6e55ebc84c5e2a97b723b4b7cc8962d7ea6805fe1a089",
+      "terminal_premises": [
+        {
+          "category": "jsc-private-branch",
+          "hook": "$vm.toCacheableDictionary/$vm.flattenDictionaryObject",
+          "reason": "The real get/put optimizer publication and concurrent coherence arms are maintained; zig-js does not emulate JSC's private cacheable-dictionary IC reset mechanism."
+        }
+      ]
+    },
+    {
+      "case": "jit/int-gate-direct-call-relink.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 12,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 29,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/int-gate-direct-call-relink.js",
+      "sha256": "d561f53574b3a34d41d9e4c74c4a7c28e7568bdf7ddfb70b097515ce24b115e6"
+    },
+    {
+      "case": "jit/int-gate-epoch-reclaim.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 25,
+          "optimizer_invalidations": 1,
+          "optimizer_publications": 2,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 42,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/int-gate-epoch-reclaim.js",
+      "sha256": "04f673f488a1881528479aefffd9776ce4198ef8b47aacb2445a99f36cd79aa2"
+    },
+    {
+      "case": "jit/int-gate-fire-vs-execute.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 21,
+          "optimizer_invalidations": 2,
+          "optimizer_publications": 3,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 19,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/int-gate-fire-vs-execute.js",
+      "sha256": "25d209e31cdf0ecb856d939740ca0b6f9f33d01ea1e53f7268d83bd91bc83018"
+    },
+    {
+      "case": "jit/int-gate-jettison-vs-execute.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/int-gate-jettison-vs-execute.js",
+      "sha256": "25652b3a716901151fd782b76ee538e3081899e4f8c784cd58f11359f3a580c9"
+    },
+    {
+      "case": "jit/int-gate-stop-budget.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 571,
+          "optimizer_invalidations": 2962,
+          "optimizer_publications": 4599,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 225,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 24,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/int-gate-stop-budget.js",
+      "sha256": "9f6449623b042a4d0fc7da6f3f55870b950d866e292e8ae970574438eb57ad4f"
+    },
+    {
+      "case": "jit/shared-arraystorage-stress.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 60,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 162,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/shared-arraystorage-stress.js",
+      "sha256": "579428bfb020d564476bfeeccec628fdc2f07832902046d5424247652ae24658"
+    },
+    {
+      "case": "jit/spawned-thread-butterfly-stress.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 92,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2284,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/spawned-thread-butterfly-stress.js",
+      "sha256": "bad97e0653af1c94d117981e1bb701d93dd9e815b14ec1f5ab0083e2aa0b02db"
+    },
+    {
+      "case": "jit/tag-discipline.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 3,
+          "optimizer_publications": 12,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1006,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/tag-discipline.js",
+      "sha256": "2028f3a95b551167778d566fb5f24ae5d3181be1ebe6da5642eda8bd98736b94"
+    },
+    {
+      "case": "jit/tid-tag-3-threads.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 13879,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 15849,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/jit/tid-tag-3-threads.js",
+      "sha256": "9dd1805b2f2dfd948cc30013859b5373cc518e02afa1f870a687e0dc1edffb1a"
+    },
+    {
+      "case": "lifecycle/async-join.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/async-join.js",
+      "sha256": "c4ac146b04072cf855973850b38c67c1b5d6332423c4d906fbc9323fa21cc288"
+    },
+    {
+      "case": "lifecycle/create-basics.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/create-basics.js",
+      "sha256": "74fb14ee1418d4eae6643bbf42f64b7d9f0464db5af48ecc6eaec81e1cc44fbe"
+    },
+    {
+      "case": "lifecycle/current-and-id.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/current-and-id.js",
+      "sha256": "73bb748c6ff3f0c75e237879fdb599f4f138b242d06a18cbdfca4d42823af6f4"
+    },
+    {
+      "case": "lifecycle/exceptions-cross-join.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 16,
+          "optimizer_invalidations": 1,
+          "optimizer_publications": 1,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 11,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/exceptions-cross-join.js",
+      "sha256": "f9c183cb4d79c0bcc09d3a3513890768d7ce07524cbb05f4eb08b8cf7c80b4c4"
+    },
+    {
+      "case": "lifecycle/join-semantics.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/join-semantics.js",
+      "sha256": "60e685a222e2f0a5965960f98dc79ebb71243a8f97a7c001ccb0b5384b52c28f"
+    },
+    {
+      "case": "lifecycle/nested-threads.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/nested-threads.js",
+      "sha256": "e3f89632b5f27b837f26e98210ef33f93a216cc909e5a2b94e002773286d2a5c"
+    },
+    {
+      "case": "lifecycle/restrict-foreign-access.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/restrict-foreign-access.js",
+      "sha256": "639ca752a6dc09e75e5b1693856cd7dbee29cc403d8407468ce094136e7427fd"
+    },
+    {
+      "case": "lifecycle/restrict.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/restrict.js",
+      "sha256": "f3d18723bbe091acc4979a31a25970c48342acaad487ca952f6f6f9c9b414d44"
+    },
+    {
+      "case": "lifecycle/return-values.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/lifecycle/return-values.js",
+      "sha256": "e90dd361ff074ceb69d56c9457aeeb7d67386ee6f115235dd4cef1d4e70ec73c"
+    },
+    {
+      "case": "objectmodel/array-storage-property-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/array-storage-property-transition.js",
+      "sha256": "1d26fef3d6071ef699c8baf9915778ddf39600be5a236f587d4dcc898ac5da74"
+    },
+    {
+      "case": "objectmodel/cow-named-property-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/cow-named-property-transition.js",
+      "sha256": "f3c00a47841812474e43ef39a8f346a56754efd20037e995dd372148f6ad3e4a"
+    },
+    {
+      "case": "objectmodel/i03-array-resize-cas.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 97,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 75,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-array-resize-cas.js",
+      "sha256": "356c046153f02fb269361525832c8e6212df0b6c5ccbebfd3b67b1d4c60f8bae"
+    },
+    {
+      "case": "objectmodel/i03-as-shift-unshift.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 136,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 137,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-as-shift-unshift.js",
+      "sha256": "d1b225951e869df046168acbc6f09fc3116b3638e1fd15c2d3ee100bc32a7b39"
+    },
+    {
+      "case": "objectmodel/i03-as-sparse-holes.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 83,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 80,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-as-sparse-holes.js",
+      "sha256": "b43d133379396caa70832e568af6abcd40c918315f65b0a11c7d5acf93799b71"
+    },
+    {
+      "case": "objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 61,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 59,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-b2-stay-flat-growth-vs-sw-flip.js",
+      "sha256": "5e236623a063590441cc774f9a8c3f20c53b768eeb81f2d726c5356c5c666dfc"
+    },
+    {
+      "case": "objectmodel/i03-convert-grow-gc-read.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 36,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 34,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-convert-grow-gc-read.js",
+      "sha256": "14f18ab7c633df35624ab70192c10409765b2d85303272a6623f54e51f9e4a7a"
+    },
+    {
+      "case": "objectmodel/i03-cow-materialize-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-cow-materialize-race.js",
+      "sha256": "4f685c785d609827cd8afcd5143a062cd421d1816caf4b6166f592c67085775d"
+    },
+    {
+      "case": "objectmodel/i03-i37-same-shape-add-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 96,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 60,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-i37-same-shape-add-storm.js",
+      "sha256": "ff9b895e88978c0539c7a9342782ee2fa2952dfd712439ed3561cd1440963921"
+    },
+    {
+      "case": "objectmodel/i03-n2-inline-add-races.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 21,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 16,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-n2-inline-add-races.js",
+      "sha256": "c7a9ddb6f3842af7d37e220ad65987242bab51f7274c6222c82a35f2c525cf41"
+    },
+    {
+      "case": "objectmodel/i03-n3-first-install-races.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 20,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-n3-first-install-races.js",
+      "sha256": "6acd3a09ff9a733ab16adfd477d642b999f188ba837ae1d307c61ff7e273dd94"
+    },
+    {
+      "case": "objectmodel/i03-pa-global-races.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 55,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 48,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-pa-global-races.js",
+      "sha256": "24751b231063f524ba383187d069c164ff80cf8e639206dfff49507312e08a08"
+    },
+    {
+      "case": "objectmodel/i03-quarantine-readd-across-gc.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 77,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 77,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-quarantine-readd-across-gc.js",
+      "sha256": "5a10a4041b24670a19667bdaef638f760100c1f196461bbfe5a0aa32733f04c7"
+    },
+    {
+      "case": "objectmodel/i03-restart-locked-vs-conversion.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 26,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-restart-locked-vs-conversion.js",
+      "sha256": "5c83670b7ed2f004dfe78e5f119918c658adff98d0f2d03ec418920858b81a47"
+    },
+    {
+      "case": "objectmodel/i03-selftest.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-selftest.js",
+      "sha256": "40db3e94c9c6b8f3332ddd6b26161103e9e604c3a7bd60ecaff2d4a469d8839b"
+    },
+    {
+      "case": "objectmodel/i03-shared-double.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 89,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 77,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-shared-double.js",
+      "sha256": "7f0e527e9ec35fd0b38b789fac6d33ca897b2722531d12f967d81e2693a92cfc"
+    },
+    {
+      "case": "objectmodel/i03-single-threaded-flag-on.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-single-threaded-flag-on.js",
+      "sha256": "0fe1e9fcd15cebbbf9a3597a6d72760a06b73933679767c7a3f043f5880a050d"
+    },
+    {
+      "case": "objectmodel/i03-single-threaded-no-change.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-single-threaded-no-change.js",
+      "sha256": "ddb51fdcec8ff913bb1a571769232260d3184237640621d76a8b29757df7a0cd"
+    },
+    {
+      "case": "objectmodel/i03-stale-spine-reader-vs-grow.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 27,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 101,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-stale-spine-reader-vs-grow.js",
+      "sha256": "d02e695de8a84caa58da51988074466cf11bf06def6293e4bcad75a1164a5f11"
+    },
+    {
+      "case": "objectmodel/i03-stress-force-segmented.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-stress-force-segmented.js",
+      "sha256": "85dee983159fb0cee2362ec04cc45b6da34f00ad742867d0611a1dbba412f26f"
+    },
+    {
+      "case": "objectmodel/i03-stress-force-sw.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 11,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-stress-force-sw.js",
+      "sha256": "dba60a527aeff4d128c96fed9b2b7cf445430ae85248c7602821164306715c1e"
+    },
+    {
+      "case": "objectmodel/i03-t1-vs-sw-flip.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 88,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-t1-vs-sw-flip.js",
+      "sha256": "94b539fe0562a19066fa55c40f4db23746cdf52d0c0b9019214ca0162e5815a1"
+    },
+    {
+      "case": "objectmodel/i03-t5-racing-growers.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 24,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 132,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-t5-racing-growers.js",
+      "sha256": "9e2d767ec7f73caf0e4ed328168dedb61a6f6b981464320b9b3989f891548997"
+    },
+    {
+      "case": "objectmodel/i03-visit-range-outofline.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 78,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i03-visit-range-outofline.js",
+      "sha256": "56a0fec0615652fe0dc0dbc15ef8f70d92450c11696b33be3d1b2d81811978f7"
+    },
+    {
+      "case": "objectmodel/i08-named-vs-indexed-first-install.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 49,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/i08-named-vs-indexed-first-install.js",
+      "sha256": "d7800f0e7c2763c481d2befbb0095bc827dfe373822234d589629ff96b3ddc72"
+    },
+    {
+      "case": "objectmodel/r47-foreign-dictionary-flatten.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 66,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 76,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/r47-foreign-dictionary-flatten.js",
+      "sha256": "d24acdfb0c736b5494f0ee5e6a01d9df0f04348a8673c76b160d8c1afd1271c6"
+    },
+    {
+      "case": "objectmodel/r47-typedarray-slowdown-wastememory.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 41,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 29,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/r47-typedarray-slowdown-wastememory.js",
+      "sha256": "bb75f811e5ed1e2f28825cf3e43752df750d55dae8e6b96496329cb221dec4c3"
+    },
+    {
+      "case": "objectmodel/r48-typedarray-segmented-arraybuffer.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/objectmodel/r48-typedarray-segmented-arraybuffer.js",
+      "sha256": "01f43c9370650484d1475c2d3047e5e232524bdefaa6f0a2833994f2bcf1b157"
+    },
+    {
+      "case": "races/counter-atomics.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 76,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 830,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/counter-atomics.js",
+      "sha256": "d26bdfbe4c4ffbd39822054e2f0f9239ad15b36a4197439d37c7bbebb479a40d"
+    },
+    {
+      "case": "races/counter-lock.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 335,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 5320,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/counter-lock.js",
+      "sha256": "2949939967d091cd3c6a01b192be948b06f2e07bf08d67f388dba9fc67ba282e"
+    },
+    {
+      "case": "races/forin-enumerator-cache.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 269,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 253,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/forin-enumerator-cache.js",
+      "sha256": "aad7c9066d0e4f6b51df2022d28cf5ede778c9a903b18d08de3420d7a617b901"
+    },
+    {
+      "case": "races/join-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/join-storm.js",
+      "sha256": "a714b4043622588796dc3f38dd54b451ba87d6939bbee89ba194d67384d6fbbb"
+    },
+    {
+      "case": "races/transition-vs-read.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 43,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 42,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/transition-vs-read.js",
+      "sha256": "3cc0d1e8ae3e7fb85ae39b5020d76c0326c6fd8788c2de2845a2080302d66b44"
+    },
+    {
+      "case": "races/transition-vs-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 797,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 951,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/transition-vs-write.js",
+      "sha256": "4f870fb13cb7fbced42cab1de0f987ed238226e20fb07dfd4e2d15bf071248e0"
+    },
+    {
+      "case": "races/wait-notify-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 36,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 38,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/races/wait-notify-storm.js",
+      "sha256": "b81d0a8cd412a770b9ac9fef7283f58aa6406cf165ef055f5090ca0d01a2c465"
+    },
+    {
+      "case": "scaling/lock-fairness.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2236,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2023,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/lock-fairness.js",
+      "sha256": "e73c0f86969f7f2d49de16b311bf622f6ff879fea49ab396726f7298fd9653a6"
+    },
+    {
+      "case": "scaling/map-heavy.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 103,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/map-heavy.js",
+      "sha256": "3d395ce170fc46587899fc8787430c110dc300a790000af26737eddd7a4584bd"
+    },
+    {
+      "case": "scaling/raytrace-like.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 15,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 759,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/raytrace-like.js",
+      "sha256": "fa151798a9016c002f71c49ea2c61bdef3e2b1f0754a033a054246cd8a01067c"
+    },
+    {
+      "case": "scaling/richards-like.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 47,
+          "optimizer_invalidations": 12,
+          "optimizer_publications": 10,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2445,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/richards-like.js",
+      "sha256": "0e2ca7a88e07bc605f6f74367f60b61caeebc0d4d3b21aea6b0f7d2cab9b602d"
+    },
+    {
+      "case": "scaling/splay-like.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 563,
+          "optimizer_invalidations": 4649,
+          "optimizer_publications": 3501,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 376,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/splay-like.js",
+      "sha256": "70ea404bd7bd5bbeb16b7bd56ee3c76c1aa400308efad9f1a26c5dd477698de6"
+    },
+    {
+      "case": "scaling/string-heavy.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 363,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1649,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/scaling/string-heavy.js",
+      "sha256": "9022b565b2cdd91f075382a3f9fa60f3a7b143266bec870082b325ddf18d83b1"
+    },
+    {
+      "case": "semantics/atom-rope-torture.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 70,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 358,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/atom-rope-torture.js",
+      "sha256": "f9b264179df4558dc6231a4a44bd9d6fb79956afd7b25754ce42d9a4a4f3c751"
+    },
+    {
+      "case": "semantics/date-cache-churn.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 151,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/date-cache-churn.js",
+      "sha256": "199c6a078abdc85be55a26db191ed5f5a3c6e97cf6bae6a5402a79ce02a3f952"
+    },
+    {
+      "case": "semantics/frozen-seal-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 22,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 35,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/frozen-seal-race.js",
+      "sha256": "edb1b1d42d5bc45b8f63f3fc1577249c5e7246b0576e8acf251592668e5ec776"
+    },
+    {
+      "case": "semantics/ic-delete_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 35,
+          "optimizer_invalidations": 35,
+          "optimizer_publications": 70,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 142,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-delete_by_id-vs-transition.js",
+      "sha256": "d04b0d46bf28a9b569a5fa9f6f76d893b127b4428ef9ec01888f4c92bf9a30f4"
+    },
+    {
+      "case": "semantics/ic-get_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 20,
+          "optimizer_invalidations": 15,
+          "optimizer_publications": 16,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 88,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-get_by_id-vs-transition.js",
+      "sha256": "2ca444b0ff685845da7cd1b766c53a05208cd429c3f5d63366f47935753fd762"
+    },
+    {
+      "case": "semantics/ic-get_by_val-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 33,
+          "optimizer_invalidations": 3,
+          "optimizer_publications": 4,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 135,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-get_by_val-vs-transition.js",
+      "sha256": "2582f58054f6f277fe9cf6635aaa3595befad13e32450c0ccd447ea58812e02f"
+    },
+    {
+      "case": "semantics/ic-in_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 40,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 166,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-in_by_id-vs-transition.js",
+      "sha256": "460139922ca14b9b0b16a841bea47f0a808893f1512437436ac99a35897870f9"
+    },
+    {
+      "case": "semantics/ic-instanceof-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 35,
+          "optimizer_invalidations": 1,
+          "optimizer_publications": 1,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 104,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 1,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-instanceof-vs-transition.js",
+      "sha256": "002bd183f9368609aa74003bb69a47f6046d542941008d2134d0666ed4c64ea2"
+    },
+    {
+      "case": "semantics/ic-put_by_id-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 268,
+          "optimizer_invalidations": 597,
+          "optimizer_publications": 1439,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 121,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 4,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-put_by_id-vs-transition.js",
+      "sha256": "7b3e7821204cc8f0679821736b3c9d92af870cc5b9e66f7d8ddd6604bdf0bc43"
+    },
+    {
+      "case": "semantics/ic-put_by_val-vs-transition.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 35,
+          "optimizer_invalidations": 3,
+          "optimizer_publications": 7,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 118,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/ic-put_by_val-vs-transition.js",
+      "sha256": "6fe232fa9a7ba1bffe060c51f56e1fc76cc9ddb64ee4cb8c428be41a725cdf57"
+    },
+    {
+      "case": "semantics/oom-one-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 479,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 397,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/oom-one-thread.js",
+      "sha256": "a89ef7302dcbe356e528c128966d01b4fde871b0c11e8a590c7ef08b2d22415a"
+    },
+    {
+      "case": "semantics/private-fields-shared.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/private-fields-shared.js",
+      "sha256": "0d80624c8ffc3fa270385e13cafed9216f24f6bde80d650835e368a6616d2f4d"
+    },
+    {
+      "case": "semantics/proto-cycle-race.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 44,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 235,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/proto-cycle-race.js",
+      "sha256": "3a982ba10b4934df6c38fcc3324f15e653fe0e43f42eb76266d12430ab44ada7"
+    },
+    {
+      "case": "semantics/regexp-lastindex-shared.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 11,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 47,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/regexp-lastindex-shared.js",
+      "sha256": "97c3963c6386581654672200dc6cbd05e0f410d8cc072b8235b0c3199a1898e7"
+    },
+    {
+      "case": "semantics/stack-overflow-per-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 80,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 147,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/stack-overflow-per-thread.js",
+      "sha256": "cc426b1f16b4c147502c043a06bd94644db42241234a749ce2744c2a28a2d6a4"
+    },
+    {
+      "case": "semantics/symbol-registry-cross-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 20,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 61,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/symbol-registry-cross-thread.js",
+      "sha256": "15a169439d1490796821fd7eaa847f6046a0ad5c1ca51d866b1145dccb246098"
+    },
+    {
+      "case": "semantics/termination-storm.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/semantics/termination-storm.js",
+      "sha256": "4c11f924692793f1a821d22d25e1e3d49862c5224ccdb6c26714dafcc80f3bbc"
+    },
+    {
+      "case": "shared-objects/dictionary-mode.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 21,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/dictionary-mode.js",
+      "sha256": "9756aa8bf4267fdff3edcd4a256808b409a24ca8656b9af0c681716893612bcb"
+    },
+    {
+      "case": "shared-objects/frozen-sealed.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/frozen-sealed.js",
+      "sha256": "b44d5a4d06028ae53bf2ca9f5a50790eb346d9a8b9d3675a2763f5b540fbe828"
+    },
+    {
+      "case": "shared-objects/getters-setters.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/getters-setters.js",
+      "sha256": "1a1ae838f06c3796ea57d83b28976a98250bc975cea1619722f713e4bb17f06f"
+    },
+    {
+      "case": "shared-objects/property-add.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 49,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 45,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/property-add.js",
+      "sha256": "da1a7c42d23232aa7875bff5426bb7093c4d3bf3a3d33a188682e927b47dd760"
+    },
+    {
+      "case": "shared-objects/property-delete.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/property-delete.js",
+      "sha256": "87d58bda48b7bb477745a23d6bc43b6723f2ba47dee887ad754c863c4b5d40bf"
+    },
+    {
+      "case": "shared-objects/property-read-write.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/property-read-write.js",
+      "sha256": "bb50927bb7965c4b92d70c508b8130cd5d7055eb9b45fa0cd5e9cb2599c0d270"
+    },
+    {
+      "case": "shared-objects/prototype-chain.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/shared-objects/prototype-chain.js",
+      "sha256": "91319c1af6b2be75294a8e54482a28c73a1912d7d17394318078f897ccaa9632"
+    },
+    {
+      "case": "smoke.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 30,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 27,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/smoke.js",
+      "sha256": "e17885f87a8c999c57fed5810395b26c824a1bca93dd312415b5124ecfb202bd"
+    },
+    {
+      "case": "sync/atomics-futex-lock.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 17,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/atomics-futex-lock.js",
+      "sha256": "a23402939295e67ee7e0e54a42e14519cd4256499289e2ce2713d3231901e4d5"
+    },
+    {
+      "case": "sync/atomics-object-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 37,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 35,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/atomics-object-basic.js",
+      "sha256": "8707143fde7c429c0606484edd220e3c2b0e51f6b7fa096c60af4e24d2abfbb6"
+    },
+    {
+      "case": "sync/condition-notify-all-multi-waiter.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/condition-notify-all-multi-waiter.js",
+      "sha256": "241e6c58ee32fc27af66236eecad284d9291b85774fe2fe8bd7bcf0a3f352a11"
+    },
+    {
+      "case": "sync/condition-notify-all-shared-lock.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/condition-notify-all-shared-lock.js",
+      "sha256": "b40174c4a0371987a1fba988c74434c24186f4aaa89d9c0fc611419f9a6a67a1"
+    },
+    {
+      "case": "sync/condition-notify-all.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/condition-notify-all.js",
+      "sha256": "080c428e2f5f9f3b58927b6820a1822863ab4e0bb926aef8b81e2687b1937fce"
+    },
+    {
+      "case": "sync/condition-wait-notify.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/condition-wait-notify.js",
+      "sha256": "b6f1fc75cfd9dbf4267db5a189053102caab8e1a90eb9a65aed0d6c2c8f6c8dc"
+    },
+    {
+      "case": "sync/condition-worker-waiter.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/condition-worker-waiter.js",
+      "sha256": "7ad2a7577561e531fe78fe62f98683fa2b778a4d8e4dfd99634e7218d0dd642b"
+    },
+    {
+      "case": "sync/lock-async-hold.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/lock-async-hold.js",
+      "sha256": "1a6be32ace8b3b295e288fcb2c333e20f6a515e46d5c22abe4aa6e2681aad794"
+    },
+    {
+      "case": "sync/lock-hold-basic.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 1,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/lock-hold-basic.js",
+      "sha256": "736effc8f066a9ea7b48dd16420bfba107c350c404b12de7231cfaa0b1460ca2"
+    },
+    {
+      "case": "sync/lock-hold-mutual-exclusion.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 14,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/lock-hold-mutual-exclusion.js",
+      "sha256": "ce189f06ac07c3fe44c9ffccba4bf67858c04c0ef68077403ac22f6786cd8ce9"
+    },
+    {
+      "case": "sync/thread-local-isolation.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/sync/thread-local-isolation.js",
+      "sha256": "da05782cbe34d86cc236cae14acb2cc689fe42caa26b959e35ca0060a53e5f41"
+    },
+    {
+      "case": "vmstate/all-flags-identity.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 29,
+          "optimizer_invalidations": 3,
+          "optimizer_publications": 5,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 50,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 5,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/all-flags-identity.js",
+      "sha256": "c755c866e09370b6577ebeab75eeda5cb7bab44359919dd2bcb106151bb9f180"
+    },
+    {
+      "case": "vmstate/exception-state-per-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 5,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/exception-state-per-thread.js",
+      "sha256": "7b7ad2422fc880b7897f66a547e35ff2cc031162472282f23aa8f03f46dee79e"
+    },
+    {
+      "case": "vmstate/flags-off-baseline.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 7,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/flags-off-baseline.js",
+      "sha256": "3162d66f1803ca8432975b7459c3788071671d9529871d310b62589f64158292"
+    },
+    {
+      "case": "vmstate/globalthis-postpublication-negative.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 3,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/globalthis-postpublication-negative.js",
+      "sha256": "d9551edb6bc7e468ab490653a101fcae578b77d11bf8a466e5bb1dadb30ec099"
+    },
+    {
+      "case": "vmstate/microtask-ordering.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 4,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 2,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/microtask-ordering.js",
+      "sha256": "59553d31abba8ce24cdc52633f2e1b1099b5b3b5c3cdd5096a8f86aa9341c0b3"
+    },
+    {
+      "case": "vmstate/regexp-churn-threads.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 24,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/regexp-churn-threads.js",
+      "sha256": "d8c27deda1b2a4d3d53bf6ff90133ffde7eba5af4466a4b7f7ac64ca1a86927b"
+    },
+    {
+      "case": "vmstate/stack-limits-per-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 48,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 66,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/stack-limits-per-thread.js",
+      "sha256": "5c111bdb8a9815c2cb500602bbc5d7b8666e7e1ff1de944e545c8a2a76bbfb85"
+    },
+    {
+      "case": "vmstate/structure-churn-dictionary.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 21,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/structure-churn-dictionary.js",
+      "sha256": "c907da6f2c3ee3948d78742ffc54f3ab1e5033da7aede361f4807728630f8b52"
+    },
+    {
+      "case": "vmstate/structure-churn-threads.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 13,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 39,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/structure-churn-threads.js",
+      "sha256": "420fbe92af04ce2dc74886c71d4a3e2d0c44dfa2015aa23ebbdc064953e77c86"
+    },
+    {
+      "case": "vmstate/structure-lock-single-thread.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 9,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 6,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 0,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/structure-lock-single-thread.js",
+      "sha256": "d3e599c05cef4f023b0d9ad7911c55fefc599ab882ecd420b2737d35e2e4f342"
+    },
+    {
+      "case": "vmstate/vmlite-single-thread-identity.js",
+      "execution_state": "promoted",
+      "executions": {
+        "parallel-js": {
+          "ms": 10,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        },
+        "serialized": {
+          "ms": 8,
+          "optimizer_invalidations": 0,
+          "optimizer_publications": 2,
+          "result": "pass"
+        }
+      },
+      "owner": {
+        "issues": [
+          143
+        ],
+        "kind": "implementation"
+      },
+      "path": "threads-tests/vmstate/vmlite-single-thread-identity.js",
+      "sha256": "6c861703fa41cf967f8544b52d73b0b6715a93701816e690e78f6c8322cdaa2e"
+    },
+    {
+      "case": "w16-c1-prevent-collection.js",
+      "execution_state": "terminal-disposition",
+      "executions": {
+        "parallel-js": {
+          "expected_result": "pass",
+          "ms": 17,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        },
+        "serialized": {
+          "expected_result": "pass",
+          "ms": 17,
+          "observed_result": "pass",
+          "result": "terminal-private-premise"
+        }
+      },
+      "owner": {
+        "issues": [
+          428
+        ],
+        "kind": "terminal-disposition"
+      },
+      "path": "threads-tests/w16-c1-prevent-collection.js",
+      "sha256": "27644c1cd6a0141cd37d9e195ecfae073c0a33ae98778a799b27e6ea5e8b3fa7",
+      "terminal_disposition": {
+        "category": "jsc-private-premise",
+        "premise": "The verdict requires JSC's concurrent Heap::preventCollection election through shell snapshot functions.",
+        "zig_js_contract": "VM-wide heap snapshots are real and separately gated, but zig-js has no JSC preventCollection election or fake shell equivalent."
+      }
+    }
+  ],
+  "helpers": [
+    {
+      "case": "bench/harness.js",
+      "execution_state": "helper/preload",
+      "path": "threads-tests/bench/harness.js",
+      "sha256": "a8b614c8f0bedc7468a61e2068a525364e5c265707da738149d4e74a4e864ad5"
+    },
+    {
+      "case": "harness.js",
+      "execution_state": "helper/preload",
+      "path": "threads-tests/harness.js",
+      "sha256": "edb3de1ed87d6f899eeb9d80e7612ef8d00b18b8b6d2c15d0ba25d86b80c2962"
+    },
+    {
+      "case": "resources/assert.js",
+      "execution_state": "helper/preload",
+      "path": "threads-tests/resources/assert.js",
+      "sha256": "f832b48a2112338f850ea2d506d6dfca085c30c749b6f4a1deb03d079942beac"
+    },
+    {
+      "case": "scaling/harness.js",
+      "execution_state": "helper/preload",
+      "path": "threads-tests/scaling/harness.js",
+      "sha256": "52c47d2a93d268b62d72ce95549311b296424713977ad198cf3b495cb793dc36"
+    },
+    {
+      "case": "vmstate/resources/workload.js",
+      "execution_state": "helper/preload",
+      "path": "threads-tests/vmstate/resources/workload.js",
+      "sha256": "a5a6b2b1d802dcaf3a8ac6350bc81d77d1049d16f472e643cc63ca644ca226ae"
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "measured_commit": "709f34b9d9ee6cf9fffb6ad736236fd35a9ba5d4",
+    "reference_head": "3a14f2a821ac56fcb01d1c765200be7e9dfdb458",
+    "reference_pull_request": 249,
+    "reference_repository": "https://github.com/oven-sh/WebKit"
+  },
+  "summary": {
+    "blocked": 0,
+    "executable": 259,
+    "helper_preload": 5,
+    "parallel_js_required": 259,
+    "promoted": 253,
+    "serialized_required": 252,
+    "terminal_disposition": 6
+  }
+}
