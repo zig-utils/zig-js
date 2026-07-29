@@ -4,7 +4,7 @@
   "roadmap_issue": 134,
   "release_issue": 147,
   "readme_removal_issue": 246,
-  "all_green": false,
+  "all_green": true,
   "platform_scope": {
     "matrix": "docs/.data/platform-release-matrix-2026-07-28.json",
     "correctness": [
@@ -110,7 +110,7 @@
     {
       "id": "moving_gc",
       "issue": 446,
-      "status": "open",
+      "status": "green",
       "evidence": [
         "docs/threads/gc-relocation.md",
         "docs/.data/gc-relocation-inventory.json",
@@ -118,7 +118,7 @@
         "docs/.data/gc-generation-2026-07-29.md",
         "docs/.data/gc-generation-2026-07-29.tsv"
       ],
-      "blockers": ["complete concurrent-marker, native-callback, fault-injection, and long-running coverage"]
+      "blockers": []
     },
     {
       "id": "generational_gc",
