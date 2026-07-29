@@ -1554,6 +1554,7 @@ pub fn build(b: *std.Build) void {
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
+    const shared_object_churn_ab_test = b.addSystemCommand(&.{ "python3", "tools/test_shared_object_churn_ab.py" });
     const optimizer_release_inventory_check = b.addSystemCommand(&.{ "python3", "tools/optimizer-release-inventory.py" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&comparison_harness_test.step);
@@ -1561,6 +1562,7 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
     comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
+    comparison_harness_test_step.dependOn(&shared_object_churn_ab_test.step);
     const optimizer_release_inventory_step = b.step("optimizer-release-inventory-check", "Validate the optimizer backend, correctness, sanitizer, and performance evidence");
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 
