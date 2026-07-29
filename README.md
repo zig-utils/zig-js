@@ -87,7 +87,7 @@ Run `zig build --help` for the full command list.
 ## What Is Not Implemented
 
 <!-- release-compatibility:notice:start -->
-- Open release gates: automatic shared/mid-script compaction evidence; moving nursery for the multi-age GC ([matrix](docs/.data/release-compatibility-matrix.json)).
+- Open release gates: automatic-compaction concurrency and fault coverage ([matrix](docs/.data/release-compatibility-matrix.json)).
 
 The [release matrix](docs/.data/release-compatibility-matrix.json) tracks [#134](https://github.com/zig-utils/zig-js/issues/134); removal of this section is gated by [#246](https://github.com/zig-utils/zig-js/issues/246).
 <!-- release-compatibility:notice:end -->

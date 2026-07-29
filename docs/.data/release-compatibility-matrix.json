@@ -114,20 +114,22 @@
       "evidence": [
         "docs/threads/gc-relocation.md",
         "docs/.data/gc-relocation-inventory.json",
-        "docs/.data/gc-compaction-2026-07-19.md"
+        "docs/.data/gc-compaction-2026-07-19.md",
+        "docs/.data/gc-generation-2026-07-29.md",
+        "docs/.data/gc-generation-2026-07-29.tsv"
       ],
-      "blockers": ["publish shared/mid-script automatic compaction evidence"]
+      "blockers": ["complete concurrent-marker, native-callback, fault-injection, and long-running coverage"]
     },
     {
       "id": "generational_gc",
       "issue": 447,
-      "status": "open",
+      "status": "green",
       "evidence": [
         "docs/threads/P7-gc-design.md",
-        "docs/.data/gc-generation-2026-07-20.md",
-        "docs/.data/gc-generation-2026-07-20.tsv"
+        "docs/.data/gc-generation-2026-07-29.md",
+        "docs/.data/gc-generation-2026-07-29.tsv"
       ],
-      "blockers": ["make the multi-age nursery moving"]
+      "blockers": []
     },
     {
       "id": "optimizing_jit",
