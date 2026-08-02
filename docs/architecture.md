@@ -43,6 +43,13 @@ explicit target for removal. Source-policy skips and null nested-template chunks
 retain their exact causal subreason; legacy generic counters remain in the stable
 schema but new decisions do not increment them.
 
+Test harnesses can create a context with `TestingOptions.bytecode_execution_mode`
+set to `tree_walker` or `required`. The former suppresses bytecode for plain
+synchronous code; the latter throws an `InternalError` if a program or called
+plain function lacks compiled bytecode. Differential tests can therefore prove
+both tier witnesses explicitly instead of treating a silent fallback as VM
+coverage. Production contexts always use automatic admission.
+
 ## Source map
 
 | File | Responsibility |

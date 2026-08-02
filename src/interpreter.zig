@@ -915,6 +915,15 @@ pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
     return true;
 }
 
+/// Test-harness execution contract. `required` never counts a tree-walker
+/// fallback as VM coverage; `tree_walker` suppresses bytecode for plain
+/// synchronous functions while retaining generator/async suspend machinery.
+pub const BytecodeExecutionMode = enum {
+    automatic,
+    tree_walker,
+    required,
+};
+
 /// Stable runtime admission outcomes. These names are profiling schema: append
 /// new reasons instead of renaming an existing one without a versioned migration.
 pub const BytecodeAdmissionReason = enum(u8) {
@@ -960,6 +969,8 @@ pub const BytecodeAdmissionReason = enum(u8) {
     program_policy_nested_function_declaration,
     template_plain_rejected_parameter_prologue,
     template_plain_rejected_unsupported_lowering,
+    program_forced_tree_walker,
+    plain_forced_tree_walker,
 };
 
 pub const bytecode_admission_reason_count = std.meta.fieldNames(BytecodeAdmissionReason).len;
@@ -1239,6 +1250,9 @@ pub const Interpreter = struct {
     /// Realm-owned monotonic admission counts. Atomic because no-GIL workers
     /// can create functions concurrently in one Context.
     bytecode_admission_inventory: ?*BytecodeAdmissionInventory = null,
+    /// Test-only forced tier contract inherited from the Context. Production
+    /// contexts always use `automatic`.
+    bytecode_execution_mode: BytecodeExecutionMode = .automatic,
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     /// Non-null only for a no-GIL shared realm. Script publication mutates one
     /// Context-owned registry while every interpreter reads it at statement
@@ -5000,6 +5014,8 @@ pub const Interpreter = struct {
                 },
                 .rejected => |reason| admission_reason = asyncRejectionAdmission(reason),
             }
+        } else if (self.bytecode_execution_mode == .tree_walker) {
+            admission_reason = .plain_forced_tree_walker;
         } else if (self.debug_statement_hook != null) {
             admission_reason = .plain_policy_debugger;
         } else if (plainFunctionPolicyRejection(fnode)) |reason| {
@@ -6521,6 +6537,8 @@ pub const Interpreter = struct {
             return throwClassConstructorCallError(self, func);
         if (!func.is_generator and !func.is_async) {
             if (func.chunk) |fchunk| return vm.runFunction(self, func, fchunk, args, this_val, new_target);
+            if (self.bytecode_execution_mode == .required)
+                return self.throwError("InternalError", "required bytecode function has no compiled chunk");
         }
         var cur_func = func;
         var cur_args = args;
@@ -6537,6 +6555,8 @@ pub const Interpreter = struct {
             if (next_func.is_generator or next_func.is_async or next_func.is_class_constructor)
                 return self.callValue(tail.callee, tail.args);
             if (next_func.chunk) |fchunk| return vm.runFunction(self, next_func, fchunk, tail.args, Value.undef(), Value.undef());
+            if (self.bytecode_execution_mode == .required)
+                return self.throwError("InternalError", "required bytecode function has no compiled chunk");
             cur_func = next_func;
             cur_args = tail.args;
             cur_this = Value.undef();

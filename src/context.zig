@@ -2751,6 +2751,8 @@ pub const Context = struct {
     /// owner along with its arena heap. Standalone contexts leave this null.
     shared_jit_owner: ?*jit.Owner = null,
     enable_jit: bool = true,
+    /// Test-only forced execution contract. Public contexts remain automatic.
+    bytecode_execution_mode: interp.BytecodeExecutionMode = .automatic,
     /// Reusable allocator used as the GC heap's cell backing. It recycles
     /// per-cell slabs for allocation/lifecycle performance and becomes
     /// internally locked under `parallel_gc`, so multiple mutators can allocate
@@ -3303,6 +3305,10 @@ pub const Context = struct {
     /// of the stable embedder options surface.
     pub const TestingOptions = struct {
         enable_jit: bool = true,
+        /// Force plain synchronous execution through one tier for exact
+        /// differentials. `required` throws instead of silently accepting a
+        /// compiler or template fallback as VM coverage.
+        bytecode_execution_mode: interp.BytecodeExecutionMode = .automatic,
         enable_threads: bool = false,
         enable_gc: bool = false,
         concurrent_gc: bool = false,
@@ -3872,6 +3878,7 @@ pub const Context = struct {
             .jit_owner = jit.Owner.init(allocator),
             .shared_jit_owner = primary.shared_jit_owner orelse &primary.jit_owner,
             .enable_jit = primary.enable_jit,
+            .bytecode_execution_mode = primary.bytecode_execution_mode,
             .owner_thread = primary.owner_thread,
             .sab_retains = .{ .gpa = allocator },
             .env = .{ .arena = a, .fn_scope = true },
@@ -3960,6 +3967,7 @@ pub const Context = struct {
         primary.assertOwnerThread();
         return createWithTestingOptionsForSharedOwner(primary.host_gpa, .{
             .enable_jit = primary.enable_jit,
+            .bytecode_execution_mode = primary.bytecode_execution_mode,
             .enable_gc = true,
             .wasm_features = primary.wasm_features,
         }, primary);
@@ -4035,6 +4043,7 @@ pub const Context = struct {
             .jit_owner = jit.Owner.init(context_gpa),
             .shared_jit_owner = if (shared_owner) |owner| owner.shared_jit_owner orelse &owner.jit_owner else null,
             .enable_jit = options.enable_jit,
+            .bytecode_execution_mode = options.bytecode_execution_mode,
             .owner_thread = std.Thread.getCurrentId(),
             .sab_retains = .{ .gpa = context_gpa },
             .env = .{ .arena = a, .fn_scope = true }, // global is a variable scope
@@ -4282,6 +4291,7 @@ pub const Context = struct {
             .profile_statement_ctx = self.profile_statement_ctx,
             .profile_statement_hook = self.profile_statement_hook,
             .bytecode_admission_inventory = &self.bytecode_admission_inventory,
+            .bytecode_execution_mode = self.bytecode_execution_mode,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
             .debug_script_ctx = self,
@@ -7223,13 +7233,21 @@ pub const Context = struct {
         }
 
         const outcome: interp.EvalError!value.Value = admission: {
-            if (self.debug_statement_hook != null) {
-                self.bytecode_admission_inventory.record(.program_debugger);
+            if (self.bytecode_execution_mode == .tree_walker) {
+                self.bytecode_admission_inventory.record(.program_forced_tree_walker);
                 break :admission machine.eval(prog);
             }
-            if (scriptTreeWalkPolicy(owned_source)) |reason| {
-                self.bytecode_admission_inventory.record(reason);
+            if (self.debug_statement_hook != null) {
+                self.bytecode_admission_inventory.record(.program_debugger);
+                if (self.bytecode_execution_mode == .required)
+                    break :admission machine.throwError("InternalError", "required bytecode program is blocked by debugger execution");
                 break :admission machine.eval(prog);
+            }
+            if (self.bytecode_execution_mode != .required) {
+                if (scriptTreeWalkPolicy(owned_source)) |reason| {
+                    self.bytecode_admission_inventory.record(reason);
+                    break :admission machine.eval(prog);
+                }
             }
             switch (compiler.Compiler.admitProgram(a, prog) catch return error.OutOfMemory) {
                 .compiled => |chunk| {
@@ -7238,6 +7256,8 @@ pub const Context = struct {
                 },
                 .rejected => |reason| {
                     self.bytecode_admission_inventory.record(interp.programRejectionAdmission(reason));
+                    if (self.bytecode_execution_mode == .required)
+                        break :admission machine.throwError("InternalError", "required bytecode program was rejected by the compiler");
                     break :admission machine.eval(prog);
                 },
             }
@@ -18172,6 +18192,125 @@ test "bytecode admission source policies retain causal reasons" {
         .{ .source = "var value = 1", .reason = null },
     };
     for (cases) |case| try std.testing.expectEqual(case.reason, Context.scriptTreeWalkPolicy(case.source));
+}
+
+test "forced tree-walker and required bytecode preserve exact observable state" {
+    const source =
+        \\globalThis.tierTrace = [];
+        \\function tierDifferential(seed) {
+        \\  "use strict";
+        \\  var box = { value: seed };
+        \\  var trace = [];
+        \\  function bump(value) {
+        \\    box.value = box.value + value;
+        \\    trace.push(box.value);
+        \\    return box.value;
+        \\  }
+        \\  var sum = 0;
+        \\  for (var i = 0; i < 16; i = i + 1)
+        \\    sum = sum + bump((i & 3) + 1);
+        \\  globalThis.tierTrace = trace.join(",");
+        \\  globalThis.tierBox = box.value;
+        \\  return sum + box.value;
+        \\}
+        \\tierDifferential(7);
+    ;
+
+    const tree_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .tree_walker,
+    });
+    defer tree_ctx.destroy();
+    const bytecode_ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer bytecode_ctx.destroy();
+
+    const tree_result = try tree_ctx.evaluate(source);
+    const bytecode_result = try bytecode_ctx.evaluate(source);
+    try std.testing.expectEqual(tree_result.rawBits(), bytecode_result.rawBits());
+    try std.testing.expectEqualStrings(
+        (try tree_ctx.evaluate("tierTrace + '|' + tierBox")).asStr(),
+        (try bytecode_ctx.evaluate("tierTrace + '|' + tierBox")).asStr(),
+    );
+
+    const tree = tree_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), tree.count(.program_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 2), tree.count(.plain_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 0), tree.count(.program_compiled));
+
+    const bytecode = bytecode_ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 2), bytecode.count(.program_compiled));
+    try std.testing.expectEqual(@as(u64, 2), bytecode.count(.template_plain_compiled));
+    try std.testing.expectEqual(@as(u64, 0), bytecode.count(.program_forced_tree_walker));
+    try std.testing.expectEqual(@as(u64, 0), bytecode.count(.template_plain_fallback));
+}
+
+test "required bytecode rejects an uncompiled function instead of counting fallback coverage" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\function needsParameterPrologue(value = 1) { return value; }
+        \\needsParameterPrologue();
+    ));
+    const exception = ctx.exception orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("InternalError", exception.asObj().errorName());
+    try std.testing.expectEqualStrings(
+        "required bytecode function has no compiled chunk",
+        exception.asObj().getOwn("message").?.asStr(),
+    );
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+    try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_rejected_parameter_prologue));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
+test "forced tree-walker and required bytecode preserve exception and side effects" {
+    const source =
+        \\globalThis.tierBeforeThrow = 0;
+        \\function tierThrow(seed) {
+        \\  "use strict";
+        \\  globalThis.tierBeforeThrow = seed * 2;
+        \\  throw new TypeError("tier-boom");
+        \\}
+        \\tierThrow(9);
+    ;
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var side_effects: [modes.len]u64 = undefined;
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+
+        try std.testing.expectError(error.Throw, ctx.evaluate(source));
+        const exception = ctx.exception orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings("TypeError", exception.asObj().errorName());
+        try std.testing.expectEqualStrings("tier-boom", exception.asObj().getOwn("message").?.asStr());
+        side_effects[index] = (try ctx.evaluate("tierBeforeThrow")).rawBits();
+
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        switch (mode) {
+            .tree_walker => {
+                try std.testing.expectEqual(@as(u64, 2), inventory.count(.program_forced_tree_walker));
+                try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_forced_tree_walker));
+            },
+            .required => {
+                try std.testing.expectEqual(@as(u64, 2), inventory.count(.program_compiled));
+                try std.testing.expectEqual(@as(u64, 1), inventory.count(.template_plain_compiled));
+            },
+            .automatic => unreachable,
+        }
+    }
+
+    try std.testing.expectEqual(side_effects[0], side_effects[1]);
 }
 
 test "bytecode admission inventory merges concurrent realm records" {
