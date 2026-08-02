@@ -6,6 +6,7 @@
     "zig_toolchain",
     "standard_platform_interface",
     "owner_maintained_local",
+    "owner_maintained_pinned_tooling",
     "checksum_pinned_oracle",
     "generated_data_acquisition_input",
     "prohibited_unclassified"
@@ -159,16 +160,15 @@
       "migration_issue": 497
     },
     {
-      "id": "bun-ci-bootstrap",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
-      "scope": "documentation CI",
-      "locator": "oven-sh/setup-bun",
-      "pin": "workflow tag; not an immutable revision",
+      "id": "pantry-docs-bootstrap",
+      "class": "owner_maintained_pinned_tooling",
+      "status": "allowed",
+      "scope": "documentation CI bootstrap",
+      "locator": "pantry-pm/pantry/packages/action",
+      "pin": "action 9f797da1ed073df7839cb6a9a7db6181ba33f0b7; Pantry 0.11.12; Bun 1.3.14",
       "license": "MIT",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "Documentation bootstrap only; never part of libzig-js.",
-      "migration_issue": 464
+      "runtime_semantics": "Owner-maintained CI bootstrap for the BunPress toolchain only; never part of libzig-js."
     }
   ],
   "boundaries": {
@@ -234,7 +234,7 @@
     "ci_actions": [
       { "name": "actions/checkout@v6", "count": 20, "edge": "ci-bootstrap-actions" },
       { "name": "pantry-pm/pantry/packages/action@main", "count": 6, "edge": "ci-bootstrap-actions" },
-      { "name": "oven-sh/setup-bun@v2", "count": 1, "edge": "bun-ci-bootstrap" }
+      { "name": "pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7", "count": 1, "edge": "pantry-docs-bootstrap" }
     ],
     "pinned_downloads": [
       { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz", "sha256": "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271", "occurrences": 1, "edge": "pinned-wasm-converters" },

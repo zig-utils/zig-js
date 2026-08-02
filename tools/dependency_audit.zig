@@ -13,6 +13,7 @@ const DependencyClass = enum {
     zig_toolchain,
     standard_platform_interface,
     owner_maintained_local,
+    owner_maintained_pinned_tooling,
     checksum_pinned_oracle,
     generated_data_acquisition_input,
     prohibited_unclassified,

@@ -19,6 +19,7 @@ Every external edge has exactly one class:
 | `zig_toolchain` | The Zig compiler and standard library used to produce the engine. |
 | `standard_platform_interface` | Target C/C++ ABI and named SDK interfaces such as Foundation; never an imported JavaScript implementation. |
 | `owner_maintained_local` | An owner-maintained sibling checkout resolved by local path. The production allowlist is exactly `../zig-regex` and `../zig-gc`; owned tools such as BunPress are scoped separately. |
+| `owner_maintained_pinned_tooling` | An owner-maintained build/bootstrap tool fixed to immutable source and executable versions; never part of engine semantics. |
 | `checksum_pinned_oracle` | A named test, differential, or benchmark input pinned by git object ID or release checksum. |
 | `generated_data_acquisition_input` | A one-shot source for checked-in generated tables; it is not contacted by ordinary build or test steps. |
 | `prohibited_unclassified` | An edge that cannot remain. A checked migration issue is mandatory, so this state cannot become a silent exemption. |
@@ -50,7 +51,7 @@ The inventory deliberately records current violations instead of relabeling
 them as acceptable:
 
 - BunPress itself is now an allowed exact local source dependency; completing
-  its owned transitive-resolution and Bun bootstrap contract remains under
+  its owned transitive-resolution remains under
   [#464](https://github.com/zig-utils/zig-js/issues/464);
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by
