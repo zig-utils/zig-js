@@ -596,7 +596,33 @@ pub const Compiler = struct {
     /// Compile a whole program into a fresh chunk. The chunk ends with `halt`;
     /// the VM returns its completion accumulator. Program scope is null, so all
     /// top-level bindings are globals.
+    pub const ProgramRejection = enum {
+        invalid_root,
+        unsupported_lowering,
+    };
+
+    pub const ProgramAdmission = union(enum) {
+        compiled: *Chunk,
+        rejected: ProgramRejection,
+    };
+
+    pub fn admitProgram(arena: std.mem.Allocator, program: *Node) error{OutOfMemory}!ProgramAdmission {
+        var rejection: ?ProgramRejection = null;
+        const chunk = compileProgramInner(arena, program, &rejection) catch |err| switch (err) {
+            error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return .{ .compiled = chunk };
+    }
+
     pub fn compileProgram(arena: std.mem.Allocator, program: *Node) CompileError!*Chunk {
+        return switch (try admitProgram(arena, program)) {
+            .compiled => |chunk| chunk,
+            .rejected => error.Unsupported,
+        };
+    }
+
+    fn compileProgramInner(arena: std.mem.Allocator, program: *Node, rejection: *?ProgramRejection) CompileError!*Chunk {
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // Keep latent source-node checkpoints in every chunk. With no debugger
@@ -604,7 +630,10 @@ pub const Compiler = struct {
         // later attachment inspect already-compiled functions without rebuilding
         // their frame/upvalue layout.
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .program, .debug_checkpoints = true };
-        if (program.* != .program) return error.Unsupported;
+        if (program.* != .program) {
+            rejection.* = .invalid_root;
+            return error.Unsupported;
+        }
         try c.compileStmtList(program.program);
         _ = try chunk.emit(.halt, 0);
         try chunk.finalize();
@@ -620,12 +649,41 @@ pub const Compiler = struct {
     /// operand stack. Returns `error.Unsupported` for bodies (or parameter forms)
     /// outside the VM's lowered subset, so the generator is reported unsupported
     /// rather than run incorrectly.
+    pub const GeneratorRejection = enum {
+        expression_body,
+        unsupported_lowering,
+    };
+
+    pub const GeneratorAdmission = union(enum) {
+        compiled: *Chunk,
+        rejected: GeneratorRejection,
+    };
+
+    pub fn admitGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!GeneratorAdmission {
+        var rejection: ?GeneratorRejection = null;
+        const chunk = compileGeneratorInner(arena, fnode, debug_checkpoints, &rejection) catch |err| switch (err) {
+            error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return .{ .compiled = chunk };
+    }
+
     pub fn compileGenerator(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) CompileError!*Chunk {
+        return switch (try admitGenerator(arena, fnode, debug_checkpoints)) {
+            .compiled => |chunk| chunk,
+            .rejected => error.Unsupported,
+        };
+    }
+
+    fn compileGeneratorInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, rejection: *?GeneratorRejection) CompileError!*Chunk {
         // Parameters (including default/rest/destructuring) are bound at runtime
         // by `makeGenerator` into the generator's environment — env-mode name
         // resolution means the body's references resolve there — so the param
         // shape never blocks compilation; only the body must lower.
-        if (fnode.is_expr_body) return error.Unsupported; // generators always have a block body
+        if (fnode.is_expr_body) {
+            rejection.* = .expression_body;
+            return error.Unsupported; // generators always have a block body
+        }
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         // An async generator body may also `await` (in_async enables await_op).
@@ -640,8 +698,37 @@ pub const Compiler = struct {
     /// like a generator). `await` lowers to a suspend (`gen_yield`); the async
     /// driver promisifies the suspended value, resumes on settlement, and
     /// settles the function's result promise on completion.
+    pub const AsyncRejection = enum {
+        async_generator,
+        unsupported_lowering,
+    };
+
+    pub const AsyncAdmission = union(enum) {
+        compiled: *Chunk,
+        rejected: AsyncRejection,
+    };
+
+    pub fn admitAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) error{OutOfMemory}!AsyncAdmission {
+        var rejection: ?AsyncRejection = null;
+        const chunk = compileAsyncInner(arena, fnode, debug_checkpoints, &rejection) catch |err| switch (err) {
+            error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return .{ .compiled = chunk };
+    }
+
     pub fn compileAsync(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool) CompileError!*Chunk {
-        if (fnode.is_generator) return error.Unsupported; // async generators not lowered yet
+        return switch (try admitAsync(arena, fnode, debug_checkpoints)) {
+            .compiled => |chunk| chunk,
+            .rejected => error.Unsupported,
+        };
+    }
+
+    fn compileAsyncInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, debug_checkpoints: bool, rejection: *?AsyncRejection) CompileError!*Chunk {
+        if (fnode.is_generator) {
+            rejection.* = .async_generator;
+            return error.Unsupported; // async generators not lowered yet
+        }
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = null, .in_async = true, .debug_checkpoints = debug_checkpoints };
@@ -2944,6 +3031,86 @@ test "compiler reports stable plain-function admission reasons" {
     const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
     switch (admission) {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler reports stable program admission reasons" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var invalid_parser = try @import("parser.zig").Parser.init(arena.allocator(), "1;");
+    const invalid_program = try invalid_parser.parseProgram();
+    switch (try Compiler.admitProgram(arena.allocator(), invalid_program.program[0])) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.invalid_root, reason),
+    }
+
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "null ?? 1;");
+    const unsupported_program = try unsupported_parser.parseProgram();
+    switch (try Compiler.admitProgram(arena.allocator(), unsupported_program)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.ProgramRejection.unsupported_lowering, reason),
+    }
+
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "1 + 2;");
+    const compiled_program = try compiled_parser.parseProgram();
+    switch (try Compiler.admitProgram(arena.allocator(), compiled_program)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler reports stable generator admission reasons" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var invalid_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* invalid(){}");
+    const invalid_program = try invalid_parser.parseProgram();
+    const invalid = invalid_program.program[0].func_decl;
+    invalid.is_expr_body = true;
+    switch (try Compiler.admitGenerator(arena.allocator(), invalid, true)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.expression_body, reason),
+    }
+
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* unsupported(){ yield (null ?? 1); }");
+    const unsupported_program = try unsupported_parser.parseProgram();
+    switch (try Compiler.admitGenerator(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.GeneratorRejection.unsupported_lowering, reason),
+    }
+
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "function* compiled(){ yield 1; }");
+    const compiled_program = try compiled_parser.parseProgram();
+    switch (try Compiler.admitGenerator(arena.allocator(), compiled_program.program[0].func_decl, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler reports stable async admission reasons" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var generator_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function* invalid(){}");
+    const generator_program = try generator_parser.parseProgram();
+    switch (try Compiler.admitAsync(arena.allocator(), generator_program.program[0].func_decl, true)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.async_generator, reason),
+    }
+
+    var unsupported_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function unsupported(){ return null ?? 1; }");
+    const unsupported_program = try unsupported_parser.parseProgram();
+    switch (try Compiler.admitAsync(arena.allocator(), unsupported_program.program[0].func_decl, true)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.AsyncRejection.unsupported_lowering, reason),
+    }
+
+    var compiled_parser = try @import("parser.zig").Parser.init(arena.allocator(), "async function compiled(){ return await 1; }");
+    const compiled_program = try compiled_parser.parseProgram();
+    switch (try Compiler.admitAsync(arena.allocator(), compiled_program.program[0].func_decl, true)) {
+        .compiled => |chunk| try std.testing.expect(chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
     }
 }
