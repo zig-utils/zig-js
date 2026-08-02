@@ -7077,22 +7077,22 @@ pub const Context = struct {
         try self.active_interpreters.ensureTotalCapacity(self.gpa, self.active_interpreters.items.len + extra);
     }
 
-    fn scriptNeedsTreeWalk(source: []const u8) bool {
-        const needles = [_][]const u8{
-            "let ",
-            "const ",
-            "catch",
-            "switch",
-            "label:",
-            "function arguments",
-            ".caller",
-            ".arguments",
-            "\n    function ",
+    fn scriptTreeWalkPolicy(source: []const u8) ?interp.BytecodeAdmissionReason {
+        const policies = [_]struct { needle: []const u8, reason: interp.BytecodeAdmissionReason }{
+            .{ .needle = "let ", .reason = .program_policy_lexical_declaration },
+            .{ .needle = "const ", .reason = .program_policy_lexical_declaration },
+            .{ .needle = "catch", .reason = .program_policy_catch },
+            .{ .needle = "switch", .reason = .program_policy_switch },
+            .{ .needle = "label:", .reason = .program_policy_label },
+            .{ .needle = "function arguments", .reason = .program_policy_arguments_function },
+            .{ .needle = ".caller", .reason = .program_policy_legacy_caller },
+            .{ .needle = ".arguments", .reason = .program_policy_legacy_arguments },
+            .{ .needle = "\n    function ", .reason = .program_policy_nested_function_declaration },
         };
-        for (needles) |needle| {
-            if (std.mem.indexOf(u8, source, needle) != null) return true;
+        for (policies) |policy| {
+            if (std.mem.indexOf(u8, source, policy.needle) != null) return policy.reason;
         }
-        return false;
+        return null;
     }
 
     /// Lex + parse + run `source`, returning the completion value. On an
@@ -7227,8 +7227,8 @@ pub const Context = struct {
                 self.bytecode_admission_inventory.record(.program_debugger);
                 break :admission machine.eval(prog);
             }
-            if (scriptNeedsTreeWalk(owned_source)) {
-                self.bytecode_admission_inventory.record(.program_source_policy);
+            if (scriptTreeWalkPolicy(owned_source)) |reason| {
+                self.bytecode_admission_inventory.record(reason);
                 break :admission machine.eval(prog);
             }
             switch (compiler.Compiler.admitProgram(a, prog) catch return error.OutOfMemory) {
@@ -18111,6 +18111,12 @@ test "bytecode admission inventory retains exact runtime reasons" {
         \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
         \\globalThis.asyncRejected = async function asyncRejected() { return null ?? 1; };
     );
+    _ = try ctx.evaluate(
+        \\globalThis.templateDefault = function templateDefault(value = 1) { return value; };
+        \\globalThis.templateUnsupported = function templateUnsupported() {
+        \\  return ({ get x() { return 1; } }).x;
+        \\};
+    );
 
     const expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
         .{ .name = "admitted", .reason = .plain_compiled },
@@ -18128,12 +18134,44 @@ test "bytecode admission inventory retains exact runtime reasons" {
         const function: *interp.Function = @ptrCast(@alignCast(raw));
         try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
     }
+    const template_expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
+        .{ .name = "templateDefault", .reason = .template_plain_rejected_parameter_prologue },
+        .{ .name = "templateUnsupported", .reason = .template_plain_rejected_unsupported_lowering },
+    };
+    for (template_expected) |entry| {
+        const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
+        const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+        const function: *interp.Function = @ptrCast(@alignCast(raw));
+        try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
+    }
 
     const after = ctx.bytecodeAdmissionSnapshot();
-    try std.testing.expectEqual(before.count(.program_compiled) + 1, after.count(.program_compiled));
-    try std.testing.expectEqual(before.count(.program_source_policy) + 1, after.count(.program_source_policy));
+    try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
+    try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
     for (expected) |entry|
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
+    for (template_expected) |entry|
+        try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
+    try std.testing.expectEqual(before.count(.program_source_policy), after.count(.program_source_policy));
+    try std.testing.expectEqual(before.count(.template_plain_fallback), after.count(.template_plain_fallback));
+    try std.testing.expectEqual(before.count(.template_generator_fallback), after.count(.template_generator_fallback));
+    try std.testing.expectEqual(before.count(.template_async_fallback), after.count(.template_async_fallback));
+}
+
+test "bytecode admission source policies retain causal reasons" {
+    const cases = [_]struct { source: []const u8, reason: ?interp.BytecodeAdmissionReason }{
+        .{ .source = "let value = 1", .reason = .program_policy_lexical_declaration },
+        .{ .source = "const value = 1", .reason = .program_policy_lexical_declaration },
+        .{ .source = "try {} catch (error) {}", .reason = .program_policy_catch },
+        .{ .source = "switch (value) {}", .reason = .program_policy_switch },
+        .{ .source = "label: while (false) {}", .reason = .program_policy_label },
+        .{ .source = "function arguments() {}", .reason = .program_policy_arguments_function },
+        .{ .source = "fn.caller", .reason = .program_policy_legacy_caller },
+        .{ .source = "fn.arguments", .reason = .program_policy_legacy_arguments },
+        .{ .source = "\n    function nested() {}", .reason = .program_policy_nested_function_declaration },
+        .{ .source = "var value = 1", .reason = null },
+    };
+    for (cases) |case| try std.testing.expectEqual(case.reason, Context.scriptTreeWalkPolicy(case.source));
 }
 
 test "bytecode admission inventory merges concurrent realm records" {

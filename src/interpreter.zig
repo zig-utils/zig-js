@@ -950,6 +950,16 @@ pub const BytecodeAdmissionReason = enum(u8) {
     template_generator_fallback,
     template_async_compiled,
     template_async_fallback,
+    program_policy_lexical_declaration,
+    program_policy_catch,
+    program_policy_switch,
+    program_policy_label,
+    program_policy_arguments_function,
+    program_policy_legacy_caller,
+    program_policy_legacy_arguments,
+    program_policy_nested_function_declaration,
+    template_plain_rejected_parameter_prologue,
+    template_plain_rejected_unsupported_lowering,
 };
 
 pub const bytecode_admission_reason_count = std.meta.fieldNames(BytecodeAdmissionReason).len;

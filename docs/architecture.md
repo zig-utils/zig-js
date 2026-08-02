@@ -39,7 +39,9 @@ Admission is observable rather than inferred from a null chunk. Every runtime
 `Context.bytecodeAdmissionSnapshot()` returns per-realm atomic counts for
 program, plain-function, generator, async, and nested-template decisions. This
 keeps no-GIL profiles race-free and makes each remaining fallback category an
-explicit target for removal.
+explicit target for removal. Source-policy skips and null nested-template chunks
+retain their exact causal subreason; legacy generic counters remain in the stable
+schema but new decisions do not increment them.
 
 ## Source map
 

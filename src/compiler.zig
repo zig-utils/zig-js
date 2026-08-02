@@ -2793,8 +2793,11 @@ pub const Compiler = struct {
         const scope = try self.arena.create(FnScope);
         scope.* = .{ .parent = self.scope };
 
+        var template_admission: bc.FnTemplateAdmission = undefined;
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
-            break :blk try Compiler.compileGenerator(self.arena, fnode, self.debug_checkpoints);
+            const compiled = try Compiler.compileGenerator(self.arena, fnode, self.debug_checkpoints);
+            template_admission = .generator_compiled;
+            break :blk compiled;
         } else blk: {
             const compiled = try self.arena.create(Chunk);
             compiled.* = Chunk.init(self.arena);
@@ -2806,7 +2809,10 @@ pub const Compiler = struct {
                 // fall back independently because its captures resolve through
                 // the global Environment rather than an enclosing VM frame.
                 if (p.default != null or p.is_rest or p.pattern != null) {
-                    if (self.scope == null) break :blk null;
+                    if (self.scope == null) {
+                        template_admission = .plain_parameter_prologue;
+                        break :blk null;
+                    }
                     return error.Unsupported;
                 }
                 _ = try scope.addLocal(self.arena, p.name);
@@ -2821,7 +2827,10 @@ pub const Compiler = struct {
             if (fnode.is_expr_body) {
                 sub_c.compileExpr(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
-                        if (self.scope == null) break :blk null;
+                        if (self.scope == null) {
+                            template_admission = .plain_unsupported_lowering;
+                            break :blk null;
+                        }
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
@@ -2830,7 +2839,10 @@ pub const Compiler = struct {
             } else {
                 sub_c.compileStmt(fnode.body) catch |e| switch (e) {
                     error.Unsupported => {
-                        if (self.scope == null) break :blk null;
+                        if (self.scope == null) {
+                            template_admission = .plain_unsupported_lowering;
+                            break :blk null;
+                        }
                         return error.Unsupported;
                     },
                     error.OutOfMemory => return error.OutOfMemory,
@@ -2838,6 +2850,7 @@ pub const Compiler = struct {
                 _ = try compiled.emit(.ret_undef, 0);
             }
             try compiled.finalize();
+            template_admission = .plain_compiled;
             break :blk compiled;
         };
         if (fnode.is_generator) {
@@ -2861,6 +2874,7 @@ pub const Compiler = struct {
             .is_arrow = fnode.is_arrow,
             .is_method = fnode.is_method,
             .is_strict = fnode.is_strict,
+            .admission = template_admission,
             .chunk = sub,
             .local_count = scope.count,
         };

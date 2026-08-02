@@ -546,6 +546,14 @@ fn mayStartQuickCallLoop(code: []const Inst, start: usize) bool {
 /// A compiled function prototype referenced by `make_closure`. Carries the
 /// original AST `body` too, so a Function value remains tree-walk-callable
 /// (the migration fallback) in addition to VM-callable.
+pub const FnTemplateAdmission = enum {
+    plain_compiled,
+    plain_parameter_prologue,
+    plain_unsupported_lowering,
+    generator_compiled,
+    async_compiled,
+};
+
 pub const FnTemplate = struct {
     name: []const u8,
     /// A *named function expression's* own name, which binds as an immutable
@@ -574,6 +582,9 @@ pub const FnTemplate = struct {
     /// Threaded to the closure so the VM's this-binding matches the tree-walker:
     /// a sloppy bare call substitutes the global `this`, a strict one keeps undefined.
     is_strict: bool = false,
+    /// Exact compiler decision for this nested template. A null `chunk` is
+    /// therefore causal rather than an unclassified tree-walker fallback.
+    admission: FnTemplateAdmission = .plain_unsupported_lowering,
     chunk: ?*Chunk,
     /// Number of frame slots (params + function-scoped declarations) the VM
     /// allocates per call.

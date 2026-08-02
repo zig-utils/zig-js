@@ -8056,14 +8056,13 @@ fn binOp(op: bc.Op) ast.BinaryOp {
 /// env-mode templates may leave it null and use the tree-walker body fallback.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const func = try gc_mod.allocFunction(vm.arena);
-    const admission_reason: interp.BytecodeAdmissionReason = if (tmpl.is_generator)
-        if (tmpl.chunk != null) .template_generator_compiled else .template_generator_fallback
-    else if (tmpl.is_async)
-        if (tmpl.chunk != null) .template_async_compiled else .template_async_fallback
-    else if (tmpl.chunk != null)
-        .template_plain_compiled
-    else
-        .template_plain_fallback;
+    const admission_reason: interp.BytecodeAdmissionReason = switch (tmpl.admission) {
+        .plain_compiled => .template_plain_compiled,
+        .plain_parameter_prologue => .template_plain_rejected_parameter_prologue,
+        .plain_unsupported_lowering => .template_plain_rejected_unsupported_lowering,
+        .generator_compiled => .template_generator_compiled,
+        .async_compiled => .template_async_compiled,
+    };
     // A named function expression binds its own name as an immutable binding in
     // a fresh scope enclosing the body, so the body can recurse via that name and
     // can't rebind it. `runFunction` installs `func.closure` as `vm.env` for the
