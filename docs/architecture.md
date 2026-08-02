@@ -34,6 +34,13 @@ Because most code tree-walks, the VM path is comparatively under-exercised, so V
 
 The VM gives each compiled function one **flat, block-transparent slot array**: locals are frame slots indexed in O(1), and closures capture the defining frame. This is fast but does not model per-block lexical scope, so the compiler keeps functions on the tree-walker whenever correct block scoping would matter — a `let`/`const` that shadows another binding, a read in the Temporal Dead Zone (before a binding's declaration), or a `for (let …)` head captured per-iteration by a body closure. The tree-walker's `Environment` chain enforces those correctly. Proper per-block slot scoping on the VM (which would let those functions tier) is possible but unbuilt; it is only worthwhile if the VM becomes a genuine performance tier.
 
+Admission is observable rather than inferred from a null chunk. Every runtime
+`Function` retains a stable `BytecodeAdmissionReason`, and
+`Context.bytecodeAdmissionSnapshot()` returns per-realm atomic counts for
+program, plain-function, generator, async, and nested-template decisions. This
+keeps no-GIL profiles race-free and makes each remaining fallback category an
+explicit target for removal.
+
 ## Source map
 
 | File | Responsibility |

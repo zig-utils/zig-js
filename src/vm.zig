@@ -8056,6 +8056,14 @@ fn binOp(op: bc.Op) ast.BinaryOp {
 /// env-mode templates may leave it null and use the tree-walker body fallback.
 fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError!Value {
     const func = try gc_mod.allocFunction(vm.arena);
+    const admission_reason: interp.BytecodeAdmissionReason = if (tmpl.is_generator)
+        if (tmpl.chunk != null) .template_generator_compiled else .template_generator_fallback
+    else if (tmpl.is_async)
+        if (tmpl.chunk != null) .template_async_compiled else .template_async_fallback
+    else if (tmpl.chunk != null)
+        .template_plain_compiled
+    else
+        .template_plain_fallback;
     // A named function expression binds its own name as an immutable binding in
     // a fresh scope enclosing the body, so the body can recurse via that name and
     // can't rebind it. `runFunction` installs `func.closure` as `vm.env` for the
@@ -8073,6 +8081,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .realm_global = interp.functionRealmGlobal(closure_env, vm.global_object),
         .name = tmpl.name,
         .source = tmpl.source,
+        .bytecode_admission_reason = admission_reason,
         .uses_arguments = tmpl.uses_arguments,
         .is_generator = tmpl.is_generator,
         .is_async = tmpl.is_async,
@@ -8096,6 +8105,7 @@ fn makeClosure(vm: *Interpreter, tmpl: *bc.FnTemplate, frame: ?*Frame) EvalError
         .super_ctor = if (tmpl.is_arrow) vm.super_ctor else null,
         .field_init_ctx = tmpl.is_arrow and vm.in_field_initializer,
     };
+    vm.recordBytecodeAdmission(admission_reason);
     // The closure can reach `frame` and all its ancestors via the upvalue walk,
     // so their slots may now be touched concurrently — mark the chain escaped so
     // load/store_{local,upval} serialize on those frames (no-GIL only).

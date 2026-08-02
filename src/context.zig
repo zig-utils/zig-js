@@ -2804,6 +2804,9 @@ pub const Context = struct {
     /// inspector and embedder transport hooks so all three compose.
     profile_statement_ctx: ?*anyopaque = null,
     profile_statement_hook: ?interp.ProfileStatementHook = null,
+    /// Per-realm bytecode admission telemetry. Atomic counters preserve exact
+    /// reasons when shared-realm workers create functions concurrently.
+    bytecode_admission_inventory: interp.BytecodeAdmissionInventory = .{},
     debug_exception_hook: ?interp.DebugExceptionHook = null,
     debug_statement_locations: std.AutoHashMapUnmanaged(*const ast.Node, interp.DebugStatementLocation) = .empty,
     /// Guards the script-id/list and statement-location registry only in a
@@ -4278,6 +4281,7 @@ pub const Context = struct {
             .host_statement_hook = self.host_statement_hook,
             .profile_statement_ctx = self.profile_statement_ctx,
             .profile_statement_hook = self.profile_statement_hook,
+            .bytecode_admission_inventory = &self.bytecode_admission_inventory,
             .debug_statement_locations = &self.debug_statement_locations,
             .debug_registry_lock = if (self.parallel_js) &self.debug_registry_lock else null,
             .debug_script_ctx = self,
@@ -4362,6 +4366,10 @@ pub const Context = struct {
 
     pub fn unlockDebugRegistry(self: *Context) void {
         if (self.parallel_js) self.debug_registry_lock.unlock();
+    }
+
+    pub fn bytecodeAdmissionSnapshot(self: *const Context) interp.BytecodeAdmissionSnapshot {
+        return self.bytecode_admission_inventory.snapshot();
     }
 
     fn registerDebugLocationsLocked(
@@ -7214,13 +7222,25 @@ pub const Context = struct {
             machine.cur_module = self.script_referrer;
         }
 
-        const outcome: interp.EvalError!value.Value = if (self.debug_statement_hook != null or scriptNeedsTreeWalk(owned_source))
-            machine.eval(prog)
-        else if (compiler.Compiler.compileProgram(a, prog)) |chunk|
-            vm.run(&machine, chunk, null)
-        else |err| switch (err) {
-            error.Unsupported => machine.eval(prog), // construct the VM can't lower
-            error.OutOfMemory => return error.OutOfMemory,
+        const outcome: interp.EvalError!value.Value = admission: {
+            if (self.debug_statement_hook != null) {
+                self.bytecode_admission_inventory.record(.program_debugger);
+                break :admission machine.eval(prog);
+            }
+            if (scriptNeedsTreeWalk(owned_source)) {
+                self.bytecode_admission_inventory.record(.program_source_policy);
+                break :admission machine.eval(prog);
+            }
+            switch (compiler.Compiler.admitProgram(a, prog) catch return error.OutOfMemory) {
+                .compiled => |chunk| {
+                    self.bytecode_admission_inventory.record(.program_compiled);
+                    break :admission vm.run(&machine, chunk, null);
+                },
+                .rejected => |reason| {
+                    self.bytecode_admission_inventory.record(interp.programRejectionAdmission(reason));
+                    break :admission machine.eval(prog);
+                },
+            }
         };
         const top_level_failed = if (outcome) |_| false else |_| true;
         if (outcome) |_| {} else |err| {
@@ -18071,6 +18091,76 @@ test "vm admission: safe sloppy loops and strict dynamic calls tier safely" {
         try std.testing.expectEqual(@as(u64, 1), dynamic_func.chunk.?.optimizer_tier.compileCount());
         try std.testing.expectEqual(@as(u64, 1), ctx.jit_owner.optimizerPublications());
     }
+}
+
+test "bytecode admission inventory retains exact runtime reasons" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+
+    const before = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(f64, 3), (try ctx.evaluate("1 + 2")).asNum());
+
+    _ = try ctx.evaluate(
+        \\let marker = { x: 1 };
+        \\globalThis.admitted = function admitted(p) { "use strict"; return p.x; };
+        \\globalThis.withArguments = function withArguments() { return arguments[0]; };
+        \\globalThis.notCandidate = function notCandidate() { return 1; };
+        \\globalThis.shadowed = function shadowed(p) { "use strict"; { let p = 2; } return marker.x; };
+        \\globalThis.generatorCompiled = function* generatorCompiled() { yield 1; };
+        \\globalThis.generatorRejected = function* generatorRejected() { yield (null ?? 1); };
+        \\globalThis.asyncCompiled = async function asyncCompiled() { return await 1; };
+        \\globalThis.asyncRejected = async function asyncRejected() { return null ?? 1; };
+    );
+
+    const expected = [_]struct { name: []const u8, reason: interp.BytecodeAdmissionReason }{
+        .{ .name = "admitted", .reason = .plain_compiled },
+        .{ .name = "withArguments", .reason = .plain_policy_arguments },
+        .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
+        .{ .name = "shadowed", .reason = .plain_rejected_lexical_shadowing },
+        .{ .name = "generatorCompiled", .reason = .generator_compiled },
+        .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
+        .{ .name = "asyncCompiled", .reason = .async_compiled },
+        .{ .name = "asyncRejected", .reason = .async_rejected_unsupported_lowering },
+    };
+    for (expected) |entry| {
+        const function_value = ctx.global_object.getOwn(entry.name) orelse return error.TestUnexpectedResult;
+        const raw = function_value.asObj().jsFunction() orelse return error.TestUnexpectedResult;
+        const function: *interp.Function = @ptrCast(@alignCast(raw));
+        try std.testing.expectEqual(entry.reason, function.bytecode_admission_reason);
+    }
+
+    const after = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(before.count(.program_compiled) + 1, after.count(.program_compiled));
+    try std.testing.expectEqual(before.count(.program_source_policy) + 1, after.count(.program_source_policy));
+    for (expected) |entry|
+        try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
+}
+
+test "bytecode admission inventory merges concurrent realm records" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    var inventory = interp.BytecodeAdmissionInventory{};
+    const Worker = struct {
+        inventory: *interp.BytecodeAdmissionInventory,
+
+        fn run(self: *@This()) void {
+            for (0..10_000) |_| {
+                self.inventory.record(.plain_compiled);
+                self.inventory.record(.plain_rejected_temporal_dead_zone);
+            }
+        }
+    };
+    var workers: [4]Worker = undefined;
+    var threads: [workers.len]std.Thread = undefined;
+    for (&workers, &threads) |*worker, *thread| {
+        worker.* = .{ .inventory = &inventory };
+        thread.* = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+    for (threads) |thread| thread.join();
+
+    const snapshot = inventory.snapshot();
+    try std.testing.expectEqual(@as(u64, 40_000), snapshot.count(.plain_compiled));
+    try std.testing.expectEqual(@as(u64, 40_000), snapshot.count(.plain_rejected_temporal_dead_zone));
+    try std.testing.expectEqual(@as(u64, 0), snapshot.count(.program_compiled));
 }
 
 test "vm admission: strict named-property loops reach the optimizer" {

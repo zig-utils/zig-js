@@ -915,6 +915,102 @@ pub fn vmChunkAllowsInlineCalls(chunk: *const bc.Chunk) bool {
     return true;
 }
 
+/// Stable runtime admission outcomes. These names are profiling schema: append
+/// new reasons instead of renaming an existing one without a versioned migration.
+pub const BytecodeAdmissionReason = enum(u8) {
+    synthetic,
+    program_compiled,
+    program_debugger,
+    program_source_policy,
+    program_invalid_root,
+    program_unsupported_lowering,
+    plain_compiled,
+    plain_policy_debugger,
+    plain_policy_method,
+    plain_policy_arguments,
+    plain_policy_legacy_call_frame,
+    plain_policy_dynamic_call,
+    plain_policy_not_candidate,
+    plain_rejected_generator_or_async,
+    plain_rejected_function_scope_disposal,
+    plain_rejected_block_nested_function_declaration,
+    plain_rejected_lexical_shadowing,
+    plain_rejected_temporal_dead_zone,
+    plain_rejected_parameter_prologue,
+    plain_rejected_unsupported_lowering,
+    generator_compiled,
+    generator_rejected_expression_body,
+    generator_rejected_unsupported_lowering,
+    async_compiled,
+    async_rejected_async_generator,
+    async_rejected_unsupported_lowering,
+    template_plain_compiled,
+    template_plain_fallback,
+    template_generator_compiled,
+    template_generator_fallback,
+    template_async_compiled,
+    template_async_fallback,
+};
+
+pub const bytecode_admission_reason_count = std.meta.fieldNames(BytecodeAdmissionReason).len;
+
+pub const BytecodeAdmissionSnapshot = struct {
+    counts: [bytecode_admission_reason_count]u64,
+
+    pub fn count(self: *const BytecodeAdmissionSnapshot, reason: BytecodeAdmissionReason) u64 {
+        return self.counts[@backingInt(reason)];
+    }
+};
+
+/// Context-owned and safe for shared-realm no-GIL function creation. Recording
+/// is monotonic profiling state and never changes an execution decision.
+pub const BytecodeAdmissionInventory = struct {
+    counts: [bytecode_admission_reason_count]std.atomic.Value(u64) = @splat(.init(0)),
+
+    pub fn record(self: *BytecodeAdmissionInventory, reason: BytecodeAdmissionReason) void {
+        _ = self.counts[@backingInt(reason)].fetchAdd(1, .monotonic);
+    }
+
+    pub fn snapshot(self: *const BytecodeAdmissionInventory) BytecodeAdmissionSnapshot {
+        var result: BytecodeAdmissionSnapshot = undefined;
+        for (&self.counts, 0..) |*count, index| result.counts[index] = count.load(.monotonic);
+        return result;
+    }
+};
+
+pub fn programRejectionAdmission(reason: Compiler.ProgramRejection) BytecodeAdmissionReason {
+    return switch (reason) {
+        .invalid_root => .program_invalid_root,
+        .unsupported_lowering => .program_unsupported_lowering,
+    };
+}
+
+fn plainRejectionAdmission(reason: Compiler.PlainFunctionRejection) BytecodeAdmissionReason {
+    return switch (reason) {
+        .generator_or_async => .plain_rejected_generator_or_async,
+        .function_scope_disposal => .plain_rejected_function_scope_disposal,
+        .block_nested_function_declaration => .plain_rejected_block_nested_function_declaration,
+        .lexical_shadowing => .plain_rejected_lexical_shadowing,
+        .temporal_dead_zone => .plain_rejected_temporal_dead_zone,
+        .parameter_prologue => .plain_rejected_parameter_prologue,
+        .unsupported_lowering => .plain_rejected_unsupported_lowering,
+    };
+}
+
+fn generatorRejectionAdmission(reason: Compiler.GeneratorRejection) BytecodeAdmissionReason {
+    return switch (reason) {
+        .expression_body => .generator_rejected_expression_body,
+        .unsupported_lowering => .generator_rejected_unsupported_lowering,
+    };
+}
+
+fn asyncRejectionAdmission(reason: Compiler.AsyncRejection) BytecodeAdmissionReason {
+    return switch (reason) {
+        .async_generator => .async_rejected_async_generator,
+        .unsupported_lowering => .async_rejected_unsupported_lowering,
+    };
+}
+
 const TreeTailCall = struct {
     callee: Value,
     args: []const Value,
@@ -945,9 +1041,12 @@ pub const Function = struct {
     /// toString`. Empty when the parser didn't capture it (then toString falls
     /// back to native-function syntax).
     source: []const u8 = "",
+    /// Exact bytecode admission decision retained on the function for causal
+    /// profiles. `.synthetic` is reserved for host/test-created Function cells.
+    bytecode_admission_reason: BytecodeAdmissionReason = .synthetic,
     /// Compiled body for the bytecode VM. Set by `makeFunction` (and the VM's
     /// `make_closure`) via `compilePlainFunction` when a plain function's body
-    /// lowers to bytecode — see `plainFunctionMayUseBytecode` — so tree-walk-
+    /// lowers to bytecode — see `plainFunctionPolicyRejection` — so tree-walk-
     /// created closures tier onto the VM too. Null when the body uses syntax the
     /// compiler does not lower yet, in which case the function is invoked via the
     /// tree-walker (`callFunction`). Generators/async use `gen_chunk`/`async_chunk`.
@@ -1127,6 +1226,9 @@ pub const Interpreter = struct {
     host_statement_hook: ?HostStatementHook = null,
     profile_statement_ctx: ?*anyopaque = null,
     profile_statement_hook: ?ProfileStatementHook = null,
+    /// Realm-owned monotonic admission counts. Atomic because no-GIL workers
+    /// can create functions concurrently in one Context.
+    bytecode_admission_inventory: ?*BytecodeAdmissionInventory = null,
     debug_statement_locations: ?*std.AutoHashMapUnmanaged(*const Node, DebugStatementLocation) = null,
     /// Non-null only for a no-GIL shared realm. Script publication mutates one
     /// Context-owned registry while every interpreter reads it at statement
@@ -4822,6 +4924,10 @@ pub const Interpreter = struct {
         };
     }
 
+    pub fn recordBytecodeAdmission(self: *Interpreter, reason: BytecodeAdmissionReason) void {
+        if (self.bytecode_admission_inventory) |inventory| inventory.record(reason);
+    }
+
     pub fn makeFunction(self: *Interpreter, fnode: *const ast.FunctionNode, closure: *Environment) EvalError!Value {
         // The closure keeps `closure` (and its whole ancestor chain) reachable, so
         // an enclosing `for (let …)` loop must give each iteration its own binding
@@ -4865,29 +4971,42 @@ pub const Interpreter = struct {
         // Compile a generator body up front for the suspendable VM. Bodies
         // outside the VM's lowered subset leave `gen_chunk` null, so calling the
         // generator throws a clear TypeError rather than running incorrectly.
+        var admission_reason: BytecodeAdmissionReason = undefined;
         if (fnode.is_generator) {
-            func.gen_chunk = Compiler.compileGenerator(self.arena, fnode, true) catch |e| switch (e) {
-                error.Unsupported => null,
-                error.OutOfMemory => return error.OutOfMemory,
-            };
+            switch (try Compiler.admitGenerator(self.arena, fnode, true)) {
+                .compiled => |chunk| {
+                    func.gen_chunk = chunk;
+                    admission_reason = .generator_compiled;
+                },
+                .rejected => |reason| admission_reason = generatorRejectionAdmission(reason),
+            }
         } else if (fnode.is_async) {
             // A plain async function compiles to a suspendable body (await is a
             // suspend point); null on unsupported syntax → tree-walk fallback.
-            func.async_chunk = Compiler.compileAsync(self.arena, fnode, true) catch |e| switch (e) {
-                error.Unsupported => null,
-                error.OutOfMemory => return error.OutOfMemory,
-            };
-        } else if (self.debug_statement_hook == null and plainFunctionMayUseBytecode(fnode)) {
-            const compiled = Compiler.compilePlainFunction(self.arena, fnode) catch |e| switch (e) {
-                error.Unsupported => null,
-                error.OutOfMemory => return error.OutOfMemory,
-            };
-            if (compiled) |code| {
-                func.chunk = code.chunk;
-                func.local_count = code.local_count;
-                func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
+            switch (try Compiler.admitAsync(self.arena, fnode, true)) {
+                .compiled => |chunk| {
+                    func.async_chunk = chunk;
+                    admission_reason = .async_compiled;
+                },
+                .rejected => |reason| admission_reason = asyncRejectionAdmission(reason),
+            }
+        } else if (self.debug_statement_hook != null) {
+            admission_reason = .plain_policy_debugger;
+        } else if (plainFunctionPolicyRejection(fnode)) |reason| {
+            admission_reason = reason;
+        } else {
+            switch (try Compiler.admitPlainFunction(self.arena, fnode)) {
+                .compiled => |code| {
+                    func.chunk = code.chunk;
+                    func.local_count = code.local_count;
+                    func.vm_inline_calls_safe = vmChunkAllowsInlineCalls(code.chunk);
+                    admission_reason = .plain_compiled;
+                },
+                .rejected => |reason| admission_reason = plainRejectionAdmission(reason),
             }
         }
+        func.bytecode_admission_reason = admission_reason;
+        self.recordBytecodeAdmission(admission_reason);
         // A function object's [[Prototype]] is the kind-specific function
         // prototype intrinsic: %GeneratorFunction.prototype% for `function*`,
         // %AsyncFunction.prototype% for `async function`,
@@ -4995,16 +5114,22 @@ pub const Interpreter = struct {
     /// optimizing tier. Unsupported bodies still fall back during compilation.
     /// Methods, generators, async, and `arguments`-using functions retain their
     /// dedicated paths.
-    fn plainFunctionMayUseBytecode(fnode: *const ast.FunctionNode) bool {
-        if (fnode.is_method or fnode.is_generator or fnode.is_async or fnode.uses_arguments) return false;
-        if (fnode.is_strict)
-            return sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null;
+    fn plainFunctionPolicyRejection(fnode: *const ast.FunctionNode) ?BytecodeAdmissionReason {
+        if (fnode.is_method) return .plain_policy_method;
+        if (fnode.uses_arguments) return .plain_policy_arguments;
+        if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
+            null
+        else
+            .plain_policy_not_candidate;
         const named_self_recursion = sourceHasNamedSelfCall(fnode.source, fnode.name);
-        return !sourceMayObserveLegacyCallFrame(fnode.source) and
-            !sourceBodyMayCallOtherThan(fnode.source, if (named_self_recursion) fnode.name else "") and
-            (named_self_recursion or
-                std.mem.indexOfScalar(u8, fnode.source, '.') != null or
-                std.mem.indexOfScalar(u8, fnode.source, '[') != null);
+        if (sourceMayObserveLegacyCallFrame(fnode.source)) return .plain_policy_legacy_call_frame;
+        if (sourceBodyMayCallOtherThan(fnode.source, if (named_self_recursion) fnode.name else ""))
+            return .plain_policy_dynamic_call;
+        if (!named_self_recursion and
+            std.mem.indexOfScalar(u8, fnode.source, '.') == null and
+            std.mem.indexOfScalar(u8, fnode.source, '[') == null)
+            return .plain_policy_not_candidate;
+        return null;
     }
 
     pub fn funcOf(v: Value) ?*Function {
