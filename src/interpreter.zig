@@ -971,6 +971,7 @@ pub const BytecodeAdmissionReason = enum(u8) {
     template_plain_rejected_unsupported_lowering,
     program_forced_tree_walker,
     plain_forced_tree_walker,
+    plain_policy_class_constructor_semantics,
 };
 
 pub const bytecode_admission_reason_count = std.meta.fieldNames(BytecodeAdmissionReason).len;
@@ -2165,7 +2166,7 @@ pub const Interpreter = struct {
         try o.addPrivateBrand(self.arena, name);
     }
 
-    fn addPrivateMethodOrAccessorChecked(self: *Interpreter, o: *value.Object, home: ?*value.Object, name: []const u8) EvalError!void {
+    pub fn addPrivateMethodOrAccessorChecked(self: *Interpreter, o: *value.Object, home: ?*value.Object, name: []const u8) EvalError!void {
         try self.addPrivateBrandChecked(o, name);
         const h = home orelse return;
         if (h.getAccessor(name)) |acc| {
@@ -5138,11 +5139,12 @@ pub const Interpreter = struct {
     /// VM instead of the tree-walker. Besides tail calls and recursion, named
     /// property functions enter the VM so their observed shapes can reach the
     /// optimizing tier. Unsupported bodies still fall back during compilation.
-    /// Methods, generators, async, and `arguments`-using functions retain their
-    /// dedicated paths.
+    /// Generators, async, and `arguments`-using functions retain their dedicated
+    /// paths. Methods use the same compiler admission now that VM activations
+    /// carry their exact home object and super constructor.
     fn plainFunctionPolicyRejection(fnode: *const ast.FunctionNode) ?BytecodeAdmissionReason {
-        if (fnode.is_method) return .plain_policy_method;
         if (fnode.uses_arguments) return .plain_policy_arguments;
+        if (fnode.requires_tree_walk_class_constructor) return .plain_policy_class_constructor_semantics;
         if (fnode.is_strict) return if (sourceMayHaveTailCall(fnode.source) or std.mem.indexOfScalar(u8, fnode.source, '.') != null)
             null
         else
@@ -5811,6 +5813,12 @@ pub const Interpreter = struct {
             .body = body,
             .source = source,
             .is_expr_body = false,
+            // Preserve the parser's exact conservative ruling. FunctionNode's
+            // default is true for hand-built nodes, which otherwise forces an
+            // unused arguments exotic and blocks bytecode for every class
+            // constructor synthesized here.
+            .uses_arguments = if (ctor_node) |cf| cf.uses_arguments else false,
+            .requires_tree_walk_class_constructor = derived or field_inits.items.len != 0,
             // All class code is strict, so the constructor is a strict function
             // (e.g. its `.caller`/`.arguments` hit the %ThrowTypeError% poison pill
             // rather than the legacy sloppy `null`).

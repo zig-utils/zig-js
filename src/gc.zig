@@ -2236,6 +2236,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| traceChunk(chunk, v);
         for (exec.stack.items) |s| markValue(v, s);
         markValue(v, exec.acc);
+        v.mark(exec.saved_home_object);
+        v.mark(exec.saved_super_ctor);
         // The activation's frame slots (and its captured-frame parent chain for
         // upvalues) are arena-backed locals — invisible to both the precise
         // object graph and the native-stack scan, exactly like the operand stack
@@ -2344,6 +2346,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| relocateChunk(chunk, v);
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         gc_relocation.rewriteValueSlot(v, &exec.acc);
+        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
+        gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
         var frame = exec.frame;
         while (frame) |current| : (frame = current.parent)
             for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
@@ -2409,8 +2413,8 @@ test "realm root relocation rewrites active interpreter containers" {
     const context = try ContextMod.Context.create(std.testing.allocator);
     defer context.destroy();
     var machine = context.interpreter();
-    var old_objects: [25]Object = undefined;
-    var new_objects: [25]Object = undefined;
+    var old_objects: [27]Object = undefined;
+    var new_objects: [27]Object = undefined;
     var old_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
 
@@ -2440,6 +2444,8 @@ test "realm root relocation rewrites active interpreter containers" {
         .stack = .{ .items = &operand_stack, .capacity = operand_stack.len },
         .acc = Value.obj(&old_objects[18]),
         .frame = &frame,
+        .saved_home_object = &old_objects[25],
+        .saved_super_ctor = &old_objects[26],
     };
     try machine.gc_execs.append(machine.arena, &execution);
     try machine.gc_env_roots.append(machine.arena, &old_environment);
@@ -2475,8 +2481,8 @@ test "realm root relocation rewrites active interpreter containers" {
     };
 
     const Plan = struct {
-        old_objects: *[25]Object,
-        new_objects: *[25]Object,
+        old_objects: *[27]Object,
+        new_objects: *[27]Object,
         old_environment: *Environment,
         new_environment: *Environment,
 
@@ -2517,6 +2523,8 @@ test "realm root relocation rewrites active interpreter containers" {
     try std.testing.expectEqual(&new_objects[17], operand_stack[1].asObj());
     try std.testing.expectEqual(&new_objects[18], execution.acc.asObj());
     try std.testing.expectEqual(&new_objects[19], frame_slots[0].asObj());
+    try std.testing.expectEqual(&new_objects[25], execution.saved_home_object.?);
+    try std.testing.expectEqual(&new_objects[26], execution.saved_super_ctor.?);
     try std.testing.expectEqual(&new_environment, machine.gc_env_roots.items[0]);
     try std.testing.expectEqual(&new_environment, debug_frame.environment);
     try std.testing.expectEqual(&new_objects[20], debug_frame.this_value.asObj());

@@ -50,8 +50,8 @@
     },
     {
       "path": "architecture/index.html",
-      "bytes": 167853,
-      "sha256": "e9543567b57fa59396b1cec7b8db136ad46a4b9719b92bfc73ff0e25c8585d53"
+      "bytes": 168344,
+      "sha256": "94489969f062f24fbbc1736cddd4131c90a35066416acdd55cac3a04d42e8d93"
     },
     {
       "path": "baseline-jit/index.html",
@@ -264,5 +264,5 @@
       "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
     }
   ],
-  "tree_sha256": "e6ce1bf1613e109e8fd923b966a8a46eee4ae5d2449d33fabf10973da5fa7e79"
+  "tree_sha256": "8b46ca249662b56f686f001dcb9fde5aa78d6965da2d53f8d7664e7e49485bf5"
 }

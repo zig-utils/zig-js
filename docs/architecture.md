@@ -23,7 +23,7 @@ zig-js runs JavaScript through a tree-walking interpreter and a suspendable byte
 Because the VM buys capability rather than speed, tiering is deliberately narrow (`plainFunctionMayUseBytecode`, `compiler.zig`):
 
 - **Generators / async / async generators** always compile to the VM — they need suspend/resume, which the tree-walker cannot express.
-- A **plain function** (non-method, non-generator, non-async, not using `arguments`) compiles to the VM only when it can actually benefit: it is strict and may contain a tail call, or it recurses by its own name (deep recursion that would otherwise overflow the native stack). Otherwise it stays on the tree-walker.
+- A **plain function or method** (non-generator, non-async, not using `arguments`) compiles to the VM only when it can actually benefit: it is strict and may contain a tail call/property operation, or it recurses by its own name (deep recursion that would otherwise overflow the native stack). Method activations preserve their exact home object and `super` constructor. Otherwise the function stays on the tree-walker.
 - Everything else — top-level code, and any function using a construct the compiler does not lower — tree-walks.
 
 Because most code tree-walks, the VM path is comparatively under-exercised, so VM/tree-walker semantic divergences are a known bug surface (see the block-scoping note below).
@@ -32,7 +32,7 @@ Because most code tree-walks, the VM path is comparatively under-exercised, so V
 
 ## Lexical scoping and the slot model
 
-The VM gives each compiled function one **flat, block-transparent slot array**: locals are frame slots indexed in O(1), and closures capture the defining frame. This is fast but does not model per-block lexical scope, so the compiler keeps functions on the tree-walker whenever correct block scoping would matter — a `let`/`const` that shadows another binding, a read in the Temporal Dead Zone (before a binding's declaration), or a `for (let …)` head captured per-iteration by a body closure. The tree-walker's `Environment` chain enforces those correctly. Proper per-block slot scoping on the VM (which would let those functions tier) is possible but unbuilt; it is only worthwhile if the VM becomes a genuine performance tier.
+The VM gives each compiled function one **flat, block-transparent slot array**: locals are frame slots indexed in O(1), and closures capture the defining frame. This is fast but does not model per-block lexical scope, so the compiler keeps functions on the tree-walker whenever correct block scoping would matter — a `let`/`const` that shadows another binding, a read in the Temporal Dead Zone (before a binding's declaration), or a `for (let …)` head captured per-iteration by a body closure. Deferred class members are admitted when they use only globals, but a member that captures one of these frame slots rejects its enclosing function. Base constructors without fields can use bytecode; derived constructors and constructors with field initialization retain an explicit tree-walker barrier until bytecode activations model their initialization state. The tree-walker's `Environment` chain enforces the rejected cases correctly. Proper per-block slot scoping on the VM (which would let those functions tier) is possible but unbuilt; it is only worthwhile if the VM becomes a genuine performance tier.
 
 Admission is observable rather than inferred from a null chunk. Every runtime
 `Function` retains a stable `BytecodeAdmissionReason`, and

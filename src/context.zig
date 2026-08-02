@@ -18270,6 +18270,25 @@ test "required bytecode rejects an uncompiled function instead of counting fallb
     try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
 }
 
+test "required bytecode retains the exact class-constructor semantic barrier" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expectError(error.Throw, ctx.evaluate(
+        \\class WithField { value = 1; }
+        \\new WithField();
+    ));
+    const exception = ctx.exception orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("InternalError", exception.asObj().errorName());
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expectEqual(@as(u64, 1), inventory.count(.program_compiled));
+    try std.testing.expectEqual(@as(u64, 1), inventory.count(.plain_policy_class_constructor_semantics));
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
 test "forced tree-walker and required bytecode preserve exception and side effects" {
     const source =
         \\globalThis.tierBeforeThrow = 0;
@@ -18311,6 +18330,108 @@ test "forced tree-walker and required bytecode preserve exception and side effec
     }
 
     try std.testing.expectEqual(side_effects[0], side_effects[1]);
+}
+
+fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {
+    const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+    var results: [modes.len]u64 = undefined;
+    var states: [modes.len]?[]u8 = @splat(null);
+    defer for (states) |state| if (state) |owned| std.testing.allocator.free(owned);
+
+    for (modes, 0..) |mode, index| {
+        const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+            .enable_jit = false,
+            .bytecode_execution_mode = mode,
+        });
+        defer ctx.destroy();
+
+        results[index] = (try ctx.evaluate(source)).rawBits();
+        states[index] = try std.testing.allocator.dupe(u8, (try ctx.evaluate(state_expression)).asStr());
+        const inventory = ctx.bytecodeAdmissionSnapshot();
+        switch (mode) {
+            .tree_walker => {
+                try std.testing.expectEqual(@as(u64, 2), inventory.count(.program_forced_tree_walker));
+                try std.testing.expect(inventory.count(.plain_forced_tree_walker) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.program_compiled));
+            },
+            .required => {
+                try std.testing.expectEqual(@as(u64, 2), inventory.count(.program_compiled));
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.program_forced_tree_walker));
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            },
+            .automatic => unreachable,
+        }
+    }
+
+    try std.testing.expectEqual(results[0], results[1]);
+    try std.testing.expectEqualStrings(states[0].?, states[1].?);
+}
+
+test "forced tier differential covers catch, class, and method home-object scope" {
+    try verifyForcedPlainDifferential(
+        \\globalThis.catchTrace = [];
+        \\function forcedCatch(seed) {
+        \\  "use strict";
+        \\  var total = 0;
+        \\  try {
+        \\    throw seed;
+        \\  } catch (caught) {
+        \\    total = caught + 1;
+        \\    catchTrace.push("catch:" + caught);
+        \\  } finally {
+        \\    total = total + 3;
+        \\    catchTrace.push("finally:" + total);
+        \\  }
+        \\  return total;
+        \\}
+        \\forcedCatch(7);
+    , "catchTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.classTrace = [];
+        \\function forcedClass(seed) {
+        \\  "use strict";
+        \\  class Box {
+        \\    constructor(value) { this.value = value; classTrace.push("ctor:" + value); }
+        \\    read() { classTrace.push("read:" + this.value); return this.value; }
+        \\  }
+        \\  var box = new Box(seed);
+        \\  return box.read() + 1;
+        \\}
+        \\forcedClass(11);
+    , "classTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.privateTrace = [];
+        \\function forcedPrivateClass(seed) {
+        \\  "use strict";
+        \\  class Secret {
+        \\    constructor(value) { this.value = value; }
+        \\    #value() { privateTrace.push("private:" + this.value); return this.value; }
+        \\    read() { return this.#value() + 1; }
+        \\  }
+        \\  return new Secret(seed).read();
+        \\}
+        \\forcedPrivateClass(13);
+    , "privateTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\"use strict";
+        \\globalThis.superTrace = [];
+        \\globalThis.superBase = {
+        \\  value: 4,
+        \\  read(step) { superTrace.push("base:" + this.value); return this.value + step; }
+        \\};
+        \\globalThis.superObject = {
+        \\  __proto__: superBase,
+        \\  value: 9,
+        \\  read(step) {
+        \\    superTrace.push("derived:" + this.value);
+        \\    return super.read(step) + super.read(1);
+        \\  }
+        \\};
+        \\superObject.read(3);
+    , "superTrace.join('|')");
 }
 
 test "bytecode admission inventory merges concurrent realm records" {

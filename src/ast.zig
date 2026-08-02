@@ -109,6 +109,10 @@ pub const FunctionNode = struct {
     /// A MethodDefinition (concise method, getter, or setter in an object literal
     /// or class body). Such functions get a [[HomeObject]] so `super` resolves.
     is_method: bool = false,
+    /// Runtime-synthesized class constructor whose derived/field initialization
+    /// state is not yet represented by a bytecode activation. Parsed functions
+    /// leave this false; `buildClass` sets it only for that exact barrier.
+    requires_tree_walk_class_constructor: bool = false,
 };
 
 /// A `class` member: a method (`func` is a `.function` node) or a field

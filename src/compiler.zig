@@ -449,15 +449,31 @@ fn stmtListContainsNestedFuncDecl(stmts: []*Node) bool {
     return false;
 }
 
-/// A class member with a deferred body — a method/getter/setter (`func`), a
-/// field initializer (`field_init`), or a `static { … }` block. Such bodies are
-/// evaluated by the shared tree-walker (`eval_class`) and close over the current
-/// `Environment`, so in a tiered (frame-mode) function they cannot see the
-/// frame's slot-locals. A class with none of these (only computed keys, which
-/// are lowered as VM ops) captures nothing and stays tierable.
-fn classHasMemberBody(members: []const ast.ClassMember) bool {
+/// Whether a deferred class member body references `name`. Computed keys are
+/// deliberately excluded: they execute eagerly as VM operations, so closures
+/// created there capture frame slots normally. Methods, field initializers, and
+/// static blocks execute later through `eval_class` and can only resolve names
+/// available through its Environment chain.
+fn classDeferredBodiesCaptureName(members: []const ast.ClassMember, name: []const u8) bool {
     for (members) |m| {
-        if (m.func != null or m.field_init != null or m.static_block != null) return true;
+        if (m.func) |func| if (nameRefInClosure(func, name, true)) return true;
+        if (m.field_init) |init| if (nameRefInClosure(init, name, true)) return true;
+        if (m.static_block) |block| if (nameRefInClosure(block, name, true)) return true;
+    }
+    return false;
+}
+
+/// `eval_class` can safely build deferred members from a VM activation when
+/// none of them closes over a slot in that activation or an enclosing VM frame.
+/// Global-only methods therefore remain bytecode-eligible; a real frame capture
+/// still rejects the whole function before execution.
+fn classDeferredBodiesCaptureFrame(scope: *const FnScope, members: []const ast.ClassMember) bool {
+    var current: ?*const FnScope = scope;
+    while (current) |frame_scope| : (current = frame_scope.parent) {
+        var names = frame_scope.names.keyIterator();
+        while (names.next()) |name| {
+            if (classDeferredBodiesCaptureName(members, name.*)) return true;
+        }
     }
     return false;
 }
@@ -1764,6 +1780,16 @@ pub const Compiler = struct {
     /// BEFORE the iterator advances (the spec evaluates the reference first).
     /// Returns the temp names, or null when `target` is not a member.
     const MemberRef = struct { obj: []const u8, key: ?[]const u8 };
+
+    /// Runtime class construction rewrites `#name` to its unique storage key
+    /// before compiling method bodies. An unreplaced source name can still
+    /// appear in an eagerly compiled computed class key; lowering it as an
+    /// ordinary property would erase PrivateFieldGet's required brand check.
+    fn addMemberName(self: *Compiler, name: []const u8) CompileError!u32 {
+        if (value_mod.isRawPrivateName(name) and !value_mod.isPrivateKey(name))
+            return error.Unsupported;
+        return self.chunk.addName(try value_mod.encodeStringKey(self.arena, name));
+    }
     fn preEvalMemberRef(self: *Compiler, target: ?*Node) CompileError!?MemberRef {
         const t = target orelse return null;
         if (t.* != .member) return null;
@@ -1791,7 +1817,7 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.set_index, 0);
         } else {
             try self.emitLoad(val); // [obj, val]
-            _ = try self.chunk.emit(.set_prop, try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property)));
+            _ = try self.chunk.emit(.set_prop, try self.addMemberName(m.property));
         }
         _ = try self.chunk.emit(.pop, 0); // discard the set result
     }
@@ -2039,7 +2065,7 @@ pub const Compiler = struct {
             // Fetch the method (RequireObjectCoercible on the receiver) BEFORE the
             // args, per spec order, then tail-call with this = recv.
             const m = c.callee.member;
-            const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
+            const ni = try self.addMemberName(m.property);
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
@@ -2079,7 +2105,7 @@ pub const Compiler = struct {
             // `obj.tag`...`` → this = obj. Fetch the tag (RequireObjectCoercible +
             // any getter) BEFORE the arguments, per spec order.
             const m = tag.member;
-            const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
+            const ni = try self.addMemberName(m.property);
             try self.compileExpr(m.object);
             _ = try self.chunk.emit(.dup, 0);
             _ = try self.chunk.emit(.get_prop, ni);
@@ -2167,7 +2193,8 @@ pub const Compiler = struct {
                     .shr => .shr,
                     .ushr => .ushr,
                 };
-                if (b.op == .in_op and b.left.* == .identifier and value_mod.isPrivateKey(b.left.identifier)) {
+                if (b.op == .in_op and b.left.* == .identifier and value_mod.isRawPrivateName(b.left.identifier)) {
+                    if (!value_mod.isPrivateKey(b.left.identifier)) return error.Unsupported;
                     try self.compileExpr(b.right);
                     _ = try self.chunk.emit(.private_in, try self.chunk.addName(b.left.identifier));
                     return;
@@ -2206,7 +2233,7 @@ pub const Compiler = struct {
                         _ = try self.chunk.emit(.set_index, 0);
                     } else {
                         try self.compileExpr(a.value);
-                        const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
+                        const ni = try self.addMemberName(m.property);
                         _ = try self.chunk.emit(.set_prop, ni);
                     }
                 },
@@ -2278,18 +2305,12 @@ pub const Compiler = struct {
                 // element names. Lower those key expressions in source order, then
                 // let the VM delegate class construction to the shared interpreter.
                 if (c.superclass != null) return error.Unsupported;
-                // `eval_class` delegates member bodies (methods, field
-                // initializers, static blocks) to the tree-walker, which closes
-                // them over `self.env`. In a frame-mode (tiered) function the
-                // frame's slot-locals do NOT live in that env, so a member reading
-                // an enclosing local resolves it wrong (stale/global) or throws
-                // ReferenceError. Bail the whole function to the tree-walker, where
-                // those locals live in the Environment and the capture is correct.
-                // (In env-mode — `self.scope == null`, e.g. a generator body — the
-                // members capture through the Environment chain already.) Computed
-                // keys are excluded: they are lowered here as VM ops and captured
-                // as values, not deferred.
-                if (self.scope != null and classHasMemberBody(c.members)) return error.Unsupported;
+                // `eval_class` delegates deferred member bodies to the
+                // tree-walker. Reject only when one actually reads a frame local;
+                // global-only methods need no frame Environment and are safe.
+                // (Env-mode generators already expose locals in that chain.)
+                if (self.scope) |scope|
+                    if (classDeferredBodiesCaptureFrame(scope, c.members)) return error.Unsupported;
                 const computed_count = try self.compileClassComputedKeys(c.members);
                 _ = try self.chunk.emitAB(.eval_class, try self.chunk.addClass(node), computed_count);
             },
@@ -2313,7 +2334,7 @@ pub const Compiler = struct {
                 } else if (c.callee.* == .member and c.callee.member.computed == null) {
                     // `recv.name(args)`: bind `this = recv` at the call site.
                     const m = c.callee.member;
-                    const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
+                    const ni = try self.addMemberName(m.property);
                     if (spread) {
                         try self.compileExpr(m.object);
                         _ = try self.chunk.emit(.dup, 0);
@@ -2372,7 +2393,7 @@ pub const Compiler = struct {
                     try self.compileExpr(ce);
                     _ = try self.chunk.emit(.get_index, 0);
                 } else {
-                    const ni = try self.chunk.addName(try value_mod.encodeStringKey(self.arena, m.property));
+                    const ni = try self.addMemberName(m.property);
                     _ = try self.chunk.emit(.get_prop, ni);
                 }
             },
@@ -3046,6 +3067,44 @@ test "compiler reports stable plain-function admission reasons" {
     switch (admission) {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
+    }
+}
+
+test "compiler admits global-only class members and rejects frame captures" {
+    var safe_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer safe_arena.deinit();
+    var safe_parser = try @import("parser.zig").Parser.init(
+        safe_arena.allocator(),
+        "function f(seed){ class Box { constructor(value){ this.value = value; } read(){ return this.value; } } return new Box(seed).read(); }",
+    );
+    const safe_program = try safe_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(safe_arena.allocator(), safe_program.program[0].func_decl)) {
+        .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
+
+    var capture_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer capture_arena.deinit();
+    var capture_parser = try @import("parser.zig").Parser.init(
+        capture_arena.allocator(),
+        "function f(seed){ class Box { read(){ return seed; } } return new Box().read(); }",
+    );
+    const capture_program = try capture_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(capture_arena.allocator(), capture_program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
+    }
+
+    var private_key_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer private_key_arena.deinit();
+    var private_key_parser = try @import("parser.zig").Parser.init(
+        private_key_arena.allocator(),
+        "function f(){ class Box { #value; [globalThis.#value] = 1; } }",
+    );
+    const private_key_program = try private_key_parser.parseProgram();
+    switch (try Compiler.admitPlainFunction(private_key_arena.allocator(), private_key_program.program[0].func_decl)) {
+        .compiled => return error.TestUnexpectedResult,
+        .rejected => |reason| try std.testing.expectEqual(Compiler.PlainFunctionRejection.unsupported_lowering, reason),
     }
 }
 

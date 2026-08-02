@@ -194,6 +194,11 @@ pub const Exec = struct {
     /// both the precise object graph and the conservative native-stack scan, so
     /// an object live only through a VM local would otherwise be swept.
     frame: ?*Frame = null,
+    /// Caller method scope saved by a heap activation. These live on `Exec`
+    /// rather than only on the arena-backed Activation so the registered exec
+    /// root keeps them marked and relocates them during a moving collection.
+    saved_home_object: ?*value.Object = null,
+    saved_super_ctor: ?*value.Object = null,
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
@@ -8313,12 +8318,21 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         .saved_debug_call_frame = vm.debug_call_frame,
         .saved_stack_trace_call_frame = vm.stack_trace_call_frame,
     };
+    act.exec.saved_home_object = vm.home_object;
+    act.exec.saved_super_ctor = vm.super_ctor;
     frame.* = .{
         .slots = slots,
         .parent = if (func.frame) |fp| @ptrCast(@alignCast(fp)) else null,
     };
     if (!func.is_arrow) vm.current_private_map = func.private_map; // a direct eval here resolves the class's private names
     vm.strict = func.is_strict;
+    vm.home_object = func.home_object;
+    // GetSuperConstructor observes a class constructor's current [[Prototype]];
+    // methods and arrows use their published/lexically captured super target.
+    vm.super_ctor = if (!func.is_arrow and func.is_class_constructor)
+        (if (func.obj) |object| object.protoAtomic() else func.super_ctor)
+    else
+        func.super_ctor;
     // Free variables (globals, and a named function expression's self name)
     // resolve through `vm.env`; install the closure's defining environment.
     vm.env = func.closure;
@@ -8333,6 +8347,18 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
         releaseActivation(vm, act);
         return e;
     };
+    // Base-class instance private methods/accessors are installed before
+    // parameter evaluation. Constructors with fields or derived initialization
+    // retain their policy barrier; this is the complete remaining base case.
+    if (func.is_class_constructor and !func.is_derived_constructor and vm.this_value.isObject()) {
+        for (func.private_brand_names) |brand| {
+            vm.addPrivateMethodOrAccessorChecked(vm.this_value.asObj(), func.home_object, brand) catch |e| {
+                popActivation(vm, act);
+                releaseActivation(vm, act);
+                return e;
+            };
+        }
+    }
     if (vm.debug_statement_hook != null or vm.host_statement_hook != null) {
         const debug_environment = try gc_mod.allocEnv(vm.arena);
         vm.initEnvironment(debug_environment, func.closure, true);
@@ -8366,6 +8392,8 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
 fn popActivation(vm: *Interpreter, act: *Activation) void {
     vm.this_value = act.saved_this;
     vm.strict = act.saved_strict;
+    vm.home_object = act.exec.saved_home_object;
+    vm.super_ctor = act.exec.saved_super_ctor;
     vm.env = act.saved_env;
     vm.global_object = act.saved_global;
     vm.new_target = act.saved_nt;
@@ -8381,6 +8409,8 @@ fn popActivation(vm: *Interpreter, act: *Activation) void {
 fn inheritCallerState(dst: *Activation, src: *const Activation) void {
     dst.saved_this = src.saved_this;
     dst.saved_strict = src.saved_strict;
+    dst.exec.saved_home_object = src.exec.saved_home_object;
+    dst.exec.saved_super_ctor = src.exec.saved_super_ctor;
     dst.saved_env = src.saved_env;
     dst.saved_global = src.saved_global;
     dst.saved_nt = src.saved_nt;
