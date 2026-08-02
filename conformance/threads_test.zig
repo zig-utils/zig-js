@@ -748,6 +748,18 @@ const ExecutionRecord = struct {
     optimizer_invalidations: u64,
 };
 
+/// Keep the versioned evidence schema stable across Zig dev snapshots. The
+/// compiler's OptimizeMode tag spelling changed from `Debug`/`ReleaseSafe` to
+/// lowercase in newer snapshots; artifacts retain their published names.
+fn inventoryBuildMode() []const u8 {
+    const mode = @tagName(builtin.mode);
+    if (std.ascii.eqlIgnoreCase(mode, "debug")) return "Debug";
+    if (std.ascii.eqlIgnoreCase(mode, "release_safe")) return "ReleaseSafe";
+    if (std.ascii.eqlIgnoreCase(mode, "release_fast")) return "ReleaseFast";
+    if (std.ascii.eqlIgnoreCase(mode, "release_small")) return "ReleaseSmall";
+    return mode;
+}
+
 /// Emit the execution inventory as JSON. Written only when a path is requested,
 /// so ordinary runs stay byte-identical. Keys are sorted per record so a diff
 /// between two runs shows behavior changes rather than field reordering.
@@ -784,7 +796,7 @@ fn writeExecutionInventory(
         gpa,
         "{{\n  \"schema_version\": 2,\n  \"build_mode\": \"{s}\",\n  \"mode\": \"{s}\",\n  \"summary\": {{ \"cases\": {d}, \"cases_reaching_optimizer\": {d}, \"passed\": {d}, \"failed\": {d}, \"skipped\": {d}, \"total_ms\": {d} }},\n  \"cases\": [\n",
         .{
-            @tagName(builtin.mode),
+            inventoryBuildMode(),
             if (parallel_js) "parallel-js" else "serialized",
             records.len,
             cases_reaching_optimizer,
