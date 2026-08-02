@@ -16,6 +16,7 @@ const std = @import("std");
 const js = @import("js");
 
 const workload_source = @embedFile("comparison.js");
+const representative_workload_source = @embedFile("representative_comparison.js");
 const wasm_simd_workload_source = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source = @embedFile("wasm_threads_comparison.js");
 const invocation = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
@@ -69,6 +70,30 @@ const ColdLane = struct {
 
 fn nowNs(io: std.Io) i96 {
     return std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+}
+
+fn evaluateShared(ctx: *js.Context, source: []const u8) !js.Value {
+    return ctx.evaluate(source) catch |err| {
+        var name: []const u8 = @errorName(err);
+        var message: []const u8 = "";
+        if (ctx.exception) |exception| {
+            if (exception.isObject()) {
+                const object = exception.asObj();
+                if (object.errorName().len != 0) name = object.errorName();
+                if (object.getOwn("name")) |value| if (value.isString()) {
+                    name = value.asStr();
+                };
+                if (object.getOwn("message")) |value| if (value.isString()) {
+                    message = value.asStr();
+                };
+            } else if (exception.isString()) {
+                name = "ThrownString";
+                message = exception.asStr();
+            }
+        }
+        std.debug.print("shared benchmark exception: {s}: {s}\n", .{ name, message });
+        return err;
+    };
 }
 
 fn parseMode(text: []const u8) !Mode {
@@ -170,6 +195,8 @@ fn configure(ctx: *js.Context, workload: []const u8, jobs: usize, lane: usize) !
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
         wasm_simd_workload_source
+    else if (std.mem.startsWith(u8, workload, "representative_"))
+        representative_workload_source
     else
         workload_source;
     _ = try ctx.evaluate(source_bytes);
@@ -404,7 +431,7 @@ fn runShared(
         // cycle before sample zero. One shared invocation only armed the first
         // cooperative collection, leaving the first recorded sample slower than
         // every later persistent-realm sample.
-        for (0..2) |_| _ = try ctx.evaluate(shared_invocation);
+        for (0..2) |_| _ = try evaluateShared(ctx, shared_invocation);
     }
     if (gc_telemetry) try writer.writeAll(gc_telemetry_header);
     for (0..samples) |sample| {
@@ -414,7 +441,7 @@ fn runShared(
             if (!ctx.beginCooperativeGcProfile()) return error.GcTelemetryUnavailable;
         }
         const started = nowNs(io);
-        const result = try ctx.evaluate(shared_invocation);
+        const result = try evaluateShared(ctx, shared_invocation);
         const elapsed: u64 = @intCast(nowNs(io) - started);
         const thread_stats = if (gc_telemetry) js.jsthread.contentionStats() else undefined;
         if (gc_telemetry) js.jsthread.disableLifecycleStats();

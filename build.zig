@@ -1551,6 +1551,8 @@ pub fn build(b: *std.Build) void {
     // only orchestrates runs, validates checksums, and renders raw/report data.
     const comparison_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_comparison.py" });
     const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
+    const representative_matrix_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_matrix.py" });
+    const representative_benchmark_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_benchmark.py" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
@@ -1559,6 +1561,8 @@ pub fn build(b: *std.Build) void {
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&comparison_harness_test.step);
     comparison_harness_test_step.dependOn(&comparison_publication_test.step);
+    comparison_harness_test_step.dependOn(&representative_matrix_test.step);
+    comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
     comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
@@ -1567,6 +1571,7 @@ pub fn build(b: *std.Build) void {
     optimizer_release_inventory_step.dependOn(&optimizer_release_inventory_check.step);
 
     const comparison_step = b.step("benchmark-comparison", "Compare zig-js direct/independent/shared throughput with system JavaScriptCore (macOS)");
+    const representative_step = b.step("representative-benchmark", "Run the versioned representative zig-js / system-JSC matrix (macOS)");
     const comparison_bin_step = b.step("benchmark-comparison-bin", "Build the zig-js and system-JSC comparison runners (macOS)");
     if (target.result.os.tag == .macos) {
         const comparison_zig_js = b.addExecutable(.{
@@ -1609,6 +1614,25 @@ pub fn build(b: *std.Build) void {
         }
         comparison_step.dependOn(&run_comparison.step);
 
+        const run_representative = b.addSystemCommand(&.{ "python3", "tools/representative-benchmark.py" });
+        run_representative.addArtifactArg(comparison_zig_js);
+        run_representative.addArtifactArg(comparison_jsc);
+        if (b.option(usize, "representative-benchmark-samples", "Full representative samples per matrix row")) |samples| {
+            run_representative.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
+        }
+        if (b.option([]const u8, "representative-benchmark-lanes", "Comma-separated representative lane counts above one")) |lanes| {
+            run_representative.addArgs(&.{ "--lanes", lanes });
+        }
+        if (b.option(bool, "representative-benchmark-quick", "Run one reduced representative validation sample") orelse false)
+            run_representative.addArg("--quick");
+        if (b.option([]const u8, "representative-benchmark-raw-out", "Write raw representative samples to this TSV path")) |path| {
+            run_representative.addArgs(&.{ "--raw-out", path });
+        }
+        if (b.option([]const u8, "representative-benchmark-markdown-out", "Write the representative report to this Markdown path")) |path| {
+            run_representative.addArgs(&.{ "--markdown-out", path });
+        }
+        representative_step.dependOn(&run_representative.step);
+
         const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "python3", "tools/wasm-threads-benchmark.py" });
         run_wasm_threads_benchmark.addArtifactArg(comparison_zig_js);
         run_wasm_threads_benchmark.addArtifactArg(comparison_jsc);
@@ -1636,6 +1660,7 @@ pub fn build(b: *std.Build) void {
     } else {
         const unsupported = b.addFail("benchmark-comparison requires the macOS system JavaScriptCore framework");
         comparison_step.dependOn(&unsupported.step);
+        representative_step.dependOn(&unsupported.step);
         comparison_bin_step.dependOn(&unsupported.step);
         const wasm_threads_unsupported = b.addFail("wasm-threads-benchmark requires the macOS system JavaScriptCore framework");
         const wasm_threads_benchmark_step = b.step("wasm-threads-benchmark", "Benchmark WebAssembly atomic and wait/notify scaling with the system-JSC boundary");

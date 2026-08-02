@@ -31,6 +31,7 @@ extern fn JSEvaluateScript(
 extern fn JSValueToNumber(ctx: JSContextRef, value: JSValueRef, exception: [*c]JSValueRef) callconv(.c) f64;
 
 const workload_source: [:0]const u8 = @embedFile("comparison.js");
+const representative_workload_source: [:0]const u8 = @embedFile("representative_comparison.js");
 const wasm_simd_workload_source: [:0]const u8 = @embedFile("wasm_simd_comparison.js");
 const wasm_threads_workload_source: [:0]const u8 = @embedFile("wasm_threads_comparison.js");
 const invocation: [:0]const u8 = "__benchmarkInvoke(__benchmarkJobs, __benchmarkLane)";
@@ -92,6 +93,8 @@ fn configure(
         wasm_threads_workload_source
     else if (std.mem.startsWith(u8, workload, "wasm_"))
         wasm_simd_workload_source
+    else if (std.mem.startsWith(u8, workload, "representative_"))
+        representative_workload_source
     else
         workload_source;
     _ = try evaluate(ctx, source_bytes);

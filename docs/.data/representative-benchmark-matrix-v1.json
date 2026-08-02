@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "matrix_id": "zig-js-representative-v1",
+  "status": "frozen",
+  "frozen_date": "2026-08-01",
+  "owner_issue": 460,
+  "history_policy": "Any workload, timed-boundary, jobs, checksum, metric, or acceptance change creates a new version; accepted versions are never rewritten.",
+  "compatibility_panel": {
+    "matrix_id": "benchmark-comparison-v1",
+    "source": "bench/comparison.js",
+    "source_sha256": "9e161be3808cf93ea251650327b2ee0481e4c0d6b38994258aa68577af79253c",
+    "driver": "tools/benchmark-comparison.py",
+    "driver_sha256": "7f03a74a1f050f186d89a051fc061d0a1f0963e5ea114b7e2bbbb7d0b24cb779",
+    "policy": "The original ten-kernel matrix remains a separately collected permanent non-regression panel."
+  },
+  "engines": ["zig-js", "JavaScriptCore"],
+  "lanes": [1, 2, 4, 8],
+  "protocol": {
+    "full_samples": 7,
+    "quick_samples": 1,
+    "warmup_calls": 10,
+    "minimum_full_median_ns": 50000000,
+    "runner_order": "deterministically alternating by directly comparable row",
+    "outliers": "none discarded",
+    "checksums": "exact checked-in aggregate for every jobs/lane combination",
+    "source_identity": "both engines evaluate identical source bytes and inputs",
+    "publication": "clean tracked zig-js, zig-gc, and zig-regex worktrees with raw samples and a byte-reproducible report"
+  },
+  "modes": {
+    "single_warm": {
+      "engines": ["zig-js", "JavaScriptCore"],
+      "timed_boundary": "one invocation in a persistent context after ten reduced-work warmups"
+    },
+    "independent_steady": {
+      "engines": ["zig-js", "JavaScriptCore"],
+      "timed_boundary": "persistent-worker dispatch, one invocation per lane, and completion wait"
+    },
+    "independent_cold": {
+      "engines": ["zig-js", "JavaScriptCore"],
+      "timed_boundary": "worker/context creation, source parse and setup, one invocation, teardown, and join"
+    },
+    "shared": {
+      "engines": ["zig-js"],
+      "timed_boundary": "JavaScript Thread creation, one invocation per lane in one shared realm, join, and result aggregation",
+      "comparison": "capability panel with no public-JSC-equivalent ratio"
+    }
+  },
+  "acceptance": {
+    "direct_rows": "zig-js throughput is greater than JavaScriptCore for every base workload row",
+    "variants": "each base/variant pair has equivalent tier attribution and no source, identifier, layout, or fixed-input recognizer",
+    "compatibility": "the immutable benchmark-comparison-v1 panel has no noise-qualified regression",
+    "shared": "per-row scaling remains visible; no ratio is constructed against independent JSC contexts",
+    "resources": "no unbounded cache, pool, reserve, retained graph, or work moved outside the declared timer"
+  },
+  "required_families": [
+    "strings_unicode",
+    "regexp",
+    "json",
+    "map_set",
+    "weak_collections",
+    "typed_arrays_dataview",
+    "promises_async_microtasks",
+    "modules_dynamic_import",
+    "classes_private_fields",
+    "iterators_generators",
+    "proxies_accessors",
+    "intl",
+    "temporal",
+    "wasm_scalar",
+    "wasm_simd",
+    "wasm_memory",
+    "mixed_long_lived_graph",
+    "application_mix"
+  ],
+  "implemented_families": [
+    {
+      "family": "strings_unicode",
+      "base": "representative_strings",
+      "variant": "representative_strings_variant",
+      "jobs": {"full": 2200, "quick": 110},
+      "checksums": {
+        "base": {"full": [516617715, 1011905840, 1835509665, 3645029730], "quick": [24927079, 49990157, 91273124, 181525594]},
+        "variant": {"full": [503555772, 1054974322, 2091390433, 4042434706], "quick": [22508414, 50381693, 98870854, 188435105]}
+      }
+    },
+    {
+      "family": "regexp",
+      "base": "representative_regexp",
+      "variant": "representative_regexp_variant",
+      "jobs": {"full": 800, "quick": 40},
+      "checksums": {
+        "base": {"full": [203976000, 408384000, 818496000, 1643904000], "quick": [10198800, 20419200, 40924800, 82195200]},
+        "variant": {"full": [203976000, 408384000, 818496000, 1643904000], "quick": [10198800, 20419200, 40924800, 82195200]}
+      }
+    },
+    {
+      "family": "json",
+      "base": "representative_json",
+      "variant": "representative_json_variant",
+      "jobs": {"full": 2200, "quick": 110},
+      "checksums": {
+        "base": {"full": [324952086, 652976496, 1318241862, 2685636093], "quick": [5864992, 11884094, 24384478, 51233174]},
+        "variant": {"full": [324952086, 652976496, 1318241862, 2685636093], "quick": [5864992, 11884094, 24384478, 51233174]}
+      }
+    },
+    {
+      "family": "map_set",
+      "base": "representative_collections",
+      "variant": "representative_collections_variant",
+      "jobs": {"full": 450, "quick": 22},
+      "checksums": {
+        "base": {"full": [112270500, 224771400, 450464400, 904615200], "quick": [3078284, 6167832, 12380720, 24941664]},
+        "variant": {"full": [112270500, 224771400, 450464400, 904615200], "quick": [3078284, 6167832, 12380720, 24941664]}
+      }
+    },
+    {
+      "family": "weak_collections",
+      "base": "representative_weak_collections",
+      "variant": "representative_weak_collections_variant",
+      "jobs": {"full": 1200, "quick": 60},
+      "checksums": {
+        "base": {"full": [455904000, 912384000, 1827072000, 3663360000], "quick": [6379200, 12787200, 25689600, 51840000]},
+        "variant": {"full": [455904000, 912384000, 1827072000, 3663360000], "quick": [6379200, 12787200, 25689600, 51840000]}
+      }
+    },
+    {
+      "family": "typed_arrays_dataview",
+      "base": "representative_typed_data",
+      "variant": "representative_typed_data_variant",
+      "jobs": {"full": 45, "quick": 2},
+      "checksums": {
+        "base": {"full": [565692416, 1131356160, 2262609920, 4524957696], "quick": [25169920, 50339840, 100667392, 201351168]},
+        "variant": {"full": [565692416, 1131356160, 2262609920, 4524957696], "quick": [25169920, 50339840, 100667392, 201351168]}
+      }
+    },
+    {
+      "family": "classes_private_fields",
+      "base": "representative_classes",
+      "variant": "representative_classes_variant",
+      "jobs": {"full": 150, "quick": 7},
+      "checksums": {
+        "base": {"full": [230107685, 460218116, 920434928, 1840809600], "quick": [10676843, 21354742, 42706540, 85378776]},
+        "variant": {"full": [230106879, 460209848, 920398936, 1840707152], "quick": [10679771, 21357014, 42702636, 85371736]}
+      }
+    },
+    {
+      "family": "iterators_generators",
+      "base": "representative_iterators",
+      "variant": "representative_iterators_variant",
+      "jobs": {"full": 800, "quick": 40},
+      "checksums": {
+        "base": {"full": [209589248, 419183616, 838390784, 1676874752], "quick": [10275840, 20551680, 41105408, 82222080]},
+        "variant": {"full": [211154944, 422320128, 844678144, 1689497600], "quick": [10105856, 20212736, 40429568, 80878592]}
+      }
+    },
+    {
+      "family": "proxies_accessors",
+      "base": "representative_proxy_accessors",
+      "variant": "representative_proxy_accessors_variant",
+      "jobs": {"full": 50, "quick": 2},
+      "checksums": {
+        "base": {"full": [32452146, 64907508, 129822760, 259648592], "quick": [1296002, 2593044, 5190248, 10384592]},
+        "variant": {"full": [32488802, 64984081, 129989462, 260078606], "quick": [1293772, 2588328, 5175373, 10334149]}
+      }
+    },
+    {
+      "family": "intl",
+      "base": "representative_intl",
+      "variant": "representative_intl_variant",
+      "jobs": {"full": 1500, "quick": 25},
+      "checksums": {
+        "base": {"full": [22413600, 44827200, 89654400, 179308800], "quick": [355920, 711840, 1423680, 2847360]},
+        "variant": {"full": [22413600, 44827200, 89654400, 179308800], "quick": [355920, 711840, 1423680, 2847360]}
+      }
+    },
+    {
+      "family": "mixed_long_lived_graph",
+      "base": "representative_long_lived_graph",
+      "variant": "representative_long_lived_graph_variant",
+      "jobs": {"full": 1000, "quick": 12},
+      "checksums": {
+        "base": {"full": [66100826112, 132201865216, 264402944000, 528806281216], "quick": [192370688, 384765952, 769630208, 1539653632]},
+        "variant": {"full": [66101743616, 132203962368, 264409169920, 528824434688], "quick": [192370688, 384765952, 769630208, 1539653632]}
+      }
+    },
+    {
+      "family": "application_mix",
+      "base": "representative_application_mix",
+      "variant": "representative_application_mix_variant",
+      "jobs": {"full": 960, "quick": 8},
+      "checksums": {
+        "base": {"full": [2803354080, 5606953920, 11214890880, 22433713920], "quick": [22382628, 44767304, 89542800, 179118368]},
+        "variant": {"full": [2803354080, 5606953920, 11214890880, 22433713920], "quick": [22382628, 44767304, 89542800, 179118368]}
+      }
+    }
+  ],
+  "deferred_families": [
+    {"family": "promises_async_microtasks", "reason": "requires a timed job-drain boundary shared by both runners"},
+    {"family": "modules_dynamic_import", "reason": "requires symmetric public host module providers and explicit graph lifecycle modes"},
+    {"family": "temporal", "reason": "requires a declared JavaScriptCore availability profile rather than conditional workload behavior"},
+    {"family": "wasm_scalar", "reason": "requires integration of the existing Wasm runner into the versioned row schema"},
+    {"family": "wasm_simd", "reason": "requires integration of the existing Wasm SIMD evidence without rewriting its accepted history"},
+    {"family": "wasm_memory", "reason": "requires scalar and shared-memory subpanels with explicit feature gates"}
+  ],
+  "pending_metric_panels": [
+    {"metrics": ["cpu_time_ns", "peak_rss_bytes", "retained_rss_bytes", "allocations", "allocated_bytes", "gc_pause_p50_ns", "gc_pause_p95_ns", "gc_pause_max_ns", "generated_code_bytes", "tier_up_ns", "deoptimization_ns"], "issue": 461},
+    {"metrics": ["cycles", "instructions", "cache_misses", "energy_joules", "thermal_state"], "issue": 503},
+    {"metrics": ["independent_suite_results", "additional_engine_results"], "issue": 504}
+  ]
+}
