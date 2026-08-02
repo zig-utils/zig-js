@@ -35,9 +35,12 @@ command. CI checks out those siblings at the exact revisions recorded in the
 inventory, using the same adjacent paths as a local build.
 
 Documentation deliberately uses the owner-maintained BunPress source checkout
-at `../../Tools/bunpress`. Its exact revision is recorded in the inventory and
-CI uses the same `Libraries/` plus `Tools/` layout. Missing renderer behavior is
-fixed in BunPress and then consumed here; zig-js does not carry a substitute.
+at `../../Tools/bunpress`. BunPress, STX, and ts-syntax-highlighter are each
+resolved from their owner-maintained sibling checkout, and all three exact
+revisions are recorded in the inventory. CI uses the same `Libraries/` plus
+`Tools/` layout, builds those owned sources, and verifies the workspace links
+before rendering. Missing behavior is fixed in the owning repository and then
+consumed here; zig-js does not carry substitutes.
 
 The macOS Objective-C bridge may use the Xcode SDK and Foundation as the
 platform interface it implements. System JavaScriptCore is isolated to the
@@ -48,9 +51,10 @@ are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 ## Open migration edges
 
 The BunPress edge is fully classified: zig-js consumes its exact local source,
-CI pins that source revision, and BunPress declares and freezes its renderer
-runtime dependencies in its own lockfile. The remaining inventory deliberately
-records current violations instead of relabeling them as acceptable:
+CI pins the complete owned renderer graph, and BunPress declares, builds, and
+verifies its STX and syntax-highlighter workspaces from its own frozen lockfile.
+The remaining inventory deliberately records current violations instead of
+relabeling them as acceptable:
 
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by

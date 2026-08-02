@@ -70,13 +70,13 @@
     },
     {
       "path": "conformance/index.html",
-      "bytes": 230577,
-      "sha256": "1c6964c7ba9f7d3f2ce63f41c8cc5b05eea7d6fe0164f9b6d16de76dba19d249"
+      "bytes": 227566,
+      "sha256": "a295c4e6f88671db171bd71b29cdbe54bbb66787b1dd8faa6a07b7a2215e28be"
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 157236,
-      "sha256": "9a48f5b2199a8d3cc4881f6a4bba557db9e61b788593f3ecac22ec9d308a0f5a"
+      "bytes": 157472,
+      "sha256": "426269e26f6ad1647fcab38c08402303e71025316e267d69ec890435f6eb178c"
     },
     {
       "path": "dev-cache/index.html",
@@ -105,8 +105,8 @@
     },
     {
       "path": "features/index.html",
-      "bytes": 179654,
-      "sha256": "b0eb70297fda12c1af978fa89a532517c9a77282268c65a6b0d90ddf096d92dc"
+      "bytes": 158479,
+      "sha256": "3d99f691bf8d33513da21a12ec62b5858897672ef106d5200993a3e065f78989"
     },
     {
       "path": "features/intl-temporal/index.html",
@@ -125,8 +125,8 @@
     },
     {
       "path": "guide/building/index.html",
-      "bytes": 169700,
-      "sha256": "5a1f19a9c59df053583bc9b61fb6bc12b6349d308d1f4093b7b29a1a45f121d2"
+      "bytes": 166689,
+      "sha256": "71e5c647dcc6bc580fd59eff99097a5f4c1b686a2715c70f5c3c1a0114b868e4"
     },
     {
       "path": "guide/contributing/index.html",
@@ -135,8 +135,8 @@
     },
     {
       "path": "guide/index.html",
-      "bytes": 161537,
-      "sha256": "57608c65e6883c3ca48c6b907a2c56d725234e3441c2211682627db55d7e722c"
+      "bytes": 158526,
+      "sha256": "67fd69c55e625dc1cba903378e2a7e3f2fdbca17e4cdfa1394b22946cadb9029"
     },
     {
       "path": "HOME_INTEGRATION/index.html",
@@ -145,8 +145,8 @@
     },
     {
       "path": "index.html",
-      "bytes": 193475,
-      "sha256": "6123b50aa2dc053bdfa384bfcfb4427759b93d87af120291b40c73b82c497a5e"
+      "bytes": 190464,
+      "sha256": "6b60e202fb1325f906b53fd8dd530b530d406b5d6856e1f3880757954dfe9876"
     },
     {
       "path": "inspector/index.html",
@@ -264,5 +264,5 @@
       "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
     }
   ],
-  "tree_sha256": "979da26f8d326b637104d5f7714ad11ecbe09e581b2124ba90207ca34421864e"
+  "tree_sha256": "68a962479d3da7bc5f1e54a478dc2304b36e7fab8443a4df3fba2ee48bc5d1fe"
 }
