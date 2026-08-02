@@ -45,8 +45,8 @@
     },
     {
       "path": "api/index.html",
-      "bytes": 228521,
-      "sha256": "a9a7f9a3c7764dc43cb5dbbe07c3a7d57801917a19fa838961ba1a9efb36abfe"
+      "bytes": 228558,
+      "sha256": "a0cdca2fcba7e04c50022c79739cc1a9d4cfb0db409d89038b6810ab731a5028"
     },
     {
       "path": "architecture/index.html",
@@ -70,13 +70,13 @@
     },
     {
       "path": "conformance/index.html",
-      "bytes": 158566,
-      "sha256": "0630e0de1275cf7251383a00b77043186a699eb7e366b52188dd78cb035d9825"
+      "bytes": 230577,
+      "sha256": "1c6964c7ba9f7d3f2ce63f41c8cc5b05eea7d6fe0164f9b6d16de76dba19d249"
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 157587,
-      "sha256": "a426f932dca4c37c39e8383756d4f0f0a18cc47fc271f9a7be4c2597cde7e3ae"
+      "bytes": 157236,
+      "sha256": "9a48f5b2199a8d3cc4881f6a4bba557db9e61b788593f3ecac22ec9d308a0f5a"
     },
     {
       "path": "dev-cache/index.html",
@@ -105,8 +105,8 @@
     },
     {
       "path": "features/index.html",
-      "bytes": 155856,
-      "sha256": "3aa4a078aa058106af920982c2d7eb6183e904d2de37e8688ed2dad4082ef2a2"
+      "bytes": 179654,
+      "sha256": "b0eb70297fda12c1af978fa89a532517c9a77282268c65a6b0d90ddf096d92dc"
     },
     {
       "path": "features/intl-temporal/index.html",
@@ -125,8 +125,8 @@
     },
     {
       "path": "guide/building/index.html",
-      "bytes": 166061,
-      "sha256": "28a739d1ba406fef24dd9cdda5208ac194a68ac5a6405641be24631956dc8047"
+      "bytes": 169700,
+      "sha256": "5a1f19a9c59df053583bc9b61fb6bc12b6349d308d1f4093b7b29a1a45f121d2"
     },
     {
       "path": "guide/contributing/index.html",
@@ -135,8 +135,8 @@
     },
     {
       "path": "guide/index.html",
-      "bytes": 157625,
-      "sha256": "111fa85606b310f3306d35cab0f690d4356b33516c7a74280251324acac6a48a"
+      "bytes": 161537,
+      "sha256": "57608c65e6883c3ca48c6b907a2c56d725234e3441c2211682627db55d7e722c"
     },
     {
       "path": "HOME_INTEGRATION/index.html",
@@ -145,8 +145,8 @@
     },
     {
       "path": "index.html",
-      "bytes": 119145,
-      "sha256": "92da86794b2143b6c46968ab8f56673b58bb87e4a9e35a99fab95d858b53434f"
+      "bytes": 193475,
+      "sha256": "6123b50aa2dc053bdfa384bfcfb4427759b93d87af120291b40c73b82c497a5e"
     },
     {
       "path": "inspector/index.html",
@@ -175,8 +175,8 @@
     },
     {
       "path": "sitemap.xml",
-      "bytes": 8265,
-      "sha256": "e8b5d61cb25e59c5b9c057d34baf7db580e6994b79102c6cd132b2b1a32274eb"
+      "bytes": 6599,
+      "sha256": "b94b52773d4a2401fd158d3b4bb4921a2c1a494fdc8d4b6c16fa96133e83a2e9"
     },
     {
       "path": "threads/api/index.html",
@@ -185,8 +185,8 @@
     },
     {
       "path": "threads/bindings/index.html",
-      "bytes": 212336,
-      "sha256": "0e7f483b8165555580ba7b29471c4527114960ebcde9424448f3c41d36b47382"
+      "bytes": 212370,
+      "sha256": "b704439314d7463a10866bc5ad96b06a04130404065a29273d81d795274141d0"
     },
     {
       "path": "threads/gc-relocation/index.html",
@@ -264,5 +264,5 @@
       "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
     }
   ],
-  "tree_sha256": "8fcd279dedb5d938bbd21a0bd560a7eb03a8ce6ad98a9d26131d90ee62725e4c"
+  "tree_sha256": "979da26f8d326b637104d5f7714ad11ecbe09e581b2124ba90207ca34421864e"
 }

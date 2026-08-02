@@ -47,17 +47,16 @@ are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 
 ## Open migration edges
 
-The inventory deliberately records current violations instead of relabeling
-them as acceptable:
+The BunPress edge is fully classified: zig-js consumes its exact local source,
+CI pins that source revision, and BunPress declares and freezes its renderer
+runtime dependencies in its own lockfile. The remaining inventory deliberately
+records current violations instead of relabeling them as acceptable:
 
-- BunPress itself is now an allowed exact local source dependency; completing
-  its owned transitive-resolution remains under
-  [#464](https://github.com/zig-utils/zig-js/issues/464);
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by
   [#497](https://github.com/zig-utils/zig-js/issues/497).
 
-These entries have `migration_required` status. They remain visible and gated,
+Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
 
 The former system-libffi edge was removed by the owned Zig/assembly dispatcher
