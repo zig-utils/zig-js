@@ -5,6 +5,22 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const tsan = b.option(bool, "tsan", "Build tests with ThreadSanitizer") orelse false;
 
+    // Repository dependency policy (#462). The Zig executable reads the checked
+    // inventory and audits the working tree without Python, Node, or network
+    // access, so an unclassified edge fails before it can become precedent.
+    const dependency_audit = b.addExecutable(.{
+        .name = "dependency-audit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/dependency_audit.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_dependency_audit = b.addRunArtifact(dependency_audit);
+    run_dependency_audit.setCwd(b.path("."));
+    const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
+    dependency_audit_step.dependOn(&run_dependency_audit.step);
+
     // Homegrown regex engine, used to back JS RegExp.
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");

@@ -97,6 +97,8 @@ jobs:
               python3 tools/pr249-terminal-execution.py --check
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
+          - name: dependency-audit
+            cmd: zig build dependency-audit
           - name: wasm-feature-profiles
             cmd: zig build wasm-feature-profiles-check
           # Revision drift, converter compatibility, and the densest MVP
@@ -330,10 +332,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
@@ -475,10 +479,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
@@ -541,10 +547,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
@@ -586,10 +594,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
@@ -628,10 +638,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
@@ -673,10 +685,12 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:

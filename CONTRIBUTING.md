@@ -37,6 +37,11 @@ parent/
 Without both, dependency resolution fails before anything compiles. If you work
 in a git worktree, create the two symlinks there yourself.
 
+The repository-wide ownership policy, including platform interfaces, pinned
+conformance oracles, and migration targets, is documented in
+[`docs/dependencies.md`](docs/dependencies.md). Run `zig build dependency-audit`
+after changing a package, link, subprocess, script, corpus, or download edge.
+
 ### Corpora
 
 ```bash

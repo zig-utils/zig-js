@@ -15,6 +15,10 @@ zig-js requires **Zig 0.17.0-dev**. The 0.16 release will **not** build it.
 > [!IMPORTANT]
 > zig-js resolves two sibling Zig packages by **local path** — `../zig-regex` and `../zig-gc` (see `build.zig.zon`). Both must be checked out next to your `zig-js` directory or the build cannot resolve its dependencies; CI provisions them from the `zig-utils` org.
 
+The complete [dependency-ownership policy](/dependencies) is machine-checked.
+Run `zig build dependency-audit` after changing a package, system link,
+subprocess, script runtime, corpus, or acquisition input.
+
 ## Build the library
 
 ```bash

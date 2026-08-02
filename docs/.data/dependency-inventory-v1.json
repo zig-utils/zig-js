@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "policy_id": "zig-js-owned-dependencies-v1",
+  "owner_issue": 462,
+  "classes": [
+    "zig_toolchain",
+    "standard_platform_interface",
+    "zig_utils_owned_local",
+    "checksum_pinned_oracle",
+    "generated_data_acquisition_input",
+    "prohibited_unclassified"
+  ],
+  "edges": [
+    {
+      "id": "zig-toolchain",
+      "class": "zig_toolchain",
+      "status": "allowed",
+      "scope": "build and runtime compilation",
+      "locator": "Zig compiler and standard library",
+      "pin": "minimum 0.17.0-dev.956; CI 0.17.0-dev channel",
+      "license": "MIT",
+      "affects_runtime_semantics": true,
+      "runtime_semantics": "Compiler, standard library, target ABI, and atomics define the produced engine binary."
+    },
+    {
+      "id": "zig-regex",
+      "class": "zig_utils_owned_local",
+      "status": "allowed",
+      "scope": "production",
+      "locator": "../zig-regex",
+      "pin": "local sibling checkout provisioned from zig-utils/zig-regex",
+      "license": "MIT",
+      "affects_runtime_semantics": true,
+      "runtime_semantics": "Implements JavaScript RegExp semantics."
+    },
+    {
+      "id": "zig-gc",
+      "class": "zig_utils_owned_local",
+      "status": "allowed",
+      "scope": "production",
+      "locator": "../zig-gc",
+      "pin": "local sibling checkout provisioned from zig-utils/zig-gc",
+      "license": "MIT",
+      "affects_runtime_semantics": true,
+      "runtime_semantics": "Implements precise tracing allocation and collection."
+    },
+    {
+      "id": "platform-c-cxx-runtime",
+      "class": "standard_platform_interface",
+      "status": "allowed",
+      "scope": "embedding fixtures and platform bridge",
+      "locator": "target libc and libc++",
+      "pin": "selected target SDK/runtime",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Provides the host C/C++ ABI only; no JavaScript implementation is imported."
+    },
+    {
+      "id": "macos-sdk-foundation",
+      "class": "standard_platform_interface",
+      "status": "allowed",
+      "scope": "macOS Objective-C bridge",
+      "locator": "xcrun clang and Foundation.framework",
+      "pin": "selected Xcode SDK",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Implements the declared Objective-C/Foundation host binding; it is not a JavaScript engine."
+    },
+    {
+      "id": "libffi",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "macOS Objective-C bridge tests",
+      "locator": "system libffi",
+      "pin": "unowned system library",
+      "license": "MIT",
+      "affects_runtime_semantics": true,
+      "runtime_semantics": "Currently lowers Objective-C native calls; removal is mandatory.",
+      "migration_issue": 463
+    },
+    {
+      "id": "system-javascriptcore",
+      "class": "checksum_pinned_oracle",
+      "status": "allowed",
+      "scope": "explicit differential and benchmark targets only",
+      "locator": "macOS JavaScriptCore.framework",
+      "pin": "reported system framework version in each evidence artifact",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Never links into libzig-js; it supplies comparison output only."
+    },
+    {
+      "id": "pinned-conformance-corpora",
+      "class": "checksum_pinned_oracle",
+      "status": "allowed",
+      "scope": "test262 and WebAssembly conformance targets",
+      "locator": "git submodules and CI shallow checkouts listed in boundaries",
+      "pin": "exact git object IDs",
+      "license": "upstream corpus licenses",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Inputs tests to named runners; never ships in or executes as the engine implementation."
+    },
+    {
+      "id": "pinned-wasm-converters",
+      "class": "checksum_pinned_oracle",
+      "status": "allowed",
+      "scope": "WebAssembly conformance acquisition jobs",
+      "locator": "WABT 1.0.12/1.0.39 and wasm-tools 1.253.0 archives",
+      "pin": "release version plus SHA-256 listed in boundaries",
+      "license": "Apache-2.0",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Converts upstream text fixtures for named conformance targets only."
+    },
+    {
+      "id": "generated-standards-data",
+      "class": "generated_data_acquisition_input",
+      "status": "migration_required",
+      "scope": "one-shot Unicode, CLDR, IANA, WHATWG, and Wasm table generators",
+      "locator": "generator sources under tools/",
+      "pin": "several legacy generators still use moving URLs without checksums",
+      "license": "upstream data licenses",
+      "affects_runtime_semantics": true,
+      "runtime_semantics": "Generated Zig tables are checked in and affect semantics; ordinary builds do not fetch them.",
+      "migration_issue": 497
+    },
+    {
+      "id": "python-tooling",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "build, tests, audits, generators, benchmarks, and publication",
+      "locator": "python3 and tools/*.py",
+      "pin": "host interpreter; scripts are repository-owned",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Does not supply JavaScript semantics, but remains an unowned normal-workflow runtime.",
+      "migration_issue": 497
+    },
+    {
+      "id": "javascript-shell-tooling",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "generators and bootstrap glue",
+      "locator": "Bun/Node and shell scripts under tools/ and scripts/",
+      "pin": "host runtimes; scripts are repository-owned",
+      "license": "platform supplied",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Does not supply JavaScript semantics, but remains an unowned workflow runtime.",
+      "migration_issue": 497
+    },
+    {
+      "id": "bunpress-docs-chain",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "documentation build and preview",
+      "locator": "@stacksjs/bunpress and ts-syntax-highlighter from the Bun registry",
+      "pin": "bun.lock integrity records",
+      "license": "third-party package licenses",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Documentation rendering only; never part of libzig-js.",
+      "migration_issue": 464
+    },
+    {
+      "id": "ci-bootstrap-actions",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "GitHub Actions checkout and Zig provisioning",
+      "locator": "actions/checkout and pantry-pm/pantry/packages/action",
+      "pin": "workflow tags; not immutable revisions",
+      "license": "third-party action licenses",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "CI bootstrap only; cannot supply JavaScript semantics.",
+      "migration_issue": 497
+    },
+    {
+      "id": "bun-ci-bootstrap",
+      "class": "prohibited_unclassified",
+      "status": "migration_required",
+      "scope": "documentation CI",
+      "locator": "oven-sh/setup-bun",
+      "pin": "workflow tag; not an immutable revision",
+      "license": "MIT",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Documentation bootstrap only; never part of libzig-js.",
+      "migration_issue": 464
+    }
+  ],
+  "boundaries": {
+    "production_zig_paths": [
+      "../zig-regex",
+      "../zig-gc"
+    ],
+    "owned_sibling_checkouts": [
+      { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 6, "edge": "zig-regex" },
+      { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 6, "edge": "zig-gc" }
+    ],
+    "production_imports": [
+      { "name": "std", "external": true, "edge": "zig-toolchain" },
+      { "name": "builtin", "external": true, "edge": "zig-toolchain" },
+      { "name": "regex", "external": true, "edge": "zig-regex" },
+      { "name": "gc", "external": true, "edge": "zig-gc" },
+      { "name": "js", "external": false },
+      { "name": "private_abi_options", "external": false },
+      { "name": "wasm_test_options", "external": false }
+    ],
+    "build_links": [
+      { "kind": "framework", "name": "Foundation", "count": 2, "edge": "macos-sdk-foundation" },
+      { "kind": "system_library", "name": "ffi", "count": 2, "edge": "libffi" },
+      { "kind": "framework", "name": "JavaScriptCore", "count": 1, "edge": "system-javascriptcore" }
+    ],
+    "system_commands": [
+      { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
+      { "name": "python3", "count": 36, "edge": "python-tooling" },
+      { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
+      { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
+    ],
+    "script_extensions": [
+      { "extension": ".py", "count": 60, "edge": "python-tooling" },
+      { "extension": ".mjs", "count": 8, "edge": "javascript-shell-tooling" },
+      { "extension": ".ts", "count": 1, "edge": "javascript-shell-tooling" },
+      { "extension": ".sh", "count": 3, "edge": "javascript-shell-tooling" }
+    ],
+    "network_capable_scripts": [
+      { "path": "tools/ensure-zig-ci.py", "edge": "zig-toolchain" },
+      { "path": "tools/gen_cldr_numbers.mjs", "edge": "generated-standards-data" },
+      { "path": "tools/gen_encodings.py", "edge": "generated-standards-data" },
+      { "path": "tools/gen_idna.py", "edge": "generated-standards-data" },
+      { "path": "tools/gen_multibyte.py", "edge": "generated-standards-data" },
+      { "path": "tools/gen_norm.py", "edge": "generated-standards-data" },
+      { "path": "tools/wasm-spec/fetch.sh", "edge": "pinned-conformance-corpora" }
+    ],
+    "submodules": [
+      { "path": "test262", "url": "https://github.com/tc39/test262.git", "gitlink": "4249661388e5d3f92a85186213da140a6481490f", "edge": "pinned-conformance-corpora" },
+      { "path": "wasm-spec-wg1", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "977f97014c962f7bd1291fcc6d28b41a924882bf", "edge": "pinned-conformance-corpora" },
+      { "path": "wasm-spec-wg3", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "9d36019973201a19f9c9ebb0f10828b2fe2374aa", "edge": "pinned-conformance-corpora" }
+    ],
+    "package_dependencies": [
+      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "^0.1.9", "lockfile": "bun.lock", "locked_version": "0.1.9", "integrity": "sha512-q/1G1TrdiAH6LeZrIgmYS+Ri+rGvJ8KrrihyE8SHRjOf/9Yg3SeFifQ8ycLMJfkgQWs7y3f92LiQwcNxEk4N5w==", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "section": "overrides", "name": "ts-syntax-highlighter", "version": "0.2.0", "lockfile": "bun.lock", "locked_version": "0.2.0", "integrity": "sha512-FrnIB8WeBbsGJ+Fb1VAlLafuZv8/empJAVeShdGiQjfnGTH8t6nUNSdB/muv0ljCh/XC1F2MvJdm3k/EWHIKjg==", "edge": "bunpress-docs-chain" },
+      { "manifest": "tools/wasm-spec/package.json", "section": "dependencies", "name": "wabt", "version": "^1.0.39", "lockfile": "tools/wasm-spec/bun.lock", "locked_version": "1.0.39", "integrity": "sha512-ba+dRL/75VQQY7RkU/CgriGbkoWAfS8TDyUlJfJhJ8KhtXgMl5dhNvoPNUcQ9IWRhW8u41glMSuZeTvsYq2rRg==", "edge": "pinned-wasm-converters" }
+    ],
+    "package_scripts": [
+      { "manifest": "package.json", "name": "docs:dev", "command": "bunpress dev", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "name": "docs:build", "command": "bunpress build --outdir ./dist", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "name": "docs:preview", "command": "bunpress preview --outdir ./dist", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "name": "docs:data", "command": "bun scripts/gen-test262-data.ts", "edge": "javascript-shell-tooling" }
+    ],
+    "ci_actions": [
+      { "name": "actions/checkout@v6", "count": 19, "edge": "ci-bootstrap-actions" },
+      { "name": "pantry-pm/pantry/packages/action@main", "count": 6, "edge": "ci-bootstrap-actions" },
+      { "name": "oven-sh/setup-bun@v2", "count": 1, "edge": "bun-ci-bootstrap" }
+    ],
+    "pinned_downloads": [
+      { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz", "sha256": "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271", "occurrences": 1, "edge": "pinned-wasm-converters" },
+      { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.39/wabt-1.0.39-linux-x64.tar.gz", "sha256": "1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f", "occurrences": 4, "edge": "pinned-wasm-converters" },
+      { "url": "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.253.0/wasm-tools-1.253.0-x86_64-linux.tar.gz", "sha256": "4e2898f7ca3bd0536218ed9b7b36ff7b86954c57ae0e6272fde69728cbe01088", "occurrences": 1, "edge": "pinned-wasm-converters" }
+    ],
+    "pinned_ci_corpora": [
+      { "url": "https://github.com/WebAssembly/spec.git", "revision": "fffc6e12fa454e475455a7b58d3b5dc343980c10", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/simd.git", "revision": "a78b98a6899c9e91a13095e560767af6e99d98fd", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/threads.git", "revision": "979d0fcb994439423d63b2f0a8a7332d6285dd84", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/tail-call.git", "revision": "a6003d06aefef41e20a3e36fe2e500062555c895", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/exception-handling.git", "revision": "af287a73d8f3bf7ea216c10592f9e350b947c4f2", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/multi-memory.git", "revision": "cf8b5aa27257311b8eac80ae83f4ba22ee308064", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/spec.git", "revision": "d7b37e4170d8315f2f1283aed4e8076591a9a333", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/memory64.git", "revision": "9003cd5e24e53b84cd9027ea3dd7ae57159a6db1", "edge": "pinned-conformance-corpora" },
+      { "url": "https://github.com/WebAssembly/gc.git", "revision": "756060f5816c7e2159f4817fbdee76cf52f9c923", "edge": "pinned-conformance-corpora" }
+    ]
+  }
+}

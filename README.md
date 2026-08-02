@@ -94,6 +94,11 @@ Run `zig build --help` for the full command list.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for toolchain setup (including the sibling `zig-regex` / `zig-gc` checkouts), how to run each suite, the CI gates, and the commit conventions. Coding agents should start from [CLAUDE.md](CLAUDE.md) (symlinked as `AGENTS.md`).
 
+The fail-closed [dependency ownership policy](docs/dependencies.md) classifies
+local packages, platform interfaces, oracle-only tools/corpora, acquisition
+inputs, and explicit migration targets. Validate it with
+`zig build dependency-audit`.
+
 ## Community
 
 For help, discussion about best practices, or any other conversation that would benefit from being searchable:
