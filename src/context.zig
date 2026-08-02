@@ -3747,6 +3747,9 @@ pub const Context = struct {
     pub const JitGcConductor = struct {
         lock: std.atomic.Mutex = .unlocked,
         class_a_stops: std.atomic.Value(u64) = .init(0),
+        /// Threads that have observed `lock` held and are actively waiting to
+        /// enter. This is a live gauge, unlike the cumulative iteration counts.
+        waiting_threads: std.atomic.Value(u64) = .init(0),
         wait_iterations: std.atomic.Value(u64) = .init(0),
         wait_iterations_max: std.atomic.Value(u64) = .init(0),
         /// Thread currently holding `lock`, or 0. The gate is not reentrant, so
@@ -5834,10 +5837,16 @@ pub const Context = struct {
 
     fn enterJitGcConductor(self: *Context) void {
         var waited: u64 = 0;
+        var published_waiter = false;
         while (!self.tryEnterJitGcConductor()) : (waited += 1) {
+            if (!published_waiter) {
+                _ = self.jitGcConductor().waiting_threads.fetchAdd(1, .acq_rel);
+                published_waiter = true;
+            }
             if ((waited & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
         }
         const conductor = self.jitGcConductor();
+        if (published_waiter) _ = conductor.waiting_threads.fetchSub(1, .acq_rel);
         conductor.holder_thread.store(currentThreadId(), .release);
         if (waited != 0) {
             _ = conductor.wait_iterations.fetchAdd(waited, .monotonic);
@@ -5862,7 +5871,12 @@ pub const Context = struct {
     /// wait for this same mutator forever.
     fn enterJitGcConductorFromInterpreter(self: *Context, machine: *interp.Interpreter) void {
         var waited: u64 = 0;
+        var published_waiter = false;
         while (!self.tryEnterJitGcConductor()) : (waited += 1) {
+            if (!published_waiter) {
+                _ = self.jitGcConductor().waiting_threads.fetchAdd(1, .acq_rel);
+                published_waiter = true;
+            }
             if (self.gc_cooperative_enabled and self.gc_par_request.load(.acquire) != 0) {
                 self.joinCooperativeGcRequest(machine);
             } else if (self.gc_par_collector.load(.acquire) != null) {
@@ -5873,6 +5887,7 @@ pub const Context = struct {
                 std.atomic.spinLoopHint();
             }
         }
+        if (published_waiter) _ = self.jitGcConductor().waiting_threads.fetchSub(1, .acq_rel);
         if (waited != 0) {
             const conductor = self.jitGcConductor();
             _ = conductor.wait_iterations.fetchAdd(waited, .monotonic);
@@ -16536,7 +16551,7 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
     var shared = Shared{ .context = ctx };
     var invalidator = try std.Thread.spawn(.{}, Shared.invalidate, .{&shared});
     while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
-    for (0..256) |_| std.Thread.yield() catch {};
+    while (ctx.jitGcConductor().waiting_threads.load(.acquire) == 0) std.atomic.spinLoopHint();
     try std.testing.expect(!shared.finished.load(.acquire));
     try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
     ctx.leaveJitGcConductor();
@@ -16545,6 +16560,7 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
     try std.testing.expect(shared.finished.load(.acquire));
     try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ctx.jitGcConductor().waiting_threads.load(.acquire));
     try std.testing.expect(ctx.jitGcConductor().wait_iterations.load(.acquire) != 0);
 }
 
