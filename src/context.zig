@@ -20151,10 +20151,6 @@ test "parallel_js (M3): mid-script parallel collector reclaims garbage while thr
     }
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
     try expectParallelGcTelemetryCoherent(ctx);
-    // The host is parked in Thread.join while a worker reaches the allocation
-    // safepoint and drives collection, so the direct parked-peer path must be
-    // represented rather than hidden inside a generic attempt count.
-    try std.testing.expect(ctx.gc_par_parked_peer_observations.load(.monotonic) > 0);
 }
 
 test "parallel_js heap_limit_bytes recovers GC cells while sibling Thread is alive" {
@@ -21768,6 +21764,10 @@ test "parallel_js: WebAssembly externref roots survive no-GIL collection then re
 
     try std.testing.expect(worker.ok.load(.acquire));
     try std.testing.expect(ctx.gc_par_collections.load(.monotonic) > 0);
+    // This interpreter remains deliberately parked for the whole worker run,
+    // so every successful parallel collection has a deterministic direct-peer
+    // witness (unlike a Thread.join waiter that wakes every 5 ms to pump work).
+    try std.testing.expect(ctx.gc_par_parked_peer_observations.load(.monotonic) > 0);
     try std.testing.expect((try ctx.evaluate("wasmParallelWeak.deref()?.tag === 29")).asBool());
 
     machine.lockGcRoots();
