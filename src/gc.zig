@@ -1351,6 +1351,23 @@ fn finalizeObjectBacking(o: *Object, a: std.mem.Allocator) usize {
     return released;
 }
 
+/// Bytecode storage is arena-owned, but constants emitted through `Value.strAlloc`
+/// and object-valued constants still belong to the managed heap. Nested function
+/// templates are not cells yet, so their chunks must be reached through the
+/// owning chunk as well.
+fn traceChunk(chunk: *const bytecode.Chunk, v: anytype) void {
+    for (chunk.consts.items) |constant| markValue(v, constant);
+    for (chunk.fns.items) |template|
+        if (template.chunk) |nested| traceChunk(nested, v);
+}
+
+fn relocateChunk(chunk: *bytecode.Chunk, v: anytype) void {
+    for (chunk.consts.items) |*constant|
+        gc_relocation.rewriteValueSlot(v, constant);
+    for (chunk.fns.items) |template|
+        if (template.chunk) |nested| relocateChunk(nested, v);
+}
+
 pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markManaged(v, f.closure);
     v.mark(f.realm_global);
@@ -1362,7 +1379,11 @@ pub fn traceFunction(f: *interp.Function, v: anytype) void {
     markValue(v, f.arrow_new_target);
     if (f.this_cell) |cell| markValue(v, cell.value);
     for (f.with_stack) |object| v.mark(object);
-    // `params`/`body`/`source`/`chunk` are immutable arena/AST — not cells.
+    if (f.chunk) |chunk| traceChunk(chunk, v);
+    if (f.gen_chunk) |chunk| traceChunk(chunk, v);
+    if (f.async_chunk) |chunk| traceChunk(chunk, v);
+    // `params`/`body`/`source` and the chunk containers are arena/AST-owned;
+    // only the managed Values held by chunk constant pools need tracing.
 }
 
 /// Rewrite the same complete Function edge set that `traceFunction` marks.
@@ -1381,6 +1402,9 @@ pub fn relocateFunction(f: *interp.Function, v: anytype) void {
     if (f.this_cell) |cell| gc_relocation.rewriteValueSlot(v, &cell.value);
     for (f.with_stack) |*object|
         gc_relocation.rewriteRequiredSlot(v, Object, object);
+    if (f.chunk) |chunk| relocateChunk(chunk, v);
+    if (f.gen_chunk) |chunk| relocateChunk(chunk, v);
+    if (f.async_chunk) |chunk| relocateChunk(chunk, v);
 }
 
 test "Function marking and relocation cover every managed field" {
@@ -1392,8 +1416,8 @@ test "Function marking and relocation cover every managed field" {
         .arena = std.testing.allocator,
         .gc_managed = true,
     };
-    var old_objects: [10]Object = undefined;
-    var new_objects: [10]Object = undefined;
+    var old_objects: [13]Object = undefined;
+    var new_objects: [13]Object = undefined;
     var body: ast.Node = .undefined_lit;
     var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[4] };
     var this_cell = interp.ThisCell{
@@ -1401,6 +1425,15 @@ test "Function marking and relocation cover every managed field" {
         .initialized = true,
     };
     var with_stack = [_]*Object{ &old_objects[8], &old_objects[9] };
+    var plain_constants = [_]Value{Value.obj(&old_objects[10])};
+    var generator_constants = [_]Value{Value.obj(&old_objects[11])};
+    var async_constants = [_]Value{Value.obj(&old_objects[12])};
+    var plain_chunk = bytecode.Chunk.init(std.testing.allocator);
+    plain_chunk.consts = .{ .items = &plain_constants, .capacity = plain_constants.len };
+    var generator_chunk = bytecode.Chunk.init(std.testing.allocator);
+    generator_chunk.consts = .{ .items = &generator_constants, .capacity = generator_constants.len };
+    var async_chunk = bytecode.Chunk.init(std.testing.allocator);
+    async_chunk.consts = .{ .items = &async_constants, .capacity = async_constants.len };
     var function = interp.Function{
         .params = &.{},
         .body = &body,
@@ -1415,6 +1448,9 @@ test "Function marking and relocation cover every managed field" {
         .arrow_new_target = Value.obj(&old_objects[6]),
         .this_cell = &this_cell,
         .with_stack = &with_stack,
+        .chunk = &plain_chunk,
+        .gen_chunk = &generator_chunk,
+        .async_chunk = &async_chunk,
     };
 
     const TraceVisitor = struct {
@@ -1435,13 +1471,13 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expect(trace.seen.contains(@intFromPtr(&old_environment)));
     for (&old_objects) |*object|
         try std.testing.expect(trace.seen.contains(@intFromPtr(object)));
-    try std.testing.expectEqual(@as(usize, 11), trace.seen.count());
+    try std.testing.expectEqual(@as(usize, 14), trace.seen.count());
 
     const Plan = struct {
         old_environment: *Environment,
         new_environment: *Environment,
-        old_objects: *[10]Object,
-        new_objects: *[10]Object,
+        old_objects: *[13]Object,
+        new_objects: *[13]Object,
 
         pub fn resolve(self: *const @This(), old: *anyopaque) *anyopaque {
             if (old == @as(*anyopaque, @ptrCast(self.old_environment)))
@@ -1471,6 +1507,9 @@ test "Function marking and relocation cover every managed field" {
     try std.testing.expectEqual(&new_objects[7], this_cell.value.asObj());
     try std.testing.expectEqual(&new_objects[8], with_stack[0]);
     try std.testing.expectEqual(&new_objects[9], with_stack[1]);
+    try std.testing.expectEqual(&new_objects[10], plain_constants[0].asObj());
+    try std.testing.expectEqual(&new_objects[11], generator_constants[0].asObj());
+    try std.testing.expectEqual(&new_objects[12], async_constants[0].asObj());
     try std.testing.expect(Binding.traceOldOnMinor(.function));
 }
 
@@ -1693,6 +1732,7 @@ inline fn relocateMicrotask(mt: *promise.Microtask, v: anytype) void {
 }
 
 pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
+    traceChunk(g.chunk, v);
     v.mark(g.env);
     for (g.exec.stack.items) |s| markValue(v, s);
     markValue(v, g.exec.acc);
@@ -1715,6 +1755,7 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
 /// concurrent mark; relocation runs at that same boundary, so no mutator can
 /// race these arena-owned stacks, frames, or request records.
 pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
+    relocateChunk(g.chunk, v);
     gc_relocation.rewriteRequiredSlot(v, Environment, &g.env);
     for (g.exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     gc_relocation.rewriteValueSlot(v, &g.exec.acc);
@@ -2192,6 +2233,7 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     // stack scan. The VM flushes `acc`/`ip` into each `Exec` at the safepoint
     // before collecting, so these reads are current.
     for (machine.gc_execs.items) |exec| {
+        if (exec.chunk) |chunk| traceChunk(chunk, v);
         for (exec.stack.items) |s| markValue(v, s);
         markValue(v, exec.acc);
         // The activation's frame slots (and its captured-frame parent chain for
@@ -2299,6 +2341,7 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &machine.env);
     relocateEnv(machine.env, v);
     for (machine.gc_execs.items) |exec| {
+        if (exec.chunk) |chunk| relocateChunk(chunk, v);
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         gc_relocation.rewriteValueSlot(v, &exec.acc);
         var frame = exec.frame;

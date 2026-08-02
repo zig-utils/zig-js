@@ -183,6 +183,10 @@ pub const Exec = struct {
     stack: OperandStack = .empty,
     acc: Value = Value.undef(),
     ip: usize = 0,
+    /// The immutable bytecode container for this activation. Its constant pool
+    /// can contain managed Values, so an active top-level/program chunk must be
+    /// published as a precise root even when no Function or Generator owns it.
+    chunk: ?*Chunk = null,
     /// The activation frame this Exec is running (null for env-mode bodies:
     /// program/generator/async). Recorded so a mid-script collection can trace
     /// the frame's `slots` (and its captured-frame parent chain) as precise GC
@@ -5649,6 +5653,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
     // operand stack is arena-backed, invisible to the conservative native-stack
     // scan). No-op when the GC is off.
     exec.frame = frame; // so a mid-script collection roots this activation's slots
+    exec.chunk = chunk; // and the chunk's managed constant pool
     vm.pushExecRoot(exec);
     defer vm.popExecRoot(exec);
     if (try tryRunNative(vm, exec, chunk, frame, gen)) |result| {

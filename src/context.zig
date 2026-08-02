@@ -17442,6 +17442,37 @@ test "enable_gc: collectGarbage reclaims unreachable objects, keeps reachable" {
     try std.testing.expectEqual(@as(f64, 4), r.asNum()); // 1 + 3
 }
 
+test "enable_gc: persistent bytecode string constants survive collection" {
+    const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true, .enable_jit = false });
+    defer ctx.destroy();
+
+    _ = try ctx.evaluate(
+        \\globalThis.persistentBytecodeLiteral = function persistentBytecodeLiteral(depth) {
+        \\  "use strict";
+        \\  if (depth === 0) return "en-US";
+        \\  return persistentBytecodeLiteral(depth - 1);
+        \\};
+    );
+    const function_value = ctx.global_object.getOwn("persistentBytecodeLiteral") orelse
+        return error.TestUnexpectedResult;
+    const function = interp.Interpreter.funcOf(function_value) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(function.chunk != null);
+
+    // The Function is globally reachable while its compiled string literal is
+    // reachable only through the arena-owned Chunk. Reclaim first, then churn
+    // StringCell storage so a missing chunk edge cannot pass by stale-address
+    // luck before the function runs again.
+    ctx.collectGarbage();
+    _ = try ctx.evaluate(
+        \\for (let i = 0; i < 2000; ++i) globalThis.bytecodeGcChurn = "replacement-" + i;
+    );
+    try std.testing.expectEqualStrings(
+        "en-US",
+        (try ctx.evaluate("persistentBytecodeLiteral(4)")).asStr(),
+    );
+}
+
 test "enable_gc nursery: quiescent minor collection reclaims young garbage" {
     const ctx = try Context.createWith(std.testing.allocator, .{ .enable_gc = true });
     defer ctx.destroy();
