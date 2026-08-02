@@ -10301,8 +10301,8 @@ fn privateDeepObject(input: Value) ?*Object {
 }
 
 fn privateDeepElementSnapshot(machine: *interp.Interpreter, object: *Object) ![]Value {
-    object.lockElements();
-    defer object.unlockElements();
+    const elements_locked_1 = object.lockElements();
+    defer object.unlockElements(elements_locked_1);
     const result = try machine.arena.alloc(Value, object.elementsItems().len);
     @memcpy(result, object.elementsItems());
     return result;

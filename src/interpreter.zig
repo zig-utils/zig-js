@@ -10155,8 +10155,8 @@ pub const Interpreter = struct {
             const pair = (try self.newArray()).asObj();
             try pair.appendElement(self.arena, key);
             try pair.appendElement(self.arena, val);
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_1 = o.lockElements();
+            defer o.unlockElements(elements_locked_1);
             if (mapFindPos(o, key, self.arena)) |pos| {
                 _ = liveMapEntry(o.elementsItems()[pos]).?.setElementAt(1, val);
                 return self_v;
@@ -10171,19 +10171,19 @@ pub const Interpreter = struct {
             return self_v;
         }
         if (eq(name, "get")) {
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_2 = o.lockElements();
+            defer o.unlockElements(elements_locked_2);
             if (mapFindPos(o, key, self.arena)) |pos| return mapEntryValue(liveMapEntry(o.elementsItems()[pos]).?);
             return Value.undef();
         }
         if (eq(name, "has")) {
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_3 = o.lockElements();
+            defer o.unlockElements(elements_locked_3);
             return Value.boolVal(mapFindPos(o, key, self.arena) != null);
         }
         if (eq(name, "delete")) {
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_4 = o.lockElements();
+            defer o.unlockElements(elements_locked_4);
             if (mapFindPos(o, key, self.arena)) |pos| {
                 liveMapEntry(o.elementsItems()[pos]).?.clearElementsRetainingCapacity();
                 if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
@@ -10203,8 +10203,8 @@ pub const Interpreter = struct {
             while (true) : (i += 1) {
                 var end = false;
                 const entry = blk: {
-                    o.lockElements();
-                    defer o.unlockElements();
+                    const elements_locked_5 = o.lockElements();
+                    defer o.unlockElements(elements_locked_5);
                     if (i >= o.elementsItems().len) {
                         end = true;
                         break :blk null;
@@ -10226,8 +10226,8 @@ pub const Interpreter = struct {
                 break :cb candidate;
             } else Value.undef();
             {
-                o.lockElements();
-                defer o.unlockElements();
+                const elements_locked_6 = o.lockElements();
+                defer o.unlockElements(elements_locked_6);
                 if (mapFindPos(o, key, self.arena)) |pos| return mapEntryValue(liveMapEntry(o.elementsItems()[pos]).?);
             }
             const v = if (eq(name, "getOrInsertComputed")) blk: {
@@ -10299,8 +10299,8 @@ pub const Interpreter = struct {
             return null;
         }
         if (eq(name, "add")) {
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_7 = o.lockElements();
+            defer o.unlockElements(elements_locked_7);
             if (setFindPos(o, key, self.arena) != null) return self_v;
             gc_mod.barrierValueFrom(o, key); // new key hidden behind the live set
             const elements = try o.ensureElementsList(self.arena);
@@ -10312,15 +10312,15 @@ pub const Interpreter = struct {
             return self_v;
         }
         if (eq(name, "has")) {
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_8 = o.lockElements();
+            defer o.unlockElements(elements_locked_8);
             return Value.boolVal(setFindPos(o, key, self.arena) != null);
         }
         if (eq(name, "delete")) {
             const tomb = try gc_mod.allocObj(self.arena);
             tomb.* = .{ .behavior = .{ .is_set_deleted = true } };
-            o.lockElements();
-            defer o.unlockElements();
+            const elements_locked_9 = o.lockElements();
+            defer o.unlockElements(elements_locked_9);
             if (setFindPos(o, key, self.arena)) |pos| {
                 o.elementsItems()[pos] = Value.obj(tomb);
                 if (!o.collUnindexed()) if (hashKey(key)) |hkey| o.collIndexRemove(hkey);
@@ -10340,8 +10340,8 @@ pub const Interpreter = struct {
             while (true) : (i += 1) {
                 var end = false;
                 const e = blk: {
-                    o.lockElements();
-                    defer o.unlockElements();
+                    const elements_locked_10 = o.lockElements();
+                    defer o.unlockElements(elements_locked_10);
                     if (i >= o.elementsItems().len) {
                         end = true;
                         break :blk null;
@@ -10556,8 +10556,8 @@ pub const Interpreter = struct {
     /// SetDataHas: whether the native Set `o` contains `elem` (SameValueZero) —
     /// used by the set operations when they iterate the *other* operand.
     fn setContains(o: *value.Object, elem: Value) bool {
-        o.lockElements();
-        defer o.unlockElements();
+        const elements_locked_11 = o.lockElements();
+        defer o.unlockElements(elements_locked_11);
         for (o.elementsItems()) |e| {
             const entry = liveSetEntry(e) orelse continue;
             if (value.sameValueZero(entry, elem)) return true;
@@ -10569,8 +10569,8 @@ pub const Interpreter = struct {
     /// set-like calls its `has`).
     fn recordHas(self: *Interpreter, rec: SetRecord, elem: Value) EvalError!bool {
         if (rec.is_set) {
-            rec.obj.lockElements();
-            defer rec.obj.unlockElements();
+            const elements_locked_12 = rec.obj.lockElements();
+            defer rec.obj.unlockElements(elements_locked_12);
             for (rec.obj.elementsItems()) |e| {
                 const entry = liveSetEntry(e) orelse continue;
                 if (value.sameValueZero(entry, elem)) return true;
@@ -10604,8 +10604,8 @@ pub const Interpreter = struct {
     /// collections, so callers never hold `elements_lock` across re-entrant JS.
     fn collectLiveSetEntries(self: *Interpreter, o: *value.Object) EvalError![]Value {
         var list: std.ArrayListUnmanaged(Value) = .empty;
-        o.lockElements();
-        defer o.unlockElements();
+        const elements_locked_13 = o.lockElements();
+        defer o.unlockElements(elements_locked_13);
         for (o.elementsItems()) |e| {
             const entry = liveSetEntry(e) orelse continue;
             try list.append(self.arena, entry);
@@ -21488,8 +21488,8 @@ fn dispPush(self: *Interpreter, o: *value.Object, v: Value, f: Value, kind: f64)
     // The stack object's elements_lock acts as the native state mutex for
     // disposed-state publication, move/transfer, and resource-list mutation.
     // It is never held while resolving disposal methods or invoking callbacks.
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_14 = o.lockElements();
+    defer o.unlockElements(elements_locked_14);
     if (dispDisposed(o)) return dispThrowDisposed(self);
     const res = o.getOwn("\x00ds_res").?.asObj();
     try res.appendInternalElement(self.arena, Value.obj(entry));
@@ -21513,8 +21513,8 @@ fn dispUseFn(comptime is_async: bool) value.NativeFn {
                 if (is_async) try dispPush(self, this.asObj(), v, Value.undef(), 3);
                 if (!is_async) {
                     const stack = this.asObj();
-                    stack.lockElements();
-                    defer stack.unlockElements();
+                    const elements_locked_15 = stack.lockElements();
+                    defer stack.unlockElements(elements_locked_15);
                     if (dispDisposed(stack)) return dispThrowDisposed(self);
                 }
                 return v;
@@ -21562,8 +21562,8 @@ fn dispMoveFn(comptime is_async: bool) value.NativeFn {
             const self: *Interpreter = @ptrCast(@alignCast(ctx));
             if (!isDispStackOf(this, is_async)) return self.throwError("TypeError", "move called on an incompatible receiver");
             const src = this.asObj();
-            src.lockElements();
-            defer src.unlockElements();
+            const elements_locked_16 = src.lockElements();
+            defer src.unlockElements(elements_locked_16);
             if (dispDisposed(src)) return dispThrowDisposed(self);
             // OrdinaryCreateFromConstructor(%DisposableStack%, …): the new stack
             // uses the INTRINSIC prototype, never the subclass's.
@@ -21616,8 +21616,8 @@ const DispStart = struct {
 /// Atomically publish disposed state and detach a resource snapshot.
 /// The stack-state lock is released before any disposal callback or await.
 fn dispStartDispose(self: *Interpreter, o: *value.Object, is_async: bool) EvalError!?DispStart {
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_17 = o.lockElements();
+    defer o.unlockElements(elements_locked_17);
     if (dispDisposed(o)) return null;
     const res = o.getOwn("\x00ds_res").?.asObj();
     const entries = try res.internalElementsSnapshot(self.arena);
@@ -21698,8 +21698,8 @@ fn dispDisposedGetter(ctx: *anyopaque, this: Value, args: []const Value) value.H
     const self: *Interpreter = @ptrCast(@alignCast(ctx));
     if (!isDispStack(this)) return self.throwError("TypeError", "disposed getter on a non-DisposableStack");
     const stack = this.asObj();
-    stack.lockElements();
-    defer stack.unlockElements();
+    const elements_locked_18 = stack.lockElements();
+    defer stack.unlockElements(elements_locked_18);
     return Value.boolVal(dispDisposed(stack));
 }
 
@@ -31220,8 +31220,8 @@ fn mapEntryValue(entry: *value.Object) Value {
 
 fn liveMapEntryCount(o: *value.Object) usize {
     var n: usize = 0;
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_19 = o.lockElements();
+    defer o.unlockElements(elements_locked_19);
     for (o.elementsItems()) |entry| {
         if (liveMapEntry(entry) != null) n += 1;
     }
@@ -31234,16 +31234,16 @@ fn liveSetEntry(v: Value) ?Value {
 }
 
 fn liveSetEntryAt(o: *value.Object, i: usize) ?Value {
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_20 = o.lockElements();
+    defer o.unlockElements(elements_locked_20);
     if (i >= o.elementsItems().len) return null;
     return liveSetEntry(o.elementsItems()[i]);
 }
 
 fn liveSetEntryCount(o: *value.Object) usize {
     var n: usize = 0;
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_21 = o.lockElements();
+    defer o.unlockElements(elements_locked_21);
     for (o.elementsItems()) |entry| {
         if (liveSetEntry(entry) != null) n += 1;
     }
@@ -31446,7 +31446,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                 }
             } else if (so.is_map) {
                 var j = i;
-                so.lockElements();
+                const source_elements_locked = so.lockElements();
                 while (j < so.elementsItems().len) : (j += 1) {
                     const entry = liveMapEntry(so.elementsItems()[j]) orelse continue;
                     val = switch (kind) {
@@ -31458,11 +31458,11 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                     advance = j + 1 - i;
                     break;
                 }
-                so.unlockElements();
+                so.unlockElements(source_elements_locked);
             } else if (so.is_set) {
                 var j = i;
                 var entry_value: ?Value = null;
-                so.lockElements();
+                const source_elements_locked = so.lockElements();
                 while (j < so.elementsItems().len) : (j += 1) {
                     const e = liveSetEntry(so.elementsItems()[j]) orelse continue;
                     entry_value = e;
@@ -31470,7 +31470,7 @@ fn cursorIterNext(ctx: *anyopaque, this: Value, args: []const Value) value.HostE
                     advance = j + 1 - i;
                     break;
                 }
-                so.unlockElements();
+                so.unlockElements(source_elements_locked);
                 if (entry_value) |e| if (kind == 2) {
                     const pair = (try self.newArray()).asObj();
                     try pair.appendElement(self.arena, e);

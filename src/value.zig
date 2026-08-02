@@ -2937,11 +2937,13 @@ pub const Object = struct {
     /// parallel/concurrent synchronization protocol (mutators in parallel or a
     /// concurrent marker). The single-threaded and `.gil = true` engines leave
     /// `lockElements`/`unlockElements` as a single relaxed-ish load and return —
-    /// the hot dense-element read/write paths stay lock-free and full-speed.
+    /// the hot dense-element read/write paths stay lock-free and full-speed. The
+    /// acquisition token must be passed to `unlockElements`: the process-wide
+    /// gate is enable-only and may change while a new threaded Context starts.
     pub var element_locks_enabled: std.atomic.Value(bool) = .init(false);
 
-    pub fn lockElements(self: *const Object) void {
-        if (!element_locks_enabled.load(.acquire)) return;
+    pub fn lockElements(self: *const Object) bool {
+        if (!element_locks_enabled.load(.acquire)) return false;
         var spins: usize = 0;
         const mutex = &@constCast(self).elements_lock;
         while (!mutex.tryLock()) : (spins += 1) {
@@ -2953,10 +2955,11 @@ pub const Object = struct {
         }
         object_profile.recordElementLockAcquire(spins);
         gc_runtime.enterTraceSensitiveLock();
+        return true;
     }
 
-    pub fn unlockElements(self: *const Object) void {
-        if (!element_locks_enabled.load(.acquire)) return;
+    pub fn unlockElements(self: *const Object, held: bool) void {
+        if (!held) return;
         gc_runtime.leaveTraceSensitiveLock();
         @constCast(self).elements_lock.unlock();
     }
@@ -2992,8 +2995,8 @@ pub const Object = struct {
     }
 
     pub fn elementsLen(self: *const Object) usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_1 = self.lockElements();
+        defer self.unlockElements(elements_locked_1);
         return self.elementsItems().len;
     }
 
@@ -3013,21 +3016,21 @@ pub const Object = struct {
     }
 
     pub fn arrayLength(self: *const Object) usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_2 = self.lockElements();
+        defer self.unlockElements(elements_locked_2);
         return @max(self.elementsItems().len, self.arrayLengthFloor());
     }
 
     pub fn elementAt(self: *const Object, i: usize) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_3 = self.lockElements();
+        defer self.unlockElements(elements_locked_3);
         if (i >= self.elementsItems().len) return null;
         return self.elementsItems()[i];
     }
 
     pub fn setElementAt(self: *Object, i: usize, v: Value) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_4 = self.lockElements();
+        defer self.unlockElements(elements_locked_4);
         if (i >= self.elementsItems().len) return false;
         gcBarrier(self, v);
         self.elementsItems()[i] = v;
@@ -3035,8 +3038,8 @@ pub const Object = struct {
     }
 
     pub fn appendElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_5 = self.lockElements();
+        defer self.unlockElements(elements_locked_5);
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         const elements = try self.ensureElementsList(arena);
@@ -3044,8 +3047,8 @@ pub const Object = struct {
     }
 
     pub fn appendElementIfLen(self: *Object, arena: std.mem.Allocator, expected_len: usize, v: Value) std.mem.Allocator.Error!bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_6 = self.lockElements();
+        defer self.unlockElements(elements_locked_6);
         if (self.elementsItems().len != expected_len) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
@@ -3059,8 +3062,8 @@ pub const Object = struct {
     /// entries). This keeps the same lock + GC barrier discipline as
     /// `appendElement` without changing `indexed_own_seen`.
     pub fn appendInternalElement(self: *Object, arena: std.mem.Allocator, v: Value) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_7 = self.lockElements();
+        defer self.unlockElements(elements_locked_7);
         gcBarrier(self, v);
         const elements = try self.ensureElementsList(arena);
         try elements.append(self.elementsAllocator(arena), v);
@@ -3069,8 +3072,8 @@ pub const Object = struct {
     /// Append an array-literal elision at the current dense end. The slot
     /// contributes to array length but remains an absent indexed property.
     pub fn appendArrayHole(self: *Object, arena: std.mem.Allocator) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_8 = self.lockElements();
+        defer self.unlockElements(elements_locked_8);
         try self.markHoleUnlocked(arena, self.elementsItems().len);
         const elements = try self.ensureElementsList(arena);
         try elements.append(self.elementsAllocator(arena), Value.undef());
@@ -3080,8 +3083,8 @@ pub const Object = struct {
     /// Returns the new logical length, or null when holes/sparse tail require
     /// the full observable `[[Set]]` path.
     pub fn appendPackedDenseElements(self: *Object, arena: std.mem.Allocator, values: []const Value) std.mem.Allocator.Error!?usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_9 = self.lockElements();
+        defer self.unlockElements(elements_locked_9);
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len) return null;
         const new_len = std.math.add(usize, self.elementsItems().len, values.len) catch return null;
         if (new_len > 4294967295) return null;
@@ -3101,8 +3104,8 @@ pub const Object = struct {
     /// are one element-lock critical section so a peer grow cannot race the
     /// `items.len` observation.
     pub fn appendDataIndexIfDense(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_10 = self.lockElements();
+        defer self.unlockElements(elements_locked_10);
         if (self.holesMap() != null or i != self.elementsItems().len or self.arrayLengthFloor() > i) return false;
         if (i >= 4294967295) return false;
         gcBarrier(self, v);
@@ -3113,15 +3116,15 @@ pub const Object = struct {
     }
 
     pub fn atomicDenseElementLoad(self: *Object, i: usize) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_11 = self.lockElements();
+        defer self.unlockElements(elements_locked_11);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         return self.elementsItems()[i];
     }
 
     pub fn atomicDenseElementStore(self: *Object, i: usize, v: Value) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_12 = self.lockElements();
+        defer self.unlockElements(elements_locked_12);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         gcBarrier(self, v);
         self.elementsItems()[i] = v;
@@ -3129,8 +3132,8 @@ pub const Object = struct {
     }
 
     pub fn atomicDenseElementExchange(self: *Object, i: usize, v: Value) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_13 = self.lockElements();
+        defer self.unlockElements(elements_locked_13);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         const old = self.elementsItems()[i];
         gcBarrier(self, v);
@@ -3139,8 +3142,8 @@ pub const Object = struct {
     }
 
     pub fn atomicDenseElementCompareExchange(self: *Object, i: usize, expected: Value, replacement: Value) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_14 = self.lockElements();
+        defer self.unlockElements(elements_locked_14);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         const old = self.elementsItems()[i];
         if (sameValueZero(old, expected)) {
@@ -3153,8 +3156,8 @@ pub const Object = struct {
     pub const DenseElementRmwOp = enum { add, sub, and_, or_, xor };
 
     pub fn atomicDenseElementRmwNumber(self: *Object, i: usize, operand: f64, op: DenseElementRmwOp) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_15 = self.lockElements();
+        defer self.unlockElements(elements_locked_15);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         const old = self.elementsItems()[i];
         if (!old.isNumber()) return null;
@@ -3177,8 +3180,8 @@ pub const Object = struct {
     }
 
     pub fn clearElementsRetainingCapacity(self: *Object) void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_16 = self.lockElements();
+        defer self.unlockElements(elements_locked_16);
         if (self.elementsState()) |state| state.list.clearRetainingCapacity();
     }
 
@@ -3193,22 +3196,22 @@ pub const Object = struct {
 
     /// WeakMap `[[Get]]`: the value stored under `key`, or null if absent.
     pub fn weakEntryGet(self: *Object, key: ?*anyopaque) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_17 = self.lockElements();
+        defer self.unlockElements(elements_locked_17);
         const i = self.weakEntryIndexUnlocked(key) orelse return null;
         return self.collectionState().?.weak_entries.items[i].value;
     }
 
     /// WeakMap/WeakSet `[[Has]]`.
     pub fn weakEntryHas(self: *Object, key: ?*anyopaque) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_18 = self.lockElements();
+        defer self.unlockElements(elements_locked_18);
         return self.weakEntryIndexUnlocked(key) != null;
     }
 
     pub fn weakEntryCount(self: *Object) usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_19 = self.lockElements();
+        defer self.unlockElements(elements_locked_19);
         const state = self.collectionState() orelse return 0;
         return state.weak_entries.items.len;
     }
@@ -3217,8 +3220,8 @@ pub const Object = struct {
     pub fn weakEntrySet(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque, v: Value) std.mem.Allocator.Error!void {
         gc_runtime.barrierWeak(@ptrCast(self));
         gcBarrier(self, v);
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_20 = self.lockElements();
+        defer self.unlockElements(elements_locked_20);
         const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
@@ -3234,8 +3237,8 @@ pub const Object = struct {
     /// WeakSet `add`: append `key` if it is not already present.
     pub fn weakEntryAdd(self: *Object, fallback: std.mem.Allocator, key: ?*anyopaque) std.mem.Allocator.Error!void {
         gc_runtime.barrierWeak(@ptrCast(self));
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_21 = self.lockElements();
+        defer self.unlockElements(elements_locked_21);
         const state = try self.ensureCollectionState(fallback);
         const alloc = try self.weakEntriesAllocator(fallback);
         if (self.weakEntryIndexUnlocked(key)) |i| {
@@ -3250,8 +3253,8 @@ pub const Object = struct {
     /// WeakMap/WeakSet `delete`: remove the entry for `key`; returns whether one
     /// was found.
     pub fn weakEntryDelete(self: *Object, key: ?*anyopaque) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_22 = self.lockElements();
+        defer self.unlockElements(elements_locked_22);
         const i = self.weakEntryIndexUnlocked(key) orelse return false;
         self.weakEntrySwapRemoveAtUnlocked(i);
         return true;
@@ -3331,8 +3334,8 @@ pub const Object = struct {
     /// FinalizationRegistry `register`: append a record (the strong `held` value
     /// is barriered by the caller before this store into the live registry cell).
     pub fn finRecordAppend(self: *Object, fallback: std.mem.Allocator, record: FinalizationRecord) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_23 = self.lockElements();
+        defer self.unlockElements(elements_locked_23);
         const cold = try self.ensureCold(fallback);
         const allocator = try self.finalizationRecordsAllocator(fallback);
         var created = false;
@@ -3354,8 +3357,8 @@ pub const Object = struct {
     /// FinalizationRegistry `unregister`: remove every record whose token matches
     /// `token`; returns whether any were removed.
     pub fn finRecordUnregister(self: *Object, token: ?*anyopaque) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_24 = self.lockElements();
+        defer self.unlockElements(elements_locked_24);
         const cold = self.coldState() orelse return false;
         const records = cold.finalization_records orelse return false;
         var removed = false;
@@ -3376,8 +3379,8 @@ pub const Object = struct {
     /// caller runs the cleanup callback *after* this returns — never under the
     /// lock — so the callback may re-enter the registry.
     pub fn finRecordTakeReady(self: *Object) ?FinalizationRecord {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_25 = self.lockElements();
+        defer self.unlockElements(elements_locked_25);
         const cold = self.coldState() orelse return null;
         const records = cold.finalization_records orelse return null;
         var i: usize = 0;
@@ -3389,8 +3392,8 @@ pub const Object = struct {
     }
 
     pub fn packedDenseElementsCoverLength(self: *const Object) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_26 = self.lockElements();
+        defer self.unlockElements(elements_locked_26);
         return self.holesMap() == null and self.arrayLengthFloor() <= self.elementsItems().len;
     }
 
@@ -3406,8 +3409,8 @@ pub const Object = struct {
     /// current element backing. Private contiguous-vector consumers compare
     /// both the encoded snapshot and this address before every direct read.
     pub fn packedDenseStorageSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error!?PackedDenseStorageSnapshot {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_27 = self.lockElements();
+        defer self.unlockElements(elements_locked_27);
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len or self.accessorsMap() != null) return null;
         const out = try arena.alloc(Value, self.elementsItems().len);
         @memcpy(out, self.elementsItems());
@@ -3419,16 +3422,16 @@ pub const Object = struct {
     /// semantics; callers use it only for engine-owned element lists such as
     /// iterator-helper source arrays.
     pub fn internalElementsSnapshot(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_28 = self.lockElements();
+        defer self.unlockElements(elements_locked_28);
         const out = try arena.alloc(Value, self.elementsItems().len);
         @memcpy(out, self.elementsItems());
         return out;
     }
 
     pub fn denseElementLimit(self: *const Object, logical_len: usize) usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_29 = self.lockElements();
+        defer self.unlockElements(elements_locked_29);
         return @min(self.elementsItems().len, logical_len);
     }
 
@@ -3452,27 +3455,27 @@ pub const Object = struct {
     }
 
     pub fn denseElementInBounds(self: *const Object, i: usize) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_30 = self.lockElements();
+        defer self.unlockElements(elements_locked_30);
         return i < self.elementsItems().len;
     }
 
     pub fn denseElementPresent(self: *const Object, i: usize) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_31 = self.lockElements();
+        defer self.unlockElements(elements_locked_31);
         return i < self.elementsItems().len and !self.isHoleUnlocked(i);
     }
 
     pub fn denseElement(self: *const Object, i: usize) ?Value {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_32 = self.lockElements();
+        defer self.unlockElements(elements_locked_32);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return null;
         return self.elementsItems()[i];
     }
 
     pub fn denseElementIndices(self: *const Object, arena: std.mem.Allocator) std.mem.Allocator.Error![]usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_33 = self.lockElements();
+        defer self.unlockElements(elements_locked_33);
         var list: std.ArrayListUnmanaged(usize) = .empty;
         errdefer list.deinit(arena);
         for (self.elementsItems(), 0..) |_, i| {
@@ -3483,8 +3486,8 @@ pub const Object = struct {
     }
 
     pub fn setDenseElement(self: *Object, i: usize, v: Value) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_34 = self.lockElements();
+        defer self.unlockElements(elements_locked_34);
         if (i >= self.elementsItems().len) return false;
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
@@ -3497,8 +3500,8 @@ pub const Object = struct {
     /// length or filling a hole. The presence check and write share one element
     /// lock so a parallel delete/truncate cannot race between them.
     pub fn replaceDenseElement(self: *Object, i: usize, v: Value) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_35 = self.lockElements();
+        defer self.unlockElements(elements_locked_35);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return false;
         gcBarrier(self, v);
         self.elementsItems()[i] = v;
@@ -3510,8 +3513,8 @@ pub const Object = struct {
     /// retains the element lock and presence check required by shared-realm
     /// quick paths racing delete/truncate operations.
     pub fn replaceDenseElementPresentAfterBarrier(self: *Object, i: usize, v: Value) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_36 = self.lockElements();
+        defer self.unlockElements(elements_locked_36);
         if (i >= self.elementsItems().len or self.isHoleUnlocked(i)) return false;
         self.elementsItems()[i] = v;
         return true;
@@ -3527,8 +3530,8 @@ pub const Object = struct {
     }
 
     pub fn growDenseElement(self: *Object, arena: std.mem.Allocator, i: usize, v: Value) std.mem.Allocator.Error!usize {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_37 = self.lockElements();
+        defer self.unlockElements(elements_locked_37);
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         const gap_start = self.elementsItems().len;
@@ -3548,8 +3551,8 @@ pub const Object = struct {
         v: Value,
         dense_cap: usize,
     ) std.mem.Allocator.Error!bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_38 = self.lockElements();
+        defer self.unlockElements(elements_locked_38);
         gcBarrier(self, v);
         self.indexed_own_seen.store(true, .release);
         if (i < self.elementsItems().len) {
@@ -3569,8 +3572,8 @@ pub const Object = struct {
     }
 
     pub fn deleteDenseElement(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_39 = self.lockElements();
+        defer self.unlockElements(elements_locked_39);
         if (i >= self.elementsItems().len) return false;
         self.elementsItems()[i] = Value.undef();
         try self.markHoleUnlocked(arena, i);
@@ -3578,21 +3581,21 @@ pub const Object = struct {
     }
 
     pub fn truncateDenseElementsAndSetLength(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_40 = self.lockElements();
+        defer self.unlockElements(elements_locked_40);
         if (new_len < self.elementsItems().len) self.elementsState().?.list.shrinkRetainingCapacity(new_len);
         try self.setArrayLengthFloorUnlocked(fallback, new_len);
     }
 
     pub fn extendArrayLengthFloor(self: *Object, fallback: std.mem.Allocator, new_len: usize) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_41 = self.lockElements();
+        defer self.unlockElements(elements_locked_41);
         try self.setArrayLengthFloorUnlocked(fallback, @max(self.arrayLengthFloor(), new_len));
     }
 
     pub fn reversePackedDenseElements(self: *Object) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_42 = self.lockElements();
+        defer self.unlockElements(elements_locked_42);
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len) return false;
         std.mem.reverse(Value, self.elementsItems());
         return true;
@@ -3604,8 +3607,8 @@ pub const Object = struct {
         values: []const Value,
         new_len: usize,
     ) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_43 = self.lockElements();
+        defer self.unlockElements(elements_locked_43);
         // If a sparse logical tail will need cold storage, reserve it before
         // mutating an existing array so OOM cannot leave a half-replaced value.
         if (new_len > values.len and self.coldState() == null) _ = try self.ensureCold(arena);
@@ -3625,8 +3628,8 @@ pub const Object = struct {
         delete_count: usize,
         inserts: []const Value,
     ) std.mem.Allocator.Error!bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_44 = self.lockElements();
+        defer self.unlockElements(elements_locked_44);
         if (self.holesMap() != null or self.arrayLengthFloor() > self.elementsItems().len) return false;
         for (inserts) |v| gcBarrier(self, v);
         if (inserts.len != 0) self.indexed_own_seen.store(true, .release);
@@ -3723,22 +3726,22 @@ pub const Object = struct {
 
     /// Whether dense array index `i` is a hole (absent).
     pub fn isHole(self: *const Object, i: usize) bool {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_45 = self.lockElements();
+        defer self.unlockElements(elements_locked_45);
         return self.isHoleUnlocked(i);
     }
 
     /// Mark dense index `i` as a hole.
     pub fn markHole(self: *Object, arena: std.mem.Allocator, i: usize) std.mem.Allocator.Error!void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_46 = self.lockElements();
+        defer self.unlockElements(elements_locked_46);
         try self.markHoleUnlocked(arena, i);
     }
 
     /// Clear the hole at index `i` (an assignment fills it).
     pub fn clearHole(self: *Object, i: usize) void {
-        self.lockElements();
-        defer self.unlockElements();
+        const elements_locked_47 = self.lockElements();
+        defer self.unlockElements(elements_locked_47);
         self.clearHoleUnlocked(i);
     }
 
@@ -4231,8 +4234,8 @@ pub const Object = struct {
         }
         if (self.is_array) {
             if (canonicalIndex(key)) |i| {
-                self.lockElements();
-                defer self.unlockElements();
+                const elements_locked_48 = self.lockElements();
+                defer self.unlockElements(elements_locked_48);
                 if (i < self.elementsItems().len) try self.markHoleUnlocked(arena, i);
             }
         }
@@ -5399,6 +5402,28 @@ test "Object backing lock pairs unlock with actual acquisition" {
 
     try std.testing.expect(o.backing_lock.tryLock());
     o.backing_lock.unlock();
+}
+
+test "Object element lock pairs unlock with actual acquisition" {
+    var o = Object{};
+
+    const prev = Object.element_locks_enabled.swap(false, .release);
+    const not_locked = o.lockElements();
+    try std.testing.expect(!not_locked);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    Object.element_locks_enabled.store(true, .release);
+    o.unlockElements(not_locked);
+
+    const locked = o.lockElements();
+    try std.testing.expect(locked);
+    try std.testing.expect(gc_runtime.inTraceSensitiveLock());
+    Object.element_locks_enabled.store(false, .release);
+    o.unlockElements(locked);
+    try std.testing.expect(!gc_runtime.inTraceSensitiveLock());
+    defer Object.element_locks_enabled.store(prev, .release);
+
+    try std.testing.expect(o.elements_lock.tryLock());
+    o.elements_lock.unlock();
 }
 
 test "Object.has_indexed_property atomic flag converges under concurrent set" {

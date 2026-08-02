@@ -285,8 +285,8 @@ const Serializer = struct {
     fn snapshotSetEntries(s: *Serializer, o: *value.Object) HostError![]Value {
         var list: std.ArrayListUnmanaged(Value) = .empty;
         errdefer list.deinit(s.w.gpa);
-        o.lockElements();
-        defer o.unlockElements();
+        const elements_locked_1 = o.lockElements();
+        defer o.unlockElements(elements_locked_1);
         for (o.elementsItems()) |entry| {
             if (entry.isObject() and entry.asObj().behavior.is_set_deleted) continue;
             try s.rootSnapshotValue(entry);
@@ -298,14 +298,14 @@ const Serializer = struct {
     fn snapshotMapEntries(s: *Serializer, o: *value.Object) HostError![]MapEntrySnapshot {
         var list: std.ArrayListUnmanaged(MapEntrySnapshot) = .empty;
         errdefer list.deinit(s.w.gpa);
-        o.lockElements();
-        defer o.unlockElements();
+        const elements_locked_2 = o.lockElements();
+        defer o.unlockElements(elements_locked_2);
         for (o.elementsItems()) |entry_v| {
             if (!entry_v.isObject()) return s.throwClone("DataCloneError: malformed Map entry");
             const entry = entry_v.asObj();
             {
-                entry.lockElements();
-                defer entry.unlockElements();
+                const elements_locked_3 = entry.lockElements();
+                defer entry.unlockElements(elements_locked_3);
                 if (entry.elementsItems().len == 0) continue; // deleted MapData slot
                 if (entry.elementsItems().len < 2) return s.throwClone("DataCloneError: malformed Map entry");
                 const k = entry.elementsItems()[0];
@@ -319,8 +319,8 @@ const Serializer = struct {
     }
 
     fn snapshotArrayElements(s: *Serializer, o: *value.Object) HostError!ArraySnapshot {
-        o.lockElements();
-        defer o.unlockElements();
+        const elements_locked_4 = o.lockElements();
+        defer o.unlockElements(elements_locked_4);
         const n = o.elementsItems().len;
         const elements = try s.w.gpa.alloc(Value, n);
         errdefer s.w.gpa.free(elements);

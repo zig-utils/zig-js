@@ -232,9 +232,9 @@ pub fn traceObject(o: *Object, v: anytype) void {
         // read during the (possibly concurrent) mark — nothing tears against a
         // mutator append, and no `&entry.key` can dangle when the buffer grows.
     } else {
-        if (concurrent) o.lockElements();
+        const elements_locked = if (concurrent) o.lockElements() else false;
         for (o.elementsItems(), 0..) |el, index| markValueIndex(v, index, el);
-        if (concurrent) o.unlockElements();
+        o.unlockElements(elements_locked);
     }
     markValueOpt(v, cold.boxed_primitive);
     markValueOpt(v, cold.async_context_callback);
@@ -248,10 +248,10 @@ pub fn traceObject(o: *Object, v: anytype) void {
             // Only `held` is a strong edge (mark it by value under the entry-storage
             // lock so a concurrent append can't tear the read). target/token are
             // weak — their liveness is decided by `isLive` at finish, not registered.
-            if (concurrent) o.lockElements();
+            const elements_locked = if (concurrent) o.lockElements() else false;
             if (state.finalization_records) |records|
                 for (records.items) |*record| markValue(v, record.held);
-            if (concurrent) o.unlockElements();
+            o.unlockElements(elements_locked);
         }
     }
 
@@ -884,8 +884,8 @@ pub fn traceObjectEphemeron(o: *Object, v: anytype) void {
 /// GIL-held paths (a dead key/target is exactly an unmarked managed cell).
 pub fn pruneDeadWeakEntries(o: *Object, heap: anytype) bool {
     if (!(o.is_weak and (o.is_map or o.is_set)) and !o.behavior.is_finalization_registry) return false;
-    o.lockElements();
-    defer o.unlockElements();
+    const elements_locked_1 = o.lockElements();
+    defer o.unlockElements(elements_locked_1);
 
     var cleanup_ready = false;
     if (o.is_weak and (o.is_map or o.is_set)) {

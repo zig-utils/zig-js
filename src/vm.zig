@@ -2670,9 +2670,9 @@ fn tryQuickObjectAllocationLoopMode(
         array.accessorsMap() != null or array.attrsMap() != null or
         array.has_indexed_property.load(.monotonic))
         return null;
-    if (parallel_sync) array.lockElements();
+    const elements_locked = if (parallel_sync) array.lockElements() else false;
     const dense_array = array.holesMap() == null and array.arrayLengthFloor() <= array.elementsItems().len;
-    if (parallel_sync) array.unlockElements();
+    array.unlockElements(elements_locked);
     if (!dense_array) return null;
     if (!frame.slots[counter_slot].isNumber() or !frame.slots[total_slot].isNumber() or
         !frame.slots[extra_slot].isNumber()) return null;
@@ -2991,8 +2991,8 @@ fn tryQuickArrayLoop(
             const array = array_value.asObj();
             if (!array.is_array or array.is_arguments or array.proxyHandler() != null or array.proxy_revoked)
                 break :quick null;
-            if (parallel_sync) array.lockElements();
-            defer if (parallel_sync) array.unlockElements();
+            const elements_locked = if (parallel_sync) array.lockElements() else false;
+            defer array.unlockElements(elements_locked);
             if (array.accessorsMap() != null or array.holesMap() != null or array.arrayLengthFloor() > array.elementsItems().len)
                 break :quick null;
             var index_value = frame.slots[index_slot];
