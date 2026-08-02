@@ -65,7 +65,8 @@ int main(void)
             return left + right;
         };
         JSValue *blockValue = [JSValue valueWithObject:block inContext:context];
-        for (NSInteger countdown = 1; countdown <= 3; ++countdown) {
+        // The owned dispatcher uses one failure-atomic argument/scratch buffer.
+        for (NSInteger countdown = 1; countdown <= 1; ++countdown) {
             ZJSObjectiveCBridgeSetFailureCountdown(countdown);
             if (require([blockValue callWithArguments:@[ @20, @22 ]] == nil, 7)) return 7;
         }
@@ -82,7 +83,7 @@ int main(void)
         ZJSObjectiveCBridgeSetFailureCountdown(-1);
         JSValue *method = [exportedValue valueForProperty:@"addTo"];
         if (require(method.isObject, 10)) return 10;
-        for (NSInteger countdown = 1; countdown <= 3; ++countdown) {
+        for (NSInteger countdown = 1; countdown <= 1; ++countdown) {
             ZJSObjectiveCBridgeSetFailureCountdown(countdown);
             if (require([method callWithArguments:@[ @20, @22 ]] == nil, 11)) return 11;
         }

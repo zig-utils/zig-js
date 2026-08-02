@@ -44,7 +44,6 @@ are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 The inventory deliberately records current violations instead of relabeling
 them as acceptable:
 
-- system libffi in Objective-C call lowering is owned by [#463](https://github.com/zig-utils/zig-js/issues/463);
 - the BunPress registry chain and Bun CI bootstrap are owned by [#464](https://github.com/zig-utils/zig-js/issues/464);
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by
@@ -52,6 +51,10 @@ them as acceptable:
 
 These entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
+
+The former system-libffi edge was removed by the owned Zig/assembly dispatcher
+tracked in [#463](https://github.com/zig-utils/zig-js/issues/463); it is no
+longer an inventory entry or link dependency.
 
 ## Changing a dependency edge
 

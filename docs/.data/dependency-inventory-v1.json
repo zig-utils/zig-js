@@ -67,18 +67,6 @@
       "runtime_semantics": "Implements the declared Objective-C/Foundation host binding; it is not a JavaScript engine."
     },
     {
-      "id": "libffi",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
-      "scope": "macOS Objective-C bridge tests",
-      "locator": "system libffi",
-      "pin": "unowned system library",
-      "license": "MIT",
-      "affects_runtime_semantics": true,
-      "runtime_semantics": "Currently lowers Objective-C native calls; removal is mandatory.",
-      "migration_issue": 463
-    },
-    {
       "id": "system-javascriptcore",
       "class": "checksum_pinned_oracle",
       "status": "allowed",
@@ -203,8 +191,7 @@
       { "name": "wasm_test_options", "external": false }
     ],
     "build_links": [
-      { "kind": "framework", "name": "Foundation", "count": 2, "edge": "macos-sdk-foundation" },
-      { "kind": "system_library", "name": "ffi", "count": 2, "edge": "libffi" },
+      { "kind": "framework", "name": "Foundation", "count": 4, "edge": "macos-sdk-foundation" },
       { "kind": "framework", "name": "JavaScriptCore", "count": 1, "edge": "system-javascriptcore" }
     ],
     "system_commands": [

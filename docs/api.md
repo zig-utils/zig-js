@@ -452,7 +452,10 @@ from `JSContext.h`, `JSValue.h`, `JSVirtualMachine.h`, `JSManagedValue.h`, and
 inventory on every host; `zig build test-objc-api-headers` compiles the umbrella
 under the real macOS Objective-C ARC/blocks frontend. On macOS,
 `zig build test-objc-api` also compiles, links, and runs a host against the
-zig-js runtime classes. A live SDK comparison is:
+zig-js runtime classes. Typed blocks and `JSExport` calls use the owned
+Zig/AArch64/x86-64 dispatcher, not libffi; `zig build test-objc-abi-dispatch`
+checks its register, stack, aggregate-return, exception, and reentry contracts.
+A live SDK comparison is:
 
 ```sh
 python3 tools/verify-objc-api.py \

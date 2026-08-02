@@ -31,15 +31,24 @@ Compile, link, and execute the implemented runtime slice on macOS:
 zig build test-objc-api
 ```
 
-The installed static archive includes the Objective-C bridge. A manual
-Objective-C host link therefore needs both Foundation and the system `libffi`
-used for typed block calls:
+The installed static archive includes the Objective-C bridge and the owned
+Darwin native-call dispatcher. A manual Objective-C host link therefore needs
+Foundation, but no foreign call library:
 
 ```sh
 xcrun clang -fobjc-arc -fblocks host.m \
-  -I zig-out/include -L zig-out/lib -lzig-js -lffi \
+  -I zig-out/include -L zig-out/lib -lzig-js \
   -framework Foundation -o host
 ```
+
+`src/objc_abi_dispatch.zig` classifies the pinned scalar, pointer, object,
+selector, class, `CGPoint`, `CGSize`, `CGRect`, and `NSRange` signatures. Owned
+AArch64 and x86-64 assembly stubs load the classified registers and stack,
+invoke the target, and capture the return convention. Unsupported encodings
+fail before invocation; there is no generated trampoline or fallback library.
+`zig build test-objc-abi-dispatch` exercises integer and floating-point register
+exhaustion, stack spill, aggregate arguments and returns, pointers, nested
+dispatch, exception unwinding, descriptor layout, and failure before entry.
 
 Compare the completed Foundation conversion rows with system JavaScriptCore:
 
@@ -51,6 +60,7 @@ Run the lifetime and completion evidence separately or as one matrix:
 
 ```sh
 zig build test-objc-api-lifetime # 200 VM/context/autorelease teardown cycles
+zig build test-objc-abi-dispatch # AArch64/x86-64 descriptor and call ABI
 zig build test-objc-api-sanitize # ASan + UBSan
 zig build test-objc-api-leaks    # Apple leaks: must report 0 leaked bytes
 zig build test-objc-api-faults   # deterministic allocation/registration rollback

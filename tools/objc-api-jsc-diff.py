@@ -58,7 +58,7 @@ def main() -> None:
         reference = temporary / "system-jsc"
         actual = temporary / "zig-js"
         compile_fixture(reference, ["-framework", "JavaScriptCore"])
-        compile_fixture(actual, ["-I", str(ROOT / "include"), sys.argv[1], "-lffi"])
+        compile_fixture(actual, ["-I", str(ROOT / "include"), sys.argv[1]])
         expected_output = run([str(reference)])
         actual_output = run([str(actual)])
 

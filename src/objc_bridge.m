@@ -1,9 +1,10 @@
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <objc/runtime.h>
 #import <zig-js/Extensions.h>
-#include <ffi/ffi.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "objc_abi_dispatch.h"
 
 #if defined(ZJS_OBJC_BRIDGE_FAULT_INJECTION)
 static NSInteger ZJSBridgeFailureCountdown = -1;
@@ -275,33 +276,6 @@ typedef struct {
     void *descriptor;
 } ZJSBlockLiteral;
 
-typedef union {
-    int8_t sint8;
-    uint8_t uint8;
-    int16_t sint16;
-    uint16_t uint16;
-    int32_t sint32;
-    uint32_t uint32;
-    int64_t sint64;
-    uint64_t uint64;
-    float float32;
-    double float64;
-    void *pointer;
-    CGPoint point;
-    CGSize size;
-    CGRect rect;
-    NSRange range;
-} ZJSFFIStorage;
-
-static ffi_type *ZJSPointElements[] = { &ffi_type_double, &ffi_type_double, NULL };
-static ffi_type *ZJSSizeElements[] = { &ffi_type_double, &ffi_type_double, NULL };
-static ffi_type *ZJSRectElements[] = { NULL, NULL, NULL };
-static ffi_type *ZJSRangeElements[] = { &ffi_type_uint64, &ffi_type_uint64, NULL };
-static ffi_type ZJSPointType = { 0, 0, FFI_TYPE_STRUCT, ZJSPointElements };
-static ffi_type ZJSSizeType = { 0, 0, FFI_TYPE_STRUCT, ZJSSizeElements };
-static ffi_type ZJSRectType = { 0, 0, FFI_TYPE_STRUCT, ZJSRectElements };
-static ffi_type ZJSRangeType = { 0, 0, FFI_TYPE_STRUCT, ZJSRangeElements };
-
 static const char *ZJSSkipTypeQualifiers(const char *type)
 {
     while (*type && strchr("rnNoORV", *type))
@@ -309,42 +283,48 @@ static const char *ZJSSkipTypeQualifiers(const char *type)
     return type;
 }
 
-static ffi_type *ZJSFFIType(const char *rawType)
+static BOOL ZJSNativeKindForType(const char *rawType, ZJSNativeKind *kind)
 {
     const char *type = ZJSSkipTypeQualifiers(rawType);
     switch (*type) {
-    case 'v': return &ffi_type_void;
-    case 'c': return &ffi_type_sint8;
-    case 'C': return &ffi_type_uint8;
-    case 's': return &ffi_type_sint16;
-    case 'S': return &ffi_type_uint16;
-    case 'i': return &ffi_type_sint32;
-    case 'I': return &ffi_type_uint32;
-    case 'l': return sizeof(long) == 8 ? &ffi_type_sint64 : &ffi_type_sint32;
-    case 'L': return sizeof(unsigned long) == 8 ? &ffi_type_uint64 : &ffi_type_uint32;
-    case 'q': return &ffi_type_sint64;
-    case 'Q': return &ffi_type_uint64;
-    case 'f': return &ffi_type_float;
-    case 'd': return &ffi_type_double;
-    case 'B': return &ffi_type_uint8;
+    case 'v': *kind = ZJSNativeVoid; return YES;
+    case 'c': *kind = ZJSNativeSInt8; return YES;
+    case 'C': *kind = ZJSNativeUInt8; return YES;
+    case 's': *kind = ZJSNativeSInt16; return YES;
+    case 'S': *kind = ZJSNativeUInt16; return YES;
+    case 'i': *kind = ZJSNativeSInt32; return YES;
+    case 'I': *kind = ZJSNativeUInt32; return YES;
+    case 'l': *kind = sizeof(long) == 8 ? ZJSNativeSInt64 : ZJSNativeSInt32; return YES;
+    case 'L': *kind = sizeof(unsigned long) == 8 ? ZJSNativeUInt64 : ZJSNativeUInt32; return YES;
+    case 'q': *kind = ZJSNativeSInt64; return YES;
+    case 'Q': *kind = ZJSNativeUInt64; return YES;
+    case 'f': *kind = ZJSNativeFloat; return YES;
+    case 'd': *kind = ZJSNativeDouble; return YES;
+    case 'B': *kind = ZJSNativeUInt8; return YES;
     case '@':
     case '#':
     case ':':
     case '^':
-    case '*': return &ffi_type_pointer;
+    case '*': *kind = ZJSNativePointer; return YES;
     case '{':
-        ZJSRectElements[0] = &ZJSPointType;
-        ZJSRectElements[1] = &ZJSSizeType;
-        if (!strcmp(type, @encode(CGPoint)))
-            return &ZJSPointType;
-        if (!strcmp(type, @encode(CGSize)))
-            return &ZJSSizeType;
-        if (!strcmp(type, @encode(CGRect)))
-            return &ZJSRectType;
-        if (!strcmp(type, @encode(NSRange)))
-            return &ZJSRangeType;
-        return NULL;
-    default: return NULL;
+        if (!strcmp(type, @encode(CGPoint))) {
+            *kind = ZJSNativePoint;
+            return YES;
+        }
+        if (!strcmp(type, @encode(CGSize))) {
+            *kind = ZJSNativeSize;
+            return YES;
+        }
+        if (!strcmp(type, @encode(CGRect))) {
+            *kind = ZJSNativeRect;
+            return YES;
+        }
+        if (!strcmp(type, @encode(NSRange))) {
+            *kind = ZJSNativeRange;
+            return YES;
+        }
+        return NO;
+    default: return NO;
     }
 }
 
@@ -361,7 +341,7 @@ static const char *ZJSBlockSignature(id block)
 }
 
 static void ZJSPrepareFFIArgument(JSValue *value, const char *rawType,
-                                  ZJSFFIStorage *storage,
+                                  ZJSNativeStorage *storage,
                                   NSMutableArray *retainedObjects)
 {
     const char *type = ZJSSkipTypeQualifiers(rawType);
@@ -392,6 +372,16 @@ static void ZJSPrepareFFIArgument(JSValue *value, const char *rawType,
         storage->pointer = NSSelectorFromString(selectorName);
         return;
     }
+    case '^':
+        storage->pointer = (void *)(uintptr_t)value.toUInt64;
+        return;
+    case '*': {
+        NSString *string = value.toString;
+        if (string)
+            [retainedObjects addObject:string];
+        storage->pointer = (void *)string.UTF8String;
+        return;
+    }
     case '{':
         if (!strcmp(type, @encode(CGPoint))) {
             storage->point = value.toPoint;
@@ -416,7 +406,7 @@ static void ZJSPrepareFFIArgument(JSValue *value, const char *rawType,
 }
 
 static JSValue *ZJSValueFromFFIReturn(JSContext *context, const char *rawType,
-                                      const ZJSFFIStorage *storage)
+                                      const ZJSNativeStorage *storage)
 {
     const char *type = ZJSSkipTypeQualifiers(rawType);
     switch (*type) {
@@ -437,6 +427,12 @@ static JSValue *ZJSValueFromFFIReturn(JSContext *context, const char *rawType,
     case '@':
     case '#': return [JSValue valueWithObject:(__bridge id)storage->pointer inContext:context];
     case ':': return [JSValue valueWithObject:NSStringFromSelector((SEL)storage->pointer)
+                                     inContext:context];
+    case '^': return [JSValue valueWithDouble:(double)(uintptr_t)storage->pointer
+                                     inContext:context];
+    case '*': return [JSValue valueWithObject:storage->pointer
+                         ? [NSString stringWithUTF8String:storage->pointer]
+                         : nil
                                      inContext:context];
     case '{':
         if (!strcmp(type, @encode(CGPoint)))
@@ -468,15 +464,14 @@ static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
 
     NSMethodSignature *signature = [NSMethodSignature signatureWithObjCTypes:signatureText];
     NSUInteger nativeCount = signature.numberOfArguments;
-    ffi_type **argumentTypes = ZJSBridgeCalloc(nativeCount, sizeof(ffi_type *));
-    void **argumentPointers = ZJSBridgeCalloc(nativeCount, sizeof(void *));
-    ZJSFFIStorage *argumentStorage = ZJSBridgeCalloc(nativeCount, sizeof(ZJSFFIStorage));
-    if (!argumentTypes || !argumentPointers || !argumentStorage) {
-        free(argumentTypes);
-        free(argumentPointers);
-        free(argumentStorage);
+    if (nativeCount > (SIZE_MAX - 16) / (64 + sizeof(ZJSNativeArgument)))
         return NULL;
-    }
+    size_t scratchCapacity = nativeCount * 64 + 16;
+    size_t allocationSize = nativeCount * sizeof(ZJSNativeArgument) + scratchCapacity;
+    ZJSNativeArgument *nativeArguments = ZJSBridgeCalloc(1, allocationSize);
+    if (!nativeArguments)
+        return NULL;
+    void *scratch = nativeArguments + nativeCount;
 
     NSMutableArray *retainedObjects = [NSMutableArray array];
     NSMutableArray<JSValue *> *callbackArguments = [NSMutableArray array];
@@ -485,31 +480,24 @@ static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
     NSMutableDictionary *threadDictionary = NSThread.currentThread.threadDictionary;
     JSValue *result = nil;
     @try {
-        argumentTypes[0] = &ffi_type_pointer;
-        argumentStorage[0].pointer = (__bridge void *)block;
-        argumentPointers[0] = &argumentStorage[0];
+        nativeArguments[0].kind = ZJSNativePointer;
+        nativeArguments[0].value.pointer = (__bridge void *)block;
         for (NSUInteger index = 1; index < nativeCount; ++index) {
             JSValue *value = index - 1 < argumentCount
                 ? [JSValue valueWithJSValueRef:arguments[index - 1] inContext:context]
                 : [JSValue valueWithUndefinedInContext:context];
             [callbackArguments addObject:value];
             const char *type = [signature getArgumentTypeAtIndex:index];
-            argumentTypes[index] = ZJSFFIType(type);
-            if (!argumentTypes[index])
+            if (!ZJSNativeKindForType(type, &nativeArguments[index].kind))
                 [NSException raise:NSInvalidArgumentException
                             format:@"Unsupported Objective-C block argument encoding %s", type];
-            ZJSPrepareFFIArgument(value, type, &argumentStorage[index], retainedObjects);
-            argumentPointers[index] = &argumentStorage[index];
+            ZJSPrepareFFIArgument(value, type, &nativeArguments[index].value, retainedObjects);
         }
-        ffi_type *returnType = ZJSFFIType(signature.methodReturnType);
-        if (!returnType)
+        ZJSNativeKind returnKind;
+        if (!ZJSNativeKindForType(signature.methodReturnType, &returnKind))
             [NSException raise:NSInvalidArgumentException
                         format:@"Unsupported Objective-C block return encoding %s",
                                signature.methodReturnType];
-        ffi_cif callInterface;
-        if (ffi_prep_cif(&callInterface, FFI_DEFAULT_ABI, (unsigned)nativeCount,
-                         returnType, argumentTypes) != FFI_OK)
-            [NSException raise:NSInvalidArgumentException format:@"Unable to prepare Objective-C block call"];
 
         ZJSCallbackState *callbackState = [ZJSCallbackState new];
         callbackState.context = context;
@@ -521,10 +509,21 @@ static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
         context.exception = nil;
         threadDictionary[ZJSCallbackStateThreadKey] = callbackState;
 
-        ZJSFFIStorage returnStorage = { 0 };
+        ZJSNativeStorage returnStorage = { 0 };
         ZJSBlockLiteral *literal = (__bridge ZJSBlockLiteral *)block;
-        ffi_call(&callInterface, FFI_FN(literal->invoke), &returnStorage,
-                 argumentPointers);
+        ZJSNativeCall call = {
+            .function = (void *)literal->invoke,
+            .arguments = nativeArguments,
+            .argumentCount = nativeCount,
+            .returnKind = returnKind,
+            .scratch = scratch,
+            .scratchCapacity = scratchCapacity,
+            .result = &returnStorage,
+        };
+        ZJSNativeCallStatus status = ZJSObjCNativeCall(&call);
+        if (status != ZJSNativeCallOK)
+            [NSException raise:NSInvalidArgumentException
+                        format:@"Unable to lower Objective-C block call (status %d)", status];
         if (context.exception) {
             if (exception)
                 *exception = context.exception.JSValueRef;
@@ -543,9 +542,7 @@ static JSValueRef ZJSBlockCall(JSContextRef contextRef, JSObjectRef functionRef,
             threadDictionary[ZJSCallbackStateThreadKey] = previousState;
         else
             [threadDictionary removeObjectForKey:ZJSCallbackStateThreadKey];
-        free(argumentTypes);
-        free(argumentPointers);
-        free(argumentStorage);
+        free(nativeArguments);
     }
     return result.JSValueRef;
 }
@@ -772,15 +769,14 @@ static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
     if (!signature)
         return nil;
     NSUInteger nativeCount = signature.numberOfArguments;
-    ffi_type **argumentTypes = ZJSBridgeCalloc(nativeCount, sizeof(ffi_type *));
-    void **argumentPointers = ZJSBridgeCalloc(nativeCount, sizeof(void *));
-    ZJSFFIStorage *argumentStorage = ZJSBridgeCalloc(nativeCount, sizeof(ZJSFFIStorage));
-    if (!argumentTypes || !argumentPointers || !argumentStorage) {
-        free(argumentTypes);
-        free(argumentPointers);
-        free(argumentStorage);
+    if (nativeCount > (SIZE_MAX - 16) / (64 + sizeof(ZJSNativeArgument)))
         return nil;
-    }
+    size_t scratchCapacity = nativeCount * 64 + 16;
+    size_t allocationSize = nativeCount * sizeof(ZJSNativeArgument) + scratchCapacity;
+    ZJSNativeArgument *nativeArguments = ZJSBridgeCalloc(1, allocationSize);
+    if (!nativeArguments)
+        return nil;
+    void *scratch = nativeArguments + nativeCount;
 
     NSMutableArray *retainedObjects = [NSMutableArray array];
     JSValue *previousException = context.exception;
@@ -788,33 +784,25 @@ static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
     NSMutableDictionary *threadDictionary = NSThread.currentThread.threadDictionary;
     JSValue *result = nil;
     @try {
-        argumentTypes[0] = &ffi_type_pointer;
-        argumentStorage[0].pointer = (__bridge void *)target;
-        argumentPointers[0] = &argumentStorage[0];
-        argumentTypes[1] = &ffi_type_pointer;
-        argumentStorage[1].pointer = selector;
-        argumentPointers[1] = &argumentStorage[1];
+        nativeArguments[0].kind = ZJSNativePointer;
+        nativeArguments[0].value.pointer = (__bridge void *)target;
+        nativeArguments[1].kind = ZJSNativePointer;
+        nativeArguments[1].value.pointer = selector;
         for (NSUInteger index = 2; index < nativeCount; ++index) {
             JSValue *value = index - 2 < arguments.count
                 ? arguments[index - 2]
                 : [JSValue valueWithUndefinedInContext:context];
             const char *type = [signature getArgumentTypeAtIndex:index];
-            argumentTypes[index] = ZJSFFIType(type);
-            if (!argumentTypes[index])
+            if (!ZJSNativeKindForType(type, &nativeArguments[index].kind))
                 [NSException raise:NSInvalidArgumentException
                             format:@"Unsupported JSExport argument encoding %s", type];
-            ZJSPrepareFFIArgument(value, type, &argumentStorage[index], retainedObjects);
-            argumentPointers[index] = &argumentStorage[index];
+            ZJSPrepareFFIArgument(value, type, &nativeArguments[index].value, retainedObjects);
         }
-        ffi_type *returnType = ZJSFFIType(signature.methodReturnType);
-        if (!returnType)
+        ZJSNativeKind returnKind;
+        if (!ZJSNativeKindForType(signature.methodReturnType, &returnKind))
             [NSException raise:NSInvalidArgumentException
                         format:@"Unsupported JSExport return encoding %s",
                                signature.methodReturnType];
-        ffi_cif callInterface;
-        if (ffi_prep_cif(&callInterface, FFI_DEFAULT_ABI, (unsigned)nativeCount,
-                         returnType, argumentTypes) != FFI_OK)
-            [NSException raise:NSInvalidArgumentException format:@"Unable to prepare JSExport call"];
 
         ZJSCallbackState *callbackState = [ZJSCallbackState new];
         callbackState.context = context;
@@ -824,10 +812,21 @@ static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
         context.exception = nil;
         threadDictionary[ZJSCallbackStateThreadKey] = callbackState;
 
-        ZJSFFIStorage returnStorage = { 0 };
+        ZJSNativeStorage returnStorage = { 0 };
         IMP implementation = [target methodForSelector:selector];
-        ffi_call(&callInterface, FFI_FN(implementation), &returnStorage,
-                 argumentPointers);
+        ZJSNativeCall call = {
+            .function = (void *)implementation,
+            .arguments = nativeArguments,
+            .argumentCount = nativeCount,
+            .returnKind = returnKind,
+            .scratch = scratch,
+            .scratchCapacity = scratchCapacity,
+            .result = &returnStorage,
+        };
+        ZJSNativeCallStatus status = ZJSObjCNativeCall(&call);
+        if (status != ZJSNativeCallOK)
+            [NSException raise:NSInvalidArgumentException
+                        format:@"Unable to lower JSExport call (status %d)", status];
         if (context.exception) {
             if (exception)
                 *exception = context.exception.JSValueRef;
@@ -846,9 +845,7 @@ static JSValue *ZJSInvokeSelector(JSContext *context, id target, SEL selector,
             threadDictionary[ZJSCallbackStateThreadKey] = previousState;
         else
             [threadDictionary removeObjectForKey:ZJSCallbackStateThreadKey];
-        free(argumentTypes);
-        free(argumentPointers);
-        free(argumentStorage);
+        free(nativeArguments);
     }
     return result;
 }

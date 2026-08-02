@@ -97,7 +97,24 @@ pub fn build(b: *std.Build) void {
     const bun_private_lib = if (private_abi_is_bun) lib else fixture_private_lib;
     var installed_library: ?std.Build.LazyPath = null;
     var objc_bridge_object: ?std.Build.LazyPath = null;
+    var objc_dispatch_object: ?*std.Build.Step.Compile = null;
     if (target.result.os.tag == .macos) {
+        const dispatch = b.addObject(.{
+            .name = "zig-js-objc-dispatch",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/objc_abi_dispatch.zig"),
+                .target = target,
+                .optimize = optimize,
+                .sanitize_thread = tsan,
+            }),
+        });
+        switch (target.result.cpu.arch) {
+            .aarch64 => dispatch.root_module.addAssemblyFile(b.path("src/objc_abi_aarch64.S")),
+            .x86_64 => dispatch.root_module.addAssemblyFile(b.path("src/objc_abi_x86_64.S")),
+            else => std.debug.panic("Objective-C bridge supports only macOS AArch64 and x86-64", .{}),
+        }
+        objc_dispatch_object = dispatch;
+
         const compile_objc_bridge = b.addSystemCommand(&.{
             "xcrun",      "--sdk",    "macosx",                         "clang",
             "-fobjc-arc", "-fblocks", "-Wno-incomplete-implementation",
@@ -115,6 +132,7 @@ pub fn build(b: *std.Build) void {
         installed_library = merge_library.addOutputFileArg("libzig-js.a");
         merge_library.addArtifactArg(lib);
         merge_library.addFileArg(objc_bridge_object.?);
+        merge_library.addArtifactArg(objc_dispatch_object.?);
         b.getInstallStep().dependOn(&b.addInstallLibFile(installed_library.?, "libzig-js.a").step);
     } else {
         b.installArtifact(lib);
@@ -219,12 +237,56 @@ pub fn build(b: *std.Build) void {
         const objc_header_step = b.step("test-objc-api-headers", "Compile the Objective-C bridge headers on macOS");
         objc_header_step.dependOn(&objc_header_smoke.step);
 
+        const objc_abi_dispatch_smoke = b.addExecutable(.{
+            .name = "objc-abi-dispatch-smoke",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .sanitize_thread = tsan,
+            }),
+        });
+        objc_abi_dispatch_smoke.root_module.addCSourceFile(.{
+            .file = b.path("tests/objc_abi_dispatch_smoke.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        objc_abi_dispatch_smoke.root_module.addIncludePath(b.path("src"));
+        objc_abi_dispatch_smoke.root_module.addObjectFile(objc_dispatch_object.?.getEmittedBin());
+        objc_abi_dispatch_smoke.root_module.linkFramework("Foundation", .{});
+        const run_objc_abi_dispatch_smoke = b.addRunArtifact(objc_abi_dispatch_smoke);
+        const objc_abi_dispatch_step = b.step("test-objc-abi-dispatch", "Exercise owned Objective-C ABI register, stack, aggregate, exception, and reentry lowering");
+        objc_abi_dispatch_step.dependOn(&run_objc_abi_dispatch_smoke.step);
+
+        const objc_abi_benchmark = b.addExecutable(.{
+            .name = "objc-abi-benchmark",
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = .ReleaseFast,
+                .link_libc = true,
+            }),
+        });
+        objc_abi_benchmark.root_module.addCSourceFile(.{
+            .file = b.path("bench/objc_abi_dispatch.m"),
+            .flags = &.{ "-fobjc-arc", "-fblocks" },
+        });
+        objc_abi_benchmark.root_module.addIncludePath(b.path("include"));
+        objc_abi_benchmark.root_module.addObjectFile(installed_library.?);
+        objc_abi_benchmark.root_module.linkFramework("Foundation", .{});
+        const install_objc_abi_benchmark = b.addInstallArtifact(objc_abi_benchmark, .{});
+        const objc_abi_benchmark_bin_step = b.step("objc-abi-benchmark-bin", "Build the focused Objective-C block/JSExport dispatcher benchmark");
+        objc_abi_benchmark_bin_step.dependOn(&install_objc_abi_benchmark.step);
+        const run_objc_abi_benchmark = b.addRunArtifact(objc_abi_benchmark);
+        run_objc_abi_benchmark.addArgs(&.{ "single", "block", "200000", "1" });
+        const objc_abi_benchmark_step = b.step("objc-abi-benchmark", "Run the focused Objective-C dispatcher benchmark");
+        objc_abi_benchmark_step.dependOn(&run_objc_abi_benchmark.step);
+
         const objc_runtime_smoke = b.addExecutable(.{
             .name = "objc-api-runtime-smoke",
             .root_module = b.createModule(.{
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .sanitize_thread = tsan,
             }),
         });
         objc_runtime_smoke.root_module.addCSourceFile(.{
@@ -234,7 +296,6 @@ pub fn build(b: *std.Build) void {
         objc_runtime_smoke.root_module.addIncludePath(b.path("include"));
         objc_runtime_smoke.root_module.addObjectFile(installed_library.?);
         objc_runtime_smoke.root_module.linkFramework("Foundation", .{});
-        objc_runtime_smoke.root_module.linkSystemLibrary("ffi", .{});
         const run_objc_runtime_smoke = b.addRunArtifact(objc_runtime_smoke);
         run_objc_runtime_smoke.step.dependOn(&objc_api_audit_cmd.step);
         const objc_runtime_step = b.step("test-objc-api", "Compile, link, and run the Objective-C bridge host");
@@ -246,6 +307,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .link_libc = true,
+                .sanitize_thread = tsan,
             }),
         });
         objc_lifetime_stress.root_module.addCSourceFile(.{
@@ -255,7 +317,6 @@ pub fn build(b: *std.Build) void {
         objc_lifetime_stress.root_module.addIncludePath(b.path("include"));
         objc_lifetime_stress.root_module.addObjectFile(installed_library.?);
         objc_lifetime_stress.root_module.linkFramework("Foundation", .{});
-        objc_lifetime_stress.root_module.linkSystemLibrary("ffi", .{});
         const run_objc_lifetime_stress = b.addRunArtifact(objc_lifetime_stress);
         run_objc_lifetime_stress.step.dependOn(&objc_api_audit_cmd.step);
         const objc_lifetime_step = b.step("test-objc-api-lifetime", "Stress Objective-C VM, wrapper, managed-reference, and autorelease teardown");
@@ -270,7 +331,8 @@ pub fn build(b: *std.Build) void {
         objc_sanitized_stress.addFileArg(b.path("tests/objc_api_lifetime_stress.m"));
         objc_sanitized_stress.addFileArg(b.path("src/objc_bridge.m"));
         objc_sanitized_stress.addArtifactArg(lib);
-        objc_sanitized_stress.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
+        objc_sanitized_stress.addArtifactArg(objc_dispatch_object.?);
+        objc_sanitized_stress.addArgs(&.{ "-framework", "Foundation", "-o" });
         const objc_sanitized_executable = objc_sanitized_stress.addOutputFileArg("objc-api-lifetime-sanitized");
         const run_objc_sanitized_stress = b.addSystemCommand(&.{"env"});
         run_objc_sanitized_stress.addFileArg(objc_sanitized_executable);
@@ -291,7 +353,8 @@ pub fn build(b: *std.Build) void {
         objc_fault_injection.addFileArg(b.path("tests/objc_api_fault_injection.m"));
         objc_fault_injection.addFileArg(b.path("src/objc_bridge.m"));
         objc_fault_injection.addArtifactArg(lib);
-        objc_fault_injection.addArgs(&.{ "-lffi", "-framework", "Foundation", "-o" });
+        objc_fault_injection.addArtifactArg(objc_dispatch_object.?);
+        objc_fault_injection.addArgs(&.{ "-framework", "Foundation", "-o" });
         const objc_fault_executable = objc_fault_injection.addOutputFileArg("objc-api-fault-injection");
         const run_objc_fault_injection = b.addSystemCommand(&.{"env"});
         run_objc_fault_injection.addFileArg(objc_fault_executable);
@@ -305,6 +368,7 @@ pub fn build(b: *std.Build) void {
 
         const objc_evidence_step = b.step("test-objc-api-evidence", "Run the complete Objective-C bridge evidence matrix");
         objc_evidence_step.dependOn(&objc_header_smoke.step);
+        objc_evidence_step.dependOn(&run_objc_abi_dispatch_smoke.step);
         objc_evidence_step.dependOn(&run_objc_runtime_smoke.step);
         objc_evidence_step.dependOn(&objc_jsc_diff_cmd.step);
         objc_evidence_step.dependOn(&run_objc_lifetime_stress.step);
