@@ -7,6 +7,7 @@
 const std = @import("std");
 
 const inventory_path = "docs/.data/dependency-inventory-v1.json";
+const tool_inventory_path = "docs/.data/tool-migration-inventory-v1.json";
 const max_source_bytes = 16 * 1024 * 1024;
 
 const DependencyClass = enum {
@@ -81,6 +82,38 @@ const Inventory = struct {
     boundaries: Boundaries,
 };
 
+const ToolRuntime = enum { python, javascript, typescript, shell };
+const MigrationTarget = enum { in_tree_zig, owned_zig_package, retain_bootstrap_glue };
+
+const ContractProfile = struct {
+    id: []const u8,
+    exit_contract: []const u8,
+    ordering: []const u8,
+    diagnostics: []const u8,
+    schema: []const u8,
+    network: []const u8,
+};
+
+const ToolContract = struct {
+    path: []const u8,
+    runtime: ToolRuntime,
+    role: []const u8,
+    contract_profile: []const u8,
+    inputs: []const []const u8,
+    outputs: []const []const u8,
+    subprocesses: []const []const u8,
+    callers: []const []const u8,
+    migration_target: MigrationTarget,
+};
+
+const ToolMigrationInventory = struct {
+    schema_version: u32,
+    policy_id: []const u8,
+    owner_issue: u32,
+    contract_profiles: []const ContractProfile,
+    tools: []const ToolContract,
+};
+
 fn fail(comptime fmt: []const u8, args: anytype) error{DependencyAuditFailed} {
     std.debug.print("dependency audit: " ++ fmt ++ "\n", args);
     return error.DependencyAuditFailed;
@@ -98,6 +131,52 @@ fn count(haystack: []const u8, needle: []const u8) usize {
 
 fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_source_bytes));
+}
+
+fn nonEmptyStrings(values: []const []const u8) bool {
+    if (values.len == 0) return false;
+    for (values) |value| if (value.len == 0) return false;
+    return true;
+}
+
+fn expectedRuntime(path: []const u8) ?ToolRuntime {
+    if (std.mem.endsWith(u8, path, ".py")) return .python;
+    if (std.mem.endsWith(u8, path, ".mjs")) return .javascript;
+    if (std.mem.endsWith(u8, path, ".ts")) return .typescript;
+    if (std.mem.endsWith(u8, path, ".sh")) return .shell;
+    return null;
+}
+
+fn profileExists(inventory: ToolMigrationInventory, id: []const u8) bool {
+    for (inventory.contract_profiles) |profile| {
+        if (std.mem.eql(u8, profile.id, id)) return true;
+    }
+    return false;
+}
+
+fn toolIndex(inventory: ToolMigrationInventory, path: []const u8) ?usize {
+    for (inventory.tools, 0..) |tool, i| {
+        if (std.mem.eql(u8, tool.path, path)) return i;
+    }
+    return null;
+}
+
+fn callerListed(tool: ToolContract, path: []const u8) bool {
+    for (tool.callers) |caller| if (std.mem.eql(u8, caller, path)) return true;
+    return false;
+}
+
+fn isFilenameByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-' or byte == '.';
+}
+
+fn scriptExtensionLength(source: []const u8, dot: usize) ?usize {
+    for ([_][]const u8{ ".py", ".mjs", ".ts", ".sh" }) |extension| {
+        if (!std.mem.startsWith(u8, source[dot..], extension)) continue;
+        const end = dot + extension.len;
+        if (end == source.len or (!std.ascii.isAlphanumeric(source[end]) and source[end] != '_' and source[end] != '-')) return extension.len;
+    }
+    return null;
 }
 
 fn edgeExists(inventory: Inventory, id: []const u8) bool {
@@ -291,8 +370,7 @@ fn auditPackage(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void 
                 }
             }
             if (!found) return fail("owned package '{s}' has no matching exact CI checkout", .{item.name});
-        }
-        else if (std.mem.indexOf(u8, lock, item.integrity) == null) {
+        } else if (std.mem.indexOf(u8, lock, item.integrity) == null) {
             return fail("integrity evidence for '{s}' drifted in {s}", .{ item.name, item.lockfile });
         }
     }
@@ -372,6 +450,116 @@ fn auditScripts(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void 
     }
     if (network_count != inventory.boundaries.network_capable_scripts.len)
         return fail("network-capable script inventory contains a stale entry", .{});
+}
+
+fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: ToolMigrationInventory) !void {
+    if (inventory.schema_version != 1) return fail("unsupported tool-migration schema {d}", .{inventory.schema_version});
+    if (!std.mem.eql(u8, inventory.policy_id, "zig-js-tool-migration-v1"))
+        return fail("unexpected tool-migration policy id '{s}'", .{inventory.policy_id});
+    if (inventory.owner_issue != 497) return fail("unexpected tool-migration owner issue #{d}", .{inventory.owner_issue});
+
+    for (inventory.contract_profiles, 0..) |profile, i| {
+        if (profile.id.len == 0 or profile.exit_contract.len == 0 or profile.ordering.len == 0 or profile.diagnostics.len == 0 or profile.schema.len == 0 or profile.network.len == 0)
+            return fail("tool contract profile {d} has an empty required field", .{i});
+        for (inventory.contract_profiles[0..i]) |prior| {
+            if (std.mem.eql(u8, prior.id, profile.id)) return fail("duplicate tool contract profile '{s}'", .{profile.id});
+        }
+    }
+
+    for (inventory.tools, 0..) |tool, i| {
+        if (tool.path.len == 0 or tool.role.len == 0 or !nonEmptyStrings(tool.inputs) or !nonEmptyStrings(tool.outputs))
+            return fail("tool contract {d} has an empty required field", .{i});
+        if (tool.subprocesses.len != 0 and !nonEmptyStrings(tool.subprocesses))
+            return fail("tool '{s}' has an empty subprocess", .{tool.path});
+        if (!profileExists(inventory, tool.contract_profile))
+            return fail("tool '{s}' references unknown contract profile '{s}'", .{ tool.path, tool.contract_profile });
+        const runtime = expectedRuntime(tool.path) orelse return fail("tool '{s}' has an unsupported extension", .{tool.path});
+        if (runtime != tool.runtime) return fail("tool '{s}' runtime does not match its extension", .{tool.path});
+        if (!std.mem.startsWith(u8, tool.path, "tools/") and !std.mem.startsWith(u8, tool.path, "scripts/"))
+            return fail("tool '{s}' is outside the audited roots", .{tool.path});
+        for (inventory.tools[0..i]) |prior| {
+            if (std.mem.eql(u8, prior.path, tool.path)) return fail("duplicate tool contract '{s}'", .{tool.path});
+        }
+        for (tool.callers, 0..) |caller, caller_index| {
+            if (caller.len == 0 or std.mem.eql(u8, caller, tool.path) or std.mem.eql(u8, caller, tool_inventory_path))
+                return fail("tool '{s}' has invalid caller '{s}'", .{ tool.path, caller });
+            for (tool.callers[0..caller_index]) |prior| {
+                if (std.mem.eql(u8, prior, caller)) return fail("tool '{s}' repeats caller '{s}'", .{ tool.path, caller });
+            }
+        }
+    }
+
+    const index_source = try gitIndexSource(gpa, io);
+    defer gpa.free(index_source);
+    if (index_source.len < 12 or !std.mem.eql(u8, index_source[0..4], "DIRC")) return fail("invalid git index", .{});
+    const version = std.mem.readInt(u32, index_source[4..8], .big);
+    if (version != 2) return fail("git index version {d} is not audited", .{version});
+    const entries = std.mem.readInt(u32, index_source[8..12], .big);
+    const actual_callers = try gpa.alloc(usize, inventory.tools.len);
+    defer gpa.free(actual_callers);
+    @memset(actual_callers, 0);
+    const found_tools = try gpa.alloc(bool, inventory.tools.len);
+    defer gpa.free(found_tools);
+    @memset(found_tools, false);
+    var tool_names = std.StringHashMap(usize).init(gpa);
+    defer tool_names.deinit();
+    for (inventory.tools, 0..) |tool, i| {
+        const basename = std.fs.path.basename(tool.path);
+        const entry = try tool_names.getOrPut(basename);
+        if (entry.found_existing) return fail("tool basename '{s}' is ambiguous", .{basename});
+        entry.value_ptr.* = i;
+    }
+    const matched_in_file = try gpa.alloc(bool, inventory.tools.len);
+    defer gpa.free(matched_in_file);
+
+    var cursor: usize = 12;
+    var entry_index: u32 = 0;
+    while (entry_index < entries) : (entry_index += 1) {
+        if (cursor + 62 > index_source.len) return fail("truncated git index entry", .{});
+        const name_start = cursor + 62;
+        const name_end = std.mem.indexOfScalarPos(u8, index_source, name_start, 0) orelse return fail("unterminated git index path", .{});
+        const path = index_source[name_start..name_end];
+        const mode = std.mem.readInt(u32, index_source[cursor + 24 ..][0..4], .big);
+        if (toolIndex(inventory, path)) |i| found_tools[i] = true;
+
+        // Do not follow tracked symlinks while classifying call sites. The real
+        // tracked target is audited directly, and following links would count
+        // aliases such as AGENTS.md as a second caller of CLAUDE.md commands.
+        if (mode != 0o120000 and !std.mem.eql(u8, path, tool_inventory_path)) {
+            const source: ?[]u8 = read(gpa, io, path) catch |err| switch (err) {
+                error.IsDir => null,
+                else => return err,
+            };
+            if (source) |text_source| {
+                defer gpa.free(text_source);
+                @memset(matched_in_file, false);
+                var search_at: usize = 0;
+                while (std.mem.indexOfScalarPos(u8, text_source, search_at, '.')) |dot| {
+                    search_at = dot + 1;
+                    const extension_len = scriptExtensionLength(text_source, dot) orelse continue;
+                    var start = dot;
+                    while (start != 0 and isFilenameByte(text_source[start - 1])) start -= 1;
+                    const basename = text_source[start .. dot + extension_len];
+                    const i = tool_names.get(basename) orelse continue;
+                    if (matched_in_file[i]) continue;
+                    const tool = inventory.tools[i];
+                    if (std.mem.eql(u8, path, tool.path)) continue;
+                    if (!callerListed(tool, path))
+                        return fail("tool '{s}' has unclassified caller/reference '{s}'", .{ tool.path, path });
+                    actual_callers[i] += 1;
+                    matched_in_file[i] = true;
+                }
+            }
+        }
+
+        cursor += std.mem.alignForward(usize, name_end - cursor + 1, 8);
+    }
+
+    for (inventory.tools, 0..) |tool, i| {
+        if (!found_tools[i]) return fail("tool inventory contains untracked or stale path '{s}'", .{tool.path});
+        if (actual_callers[i] != tool.callers.len)
+            return fail("tool '{s}' has {d} caller/reference files, expected {d}", .{ tool.path, actual_callers[i], tool.callers.len });
+    }
 }
 
 fn auditSubmodules(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
@@ -581,17 +769,25 @@ pub fn main(init: std.process.Init) !void {
     defer parsed.deinit();
     const inventory = parsed.value;
 
+    const tool_inventory_source = try read(init.gpa, init.io, tool_inventory_path);
+    defer init.gpa.free(tool_inventory_source);
+    const parsed_tools = try std.json.parseFromSlice(ToolMigrationInventory, init.gpa, tool_inventory_source, .{ .allocate = .alloc_always });
+    defer parsed_tools.deinit();
+    const tool_inventory = parsed_tools.value;
+
     try auditInventory(inventory);
     try auditZon(init.gpa, init.io, inventory);
     try auditBuild(init.gpa, init.io, inventory);
     try auditPackage(init.gpa, init.io, inventory);
     try auditScripts(init.gpa, init.io, inventory);
+    try auditToolMigrationInventory(init.gpa, init.io, tool_inventory);
     try auditSubmodules(init.gpa, init.io, inventory);
     try auditCi(init.gpa, init.io, inventory);
     try auditProductionSources(init.gpa, init.io, inventory);
 
-    std.debug.print("dependency audit ok: {d} classified edges, {d} migration targets\n", .{
+    std.debug.print("dependency audit ok: {d} classified edges, {d} migration targets, {d} classified repository tools\n", .{
         inventory.edges.len,
         count(inventory_source, "\"status\": \"migration_required\""),
+        tool_inventory.tools.len,
     });
 }

@@ -5,9 +5,11 @@ description: The fail-closed dependency, platform, oracle, and acquisition polic
 
 # Dependency ownership
 
-zig-js has one machine-readable dependency boundary:
-[`docs/.data/dependency-inventory-v1.json`](.data/dependency-inventory-v1.json).
-`zig build dependency-audit` validates that inventory and rejects an unknown
+zig-js has a machine-readable dependency boundary:
+[`docs/.data/dependency-inventory-v1.json`](.data/dependency-inventory-v1.json),
+plus the issue #497 repository-tool migration inventory at
+[`docs/.data/tool-migration-inventory-v1.json`](.data/tool-migration-inventory-v1.json).
+`zig build dependency-audit` validates both inventories and rejects an unknown
 local package, system link, build subprocess, script runtime, registry package,
 submodule, corpus checkout, release download, or production dynamic-loading
 edge. The gate itself is implemented in Zig and performs no network access.
@@ -62,6 +64,15 @@ relabeling them as acceptable:
 
 Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
+
+The tool migration inventory classifies all 72 current `.py`, `.mjs`, `.ts`,
+and `.sh` files. Each record identifies its role, inputs, outputs,
+subprocesses, caller/reference files, effective exit and diagnostic contract,
+ordering and schema requirements, network policy, and intended owned Zig
+migration target. The audit reads the Git index and rejects a missing or stale
+tool record, extension/runtime mismatch, unknown contract profile, or new
+caller/reference file. Tracked symlinks are not followed because their real
+tracked targets are audited directly.
 
 The former system-libffi edge was removed by the owned Zig/assembly dispatcher
 tracked in [#463](https://github.com/zig-utils/zig-js/issues/463); it is no
