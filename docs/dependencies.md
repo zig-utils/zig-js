@@ -65,8 +65,10 @@ relabeling them as acceptable:
 Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
 
-The tool migration inventory classifies all 72 current `.py`, `.mjs`, `.ts`,
-and `.sh` files. Each record identifies its role, inputs, outputs,
+The tool migration inventory classifies all 71 current files: 59 `.py`, 8
+`.mjs`, 1 `.ts`, and 3 `.sh`. The documentation link gate has already moved to
+the tested in-tree `docs-link-check` Zig executable and is no longer part of
+that migration set. Each remaining record identifies its role, inputs, outputs,
 subprocesses, caller/reference files, effective exit and diagnostic contract,
 ordering and schema requirements, network policy, and intended owned Zig
 migration target. The audit reads the Git index and rejects a missing or stale

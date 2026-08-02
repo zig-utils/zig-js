@@ -40,8 +40,8 @@
     },
     {
       "path": "advanced/verification/index.html",
-      "bytes": 161914,
-      "sha256": "dfb31ed4f04f30b3c23e9efa1dc3dfad3ff7fff962570847a124b744e2fd5ac8"
+      "bytes": 161915,
+      "sha256": "c1ada6f04adf7236217f40ff58cf8f7dae3e6fb77d82e77ab6e26e6c4f49da24"
     },
     {
       "path": "api/index.html",
@@ -75,8 +75,8 @@
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 158255,
-      "sha256": "4ad27b8b59a1ba49d62ce787e43ed54ef95fa64b4e57d522d99ca7a58be4bc35"
+      "bytes": 158432,
+      "sha256": "c68181ec47db98aa378b27ae30f455bbf236bbd083e9b600f9051939b156cc45"
     },
     {
       "path": "dev-cache/index.html",
@@ -264,5 +264,5 @@
       "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
     }
   ],
-  "tree_sha256": "b6f47cd50460231c3ef401886c5a08dc27fba6d58ed2542a54a1f2a139087693"
+  "tree_sha256": "a86b612d0b93d55a9b6a77756d880ed49aa2b48542c0182b63a247826f30209b"
 }

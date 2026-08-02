@@ -28,7 +28,7 @@ Say "no regressions" only when you measured it. Docs-only changes:
 - [ ] `zig build test -Dtsan=true`
 - [ ] `zig build threadfuzz -Dfuzz-iters=400`
 - [ ] The matching `*-audit` step (ABI surfaces)
-- [ ] `python3 tools/docs-link-check.py` and `bun run docs:build` (docs)
+- [ ] `zig build docs-link-check` and `bun run docs:build` (docs)
 - [ ] Not applicable — explain below
 
 ## Checklist

@@ -68,7 +68,7 @@ python3 tools/platform-release-matrix.py
 rg -n 'drop-in|WebKit test262|partial|unimplemented|[0-9]{2,}/[0-9]{2,}' README.md docs
 
 # 4. Check links, then build the site
-python3 tools/docs-link-check.py
+zig build docs-link-check
 bun run docs:build
 ```
 
@@ -94,7 +94,7 @@ statement, or delete it.
 - `data.test262` is read from `docs/.data/test262.json` at build time — prefer
   binding to it over typing a number into prose, so the page cannot go stale.
 - Two **CI gates** guard docs changes; run both before committing.
-  `python3 tools/docs-link-check.py` resolves every internal link and sidebar
+  `zig build docs-link-check` resolves every internal link and sidebar
   entry — bunpress renders a link to a missing page without complaint, so the
   build alone does not cover this. `bun run docs:build` is the second.
 

@@ -32,7 +32,7 @@
       "Bash(rg *)",
       "Bash(wc *)",
       "Bash(pgrep *)",
-      "Bash(python3 tools/docs-link-check.py*)",
+      "Bash(zig build docs-link-check*)",
       "Bash(python3 tools/release-compatibility.py*)",
       "Bash(python3 tools/platform-release-matrix.py*)",
       "Bash(python3 tools/wasm-conformance-matrix.py*)",

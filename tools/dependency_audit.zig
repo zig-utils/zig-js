@@ -527,7 +527,7 @@ fn auditToolMigrationInventory(gpa: std.mem.Allocator, io: std.Io, inventory: To
         // aliases such as AGENTS.md as a second caller of CLAUDE.md commands.
         if (mode != 0o120000 and !std.mem.eql(u8, path, tool_inventory_path)) {
             const source: ?[]u8 = read(gpa, io, path) catch |err| switch (err) {
-                error.IsDir => null,
+                error.FileNotFound, error.IsDir => null,
                 else => return err,
             };
             if (source) |text_source| {

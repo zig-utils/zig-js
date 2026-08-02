@@ -203,7 +203,7 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 60, "edge": "python-tooling" },
+      { "extension": ".py", "count": 59, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 8, "edge": "javascript-shell-tooling" },
       { "extension": ".ts", "count": 1, "edge": "javascript-shell-tooling" },
       { "extension": ".sh", "count": 3, "edge": "javascript-shell-tooling" }

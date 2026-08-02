@@ -48,7 +48,7 @@ false`, so an unrelated failure cannot mask the threading gates.
    binaries pinned by commit and SHA-256.
 6. **ABI boundary** fixtures across Debug / ReleaseSafe / TSan, plus the audits.
 7. **`test262-parallel`** — parallel execution introduces no new failures.
-8. **Docs** — `tools/docs-link-check.py` resolves every internal link and
+8. **Docs** — `zig build docs-link-check` resolves every internal link and
    sidebar entry, then `bun run docs:build` must succeed. The link check is
    separate because bunpress renders a link to a missing page without
    complaint.

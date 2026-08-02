@@ -177,7 +177,7 @@ renderer fixes there and pin the resulting commit in the dependency inventory.
 
 ```bash
 bun run docs:dev
-python3 tools/docs-link-check.py   # CI gate: every internal link + sidebar entry resolves
+zig build docs-link-check         # CI gate: every internal link + sidebar entry resolves
 bun run docs:build                 # CI gate: checks the deterministic output manifest
 bun run docs:manifest              # accept an intentional complete-tree change
 ```
@@ -242,7 +242,7 @@ Public claims are backed by checked-in evidence.
 
 New docs pages must be added to `markdown.sidebar` in
 [`docs.config.ts`](docs.config.ts) — otherwise they are unreachable.
-`tools/docs-link-check.py` verifies that every internal link and sidebar entry
+`zig build docs-link-check` verifies that every internal link and sidebar entry
 resolves; `bun run docs:build` will happily render a link to a page that does
 not exist, which is why the check is separate.
 

@@ -757,7 +757,7 @@ jobs:
       # pointing at renamed files.
       - name: docs link check
         working-directory: Libraries/zig-js
-        run: python3 tools/docs-link-check.py
+        run: zig build docs-link-check
       - name: docs:build
         working-directory: Libraries/zig-js
         run: bun run docs:build

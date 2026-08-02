@@ -21,6 +21,31 @@ pub fn build(b: *std.Build) void {
     const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
     dependency_audit_step.dependOn(&run_dependency_audit.step);
 
+    // Offline documentation integrity gate (#497). Keep the executable and its
+    // malformed-input tests on the same step so CI never runs an untested parser.
+    const docs_link_check = b.addExecutable(.{
+        .name = "docs-link-check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/docs_link_check.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_docs_link_check = b.addRunArtifact(docs_link_check);
+    run_docs_link_check.setCwd(b.path("."));
+    const docs_link_check_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/docs_link_check.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_docs_link_check_tests = b.addRunArtifact(docs_link_check_tests);
+    run_docs_link_check_tests.setCwd(b.path("."));
+    const docs_link_check_step = b.step("docs-link-check", "Verify documentation links and sidebar entries offline");
+    docs_link_check_step.dependOn(&run_docs_link_check.step);
+    docs_link_check_step.dependOn(&run_docs_link_check_tests.step);
+
     // Homegrown regex engine, used to back JS RegExp.
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");
