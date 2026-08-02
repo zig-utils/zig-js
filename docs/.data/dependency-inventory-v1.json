@@ -5,7 +5,7 @@
   "classes": [
     "zig_toolchain",
     "standard_platform_interface",
-    "zig_utils_owned_local",
+    "owner_maintained_local",
     "checksum_pinned_oracle",
     "generated_data_acquisition_input",
     "prohibited_unclassified"
@@ -24,7 +24,7 @@
     },
     {
       "id": "zig-regex",
-      "class": "zig_utils_owned_local",
+      "class": "owner_maintained_local",
       "status": "allowed",
       "scope": "production",
       "locator": "../zig-regex",
@@ -35,7 +35,7 @@
     },
     {
       "id": "zig-gc",
-      "class": "zig_utils_owned_local",
+      "class": "owner_maintained_local",
       "status": "allowed",
       "scope": "production",
       "locator": "../zig-gc",
@@ -136,16 +136,15 @@
       "migration_issue": 497
     },
     {
-      "id": "bunpress-docs-chain",
-      "class": "prohibited_unclassified",
-      "status": "migration_required",
+      "id": "bunpress-docs-toolchain",
+      "class": "owner_maintained_local",
+      "status": "allowed",
       "scope": "documentation build and preview",
-      "locator": "@stacksjs/bunpress and ts-syntax-highlighter from the Bun registry",
-      "pin": "bun.lock integrity records",
-      "license": "third-party package licenses",
+      "locator": "../../Tools/bunpress/packages/bunpress",
+      "pin": "stacksjs/bunpress commit 7f24aa8b1fa028b78f36858127ed154779232efc",
+      "license": "MIT",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "Documentation rendering only; never part of libzig-js.",
-      "migration_issue": 464
+      "runtime_semantics": "Owned documentation rendering only; never part of libzig-js. Fixes land in the BunPress source repository."
     },
     {
       "id": "ci-bootstrap-actions",
@@ -179,7 +178,8 @@
     ],
     "owned_sibling_checkouts": [
       { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 6, "edge": "zig-regex" },
-      { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 6, "edge": "zig-gc" }
+      { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 6, "edge": "zig-gc" },
+      { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "7f24aa8b1fa028b78f36858127ed154779232efc", "occurrences": 1, "edge": "bunpress-docs-toolchain" }
     ],
     "production_imports": [
       { "name": "std", "external": true, "edge": "zig-toolchain" },
@@ -221,18 +221,18 @@
       { "path": "wasm-spec-wg3", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "9d36019973201a19f9c9ebb0f10828b2fe2374aa", "edge": "pinned-conformance-corpora" }
     ],
     "package_dependencies": [
-      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "^0.1.9", "lockfile": "bun.lock", "locked_version": "0.1.9", "integrity": "sha512-q/1G1TrdiAH6LeZrIgmYS+Ri+rGvJ8KrrihyE8SHRjOf/9Yg3SeFifQ8ycLMJfkgQWs7y3f92LiQwcNxEk4N5w==", "edge": "bunpress-docs-chain" },
-      { "manifest": "package.json", "section": "overrides", "name": "ts-syntax-highlighter", "version": "0.2.0", "lockfile": "bun.lock", "locked_version": "0.2.0", "integrity": "sha512-FrnIB8WeBbsGJ+Fb1VAlLafuZv8/empJAVeShdGiQjfnGTH8t6nUNSdB/muv0ljCh/XC1F2MvJdm3k/EWHIKjg==", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:7f24aa8b1fa028b78f36858127ed154779232efc", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" },
       { "manifest": "tools/wasm-spec/package.json", "section": "dependencies", "name": "wabt", "version": "^1.0.39", "lockfile": "tools/wasm-spec/bun.lock", "locked_version": "1.0.39", "integrity": "sha512-ba+dRL/75VQQY7RkU/CgriGbkoWAfS8TDyUlJfJhJ8KhtXgMl5dhNvoPNUcQ9IWRhW8u41glMSuZeTvsYq2rRg==", "edge": "pinned-wasm-converters" }
     ],
     "package_scripts": [
-      { "manifest": "package.json", "name": "docs:dev", "command": "bunpress dev", "edge": "bunpress-docs-chain" },
-      { "manifest": "package.json", "name": "docs:build", "command": "bunpress build --outdir ./dist", "edge": "bunpress-docs-chain" },
-      { "manifest": "package.json", "name": "docs:preview", "command": "bunpress preview --outdir ./dist", "edge": "bunpress-docs-chain" },
+      { "manifest": "package.json", "name": "docs:dev", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts dev", "edge": "bunpress-docs-toolchain" },
+      { "manifest": "package.json", "name": "docs:build", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --check-manifest docs/.data/bunpress-output-v1.json", "edge": "bunpress-docs-toolchain" },
+      { "manifest": "package.json", "name": "docs:manifest", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts build --outdir ./dist --manifest docs/.data/bunpress-output-v1.json", "edge": "bunpress-docs-toolchain" },
+      { "manifest": "package.json", "name": "docs:preview", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts preview --outdir ./dist", "edge": "bunpress-docs-toolchain" },
       { "manifest": "package.json", "name": "docs:data", "command": "bun scripts/gen-test262-data.ts", "edge": "javascript-shell-tooling" }
     ],
     "ci_actions": [
-      { "name": "actions/checkout@v6", "count": 19, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/checkout@v6", "count": 20, "edge": "ci-bootstrap-actions" },
       { "name": "pantry-pm/pantry/packages/action@main", "count": 6, "edge": "ci-bootstrap-actions" },
       { "name": "oven-sh/setup-bun@v2", "count": 1, "edge": "bun-ci-bootstrap" }
     ],

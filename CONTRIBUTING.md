@@ -172,10 +172,14 @@ zig build test-objc-api-evidence            # macOS Objective-C matrix
 
 ### Docs
 
+The renderer is the owner-maintained checkout at `../../Tools/bunpress`; make
+renderer fixes there and pin the resulting commit in the dependency inventory.
+
 ```bash
 bun run docs:dev
 python3 tools/docs-link-check.py   # CI gate: every internal link + sidebar entry resolves
-bun run docs:build                 # CI gate
+bun run docs:build                 # CI gate: checks the deterministic output manifest
+bun run docs:manifest              # accept an intentional complete-tree change
 ```
 
 ### Concurrency discipline (please read)

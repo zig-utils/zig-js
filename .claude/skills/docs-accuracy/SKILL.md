@@ -72,6 +72,12 @@ python3 tools/docs-link-check.py
 bun run docs:build
 ```
 
+`docs:build` uses the owner-maintained `../../Tools/bunpress` checkout and
+checks `docs/.data/bunpress-output-v1.json`. If a source/configuration or pinned
+BunPress change intentionally changes rendered bytes, run `bun run
+docs:manifest`, review the manifest diff, and rerun the checked build. Renderer
+defects belong in BunPress, not a zig-js-local replacement.
+
 For each flagged claim: tie it to a source above, rewrite it as a scoped
 statement, or delete it.
 

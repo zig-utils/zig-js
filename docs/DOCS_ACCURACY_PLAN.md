@@ -70,4 +70,9 @@ inventing implementation status.
    bun run docs:build
    ```
 
+   The command executes the pinned owner-maintained BunPress source checkout
+   and verifies `docs/.data/bunpress-output-v1.json`. For an intentional
+   rendered-tree change, run `bun run docs:manifest`, inspect the exact output
+   diff, and then rerun `bun run docs:build`.
+
 5. Commit docs-only updates with `flips 0 test262 cases` in the body.

@@ -78,6 +78,11 @@ bun run docs:data -- --from run.txt    # or parse a saved run's output
 
 Every page that reads `data.test262` (the homepage bar, the [conformance](/conformance) page) updates automatically on the next `bun run docs:build`.
 
+The docs commands run the owner-maintained BunPress checkout at
+`../../Tools/bunpress`. `bun run docs:build` checks the complete rendered tree
+against `docs/.data/bunpress-output-v1.json`; use `bun run docs:manifest` only
+when you intend to accept and review a renderer or content-output change.
+
 To inspect what is still outside the denominator:
 
 ```bash

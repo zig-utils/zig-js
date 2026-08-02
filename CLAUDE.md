@@ -38,6 +38,9 @@ differential and benchmark targets, never by the library itself.
   [`build.zig.zon`](build.zig.zon)). Without them dependency resolution fails
   before compilation starts. In a `.claude/worktrees/<name>` worktree you must
   create those two symlinks yourself.
+- **Owned documentation source** at `../../Tools/bunpress`. Documentation
+  commands execute that checkout directly; fix renderer defects there instead
+  of adding a local substitute to zig-js.
 - **Submodules** for corpora: `test262`, `wasm-spec-wg1`, `wasm-spec-wg3`. A
   missing corpus is skipped cleanly rather than failing, which means a run can
   silently score **zero** files — always sanity-check the denominator.
@@ -163,6 +166,7 @@ python3 tools/nogil-corpus-gate.py  # functional no-GIL corpus gate vs the publi
 
 ```bash
 bun run docs:dev / docs:build / docs:preview
+bun run docs:manifest              # accept an intentional rendered-tree change
 bun run docs:data -- --from run.txt   # regenerate docs/.data/test262.json from a run transcript
 ```
 

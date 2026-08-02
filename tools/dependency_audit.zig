@@ -12,7 +12,7 @@ const max_source_bytes = 16 * 1024 * 1024;
 const DependencyClass = enum {
     zig_toolchain,
     standard_platform_interface,
-    zig_utils_owned_local,
+    owner_maintained_local,
     checksum_pinned_oracle,
     generated_data_acquisition_input,
     prohibited_unclassified,
@@ -49,6 +49,7 @@ const PackageDependency = struct {
     locked_version: []const u8,
     integrity: []const u8,
     edge: []const u8,
+    source_repository: ?[]const u8 = null,
 };
 const PackageScript = struct { manifest: []const u8, name: []const u8, command: []const u8, edge: []const u8 };
 const PinnedDownload = struct { url: []const u8, sha256: []const u8, occurrences: usize, edge: []const u8 };
@@ -274,8 +275,25 @@ fn auditPackage(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void 
         defer gpa.free(lock);
         const locked = try std.fmt.allocPrint(gpa, "{s}@{s}", .{ item.name, item.locked_version });
         defer gpa.free(locked);
-        if (std.mem.indexOf(u8, lock, locked) == null or std.mem.indexOf(u8, lock, item.integrity) == null)
-            return fail("lock evidence for '{s}' drifted in {s}", .{ item.name, item.lockfile });
+        if (std.mem.indexOf(u8, lock, locked) == null)
+            return fail("locked resolution for '{s}' drifted in {s}", .{ item.name, item.lockfile });
+        const owned_revision_prefix = "owned-revision:";
+        if (std.mem.startsWith(u8, item.integrity, owned_revision_prefix)) {
+            const repository = item.source_repository orelse
+                return fail("owned package '{s}' omits source_repository", .{item.name});
+            const revision = item.integrity[owned_revision_prefix.len..];
+            var found = false;
+            for (inventory.boundaries.owned_sibling_checkouts) |sibling| {
+                if (std.mem.eql(u8, sibling.repository, repository) and std.mem.eql(u8, sibling.revision, revision)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return fail("owned package '{s}' has no matching exact CI checkout", .{item.name});
+        }
+        else if (std.mem.indexOf(u8, lock, item.integrity) == null) {
+            return fail("integrity evidence for '{s}' drifted in {s}", .{ item.name, item.lockfile });
+        }
     }
 
     for (inventory.boundaries.package_scripts, 0..) |item, item_index| {
@@ -469,7 +487,7 @@ fn auditCi(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
             return fail("owned sibling {s}@{s} occurs {d} times, expected {d}", .{ item.repository, item.revision, actual, item.occurrences });
         sibling_occurrences += item.occurrences;
     }
-    if (count(source, "repository: zig-utils/zig-") != sibling_occurrences)
+    if (count(source, "repository: ") != sibling_occurrences)
         return fail("CI contains an unclassified owned sibling checkout", .{});
 
     var action_occurrences: usize = 0;

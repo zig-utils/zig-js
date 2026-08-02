@@ -18,7 +18,7 @@ Every external edge has exactly one class:
 | --- | --- |
 | `zig_toolchain` | The Zig compiler and standard library used to produce the engine. |
 | `standard_platform_interface` | Target C/C++ ABI and named SDK interfaces such as Foundation; never an imported JavaScript implementation. |
-| `zig_utils_owned_local` | An owned sibling checkout resolved by local path. The production allowlist is exactly `../zig-regex` and `../zig-gc`. |
+| `owner_maintained_local` | An owner-maintained sibling checkout resolved by local path. The production allowlist is exactly `../zig-regex` and `../zig-gc`; owned tools such as BunPress are scoped separately. |
 | `checksum_pinned_oracle` | A named test, differential, or benchmark input pinned by git object ID or release checksum. |
 | `generated_data_acquisition_input` | A one-shot source for checked-in generated tables; it is not contacted by ordinary build or test steps. |
 | `prohibited_unclassified` | An edge that cannot remain. A checked migration issue is mandatory, so this state cannot become a silent exemption. |
@@ -33,6 +33,11 @@ package-registry resolution, and the normal library graph contains no fetch
 command. CI checks out those siblings at the exact revisions recorded in the
 inventory, using the same adjacent paths as a local build.
 
+Documentation deliberately uses the owner-maintained BunPress source checkout
+at `../../Tools/bunpress`. Its exact revision is recorded in the inventory and
+CI uses the same `Libraries/` plus `Tools/` layout. Missing renderer behavior is
+fixed in BunPress and then consumed here; zig-js does not carry a substitute.
+
 The macOS Objective-C bridge may use the Xcode SDK and Foundation as the
 platform interface it implements. System JavaScriptCore is isolated to the
 explicit differential and benchmark executables; it never links into
@@ -44,7 +49,9 @@ are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 The inventory deliberately records current violations instead of relabeling
 them as acceptable:
 
-- the BunPress registry chain and Bun CI bootstrap are owned by [#464](https://github.com/zig-utils/zig-js/issues/464);
+- BunPress itself is now an allowed exact local source dependency; completing
+  its owned transitive-resolution and Bun bootstrap contract remains under
+  [#464](https://github.com/zig-utils/zig-js/issues/464);
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by
   [#497](https://github.com/zig-utils/zig-js/issues/497).
