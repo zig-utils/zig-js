@@ -9,7 +9,7 @@ inventing implementation status.
   saved to a transcript and parsed with:
 
   ```sh
-  bun scripts/gen-test262-data.ts --from run.txt
+  bun run docs:data -- --from run.txt
   ```
 
 - **test262 runner scope** comes from `conformance/test262.zig`, especially the
@@ -17,7 +17,7 @@ inventing implementation status.
 - **C API scope** comes from exported symbols and tests in `src/c_api.zig`.
 - **Threading status** comes from `docs/threads/*`, `conformance/threads_test.zig`,
   and the current `zig build threads-test` result.
-- **Build commands** come from `build.zig`.
+- **Build commands** come from `build.zig` and `package.json`.
 - **Performance claims** come from a dated report under `docs/.data/`, its raw
   sample file, and the exact workload/runner sources documented in
   `docs/benchmarks.md`. Do not copy quick-mode smoke timings into public tables.
@@ -50,7 +50,7 @@ inventing implementation status.
 
    ```sh
    timeout 10800 zig build test262 -Doptimize=ReleaseFast
-   bun scripts/gen-test262-data.ts --from run.txt
+   bun run docs:data -- --from run.txt
    ```
 
 2. Search for stale claims:
@@ -67,7 +67,7 @@ inventing implementation status.
 4. Build or at least syntax-check docs changes:
 
    ```sh
-   zig build docs-build
+   bun run docs:build
    ```
 
 5. Commit docs-only updates with `flips 0 test262 cases` in the body.

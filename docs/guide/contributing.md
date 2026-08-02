@@ -20,8 +20,7 @@ rest of the site.
 3. **Corpora**: `git submodule update --init test262 wasm-spec-wg1 wasm-spec-wg3`.
    A missing corpus is skipped cleanly rather than failed, so a run can score
    zero and still exit 0 — check the denominator.
-4. `python3` for the remaining legacy tool gates. The documentation site itself
-   builds and previews with Zig only.
+4. `python3` for the tool gates, `bun` for this site.
 
 Detail: [Building & Running](/guide/building).
 
@@ -45,7 +44,7 @@ zig build test -Dtest-filter=<substr>       # focused (still relinks)
 zig build test262 -Doptimize=ReleaseFast    # the real corpus
 zig build threads-test                      # PR-249 thread corpus
 zig build threadfuzz -Dfuzz-iters=400       # seeded concurrent fuzzing
-zig build docs-build                        # docs are an offline CI gate
+bun run docs:build                          # docs are a CI gate
 ```
 
 `zig build test` unsharded uses one core and takes hours — `test-parallel` builds
@@ -65,9 +64,8 @@ system, and the
 [accuracy plan](https://github.com/zig-utils/zig-js/blob/main/docs/DOCS_ACCURACY_PLAN.md)
 is the binding rule set.
 
-New docs pages are discovered automatically. Add user-facing navigation to
-`docs/site.json`, then run `zig build docs-manifest-update` after inspecting the
-rendered page; CI requires the complete deterministic output manifest.
+New docs pages must be registered in `markdown.sidebar` in `docs.config.ts`, or
+they are unreachable.
 
 ## Land the change
 

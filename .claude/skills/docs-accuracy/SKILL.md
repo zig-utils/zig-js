@@ -18,7 +18,7 @@ is how to apply it.
 | C API scope | exported symbols and tests in `src/c_api.zig`; the inventories under `docs/c-api/`, `docs/objc-api/`, `docs/abi/` |
 | Threading status | `docs/threads/*`, `conformance/threads_test.zig`, a current `zig build threads-test` result |
 | WebAssembly scores | the per-profile inventories under `docs/.data/` and `docs/.data/wasm-conformance-matrix.json` |
-| Build commands | `build.zig` |
+| Build commands | `build.zig` and `package.json` |
 | Performance | a dated report under `docs/.data/` **plus** its raw sample file, with the workload/runner sources named in `docs/benchmarks.md` |
 | Platform support boundary | `docs/platforms.md` (generated) |
 | Release gates | `docs/.data/release-compatibility-matrix.json` |
@@ -57,7 +57,7 @@ is reverted by the next run and can silently desync a release gate.
 ```bash
 # 1. Conformance
 zig build test262 -Doptimize=ReleaseFast > /tmp/run.txt 2>&1   # summary is on stderr
-bun scripts/gen-test262-data.ts --from /tmp/run.txt
+bun run docs:data -- --from /tmp/run.txt
 
 # 2. Release matrix + generated README sections
 zig build release-compatibility
@@ -69,7 +69,7 @@ rg -n 'drop-in|WebKit test262|partial|unimplemented|[0-9]{2,}/[0-9]{2,}' README.
 
 # 4. Check links, then build the site
 python3 tools/docs-link-check.py
-zig build docs-build
+bun run docs:build
 ```
 
 For each flagged claim: tie it to a source above, rewrite it as a scoped
@@ -77,22 +77,20 @@ statement, or delete it.
 
 ## 5. Writing new pages
 
-- The site is rendered by the owned Zig tool in
-  [`tools/docs_site.zig`](../../../tools/docs_site.zig). Pages are discovered
-  automatically; add user-facing navigation to
-  [`docs/site.json`](../../../docs/site.json).
+- The site is [bunpress](../../../docs.config.ts). New pages must be added to
+  `markdown.sidebar` (and `nav`, for a top-level section) or they are
+  unreachable.
 - Frontmatter is `title` + `description`. Links are site-absolute
   (`/features/language`), not file-relative, inside `docs/`.
 - Custom components already available: `<Test262Progress :stats="data.test262" />`,
   `<Terminal title="…">`, `<FeatureCard tag="…" title="…">`, and the `.cards` /
-  `.suites` CSS classes defined in `docs/site.css`.
+  `.suites` CSS classes defined in `docs.config.ts`.
 - `data.test262` is read from `docs/.data/test262.json` at build time — prefer
   binding to it over typing a number into prose, so the page cannot go stale.
 - Two **CI gates** guard docs changes; run both before committing.
-  `python3 tools/docs-link-check.py` resolves every internal link and configured
-  navigation entry. `zig build docs-build` renders the complete page/asset tree
-  and verifies its checked deterministic manifest. After an intentional output
-  change, inspect `dist/` and run `zig build docs-manifest-update`.
+  `python3 tools/docs-link-check.py` resolves every internal link and sidebar
+  entry — bunpress renders a link to a missing page without complaint, so the
+  build alone does not cover this. `bun run docs:build` is the second.
 
 ## 6. Commit
 

@@ -41,10 +41,8 @@
       "Bash(python3 tools/verify-objc-api.py*)",
       "Bash(python3 tools/verify-abi-profile.py*)",
       "Bash(python3 -m unittest tools/*)",
-      "Bash(zig build docs-build*)",
-      "Bash(zig build docs-preview*)",
-      "Bash(zig build docs-manifest-update*)",
-      "Bash(bun scripts/gen-test262-data.ts*)",
+      "Bash(bun run docs:build*)",
+      "Bash(bun run docs:data*)",
       "Bash(echo \"EXIT=$?\")"
     ]
   }

@@ -41,9 +41,7 @@ differential and benchmark targets, never by the library itself.
 - **Submodules** for corpora: `test262`, `wasm-spec-wg1`, `wasm-spec-wg3`. A
   missing corpus is skipped cleanly rather than failing, which means a run can
   silently score **zero** files — always sanity-check the denominator.
-- **`python3`** for the remaining `tools/*.py` gates. The docs build and preview
-  use only Zig; the legacy test262 data-refresh script still uses Bun pending
-  #497.
+- **`python3`** for the `tools/*.py` gates, **`bun`** for the docs site.
 
 ---
 
@@ -69,7 +67,7 @@ conformance/         test262 + PR-249 thread corpus + wasm spec runners
 tests/               C / C++ / Objective-C embedding fixtures
 bench/               benchmark workloads and runners
 tools/               python + zig gates, generators, audits, profilers
-docs/                the published documentation site (owned Zig renderer)
+docs/                the published documentation site (bunpress)
 docs/.data/          machine-readable evidence: run inventories, benchmark samples, matrices
 reference/           vendored upstream reference material (see the do-not-touch note below)
 .github/workflows/   CI — the authoritative gate list
@@ -164,10 +162,8 @@ python3 tools/nogil-corpus-gate.py  # functional no-GIL corpus gate vs the publi
 ### Docs
 
 ```bash
-zig build docs-build                         # offline build + deterministic manifest gate
-zig build docs-preview -Ddocs-port=4173      # local preview server
-zig build docs-manifest-update               # accept an intentional rendered-tree change
-bun scripts/gen-test262-data.ts --from run.txt # legacy data refresh; migration is tracked by #497
+bun run docs:dev / docs:build / docs:preview
+bun run docs:data -- --from run.txt   # regenerate docs/.data/test262.json from a run transcript
 ```
 
 ### Concurrency discipline for long jobs
@@ -306,7 +302,7 @@ threading gates. The families:
 - WebAssembly smokes across ten pinned upstream corpora;
 - private/public ABI boundary fixtures across Debug/ReleaseSafe/TSan;
 - `test262-parallel` (parallel execution introduces no new failures);
-- `zig build docs-build`.
+- `bun run docs:build`.
 
 **A promoted corpus case must also pass no-GIL within the gate's time budget**,
 or CI breaks. Several PR-249 cases are roughly 20× slower with the GIL off —
