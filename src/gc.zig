@@ -1827,7 +1827,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     var new_environment = Environment{ .arena = std.testing.allocator, .gc_managed = true };
     var old_promise = promise.Promise{ .gc_owned = true };
     var new_promise = promise.Promise{ .gc_owned = true };
-    var chunk: bytecode.Chunk = undefined;
+    var chunk = bytecode.Chunk.init(std.testing.allocator);
     var stack = [_]Value{
         Value.obj(&old_objects[0]),
         Value.obj(&old_objects[1]),
