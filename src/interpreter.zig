@@ -11468,17 +11468,15 @@ pub const Interpreter = struct {
                             }
                         }
                     }
-                    if (c.getOwn(key)) |v| {
+                    if (c.getOwnSnapshot(key)) |own| {
                         if (prototype_depth == 1) if (inherited_observation) |observation| {
-                            if (c.shape) |holder_shape| if (holder_shape.lookup(key)) |slot| {
-                                observation.* = .{
-                                    .receiver_shape = o.shape,
-                                    .holder_shape = holder_shape,
-                                    .slot = slot,
-                                };
+                            observation.* = .{
+                                .receiver_shape = o.shapeSnapshot(),
+                                .holder_shape = own.shape,
+                                .slot = own.slot,
                             };
                         };
-                        return v;
+                        return own.value;
                     }
                     if (c.hostClassHooks()) |hooks| if (hooks.get) |get| {
                         switch (try get(@ptrCast(self), c, key)) {

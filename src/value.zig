@@ -4127,9 +4127,35 @@ pub const Object = struct {
 
     /// Read an own named property, or null if absent. No allocation.
     pub fn getOwn(self: *const Object, name: []const u8) ?Value {
+        const snapshot = self.getOwnSnapshot(name) orelse return null;
+        return snapshot.value;
+    }
+
+    pub const OwnPropertySnapshot = struct {
+        value: Value,
+        shape: *Shape,
+        slot: u32,
+    };
+
+    /// Read an own named property together with the immutable shape/slot pair
+    /// that located it. In shared realms the whole observation belongs to one
+    /// `property_lock` snapshot; rereading `shape` after `getOwn` returns would
+    /// race a peer's transition and could publish a torn inherited IC record.
+    pub fn getOwnSnapshot(self: *const Object, name: []const u8) ?OwnPropertySnapshot {
         self.lockProperties();
         defer self.unlockProperties();
-        return self.getOwnUnlocked(name);
+        const shape = self.shape orelse return null;
+        const slot = (@constCast(shape)).lookup(name) orelse return null;
+        return .{ .value = self.slotsItems()[slot], .shape = shape, .slot = slot };
+    }
+
+    /// Snapshot the named-property shape under its publication lock. Shapes are
+    /// immutable once installed, but the Object's pointer changes on every
+    /// transition and therefore cannot be sampled concurrently as a plain read.
+    pub fn shapeSnapshot(self: *const Object) ?*Shape {
+        self.lockProperties();
+        defer self.unlockProperties();
+        return self.shape;
     }
 
     pub fn getOwnUnlocked(self: *const Object, name: []const u8) ?Value {
