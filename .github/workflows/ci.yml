@@ -729,6 +729,18 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: Libraries/zig-js
+      # `docs-link-check` is a Zig build step, so configuration resolves the
+      # same owned local-path package graph as every other repository target.
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-regex
+          path: Libraries/zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
+      - uses: actions/checkout@v6
+        with:
+          repository: zig-utils/zig-gc
+          path: Libraries/zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
       - uses: actions/checkout@v6
         with:
           repository: stacksjs/bunpress
