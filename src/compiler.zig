@@ -854,12 +854,56 @@ pub const Compiler = struct {
         local_count: u32,
     };
 
+    /// Stable audit reasons for plain functions that do not receive bytecode.
+    /// Keep these semantic rather than AST-node-specific: profiles and admission
+    /// inventories persist the tag names across compiler implementation changes.
+    pub const PlainFunctionRejection = enum {
+        generator_or_async,
+        function_scope_disposal,
+        block_nested_function_declaration,
+        lexical_shadowing,
+        temporal_dead_zone,
+        parameter_prologue,
+        unsupported_lowering,
+    };
+
+    pub const PlainFunctionAdmission = union(enum) {
+        compiled: PlainFunctionCode,
+        rejected: PlainFunctionRejection,
+    };
+
+    /// Classify a plain function without collapsing every semantic barrier into
+    /// `error.Unsupported`. The legacy compile API below deliberately retains its
+    /// error contract while tier inventories consume this stable result.
+    pub fn admitPlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) error{OutOfMemory}!PlainFunctionAdmission {
+        var rejection: ?PlainFunctionRejection = null;
+        const compiled = compilePlainFunctionInner(arena, fnode, &rejection) catch |err| switch (err) {
+            error.Unsupported => return .{ .rejected = rejection orelse .unsupported_lowering },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return .{ .compiled = compiled };
+    }
+
     pub fn compilePlainFunction(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!PlainFunctionCode {
-        if (fnode.is_generator or fnode.is_async) return error.Unsupported;
+        return switch (try admitPlainFunction(arena, fnode)) {
+            .compiled => |compiled| compiled,
+            .rejected => error.Unsupported,
+        };
+    }
+
+    fn rejectPlainFunction(rejection: *?PlainFunctionRejection, reason: PlainFunctionRejection) CompileError {
+        rejection.* = reason;
+        return error.Unsupported;
+    }
+
+    fn compilePlainFunctionInner(arena: std.mem.Allocator, fnode: *const ast.FunctionNode, rejection: *?PlainFunctionRejection) CompileError!PlainFunctionCode {
+        if (fnode.is_generator or fnode.is_async)
+            return rejectPlainFunction(rejection, .generator_or_async);
         // Function-scope `using` resources are disposed at function exit. The
         // frame-mode VM only emits block-level DisposeResources today, so keep
         // these bodies on the tree-walker until function-exit disposal is lowered.
-        if (!fnode.is_expr_body and stmtContainsDisposableDeclDeep(fnode.body)) return error.Unsupported;
+        if (!fnode.is_expr_body and stmtContainsDisposableDeclDeep(fnode.body))
+            return rejectPlainFunction(rejection, .function_scope_disposal);
         // A function declaration nested in a block needs the tree-walker in BOTH
         // modes: strict scopes it to the block (a binding the flat slot model
         // can't isolate), and sloppy gives it Annex B.3.3 dual bindings — a block
@@ -867,17 +911,21 @@ pub const Compiler = struct {
         // value at the point the declaration is evaluated. The flat model has one
         // slot for the name, so it reports the block's final value instead of the
         // decl-time snapshot (e.g. a reassignment after the declaration leaks).
-        if (functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
+        if (functionHasBlockNestedFuncDecl(fnode))
+            return rejectPlainFunction(rejection, .block_nested_function_declaration);
         // The flat slot model can't represent a lexical binding shadowing another
         // same-named binding; keep those on the tree-walker (correct block scopes).
-        if (try functionHasShadowableLexical(arena, fnode)) return error.Unsupported;
+        if (try functionHasShadowableLexical(arena, fnode))
+            return rejectPlainFunction(rejection, .lexical_shadowing);
         // The VM has no TDZ; keep functions that could read a lexical before its
         // declaration on the tree-walker, which throws ReferenceError.
-        if (try functionHasTdzHazard(arena, fnode)) return error.Unsupported;
+        if (try functionHasTdzHazard(arena, fnode))
+            return rejectPlainFunction(rejection, .temporal_dead_zone);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null };
         for (fnode.params) |p| {
-            if (p.default != null or p.is_rest or p.pattern != null) return error.Unsupported;
+            if (p.default != null or p.is_rest or p.pattern != null)
+                return rejectPlainFunction(rejection, .parameter_prologue);
             _ = try scope.addLocal(arena, p.name);
         }
         if (!fnode.is_expr_body) try collectLocals(arena, scope, fnode.body);
@@ -2861,4 +2909,41 @@ test "compiler rejects hoisted function closure over later lexical TDZ" {
     const outer = program.program[0].func_decl;
 
     try std.testing.expectError(error.Unsupported, Compiler.compilePlainFunction(arena.allocator(), outer));
+}
+
+test "compiler reports stable plain-function admission reasons" {
+    const cases = [_]struct {
+        source: []const u8,
+        expected: Compiler.PlainFunctionRejection,
+    }{
+        .{ .source = "function* f(){}", .expected = .generator_or_async },
+        .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
+        .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
+        .{ .source = "function f(value){ { let value; } }", .expected = .lexical_shadowing },
+        .{ .source = "function f(){ return value; let value; }", .expected = .temporal_dead_zone },
+        .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
+        .{ .source = "function f(){ return arguments; }", .expected = .unsupported_lowering },
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var parser = try @import("parser.zig").Parser.init(arena.allocator(), case.source);
+        const program = try parser.parseProgram();
+        const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
+        switch (admission) {
+            .compiled => return error.TestUnexpectedResult,
+            .rejected => |reason| try std.testing.expectEqual(case.expected, reason),
+        }
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parser = try @import("parser.zig").Parser.init(arena.allocator(), "function f(value){ return value + 1; }");
+    const program = try parser.parseProgram();
+    const admission = try Compiler.admitPlainFunction(arena.allocator(), program.program[0].func_decl);
+    switch (admission) {
+        .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
+        .rejected => return error.TestUnexpectedResult,
+    }
 }
