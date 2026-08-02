@@ -3960,6 +3960,11 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     const io = agent.engineIo();
     rec.join_mutex.unlock(io);
     pumpTasks(self);
+    // A no-GIL join wait is an ordinary native park, not a cooperative-GC
+    // publication. Service an open request while the record mutex is released:
+    // the collector traces Thread records under this mutex, and the exact
+    // generation handshake keeps the waiter frozen through sweep.
+    self.serviceGcSafepoint();
     const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
     rec.join_mutex.lockUncancelable(io);
     if (stopped)

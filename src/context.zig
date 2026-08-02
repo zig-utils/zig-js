@@ -6278,29 +6278,37 @@ pub const Context = struct {
     }
 
     fn joinCooperativeGcRequest(self: *Context, machine: *interp.Interpreter) void {
-        const request = self.gc_par_request.load(.acquire);
-        if (request == 0 or self.gc_par_collector.load(.acquire) == machine) return;
+        if (self.gc_par_request.load(.acquire) == 0 or
+            self.gc_par_collector.load(.acquire) == machine) return;
 
         machine.gc_moving_parked.store(
             machine.gc_precise_safepoint and machine.gc_moving_safepoint,
             .monotonic,
         );
         stack_scan.beginPark();
-        if (machine.gc_published_gen.load(.monotonic) != request) {
-            machine.gc_published_gen.store(request, .release);
-            _ = self.gc_cooperative_peer_parks.fetchAdd(1, .monotonic);
-        }
         machine.gc_parked.store(true, .release);
         var spins: usize = 0;
-        while (self.gc_par_request.load(.acquire) == request) : (spins += 1) {
-            if ((spins & 0xff) == 0 and !self.cooperativeCollectorIsActive()) {
-                if (self.gc_par_request.cmpxchgStrong(request, 0, .acq_rel, .acquire) == null) {
-                    self.gc_par_collector.store(null, .release);
-                    _ = self.gc_cooperative_exit_cleanups.fetchAdd(1, .monotonic);
-                }
-                break;
+        while (true) {
+            const request = self.gc_par_request.load(.acquire);
+            if (request == 0 or self.gc_par_collector.load(.acquire) == machine) break;
+            if (machine.gc_published_gen.load(.monotonic) != request) {
+                machine.gc_published_gen.store(request, .release);
+                _ = self.gc_cooperative_peer_parks.fetchAdd(1, .monotonic);
             }
-            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            while (self.gc_par_request.load(.acquire) == request) : (spins += 1) {
+                if ((spins & 0xff) == 0 and !self.cooperativeCollectorIsActive()) {
+                    if (self.gc_par_request.cmpxchgStrong(request, 0, .acq_rel, .acquire) == null) {
+                        self.gc_par_collector.store(null, .release);
+                        _ = self.gc_cooperative_exit_cleanups.fetchAdd(1, .monotonic);
+                    }
+                    break;
+                }
+                if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+            }
+            // A successor request can open before this peer has left the old
+            // park. Publish it in-place and remain frozen, closing the gap where
+            // a back-to-back collector could otherwise observe stale parked
+            // state while this mutator resumes.
         }
         machine.lockGcRoots();
         machine.gc_moving_parked.store(false, .monotonic);
@@ -6319,12 +6327,18 @@ pub const Context = struct {
         return false;
     }
 
-    fn allCooperativePeersStopped(self: *Context, _: u64, me: *interp.Interpreter) bool {
+    fn allCooperativePeersStopped(self: *Context, request: u64, me: *interp.Interpreter) bool {
         self.lockActiveInterpreters();
         defer self.unlockActiveInterpreters();
         for (self.active_interpreters.items) |machine| {
             if (machine == me) continue;
             if (!machine.gc_parked.load(.acquire)) return false;
+            // `gc_parked` can still be true while a peer leaves the preceding
+            // request (or while it waits in an unrelated native park). Require
+            // this exact generation's publication before treating the peer as
+            // stopped; otherwise back-to-back minors can sweep while that peer
+            // clears the stale park flag and resumes JavaScript.
+            if (machine.gc_published_gen.load(.acquire) != request) return false;
         }
         return true;
     }
@@ -19751,6 +19765,30 @@ test "parallel_js: cooperative rendezvous releases peers after collector exit" {
     try std.testing.expectEqual(@as(?*interp.Interpreter, null), ctx.gc_par_collector.load(.acquire));
     try std.testing.expectEqual(@as(u64, 1), ctx.gc_cooperative_exit_cleanups.load(.monotonic));
     try std.testing.expect(!peer.gc_parked.load(.acquire));
+}
+
+test "parallel_js: cooperative stop rejects a stale parked generation" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    var collector = ctx.interpreter();
+    var peer = ctx.interpreter();
+    try ctx.pushActiveInterpreter(&collector);
+    defer ctx.popActiveInterpreter(&collector);
+    try ctx.pushActiveInterpreter(&peer);
+    defer ctx.popActiveInterpreter(&peer);
+
+    peer.gc_published_gen.store(41, .release);
+    peer.gc_parked.store(true, .release);
+    defer peer.gc_parked.store(false, .release);
+    try std.testing.expect(!ctx.allCooperativePeersStopped(42, &collector));
+    peer.gc_published_gen.store(42, .release);
+    try std.testing.expect(ctx.allCooperativePeersStopped(42, &collector));
 }
 
 test "parallel_js: fixed-shape object allocation quickens across shared Thread workers" {
