@@ -328,6 +328,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: zig-js
+          # The exact-parent benchmark harness validates HEAD, HEAD^1, and a
+          # non-parent HEAD~2 witness; retain precisely that ancestry in CI.
+          fetch-depth: 3
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-regex
