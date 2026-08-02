@@ -70,11 +70,13 @@ The tool migration inventory classifies all 71 current files: 59 `.py`, 8
 the tested in-tree `docs-link-check` Zig executable and is no longer part of
 that migration set. Each remaining record identifies its role, inputs, outputs,
 subprocesses, caller/reference files, effective exit and diagnostic contract,
-ordering and schema requirements, network policy, and intended owned Zig
-migration target. The audit reads the Git index and rejects a missing or stale
-tool record, extension/runtime mismatch, unknown contract profile, or new
-caller/reference file. Tracked symlinks are not followed because their real
-tracked targets are audited directly.
+ordering and schema requirements, network policy, and disposition. Durable
+tools are candidates for TypeScript execution on the owner-maintained Home
+engine after that runner contract is ready; the inventory does not require a
+one-for-one rewrite of every legacy script. The audit reads the Git index and
+rejects a missing or stale tool record, extension/runtime mismatch, unknown
+contract profile, or new caller/reference file. Tracked symlinks are not
+followed because their real tracked targets are audited directly.
 
 The former system-libffi edge was removed by the owned Zig/assembly dispatcher
 tracked in [#463](https://github.com/zig-utils/zig-js/issues/463); it is no

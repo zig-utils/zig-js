@@ -83,7 +83,7 @@ const Inventory = struct {
 };
 
 const ToolRuntime = enum { python, javascript, typescript, shell };
-const MigrationTarget = enum { in_tree_zig, owned_zig_package, retain_bootstrap_glue };
+const MigrationTarget = enum { home_typescript_candidate, owned_bootstrap_package, retain_bootstrap_glue };
 
 const ContractProfile = struct {
     id: []const u8,
