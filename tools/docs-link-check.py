@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Verify every documentation link and sidebar entry resolves to a real page.
 
-`bun run docs:build` renders whatever it is given; it does not notice that
-`/features/langauge` has no page behind it, or that a sidebar entry points at a
-file someone renamed. A dead link in a status page is the same class of problem
-as a stale number: the page looks authoritative and is wrong.
+The site builder proves rendered-tree completeness, while this complementary
+gate catches a source link or configured navigation target that resolves to no
+page. A dead link in a status page is the same class of problem as a stale
+number: the page looks authoritative and is wrong.
 
 Three link kinds are checked, each against the thing it actually resolves
 against:
@@ -20,8 +20,8 @@ Anchors (`#section`) are stripped before resolution; their targets are not
 verified. External `http(s)://` and `mailto:` links are skipped — this gate is
 about internal consistency, not reachability of the internet.
 
-Sidebar entries come from `docs.config.ts`, parsed with a link regex rather than
-by executing TypeScript, so this stays a dependency-free Python gate.
+Navigation, sidebar, and redirect entries come from `docs/site.json`, parsed as
+data rather than executable configuration.
 
 Usage:
   tools/docs-link-check.py [--quiet]
@@ -32,13 +32,14 @@ Exit status is 1 when any link fails to resolve.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
-CONFIG = ROOT / "docs.config.ts"
+CONFIG = DOCS / "site.json"
 
 # Root-level Markdown that links into the repository by relative path.
 ROOT_DOCS = ["README.md", "CONTRIBUTING.md", "CLAUDE.md"]
@@ -47,9 +48,6 @@ SKILL_GLOB = ".claude/skills/**/*.md"
 # `[text](target)` — target stops at whitespace or the closing paren, so titled
 # links (`[t](/a "Title")`) keep only the path.
 LINK = re.compile(r"\[[^\]]*\]\(\s*([^)\s]+)")
-# `link: '/features/'` in docs.config.ts.
-SIDEBAR_LINK = re.compile(r"link:\s*['\"]([^'\"]+)['\"]")
-
 SKIP_PREFIXES = ("http://", "https://", "mailto:", "#", "data:", "tel:")
 
 
@@ -96,13 +94,21 @@ def check_file(path: Path, *, site_absolute_root: bool) -> list[str]:
 
 def check_sidebar() -> list[str]:
     if not CONFIG.exists():
-        return [f"{CONFIG.name} not found"]
+        return [f"{CONFIG.relative_to(ROOT)} not found"]
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    links = [item["link"] for item in config.get("nav", [])]
+    links += [
+        item["link"]
+        for section in config.get("sidebar", [])
+        for item in section.get("items", [])
+    ]
+    links += [redirect["to"] for redirect in config.get("redirects", [])]
     failures = []
-    for target in SIDEBAR_LINK.findall(CONFIG.read_text(encoding="utf-8")):
+    for target in links:
         if is_external(target):
             continue
         if not resolve_site_absolute(strip_fragment(target)):
-            failures.append(f"docs.config.ts -> {target}")
+            failures.append(f"docs/site.json -> {target}")
     return failures
 
 

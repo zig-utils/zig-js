@@ -21,6 +21,36 @@ pub fn build(b: *std.Build) void {
     const dependency_audit_step = b.step("dependency-audit", "Reject unclassified dependency, link, fetch, and tooling edges");
     dependency_audit_step.dependOn(&run_dependency_audit.step);
 
+    // The documentation site is rendered entirely by an in-tree Zig tool.
+    // Its checked manifest covers every page and copied evidence asset, making
+    // output loss and nondeterminism part of the ordinary build gate (#464).
+    const docs_site = b.addExecutable(.{
+        .name = "docs-site",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/docs_site.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_docs_build = b.addRunArtifact(docs_site);
+    run_docs_build.setCwd(b.path("."));
+    run_docs_build.addArg("build");
+    const docs_build_step = b.step("docs-build", "Build and verify the offline documentation site");
+    docs_build_step.dependOn(&run_docs_build.step);
+
+    const run_docs_manifest = b.addRunArtifact(docs_site);
+    run_docs_manifest.setCwd(b.path("."));
+    run_docs_manifest.addArg("update-manifest");
+    const docs_manifest_step = b.step("docs-manifest-update", "Regenerate the checked deterministic docs output manifest");
+    docs_manifest_step.dependOn(&run_docs_manifest.step);
+
+    const run_docs_preview = b.addRunArtifact(docs_site);
+    run_docs_preview.setCwd(b.path("."));
+    run_docs_preview.addArg("preview");
+    if (b.option([]const u8, "docs-port", "Local docs preview port (default 4173)")) |port| run_docs_preview.addArg(port);
+    const docs_preview_step = b.step("docs-preview", "Build and serve the documentation site on localhost");
+    docs_preview_step.dependOn(&run_docs_preview.step);
+
     // Homegrown regex engine, used to back JS RegExp.
     const regex_dep = b.dependency("zig_regex", .{ .target = target, .optimize = optimize });
     const regex_mod = regex_dep.module("regex");

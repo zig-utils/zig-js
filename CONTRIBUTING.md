@@ -173,9 +173,9 @@ zig build test-objc-api-evidence            # macOS Objective-C matrix
 ### Docs
 
 ```bash
-bun run docs:dev
 python3 tools/docs-link-check.py   # CI gate: every internal link + sidebar entry resolves
-bun run docs:build                 # CI gate
+zig build docs-build              # offline CI gate + checked output manifest
+zig build docs-preview            # preview at http://127.0.0.1:4173/
 ```
 
 ### Concurrency discipline (please read)
@@ -236,11 +236,13 @@ Public claims are backed by checked-in evidence.
 | `<!-- gc-generation:start/end -->` | `zig build gc-generation-benchmark -Dgc-generation-benchmark-update-readme=true` |
 | all of `docs/platforms.md` | `python3 tools/platform-release-matrix.py` |
 
-New docs pages must be added to `markdown.sidebar` in
-[`docs.config.ts`](docs.config.ts) — otherwise they are unreachable.
-`tools/docs-link-check.py` verifies that every internal link and sidebar entry
-resolves; `bun run docs:build` will happily render a link to a page that does
-not exist, which is why the check is separate.
+Navigation lives in [`docs/site.json`](docs/site.json). The owned Zig builder
+discovers every Markdown page, copies every linked evidence asset, and checks
+its complete rendered tree against
+[`docs/.data/docs-site-manifest-v1.json`](docs/.data/docs-site-manifest-v1.json).
+After an intentional output change, inspect `dist/`, then run
+`zig build docs-manifest-update`. `tools/docs-link-check.py` separately verifies
+that every internal link and configured navigation entry resolves.
 
 ### Commits
 
@@ -294,7 +296,7 @@ cannot mask the threading gates:
 - WebAssembly smokes across ten pinned upstream corpora;
 - public/private ABI boundary fixtures across Debug / ReleaseSafe / TSan;
 - `test262-parallel` — parallel execution introduces no new failures;
-- `bun run docs:build`.
+- `zig build docs-build`.
 
 Before opening a change, run the subset that matches what you touched. For
 engine semantics: `zig build test-parallel` plus a `--diag` diff. For threading:

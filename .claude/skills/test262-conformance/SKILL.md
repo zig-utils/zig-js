@@ -116,9 +116,10 @@ Only after a real full run:
 
 ```bash
 zig build test262 -Doptimize=ReleaseFast > /tmp/run.txt 2>&1
-bun run docs:data -- --from /tmp/run.txt      # rewrites docs/.data/test262.json
+bun scripts/gen-test262-data.ts --from /tmp/run.txt # rewrites docs/.data/test262.json
 python3 tools/release-compatibility.py --update-readme
-bun run docs:build
+zig build docs-manifest-update
+zig build docs-build
 ```
 
 The homepage bar, the conformance page, and every `data.test262` reference

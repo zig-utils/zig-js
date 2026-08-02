@@ -6,8 +6,8 @@
  *   bun scripts/gen-test262-data.ts              # runs `zig build test262` and parses it
  *   bun scripts/gen-test262-data.ts --from out.txt   # parse a saved run instead
  *
- * The homepage progress bar and the conformance page read this file via
- * bunpress global data (docs/.data/*.json -> `data.test262`).
+ * The owned Zig docs builder reads this file as `data.test262` when expanding
+ * the homepage and conformance components.
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'

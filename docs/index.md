@@ -46,7 +46,7 @@ hero:
 @endforeach
 </tbody></table>
 
-> Numbers come from `docs/.data/test262.json`. Regenerate them after a run with `bun run docs:data` — the homepage and conformance page update automatically.
+> Numbers come from `docs/.data/test262.json`. Regenerate them after a run with `bun scripts/gen-test262-data.ts --from run.txt` — the homepage and conformance page update automatically on `zig build docs-build`.
 
 ## Where engines like this go
 

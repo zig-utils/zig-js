@@ -18,7 +18,7 @@ Every external edge has exactly one class:
 | --- | --- |
 | `zig_toolchain` | The Zig compiler and standard library used to produce the engine. |
 | `standard_platform_interface` | Target C/C++ ABI and named SDK interfaces such as Foundation; never an imported JavaScript implementation. |
-| `zig_utils_owned_local` | An owned sibling checkout resolved by local path. The production allowlist is exactly `../zig-regex` and `../zig-gc`. |
+| `zig_utils_owned_local` | In-tree tooling or an owned sibling checkout resolved by local path. The production package allowlist is exactly `../zig-regex` and `../zig-gc`. |
 | `checksum_pinned_oracle` | A named test, differential, or benchmark input pinned by git object ID or release checksum. |
 | `generated_data_acquisition_input` | A one-shot source for checked-in generated tables; it is not contacted by ordinary build or test steps. |
 | `prohibited_unclassified` | An edge that cannot remain. A checked migration issue is mandatory, so this state cannot become a silent exemption. |
@@ -41,10 +41,16 @@ are likewise oracle-only inputs to named targets, with git or SHA-256 pins.
 
 ## Open migration edges
 
-The inventory deliberately records current violations instead of relabeling
-them as acceptable:
+The documentation build, preview server, component renderer, syntax
+highlighting, asset copier, sitemap, and search-index generator are implemented
+by `tools/docs_site.zig`. They run offline under the Zig toolchain and are
+covered by a checked 49-page deterministic output manifest. The former
+BunPress, npm lockfile, and Bun CI bootstrap edges have been removed under
+[#464](https://github.com/zig-utils/zig-js/issues/464).
 
-- the BunPress registry chain and Bun CI bootstrap are owned by [#464](https://github.com/zig-utils/zig-js/issues/464);
+The inventory deliberately records the remaining violations instead of
+relabeling them as acceptable:
+
 - Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
   acquisition, plus mutable third-party CI bootstrap actions, are owned by
   [#497](https://github.com/zig-utils/zig-js/issues/497).

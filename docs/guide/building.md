@@ -10,7 +10,7 @@ description: Compile zig-js and run the test262 conformance suite.
 zig-js requires **Zig 0.17.0-dev**. The 0.16 release will **not** build it.
 
 > [!IMPORTANT]
-> If your system `zig` is 0.16, use a pinned 0.17-dev toolchain (e.g. installed under `~/.local/share/zig-0.17-dev/zig`). The `bun run docs:data` script below auto-detects that path.
+> If your system `zig` is 0.16, use a pinned 0.17-dev toolchain (e.g. installed under `~/.local/share/zig-0.17-dev/zig`).
 
 > [!IMPORTANT]
 > zig-js resolves two sibling Zig packages by **local path** — `../zig-regex` and `../zig-gc` (see `build.zig.zon`). Both must be checked out next to your `zig-js` directory or the build cannot resolve its dependencies; CI provisions them from the `zig-utils` org.
@@ -72,11 +72,31 @@ zig build diag -Doptimize=ReleaseFast -- run test/language
 The conformance figures on this site live in `docs/.data/test262.json`. Regenerate them from a real run:
 
 ```bash
-bun run docs:data                      # runs the suite and rewrites the JSON
-bun run docs:data -- --from run.txt    # or parse a saved run's output
+bun scripts/gen-test262-data.ts                    # runs the suite and rewrites the JSON
+bun scripts/gen-test262-data.ts --from run.txt     # or parse a saved run's output
 ```
 
-Every page that reads `data.test262` (the homepage bar, the [conformance](/conformance) page) updates automatically on the next `bun run docs:build`.
+The remaining Bun-based data generator is tracked by #497; the documentation
+build itself is offline and requires only Zig. Every page that reads
+`data.test262` (the homepage bar and [conformance](/conformance) page) updates
+on `zig build docs-manifest-update`, after which `zig build docs-build` verifies
+the exact output tree.
+
+## Building and previewing the documentation
+
+```bash
+python3 tools/docs-link-check.py       # source links and configured navigation
+zig build docs-build                  # render offline and verify the checked manifest
+zig build docs-preview                # serve dist/ on 127.0.0.1:4173
+zig build docs-preview -Ddocs-port=8080
+```
+
+The builder discovers every public Markdown page, expands the checked test262
+data and repository components, renders code highlighting and search metadata,
+copies evidence assets, and emits `sitemap.xml` and `robots.txt`. When an
+intentional source or renderer change alters the output, inspect `dist/` and
+run `zig build docs-manifest-update`; CI rejects any unaccepted page, asset, or
+tree-hash drift.
 
 To inspect what is still outside the denominator:
 

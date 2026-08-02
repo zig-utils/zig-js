@@ -2,11 +2,9 @@
 /.zig-cache
 /zig-out
 
-# docs (bunpress)
+# generated documentation output
 /dist
-/.stx
 node_modules
-bun.lockb
 /pantry
 pantry.lock
 .claude/scheduled_tasks.lock

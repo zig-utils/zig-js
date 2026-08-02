@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "title": "zig-js",
+  "description": "A JavaScript engine written in pure Zig — tree-walking interpreter, tiered bytecode VM, and a JavaScriptCore-shaped public C API subset.",
+  "base_url": "https://zig-js.dev",
+  "nav": [
+    { "text": "Guide", "link": "/guide/" },
+    { "text": "Features", "link": "/features/" },
+    { "text": "Advanced", "link": "/advanced/" },
+    { "text": "Benchmarks", "link": "/benchmarks" },
+    { "text": "Conformance", "link": "/conformance" },
+    { "text": "C API", "link": "/api" },
+    { "text": "GitHub", "link": "https://github.com/zig-utils/zig-js" }
+  ],
+  "sidebar": [
+    {
+      "text": "Introduction",
+      "items": [
+        { "text": "What is zig-js?", "link": "/guide/" },
+        { "text": "Building & Running", "link": "/guide/building" },
+        { "text": "Contributing", "link": "/guide/contributing" }
+      ]
+    },
+    {
+      "text": "Features",
+      "items": [
+        { "text": "Overview", "link": "/features/" },
+        { "text": "Language", "link": "/features/language" },
+        { "text": "Built-ins", "link": "/features/builtins" },
+        { "text": "Binary Data", "link": "/features/binary-data" },
+        { "text": "Intl & Temporal", "link": "/features/intl-temporal" },
+        { "text": "Web-shaped APIs", "link": "/features/web-apis" },
+        { "text": "Concurrency", "link": "/features/concurrency" },
+        { "text": "Timers", "link": "/timers" },
+        { "text": "WebAssembly", "link": "/wasm" }
+      ]
+    },
+    {
+      "text": "Advanced",
+      "items": [
+        { "text": "Overview", "link": "/advanced/" },
+        { "text": "Embedding", "link": "/advanced/embedding" },
+        { "text": "Memory & GC", "link": "/advanced/memory-and-gc" },
+        { "text": "Execution Tiers", "link": "/advanced/execution-tiers" },
+        { "text": "Debugging & Tooling", "link": "/advanced/debugging" },
+        { "text": "Verification & Evidence", "link": "/advanced/verification" },
+        { "text": "Build Cache", "link": "/dev-cache" }
+      ]
+    },
+    {
+      "text": "Internals",
+      "items": [
+        { "text": "Architecture", "link": "/architecture" },
+        { "text": "Baseline Native Tier", "link": "/baseline-jit" },
+        { "text": "Optimizing JIT", "link": "/optimizing-jit" },
+        { "text": "Performance Benchmarks", "link": "/benchmarks" },
+        { "text": "test262 Conformance", "link": "/conformance" },
+        { "text": "WebAssembly Spec Runner", "link": "/wasm-spec" },
+        { "text": "Platform Matrix", "link": "/platforms" }
+      ]
+    },
+    {
+      "text": "Threading",
+      "items": [
+        { "text": "Overview", "link": "/threads/" },
+        { "text": "Thread API Reference", "link": "/threads/api" },
+        { "text": "Memory Model", "link": "/threads/memory-model" },
+        { "text": "Testing & Gates", "link": "/threads/testing" },
+        { "text": "Production Readiness", "link": "/threads/production-readiness" },
+        { "text": "GC Relocation Contract", "link": "/threads/gc-relocation" },
+        { "text": "Limits & Roadmap", "link": "/threads/limits" },
+        { "text": "Thread API Design", "link": "/threads/P6-thread-api" },
+        { "text": "Thread State Audit", "link": "/threads/bindings" }
+      ]
+    },
+    {
+      "text": "Embedding",
+      "items": [
+        { "text": "JavaScriptCore C API", "link": "/api" },
+        { "text": "Inspector Protocol", "link": "/inspector" },
+        { "text": "Public C API Inventory", "link": "/c-api/README" },
+        { "text": "Objective-C Bridge Inventory", "link": "/objc-api/README" },
+        { "text": "Private ABI Profiles", "link": "/abi/README" }
+      ]
+    }
+  ],
+  "redirects": []
+}
