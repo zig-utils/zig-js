@@ -5,15 +5,66 @@ description: Reproduce and interpret zig-js direct, independent-context, shared-
 
 # Performance Benchmarks
 
-zig-js keeps five benchmark families separate:
+zig-js keeps six benchmark families separate:
 
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
+- `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v1.json`. Implemented rows and explicitly deferred families remain visible separately; quick mode is validation only.
 - `python3 tools/wasm-simd-benchmark.py` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
 None is an application benchmark or a universal engine score. They are small, inspectable baselines intended to reveal regressions, scaling limits, and the engine paths that deserve profiling.
+
+## Stable attribution and exact-parent A/Bs
+
+[`performance-attribution-schema-v1.json`](.data/performance-attribution-schema-v1.json)
+is the machine-readable contract for causal performance artifacts. Its 55
+metrics cover wall and CPU time, memory and allocation, interpreter/VM/native
+tier selection, compilation/deoptimization/code lifetime, runtime and Wasm
+dispatch, GC phases, allocator publication, synchronization, worker lifetime,
+hardware efficiency, and native-symbol coverage. Each sample must encode every
+metric as `measured`, `unavailable`, or `not_applicable`. A missing instrument
+therefore cannot silently become a zero or disappear from a report.
+
+The schema validator also provides lossless versioned migration for the
+historical object-churn A/B TSV layouts. It retains every original column and
+the input SHA-256 while mapping fields whose scope is already known:
+
+```sh
+python3 tools/performance-attribution.py
+python3 tools/performance-attribution.py \
+  --migrate-legacy docs/.data/object-churn-independent-id-block-ab-2026-07-29.tsv \
+  --output /tmp/object-churn-independent-attribution-v1.json
+python3 tools/performance-attribution.py \
+  --artifact /tmp/object-churn-independent-attribution-v1.json
+```
+
+For new causal experiments, `tools/exact-parent-regression.py` verifies that
+the named parent is exactly the candidate commit's first parent, records hashes
+of both binaries and the workload source, alternates parent/candidate process
+order within every pair, enforces the exact expected checksum, and preserves
+process CPU and peak-RSS observations alongside the runner's timed wall value.
+Metrics not connected yet remain explicitly unavailable. The tool refuses a
+dirty tracked zig-js, zig-gc, or zig-regex worktree.
+
+```sh
+python3 tools/exact-parent-regression.py /path/to/parent-runner /path/to/candidate-runner \
+  --parent-revision HEAD^ --candidate-revision HEAD \
+  --source bench/representative_comparison.js \
+  --mode single --workload representative_json --jobs 2200 --lanes 1 \
+  --expected-checksum 324952086 --samples 7 \
+  --timed-boundary "warmed persistent context; one exact invocation" \
+  --raw-out docs/.data/exact-parent-YYYY-MM-DD.json \
+  --markdown-out docs/.data/exact-parent-YYYY-MM-DD.md
+```
+
+The default host class is `diagnostic`, which never blocks publication. Only a
+deliberately declared `quiet_reference` run gates: candidate wall time must be
+more than 110% of its exact parent while both variants have at most 5% RSD.
+Every smaller or noisier change remains in the artifact instead of being hidden.
+Hosted CI validates schemas, migrations, checksums, and gate behavior without
+executing reference-host measurements.
 
 ## Latest GC fragmentation and compaction
 

@@ -1553,6 +1553,8 @@ pub fn build(b: *std.Build) void {
     const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
     const representative_matrix_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_matrix.py" });
     const representative_benchmark_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_benchmark.py" });
+    const performance_attribution_test = b.addSystemCommand(&.{ "python3", "tools/test_performance_attribution.py" });
+    const exact_parent_regression_test = b.addSystemCommand(&.{ "python3", "tools/test_exact_parent_regression.py" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
@@ -1563,6 +1565,8 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&comparison_publication_test.step);
     comparison_harness_test_step.dependOn(&representative_matrix_test.step);
     comparison_harness_test_step.dependOn(&representative_benchmark_test.step);
+    comparison_harness_test_step.dependOn(&performance_attribution_test.step);
+    comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
     comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
