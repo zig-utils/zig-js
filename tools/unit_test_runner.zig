@@ -7,6 +7,7 @@
 //! starts/finishes, and lets CI split the suite with:
 //!
 //!   UNIT_SHARD_INDEX=<zero-based> UNIT_SHARD_COUNT=<positive>
+//!   UNIT_TEST_FILTER=<test-name substring>
 //!
 //! Every test also reports its own wall time, and the run ends with the ten
 //! slowest. A single unsharded run of this suite takes hours, and without
@@ -29,6 +30,9 @@ pub fn main(init: std.process.Init.Minimal) void {
 
     const shard_count = readShardEnv(init, "UNIT_SHARD_COUNT", 1);
     const shard_index = readShardEnv(init, "UNIT_SHARD_INDEX", 0);
+    const owned_filter = readEnv(init, "UNIT_TEST_FILTER");
+    defer if (owned_filter) |value| std.heap.page_allocator.free(value);
+    const filter = owned_filter orelse "";
     if (shard_count == 0) {
         std.debug.print("UNIT_SHARD_COUNT must be greater than zero\n", .{});
         std.process.exit(1);
@@ -39,17 +43,35 @@ pub fn main(init: std.process.Init.Minimal) void {
     }
 
     const test_fns = builtin.test_functions;
+    var matched: usize = 0;
     var selected: usize = 0;
-    for (test_fns, 0..) |_, i| {
-        if (i % shard_count == shard_index) selected += 1;
+    for (test_fns) |test_fn| {
+        if (!matchesFilter(test_fn.name, filter)) continue;
+        if (matched % shard_count == shard_index) selected += 1;
+        matched += 1;
     }
 
-    std.debug.print("zig-js unit tests: shard {d}/{d}, running {d} of {d} tests\n", .{
-        shard_index,
-        shard_count,
-        selected,
-        test_fns.len,
-    });
+    if (filter.len != 0) {
+        if (matched == 0) {
+            std.debug.print("zig-js unit tests: filter '{s}' matched 0 of {d} tests\n", .{ filter, test_fns.len });
+            std.process.exit(1);
+        }
+        std.debug.print("zig-js unit tests: filter '{s}' matched {d} of {d} tests; shard {d}/{d} running {d}\n", .{
+            filter,
+            matched,
+            test_fns.len,
+            shard_index,
+            shard_count,
+            selected,
+        });
+    } else {
+        std.debug.print("zig-js unit tests: shard {d}/{d}, running {d} of {d} tests\n", .{
+            shard_index,
+            shard_count,
+            selected,
+            test_fns.len,
+        });
+    }
 
     var ok_count: usize = 0;
     var skip_count: usize = 0;
@@ -59,8 +81,12 @@ pub fn main(init: std.process.Init.Minimal) void {
     var slowest: [slowest_reported]SlowTest = @splat(.{});
     var total_ns: u64 = 0;
 
-    for (test_fns, 0..) |test_fn, i| {
-        if (i % shard_count != shard_index) continue;
+    var matched_index: usize = 0;
+    for (test_fns) |test_fn| {
+        if (!matchesFilter(test_fn.name, filter)) continue;
+        const selected_index = matched_index;
+        matched_index += 1;
+        if (selected_index % shard_count != shard_index) continue;
         seen += 1;
 
         std.testing.allocator_instance = .init(std.heap.page_allocator, .{
@@ -194,14 +220,26 @@ fn recordSlow(slowest: []SlowTest, name: []const u8, ns: u64) void {
 }
 
 fn readShardEnv(init: std.process.Init.Minimal, comptime name: []const u8, default: usize) usize {
-    const raw = switch (builtin.os.tag) {
-        .windows => return default,
-        else => std.process.Environ.getPosix(init.environ, name) orelse return default,
-    };
+    const raw = readEnv(init, name) orelse return default;
+    defer std.heap.page_allocator.free(raw);
     return std.fmt.parseUnsigned(usize, raw, 10) catch |err| {
         std.debug.print("{s} must be an unsigned integer, got '{s}' ({t})\n", .{ name, raw, err });
         std.process.exit(1);
     };
+}
+
+fn readEnv(init: std.process.Init.Minimal, comptime name: []const u8) ?[]u8 {
+    return std.process.Environ.getAlloc(init.environ, std.heap.page_allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableMissing => null,
+        else => {
+            std.debug.print("could not read {s} ({t})\n", .{ name, err });
+            std.process.exit(1);
+        },
+    };
+}
+
+fn matchesFilter(name: []const u8, filter: []const u8) bool {
+    return filter.len == 0 or std.mem.indexOf(u8, name, filter) != null;
 }
 
 fn log(
@@ -211,10 +249,10 @@ fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
-    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
+    if (@backingInt(message_level) <= @backingInt(std.log.Level.err)) {
         log_err_count +|= 1;
     }
-    if (@intFromEnum(message_level) <= @intFromEnum(std.testing.log_level)) {
+    if (@backingInt(message_level) <= @backingInt(std.testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,

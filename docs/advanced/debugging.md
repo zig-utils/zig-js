@@ -113,16 +113,17 @@ All build output lives in two repository-local directories:
 | `zig-out/` | installed artifacts |
 
 **Everything in both is reproducible** — deleting them only forces a rebuild, and
-neither ever contains source or user-owned files. Repeated focused test builds
-(each filter is compile-time, so each relinks) grow the cache quickly. Inspection
-and safe reclamation: [Build cache](/dev-cache), or `tools/zig-cache-tool.sh`.
+neither ever contains source or user-owned files. Test-name filters are runtime
+selectors and reuse the linked binary; target, optimization, sanitizer, and
+source changes can still grow the cache. Inspection and safe reclamation:
+[Build cache](/dev-cache), or `tools/zig-cache-tool.sh`.
 
 ## Build-cost expectations
 
 | Action | Rough cost |
 | --- | --- |
 | `zig build test` relink after any `src/*.zig` edit | ~4–6 min |
-| A filtered probe cycle (`-Dtest-filter=…`) | ~8–10 min |
+| Changing only `-Dtest-filter` after the test artifact exists | no relink |
 | Full unit suite via `zig build test-parallel` | ~3 min across ~10 shards |
 | `zig build threads-test-bin` | ~40 s |
 | Cold `test262 -Doptimize=ReleaseFast` build | ~25–30 min |

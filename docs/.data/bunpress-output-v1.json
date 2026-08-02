@@ -15,8 +15,8 @@
     },
     {
       "path": "advanced/debugging/index.html",
-      "bytes": 172168,
-      "sha256": "63aca8aaa8673ab9f9e1797f55c27860c53cf856790dfd4719e1e9703532b619"
+      "bytes": 172229,
+      "sha256": "97e26772b29d7c619526e232a08a422d76139f73763f09b89ce1f57693dee230"
     },
     {
       "path": "advanced/embedding/index.html",
@@ -81,7 +81,7 @@
     {
       "path": "dev-cache/index.html",
       "bytes": 162135,
-      "sha256": "f95858e2d69d8cf292460f33e189210146f17e90fd26e0511324e644320bf23a"
+      "sha256": "eb1572c5b3beffd243feeecbe19869503b295b92b3c512f380b0b6dac09edbb5"
     },
     {
       "path": "DOCS_ACCURACY_PLAN/index.html",
@@ -130,8 +130,8 @@
     },
     {
       "path": "guide/contributing/index.html",
-      "bytes": 160386,
-      "sha256": "03515da1bdca006c2eafa3377f8362642c194ea0154bed57b1e78d603585c865"
+      "bytes": 160380,
+      "sha256": "1d29a43efd7cc062a62277dbf39d261d56324ba9f9a9fa11ecdd6786c8e31dd9"
     },
     {
       "path": "guide/index.html",
@@ -264,5 +264,5 @@
       "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
     }
   ],
-  "tree_sha256": "9d2b8a64892f6d23b206217ac1c5a478d2d3e2124410e0926dff8ab6c7fb197b"
+  "tree_sha256": "ba523dd3942bc683fac8b49900033fd55092bcfc381ff90dab195d2553e02334"
 }

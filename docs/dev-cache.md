@@ -13,18 +13,18 @@ the next build to recompile. Neither ever contains source or user-owned files.
 ## Why it grows without bound
 
 Each distinct build configuration produces a distinct cache key and a fresh copy
-of the artifact. Repeated *focused* test runs are the usual culprit: a filtered
-build such as
+of the artifact. Target, optimization, sanitizer, and source changes legitimately
+produce new artifacts. Test-name filters are runtime selectors, so commands such
+as
 
 ```sh
 zig build test -Dtest-filter=vm    # then ...=jit, ...=compiler, ...
 ```
 
-relinks the whole root test binary under a new key for every filter string, so a
-day of baseline-JIT development can leave dozens of multi-hundred-MB artifacts
-behind. In practice `.zig-cache` has reached **~92 GB**, at which point LLVM
-fails with `No space left on device`. Clearing the reproducible cache recovers
-all of it.
+reuse the same linked root test binary. Historical compile-time filtering could
+leave dozens of multi-hundred-MB artifacts behind; the runtime runner removes
+that source of cache growth. Clearing the reproducible cache remains safe when
+artifacts from genuinely different build configurations accumulate.
 
 Use the small production-module roots for repeated focused work:
 
@@ -36,7 +36,7 @@ zig build test-concurrency -Dtest-filter='atomic increments'
 
 They use the same target, optimization mode, ThreadSanitizer option, external
 dependencies, and production source modules as `zig build test`, but do not
-link the unrelated C-API/corpus tests. `test-jit` is a 91-test low-level root.
+link the unrelated C-API/corpus tests. `test-jit` is a low-level root.
 The VM/concurrency steps are small semantic executables because importing the
 production interpreter through `zig test` recursively discovers the entire
 inline integration suite; their filter is a runtime selector, so distinct VM or

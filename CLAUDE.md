@@ -115,7 +115,7 @@ zig build threads-test-bin      # ~40 s; then drive zig-out/bin/threads-test dir
 
 ```bash
 zig build test-parallel         # ALWAYS use this for a full local run
-zig build test -Dtest-filter=<substr>   # focused; still relinks
+zig build test -Dtest-filter=<substr>   # focused; runtime filter reuses the linked binary
 zig build test -Dtsan=true      # ThreadSanitizer
 ```
 
@@ -321,7 +321,8 @@ or CI breaks. Several PR-249 cases are roughly 20× slower with the GIL off —
    regressions". Check the denominator.
 2. **`git checkout -- <file>` wipes uncommitted work.** Commit early, or stash
    first.
-3. **Filtered test builds still relink** — filters are compile-time.
+3. **Source edits still relink the unit artifact.** Test-name filters are runtime
+   selectors and reuse it; target, optimization, and sanitizer changes do not.
 4. **The C API and private ABI profiles are pinned contracts.** Changing an
    exported symbol, struct layout, or enum value breaks a revision-checked
    consumer. Run the matching `*-audit` step.

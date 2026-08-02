@@ -40,7 +40,7 @@ divergence. See [Execution tiers](/advanced/execution-tiers) and
 
 ```bash
 zig build test-parallel                     # full unit suite, sharded — use this
-zig build test -Dtest-filter=<substr>       # focused (still relinks)
+zig build test -Dtest-filter=<substr>       # focused; changing the filter does not relink
 zig build test262 -Doptimize=ReleaseFast    # the real corpus
 zig build threads-test                      # PR-249 thread corpus
 zig build threadfuzz -Dfuzz-iters=400       # seeded concurrent fuzzing
@@ -48,8 +48,8 @@ bun run docs:build                          # docs are a CI gate
 ```
 
 `zig build test` unsharded uses one core and takes hours — `test-parallel` builds
-once and runs shards against the same binary. Filters are compile-time, so each
-filtered probe relinks; prefer one instrumentation pass over several narrow ones.
+once and runs shards against the same binary. Test-name filtering happens in the
+runner, so repeated focused probes reuse that binary.
 
 **Never run two corpus jobs at once**, and never beside the unit suite — see
 [Debugging & tooling](/advanced/debugging) for why, and for what to do when a job

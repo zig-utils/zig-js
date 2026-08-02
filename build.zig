@@ -1181,7 +1181,6 @@ pub fn build(b: *std.Build) void {
     const unit_shard_index = b.option(usize, "unit-shard-index", "Run only this zero-based unit-test shard index") orelse null;
     const unit_shard_count = b.option(usize, "unit-shard-count", "Split unit tests across this many shards") orelse null;
     const tests = b.addTest(.{
-        .filters = if (test_filter) |f| &.{f} else &.{},
         .test_runner = .{
             .path = b.path("tools/unit_test_runner.zig"),
             .mode = .simple,
@@ -1202,6 +1201,9 @@ pub fn build(b: *std.Build) void {
     wasm_test_options.addOption([]const u8, "threads_benchmark_source", @embedFile("bench/wasm_threads_comparison.js"));
     tests.root_module.addOptions("wasm_test_options", wasm_test_options);
     const run_tests = b.addRunArtifact(tests);
+    if (test_filter) |filter| {
+        run_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
+    }
     if (unit_shard_count) |count| {
         run_tests.setEnvironmentVariable("UNIT_SHARD_INDEX", b.fmt("{d}", .{unit_shard_index orelse 0}));
         run_tests.setEnvironmentVariable("UNIT_SHARD_COUNT", b.fmt("{d}", .{count}));
@@ -1218,6 +1220,9 @@ pub fn build(b: *std.Build) void {
     // as-is for CI legs that already shard themselves.
     const parallel_tests = b.addSystemCommand(&.{ "python3", "tools/unit-test-parallel.py" });
     parallel_tests.addFileArg(tests.getEmittedBin());
+    if (test_filter) |filter| {
+        parallel_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
+    }
     if (b.option(usize, "unit-jobs", "Parallel shard count for `zig build test-parallel`")) |jobs| {
         parallel_tests.addArgs(&.{ "--jobs", b.fmt("{d}", .{jobs}) });
     }
@@ -1225,13 +1230,11 @@ pub fn build(b: *std.Build) void {
     const parallel_test_step = b.step("test-parallel", "Run zig-js unit tests as parallel shards");
     parallel_test_step.dependOn(&parallel_tests.step);
 
-    // Small production JIT test root for tight development loops. Unlike
-    // `-Dtest-filter` on the full root, distinct filters here do not relink the
-    // Context/C-API/Worker/world-sized integration artifact (#53). It uses the
-    // same target, optimization, sanitizer, dependencies, and test runner;
-    // the full step remains the integration gate.
+    // Small production JIT test root for tight development loops. It uses the
+    // same runtime filter as the full root, so distinct filters reuse its linked
+    // artifact too. The target, optimization, sanitizer, dependencies, and test
+    // runner stay aligned; the full step remains the integration gate.
     const focused_jit_tests = b.addTest(.{
-        .filters = if (test_filter) |f| &.{f} else &.{},
         .test_runner = .{
             .path = b.path("tools/unit_test_runner.zig"),
             .mode = .simple,
@@ -1249,6 +1252,9 @@ pub fn build(b: *std.Build) void {
     });
     focused_jit_tests.root_module.addOptions("private_abi_options", private_abi_options);
     const run_focused_jit_tests = b.addRunArtifact(focused_jit_tests);
+    if (test_filter) |filter| {
+        run_focused_jit_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
+    }
     const focused_jit_step = b.step("test-jit", "Run focused production baseline-JIT tests");
     focused_jit_step.dependOn(&run_focused_jit_tests.step);
 
