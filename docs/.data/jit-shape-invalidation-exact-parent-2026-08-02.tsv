@@ -1,0 +1,15 @@
+variant	pair	order	elapsed_ms	optimizer_publications	invalidations	collections	retired_live	reclaimed	shape_stops	shape_retired	survivors	shape_retired_bytes	result
+parent	0	0	3593	40	39	1	0	39	0	0	0	0	pass
+candidate	0	1	2905	40	0	1	0	0	0	0	0	0	pass
+candidate	1	0	4413	40	0	1	0	0	0	0	0	0	pass
+parent	1	1	4732	44	43	1	0	43	0	0	0	0	pass
+parent	2	0	4482	40	39	1	0	39	0	0	0	0	pass
+candidate	2	1	3399	40	0	1	0	0	0	0	0	0	pass
+candidate	3	0	3198	41	1	1	0	1	1	1	12	16384	pass
+parent	3	1	4428	40	39	1	0	39	0	0	0	0	pass
+parent	4	0	4327	41	40	1	0	40	0	0	0	0	pass
+candidate	4	1	3401	40	0	1	0	0	0	0	0	0	pass
+candidate	5	0	3354	40	0	1	0	0	0	0	0	0	pass
+parent	5	1	3216	42	41	1	0	41	0	0	0	0	pass
+parent	6	0	4273	41	40	1	0	40	0	0	0	0	pass
+candidate	6	1	4772	43	3	1	0	3	3	3	55	49152	pass
