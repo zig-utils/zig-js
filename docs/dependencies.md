@@ -58,14 +58,14 @@ verifies its STX and syntax-highlighter workspaces from its own frozen lockfile.
 The remaining inventory deliberately records current violations instead of
 relabeling them as acceptable:
 
-- Python, JavaScript/TypeScript, shell tooling, and legacy unpinned generator
-  acquisition, plus mutable third-party CI bootstrap actions, are owned by
+- Python and legacy JavaScript tooling, unpinned generator acquisition, and
+  mutable checkout actions are owned by
   [#497](https://github.com/zig-utils/zig-js/issues/497).
 
 Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
 
-The tool migration inventory classifies 71 executable tools: 45 `.py`, 2
+The tool migration inventory classifies 70 executable tools: 44 `.py`, 2
 `.mjs`, 24 `.ts`, and no `.sh`; shared TypeScript modules are counted separately
 by the dependency gate. The documentation link gate has already moved to
 the tested in-tree `docs-link-check` Zig executable and is no longer part of

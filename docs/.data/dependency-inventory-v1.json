@@ -162,9 +162,9 @@
       "id": "ci-bootstrap-actions",
       "class": "prohibited_unclassified",
       "status": "migration_required",
-      "scope": "GitHub Actions checkout and Zig provisioning",
-      "locator": "actions/checkout and pantry-pm/pantry/packages/action",
-      "pin": "workflow tags; not immutable revisions",
+      "scope": "GitHub Actions repository checkout",
+      "locator": "actions/checkout",
+      "pin": "workflow major tag; immutable revision migration remains required",
       "license": "third-party action licenses",
       "affects_runtime_semantics": false,
       "runtime_semantics": "CI bootstrap only; cannot supply JavaScript semantics.",
@@ -174,12 +174,12 @@
       "id": "pantry-docs-bootstrap",
       "class": "owner_maintained_pinned_tooling",
       "status": "allowed",
-      "scope": "documentation CI bootstrap",
+      "scope": "CI Zig and documentation bootstrap",
       "locator": "pantry-pm/pantry/packages/action",
       "pin": "action 9f797da1ed073df7839cb6a9a7db6181ba33f0b7; Pantry 0.11.12; Bun 1.3.14",
       "license": "MIT",
       "affects_runtime_semantics": false,
-      "runtime_semantics": "Owner-maintained CI bootstrap for the BunPress toolchain only; never part of libzig-js."
+      "runtime_semantics": "Owner-maintained, immutable CI bootstrap for Zig and BunPress tooling; never part of libzig-js."
     }
   ],
   "boundaries": {
@@ -218,13 +218,12 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 45, "edge": "python-tooling" },
+      { "extension": ".py", "count": 44, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 2, "edge": "javascript-shell-tooling" },
       { "extension": ".ts", "count": 25, "edge": "home-tool-runtime" },
       { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [
-      { "path": "tools/ensure-zig-ci.py", "edge": "zig-toolchain" },
       { "path": "tools/gen_cldr_numbers.mjs", "edge": "generated-standards-data" },
       { "path": "tools/gen_encodings.py", "edge": "generated-standards-data" },
       { "path": "tools/gen_idna.py", "edge": "generated-standards-data" },
@@ -248,8 +247,7 @@
     ],
     "ci_actions": [
       { "name": "actions/checkout@v6", "count": 25, "edge": "ci-bootstrap-actions" },
-      { "name": "pantry-pm/pantry/packages/action@main", "count": 6, "edge": "ci-bootstrap-actions" },
-      { "name": "pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7", "count": 1, "edge": "pantry-docs-bootstrap" }
+      { "name": "pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7", "count": 7, "edge": "pantry-docs-bootstrap" }
     ],
     "pinned_downloads": [
       { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz", "sha256": "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271", "occurrences": 1, "edge": "pinned-wasm-converters" },

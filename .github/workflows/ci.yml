@@ -350,12 +350,9 @@ jobs:
           repository: home-lang/home
           path: Home/lang
           ref: dc257693afc9ed674dd757e9cfa6ea0b942487e5
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Build zig-js public C API for Home
         if: matrix.home_tool == true
         working-directory: zig-js
@@ -505,12 +502,9 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Build the TSan-instrumented threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin -Dtsan=true
@@ -573,12 +567,9 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Build the threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin
@@ -620,12 +611,9 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Build the threads-test binary (ReleaseSafe)
         working-directory: zig-js
         run: zig build threads-test-bin -Doptimize=ReleaseSafe
@@ -664,12 +652,9 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: ${{ matrix.name }}
         working-directory: zig-js
         env:
@@ -711,12 +696,9 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
       - name: Parallel test262 introduces no new failures
         working-directory: zig-js
         run: |

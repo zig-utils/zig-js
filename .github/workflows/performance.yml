@@ -51,12 +51,9 @@ jobs:
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
-      - uses: pantry-pm/pantry/packages/action@main
-        continue-on-error: true
+      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
-      - name: Ensure Zig is available
-        run: python3 zig-js/tools/ensure-zig-ci.py
 
       - name: Validate comparison harness
         working-directory: zig-js
