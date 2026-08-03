@@ -25,8 +25,8 @@
     },
     {
       "path": "advanced/execution-tiers/index.html",
-      "bytes": 164237,
-      "sha256": "d0d36a7bfe677c98edd23165b0ebe4810700551c21ff358d7116729c594266e9"
+      "bytes": 164288,
+      "sha256": "a5188b5fec308ab8cb03c001df9fece545c18b7638458911c9511141d3388e50"
     },
     {
       "path": "advanced/index.html",
@@ -50,8 +50,8 @@
     },
     {
       "path": "architecture/index.html",
-      "bytes": 168690,
-      "sha256": "e5b9ae1516f9453dcadc626a75b0d6eb41ca926f0d2495a0281c465a3f414f28"
+      "bytes": 168619,
+      "sha256": "c368dd4dd6bdc79db0dc6e35983054d70869f11a879adf636c63ca9f05509576"
     },
     {
       "path": "baseline-jit/index.html",
@@ -264,5 +264,5 @@
       "sha256": "e3586ceb7b9b7781a3481d3871b760889b4d276be923d6b2c8776f74db9ebcb3"
     }
   ],
-  "tree_sha256": "9b8a58610cd4188ef85f2ed7196641f2213afdd56f84d25011188302abcd60bf"
+  "tree_sha256": "50d3ba463b8b760110977e43445420abf1c0921a8ecadff03f76d164db3c185e"
 }

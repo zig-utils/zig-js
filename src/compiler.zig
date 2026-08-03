@@ -13,8 +13,8 @@
 //! an enclosing function is a **global** resolved by name against the
 //! Environment. Top-level program variables are globals (they persist across
 //! `evaluate` calls, like a real global object). Lexical slots carry explicit
-//! TDZ/immutability checks; same-named block bindings remain an admission barrier
-//! until the frame layout assigns distinct scope identities.
+//! TDZ/immutability checks; compile-time lexical scopes assign distinct slots to
+//! same-named block bindings in the shared activation frame.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -62,27 +62,55 @@ const SlotBinding = struct {
 const FnScope = struct {
     parent: ?*FnScope,
     names: std.StringHashMapUnmanaged(SlotBinding) = .{},
+    lexical_scopes: std.ArrayListUnmanaged(*std.StringHashMapUnmanaged(SlotBinding)) = .empty,
+    slot_names: std.ArrayListUnmanaged([]const u8) = .empty,
     count: u32 = 0,
     lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
     tdz_checks: bool = false,
 
     fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
         if (self.names.get(name)) |binding| return binding.slot;
+        return self.addBinding(arena, &self.names, name, lexical, immutable);
+    }
+
+    fn addBinding(self: *FnScope, arena: std.mem.Allocator, bindings: *std.StringHashMapUnmanaged(SlotBinding), name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
         const slot = self.count;
         const tdz_checked = lexical and self.tdz_checks;
-        try self.names.put(arena, name, .{ .slot = slot, .lexical = lexical, .immutable = immutable, .tdz_checked = tdz_checked });
+        try bindings.put(arena, name, .{ .slot = slot, .lexical = lexical, .immutable = immutable, .tdz_checked = tdz_checked });
         if (tdz_checked) try self.lexical_slots.append(arena, slot);
+        try self.slot_names.append(arena, name);
         self.count += 1;
         return slot;
+    }
+
+    fn pushLexicalScope(self: *FnScope, arena: std.mem.Allocator) CompileError!void {
+        const bindings = try arena.create(std.StringHashMapUnmanaged(SlotBinding));
+        bindings.* = .empty;
+        try self.lexical_scopes.append(arena, bindings);
+    }
+
+    fn popLexicalScope(self: *FnScope) void {
+        _ = self.lexical_scopes.pop();
+    }
+
+    fn addLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!u32 {
+        const bindings = self.lexical_scopes.getLast().?;
+        if (bindings.get(name)) |binding| return binding.slot;
+        return self.addBinding(arena, bindings, name, true, immutable);
+    }
+
+    fn get(self: *const FnScope, name: []const u8) ?SlotBinding {
+        var index = self.lexical_scopes.items.len;
+        while (index > 0) {
+            index -= 1;
+            if (self.lexical_scopes.items[index].get(name)) |binding| return binding;
+        }
+        return self.names.get(name);
     }
 };
 
 fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const FnScope) CompileError!void {
-    const names = try arena.alloc([]const u8, scope.count);
-    @memset(names, "");
-    var iterator = scope.names.iterator();
-    while (iterator.next()) |entry| names[entry.value_ptr.slot] = entry.key_ptr.*;
-    chunk.debug_local_names = names;
+    chunk.debug_local_names = try arena.dupe([]const u8, scope.slot_names.items);
 }
 
 /// Whether a node embeds a `yield` reachable without crossing a function
@@ -830,14 +858,9 @@ pub const Compiler = struct {
         }
     }
 
-    /// The VM's `FnScope` keys locals by name across ALL block scopes (flat,
-    /// block-transparent slots), so two DIFFERENT bindings that share a name —
-    /// nested `let` shadowing, a catch param shadowing an outer binding, a `let`
-    /// shadowing a `var`/param — would collapse onto one slot and clobber each
-    /// other. Detect any name introduced by a lexical
-    /// binding that also appears as another binding, and keep such a function on
-    /// the tree-walker, which scopes blocks correctly. Conservative: also bails
-    /// harmless same-name sibling blocks, which only forgoes tiering.
+    /// Detect functions with repeated lexical spellings. Their bindings receive
+    /// distinct slots, but the TDZ hazard scan is still spelling-based, so these
+    /// functions conservatively enable checks for every lexical slot.
     fn functionHasShadowableLexical(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
         var m: std.StringHashMapUnmanaged(ShadowBind) = .empty;
         for (fnode.params) |p| try shadowAdd(arena, &m, p.name, false);
@@ -1011,11 +1034,11 @@ pub const Compiler = struct {
         // decl-time snapshot (e.g. a reassignment after the declaration leaks).
         if (functionHasBlockNestedFuncDecl(fnode))
             return rejectPlainFunction(rejection, .block_nested_function_declaration);
-        // The flat slot model can't represent a lexical binding shadowing another
-        // same-named binding; keep those on the tree-walker (correct block scopes).
-        if (try functionHasShadowableLexical(arena, fnode))
-            return rejectPlainFunction(rejection, .lexical_shadowing);
-        const tdz_checks = try functionHasTdzHazard(arena, fnode);
+        // Shadowed lexicals receive distinct slots below. Conservatively check
+        // every lexical in such a function until the TDZ scan itself is keyed by
+        // binding identity rather than spelling.
+        const has_shadowing = try functionHasShadowableLexical(arena, fnode);
+        const tdz_checks = has_shadowing or try functionHasTdzHazard(arena, fnode);
         const scope = try arena.create(FnScope);
         scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
         for (fnode.params) |p| {
@@ -1023,14 +1046,11 @@ pub const Compiler = struct {
                 return rejectPlainFunction(rejection, .parameter_prologue);
             _ = try scope.addLocal(arena, p.name, false, false);
         }
-        if (!fnode.is_expr_body) try collectLocals(arena, scope, fnode.body);
+        if (!fnode.is_expr_body) try collectFunctionLocals(arena, scope, fnode.body);
 
         const chunk = try arena.create(Chunk);
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
-        chunk.local_count = scope.count;
-        chunk.lexical_slots = scope.lexical_slots.items;
-        try retainDebugLocalNames(arena, chunk, scope);
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
         if (fnode.is_expr_body) {
             try c.compileTailExpr(fnode.body);
@@ -1038,6 +1058,9 @@ pub const Compiler = struct {
             try c.compileStmt(fnode.body);
             _ = try chunk.emit(.ret_undef, 0);
         }
+        chunk.local_count = scope.count;
+        chunk.lexical_slots = scope.lexical_slots.items;
+        try retainDebugLocalNames(arena, chunk, scope);
         try chunk.finalize();
         return .{ .chunk = chunk, .local_count = scope.count };
     }
@@ -1048,7 +1071,7 @@ pub const Compiler = struct {
         var depth: u32 = 0;
         var scope = self.scope;
         while (scope) |sc| {
-            if (sc.names.get(name)) |binding| {
+            if (sc.get(name)) |binding| {
                 return if (depth == 0) .{ .local = binding } else .{ .upval = .{ .depth = depth, .binding = binding } };
             }
             depth += 1;
@@ -1155,6 +1178,41 @@ pub const Compiler = struct {
     fn emitLexicalInitializersForList(self: *Compiler, stmts: []*Node) CompileError!void {
         if (self.scope == null) return;
         for (stmts) |stmt| try self.emitLexicalInitializersForNode(stmt);
+    }
+
+    fn predeclareLexicalNode(self: *Compiler, node: *Node) CompileError!void {
+        const scope = self.scope orelse return;
+        switch (node.*) {
+            .var_decl => |decl| {
+                if (decl.kind != .@"var")
+                    _ = try scope.addLexical(self.arena, decl.name, decl.kind == .@"const");
+            },
+            .decl_group => |decls| for (decls) |decl| try self.predeclareLexicalNode(decl),
+            else => {},
+        }
+    }
+
+    fn predeclareLexicalList(self: *Compiler, stmts: []*Node) CompileError!void {
+        if (self.scope == null) return;
+        for (stmts) |stmt| try self.predeclareLexicalNode(stmt);
+    }
+
+    fn nodeDeclaresLexical(node: *const Node) bool {
+        return switch (node.*) {
+            .var_decl => |decl| decl.kind != .@"var",
+            .decl_group => |decls| for (decls) |decl| {
+                if (nodeDeclaresLexical(decl)) break true;
+            } else false,
+            else => false,
+        };
+    }
+
+    fn pushLexicalScope(self: *Compiler) CompileError!void {
+        if (self.scope) |scope| try scope.pushLexicalScope(self.arena);
+    }
+
+    fn popLexicalScope(self: *Compiler) void {
+        if (self.scope) |scope| scope.popLexicalScope();
     }
 
     // ---- statements -------------------------------------------------------
@@ -1275,6 +1333,9 @@ pub const Compiler = struct {
             },
             .debugger_stmt => _ = try self.chunk.emit(.nop, 0),
             .block => |stmts| {
+                try self.pushLexicalScope();
+                defer self.popLexicalScope();
+                try self.predeclareLexicalList(stmts);
                 const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
                 if (disposable_scope) {
                     // This first VM block-disposal slice handles normal completion.
@@ -1376,8 +1437,15 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.pop_handler, 0);
             const skip = try self.chunk.emit(.jump, 0);
             self.chunk.code.items[ph].a = @intCast(self.chunk.here());
-            if (t.catch_param) |p| try self.emitDefine(p.identifier) else _ = try self.chunk.emit(.pop, 0);
-            try self.compileStmt(catch_block);
+            {
+                try self.pushLexicalScope();
+                defer self.popLexicalScope();
+                if (t.catch_param) |p| {
+                    if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
+                    try self.emitDefine(p.identifier);
+                } else _ = try self.chunk.emit(.pop, 0);
+                try self.compileStmt(catch_block);
+            }
             self.chunk.patchToHere(skip);
             return;
         }
@@ -1396,6 +1464,8 @@ pub const Compiler = struct {
         var catch_start: ?usize = null;
         var ph2: ?usize = null;
         if (t.catch_block) |cb| {
+            try self.pushLexicalScope();
+            defer self.popLexicalScope();
             catch_start = self.chunk.here();
             // Consume the thrown exception (bind it, or discard it) BEFORE pushing
             // the finally-only handler, so that handler records the post-binding
@@ -1403,7 +1473,10 @@ pub const Compiler = struct {
             // that still counts the (now-consumed) exception and over-shrinks the
             // operand stack. The binding is always a plain identifier (destructuring
             // catch params are rejected above), so it can't throw before the guard.
-            if (t.catch_param) |p| try self.emitDefine(p.identifier) else _ = try self.chunk.emit(.pop, 0);
+            if (t.catch_param) |p| {
+                if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
+                try self.emitDefine(p.identifier);
+            } else _ = try self.chunk.emit(.pop, 0);
             // A throw inside the catch body must still run the finally.
             ph2 = try self.chunk.emitAB(.push_handler, none, none);
             try self.compileStmt(cb);
@@ -1438,6 +1511,10 @@ pub const Compiler = struct {
         try self.compileExpr(disc);
         const d = try self.freshTemp();
         try self.emitDefine(d); // d = the discriminant value
+
+        try self.pushLexicalScope();
+        defer self.popLexicalScope();
+        for (cases) |case| try self.predeclareLexicalList(case.body);
 
         // The whole CaseBlock is one lexical scope. Its bindings enter the TDZ
         // after discriminant evaluation but before any case-test evaluation.
@@ -1528,6 +1605,12 @@ pub const Compiler = struct {
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
         if (init_node) |ini| if (forLoopCapturesLexical(ini, body)) return error.Unsupported;
         if (loopBodyCapturesLexical(body)) return error.Unsupported;
+        const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
+        if (lexical_scope) {
+            try self.pushLexicalScope();
+            try self.predeclareLexicalNode(init_node.?);
+        }
+        defer if (lexical_scope) self.popLexicalScope();
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
         if (disposable_scope) {
             if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
@@ -1627,6 +1710,12 @@ pub const Compiler = struct {
         if (!self.in_generator) if (decl_kind) |k| if (k != .@"var") {
             if (patternNameCaptured(target, body)) return error.Unsupported;
         };
+        const lexical_scope = self.scope != null and if (decl_kind) |kind| kind != .@"var" and target.* == .identifier else false;
+        if (lexical_scope) {
+            try self.pushLexicalScope();
+            _ = try self.scope.?.addLexical(self.arena, target.identifier, decl_kind.? == .@"const");
+        }
+        defer if (lexical_scope) self.popLexicalScope();
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
 
@@ -2833,18 +2922,14 @@ pub const Compiler = struct {
         if (fnode.is_generator and self.scope != null) return error.Unsupported;
         if (!fnode.is_generator and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
-        // The flat slot model can't represent a lexical binding shadowing another
-        // same-named binding (incl. a param shadowed by a block `let`). This gate
-        // is also applied in compilePlainFunction; a nested function needs it too,
-        // else a tiered parent lowers it to a sub-chunk whose slots shadow-leak.
-        if (!fnode.is_generator and try functionHasShadowableLexical(self.arena, fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
+        const has_shadowing = !fnode.is_generator and try functionHasShadowableLexical(self.arena, fnode);
         scope.* = .{
             .parent = self.scope,
-            .tdz_checks = if (!fnode.is_generator) try functionHasTdzHazard(self.arena, fnode) else false,
+            .tdz_checks = if (!fnode.is_generator) has_shadowing or try functionHasTdzHazard(self.arena, fnode) else false,
         };
 
         var template_admission: bc.FnTemplateAdmission = undefined;
@@ -2871,12 +2956,9 @@ pub const Compiler = struct {
                 }
                 _ = try scope.addLocal(self.arena, p.name, false, false);
             }
-            if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
+            if (!fnode.is_expr_body) try collectFunctionLocals(self.arena, scope, fnode.body);
 
             compiled.param_count = @intCast(fnode.params.len);
-            compiled.local_count = scope.count;
-            compiled.lexical_slots = scope.lexical_slots.items;
-            try retainDebugLocalNames(self.arena, compiled, scope);
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
             if (fnode.is_expr_body) {
@@ -2904,6 +2986,9 @@ pub const Compiler = struct {
                 }; // body is a block
                 _ = try compiled.emit(.ret_undef, 0);
             }
+            compiled.local_count = scope.count;
+            compiled.lexical_slots = scope.lexical_slots.items;
+            try retainDebugLocalNames(self.arena, compiled, scope);
             try compiled.finalize();
             template_admission = .plain_compiled;
             break :blk compiled;
@@ -2985,50 +3070,40 @@ pub const Compiler = struct {
     }
 };
 
-/// Collect a function's slot-allocated declarations: every `var`/`let`/`const`
-/// and nested `function` name reachable in the body, *without* descending into
-/// nested function/arrow bodies (those names belong to those functions). Blocks
-/// are traversed up front so scope-entry TDZ initialization can address every
-/// lexical slot. Same-named block bindings are rejected before this pass.
-fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
+/// Hoist only function-scoped declarations. Lexical declarations are allocated
+/// when their exact block/loop/switch/catch scope is entered during compilation,
+/// so same-spelled bindings receive distinct activation slots.
+fn collectFunctionLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
     switch (node.*) {
-        .var_decl => |d| _ = try scope.addLocal(arena, d.name, d.kind != .@"var", d.kind == .@"const"),
-        .func_decl => |f| _ = try scope.addLocal(arena, f.name, false, false),
-        .block => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
-        .decl_group => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
-        .if_stmt => |s| {
-            try collectLocals(arena, scope, s.consequent);
-            if (s.alternate) |alt| try collectLocals(arena, scope, alt);
+        .var_decl => |d| {
+            if (d.kind == .@"var") _ = try scope.addLocal(arena, d.name, false, false);
         },
-        .while_stmt => |s| try collectLocals(arena, scope, s.body),
-        .do_while_stmt => |s| try collectLocals(arena, scope, s.body),
+        .func_decl => |f| _ = try scope.addLocal(arena, f.name, false, false),
+        .block => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
+        .decl_group => |stmts| for (stmts) |s| try collectFunctionLocals(arena, scope, s),
+        .if_stmt => |s| {
+            try collectFunctionLocals(arena, scope, s.consequent);
+            if (s.alternate) |alt| try collectFunctionLocals(arena, scope, alt);
+        },
+        .while_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
+        .do_while_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
         .for_stmt => |f| {
-            if (f.init) |ini| try collectLocals(arena, scope, ini);
-            try collectLocals(arena, scope, f.body);
+            if (f.init) |ini| try collectFunctionLocals(arena, scope, ini);
+            try collectFunctionLocals(arena, scope, f.body);
         },
         .for_in => |f| {
-            // Identifier loop targets need slots in frame mode. Lexical targets
-            // are checked for TDZ/immutability like ordinary declarations; the
-            // captured per-iteration case remains an explicit compiler barrier.
-            if (f.decl_kind) |k| {
-                if (f.target.* == .identifier)
-                    _ = try scope.addLocal(arena, f.target.identifier, k != .@"var", k == .@"const");
+            if (f.decl_kind) |kind| {
+                if (kind == .@"var" and f.target.* == .identifier)
+                    _ = try scope.addLocal(arena, f.target.identifier, false, false);
             }
-            try collectLocals(arena, scope, f.body);
+            try collectFunctionLocals(arena, scope, f.body);
         },
-        .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectLocals(arena, scope, st),
-        .labeled_stmt => |s| try collectLocals(arena, scope, s.body),
+        .switch_stmt => |s| for (s.cases) |c| for (c.body) |st| try collectFunctionLocals(arena, scope, st),
+        .labeled_stmt => |s| try collectFunctionLocals(arena, scope, s.body),
         .try_stmt => |t| {
-            try collectLocals(arena, scope, t.block);
-            // The catch parameter is stored + read via store_local/load_local, so
-            // it needs a frame slot; without one it resolves to a global and
-            // def_var leaks the caught value out of the catch block (into the
-            // closure/global scope). A destructuring catch param bails elsewhere.
-            if (t.catch_param) |p| {
-                if (p.* == .identifier) _ = try scope.addLocal(arena, p.identifier, true, false);
-            }
-            if (t.catch_block) |cb| try collectLocals(arena, scope, cb);
-            if (t.finally_block) |fb| try collectLocals(arena, scope, fb);
+            try collectFunctionLocals(arena, scope, t.block);
+            if (t.catch_block) |cb| try collectFunctionLocals(arena, scope, cb);
+            if (t.finally_block) |fb| try collectFunctionLocals(arena, scope, fb);
         },
         // Expressions (incl. nested function/arrow literals) declare no names in
         // this function's scope. `var` inside these statement forms is hoisted to
@@ -3088,7 +3163,6 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function* f(){}", .expected = .generator_or_async },
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
-        .{ .source = "function f(value){ { let value; } }", .expected = .lexical_shadowing },
         .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(){ return arguments; }", .expected = .unsupported_lowering },
     };
@@ -3114,6 +3188,18 @@ test "compiler reports stable plain-function admission reasons" {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
     }
+
+    var shadow_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer shadow_arena.deinit();
+    var shadow_parser = try @import("parser.zig").Parser.init(
+        shadow_arena.allocator(),
+        "function f(value){ { let value = 1; } { const value = 2; } return value; }",
+    );
+    const shadow_program = try shadow_parser.parseProgram();
+    const shadow_compiled = try Compiler.compilePlainFunction(shadow_arena.allocator(), shadow_program.program[0].func_decl);
+    try std.testing.expectEqual(@as(u32, 3), shadow_compiled.local_count);
+    try std.testing.expectEqual(@as(usize, 2), shadow_compiled.chunk.lexical_slots.len);
+    for (shadow_compiled.chunk.debug_local_names) |name| try std.testing.expectEqualStrings("value", name);
 
     var tdz_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer tdz_arena.deinit();

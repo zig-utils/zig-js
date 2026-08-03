@@ -18495,7 +18495,7 @@ test "bytecode admission inventory retains exact runtime reasons" {
         .{ .name = "admitted", .reason = .plain_compiled },
         .{ .name = "withArguments", .reason = .plain_policy_arguments },
         .{ .name = "notCandidate", .reason = .plain_policy_not_candidate },
-        .{ .name = "shadowed", .reason = .plain_rejected_lexical_shadowing },
+        .{ .name = "shadowed", .reason = .plain_compiled },
         .{ .name = "generatorCompiled", .reason = .generator_compiled },
         .{ .name = "generatorRejected", .reason = .generator_rejected_unsupported_lowering },
         .{ .name = "asyncCompiled", .reason = .async_compiled },
@@ -18521,8 +18521,11 @@ test "bytecode admission inventory retains exact runtime reasons" {
     const after = ctx.bytecodeAdmissionSnapshot();
     try std.testing.expectEqual(before.count(.program_compiled) + 2, after.count(.program_compiled));
     try std.testing.expectEqual(before.count(.program_policy_lexical_declaration) + 1, after.count(.program_policy_lexical_declaration));
-    for (expected) |entry|
+    try std.testing.expectEqual(before.count(.plain_compiled) + 2, after.count(.plain_compiled));
+    for (expected) |entry| {
+        if (entry.reason == .plain_compiled) continue;
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
+    }
     for (template_expected) |entry|
         try std.testing.expectEqual(before.count(entry.reason) + 1, after.count(entry.reason));
     try std.testing.expectEqual(before.count(.program_source_policy), after.count(.program_source_policy));
@@ -18834,6 +18837,61 @@ test "forced tree-walker and required bytecode preserve lexical TDZ and const se
         \\}
         \\mutableAfterTdz();
     , "lexicalTrace.join(',')");
+}
+
+test "forced tree-walker and required bytecode preserve lexical binding identity" {
+    try verifyForcedPlainDifferential(
+        \\globalThis.shadowTrace = [];
+        \\function shadowed(value) {
+        \\  "use strict";
+        \\  shadowTrace.push("parameter:" + value);
+        \\  {
+        \\    let value = 2;
+        \\    let read = function () { return value; };
+        \\    shadowTrace.push("inner:" + read());
+        \\    value = 3;
+        \\    shadowTrace.push("captured:" + read());
+        \\  }
+        \\  shadowTrace.push("restored:" + value);
+        \\  { const value = 4; shadowTrace.push("sibling:" + value); }
+        \\  shadowTrace.push("restored-again:" + value);
+        \\  return value;
+        \\}
+        \\shadowed(1);
+    , "shadowTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.shadowTdzTrace = [];
+        \\function shadowedTdz(value) {
+        \\  "use strict";
+        \\  {
+        \\    try { value; } catch (error) { shadowTdzTrace.push(error.name); }
+        \\    let value = 5;
+        \\    shadowTdzTrace.push(value);
+        \\  }
+        \\  shadowTdzTrace.push(value);
+        \\  return value;
+        \\}
+        \\shadowedTdz(7);
+    , "shadowTdzTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.scopeTrace = [];
+        \\function scopedHeads(value) {
+        \\  "use strict";
+        \\  for (let value = 0; value < 2; value = value + 1) scopeTrace.push("for:" + value);
+        \\  scopeTrace.push("after-for:" + value);
+        \\  for (let value of [3, 4]) scopeTrace.push("of:" + value);
+        \\  scopeTrace.push("after-of:" + value);
+        \\  switch (0) {
+        \\    case 0: let value = 5; scopeTrace.push("switch:" + value); break;
+        \\  }
+        \\  try { throw 6; } catch (value) { scopeTrace.push("catch:" + value); }
+        \\  scopeTrace.push("final:" + value);
+        \\  return value;
+        \\}
+        \\scopedHeads(9);
+    , "scopeTrace.join('|')");
 }
 
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {
