@@ -10203,6 +10203,137 @@ test "vm: optimizer inherited property cache yields to shadowing, chain edits, a
     try std.testing.expectEqual(@as(f64, 9), (try Run.read(&machine, &compiled, receiver)).asNum());
 }
 
+test "vm: optimizer property modes match bytecode results effects and steps" {
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const source =
+        \\var accessorCalls = 0;
+        \\var proxyCalls = 0;
+        \\const own = { value: 1 };
+        \\const inherited = Object.create({ value: 2 });
+        \\const accessor = {};
+        \\Object.defineProperty(accessor, "value", {
+        \\  get: function () { accessorCalls = accessorCalls + 1; return 3; }
+        \\});
+        \\const proxy = new Proxy({ value: 4 }, {
+        \\  get: function (target, key) { proxyCalls = proxyCalls + 1; return target[key]; }
+        \\});
+        \\const mega0 = { value: 5, a: 0 };
+        \\const mega1 = { b: 0, value: 6 };
+        \\const mega2 = { value: 7, c: 0 };
+        \\const mega3 = { d: 0, value: 8 };
+        \\const mega4 = { value: 9, e: 0 };
+        \\const mega5 = { f: 0, value: 10 };
+        \\function readOwn(object) { return object.value; }
+        \\function readInherited(object) { return object.value; }
+        \\function readAccessor(object) { return object.value; }
+        \\function readProxy(object) { return object.value; }
+        \\function readMega(object) { return object.value; }
+        \\0;
+    ;
+    const Outcome = struct {
+        result_bits: [5]u64,
+        steps: [5]u64,
+        accessor_calls: u64,
+        proxy_calls: u64,
+    };
+    const Runner = struct {
+        fn execute(allocator: std.mem.Allocator, optimized: bool) !Outcome {
+            var parser = try Parser.init(allocator, source);
+            const program = try parser.parseProgram();
+            const root = try Compiler.compileProgram(allocator, program);
+            var owner = jit.Owner.init(allocator);
+            defer owner.deinit();
+            var env = Environment{ .arena = allocator, .fn_scope = true };
+            const root_shape = try @import("shape.zig").Shape.createRoot(allocator);
+            try interp.installGlobals(&env, root_shape);
+            var machine = Interpreter{
+                .arena = allocator,
+                .env = &env,
+                .root_shape = root_shape,
+                .jit_owner = if (optimized) &owner else null,
+            };
+            _ = try run(&machine, root, null);
+            const function_names = [_][]const u8{
+                "readOwn", "readInherited", "readAccessor", "readProxy", "readMega",
+            };
+            var functions: [function_names.len]*interp.Function = undefined;
+            var chunks: [function_names.len]*bc.Chunk = undefined;
+            for (function_names, 0..) |name, index| {
+                functions[index] = Interpreter.funcOf(env.get(name).?) orelse
+                    return error.TestUnexpectedResult;
+                chunks[index] = functions[index].chunk orelse return error.TestUnexpectedResult;
+            }
+            const inputs = [_]Value{
+                env.get("own").?,
+                env.get("inherited").?,
+                env.get("accessor").?,
+                env.get("proxy").?,
+                env.get("mega5").?,
+            };
+            const mega_inputs = [_]Value{
+                env.get("mega0").?, env.get("mega1").?, env.get("mega2").?,
+                env.get("mega3").?, env.get("mega4").?, env.get("mega5").?,
+            };
+            for (functions, chunks, 0..) |function, chunk, index| {
+                for (0..24) |warm| {
+                    const input = if (index == 4) mega_inputs[warm % mega_inputs.len] else inputs[index];
+                    _ = try runFunction(
+                        &machine,
+                        function,
+                        chunk,
+                        &.{input},
+                        Value.undef(),
+                        Value.undef(),
+                    );
+                }
+                if (optimized) {
+                    const artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+                        return error.TestUnexpectedResult;
+                    try std.testing.expectEqual(jit.CodeKind.optimizer, artifact.kind);
+                } else {
+                    try std.testing.expectEqual(@as(u64, 0), chunk.optimizer_tier.compileCount());
+                }
+            }
+
+            var result_bits: [functions.len]u64 = undefined;
+            var steps: [functions.len]u64 = undefined;
+            for (functions, chunks, inputs, 0..) |function, chunk, input, index| {
+                const start_steps = machine.steps;
+                result_bits[index] = (try runFunction(
+                    &machine,
+                    function,
+                    chunk,
+                    &.{input},
+                    Value.undef(),
+                    Value.undef(),
+                )).rawBits();
+                steps[index] = machine.steps - start_steps;
+            }
+            return .{
+                .result_bits = result_bits,
+                .steps = steps,
+                .accessor_calls = @intFromFloat(env.get("accessorCalls").?.asNum()),
+                .proxy_calls = @intFromFloat(env.get("proxyCalls").?.asNum()),
+            };
+        }
+    };
+
+    var bytecode_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer bytecode_arena.deinit();
+    const bytecode = try Runner.execute(bytecode_arena.allocator(), false);
+    var optimizer_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer optimizer_arena.deinit();
+    const optimized = try Runner.execute(optimizer_arena.allocator(), true);
+
+    try std.testing.expectEqualSlices(u64, &bytecode.result_bits, &optimized.result_bits);
+    try std.testing.expectEqualSlices(u64, &bytecode.steps, &optimized.steps);
+    try std.testing.expectEqual(bytecode.accessor_calls, optimized.accessor_calls);
+    try std.testing.expectEqual(bytecode.proxy_calls, optimized.proxy_calls);
+    for (optimized.result_bits, [_]f64{ 1, 2, 3, 4, 10 }) |bits, expected|
+        try std.testing.expectEqual(expected, Value.fromRawBits(bits).asNum());
+}
+
 test "vm: optimizer packed index guards direct existing-index reads and writes" {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
     const original_parallel = bc.ic_seqlock_enabled.swap(false, .monotonic);
