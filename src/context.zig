@@ -21563,6 +21563,13 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
         \\  const heldLock = new Lock();
         \\  const asyncTaskLock = new Lock();
         \\  const asyncRoot = { nested: { base: 41 }, label: 'async-midgc-root' };
+        \\  function waitReady(name) {
+        \\    let attempts = 0;
+        \\    while (Atomics.load(gate, name) === 0) {
+        \\      if (attempts++ === 10000) throw new Error('wait peer did not publish readiness: ' + name);
+        \\      Atomics.wait(gate, name, 0, 1);
+        \\    }
+        \\  }
         \\  let asyncScore = 0;
         \\  let asyncThen = 0;
         \\  const asyncGrant = asyncTaskLock.asyncHold(() => {
@@ -21599,20 +21606,16 @@ test "parallel_js (M3): sync wait peers publish roots for mid-script parallel GC
         \\    });
         \\    return 1;
         \\  });
-        \\  while (Atomics.load(gate, 'holderReady') === 0)
-        \\    Atomics.wait(gate, 'holderReady', 0, 1);
+        \\  waitReady('holderReady');
         \\  const lockWaiter = new Thread(() => {
         \\    Atomics.store(gate, 'lockReady', 1);
         \\    Atomics.notify(gate, 'lockReady');
         \\    heldLock.hold(() => { gate.lockDone = 1; });
         \\    return 1;
         \\  });
-        \\  while (Atomics.load(gate, 'propReady') === 0)
-        \\    Atomics.wait(gate, 'propReady', 0, 1);
-        \\  while (Atomics.load(gate, 'condReady') === 0)
-        \\    Atomics.wait(gate, 'condReady', 0, 1);
-        \\  while (Atomics.load(gate, 'lockReady') === 0)
-        \\    Atomics.wait(gate, 'lockReady', 0, 1);
+        \\  waitReady('propReady');
+        \\  waitReady('condReady');
+        \\  waitReady('lockReady');
         \\  const keep = [];
         \\  for (let round = 0; round < 12; round++) {
         \\    for (let i = 0; i < 900; i++)
