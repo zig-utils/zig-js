@@ -1240,7 +1240,8 @@ pub fn build(b: *std.Build) void {
     // step is what actually spends the cores. Shards share the one built
     // binary, so changing `-Dunit-jobs` costs no relink. The serial step stays
     // as-is for CI legs that already shard themselves.
-    const parallel_tests = b.addSystemCommand(&.{ "python3", "tools/unit-test-parallel.py" });
+    const parallel_driver_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts", "--self-test" });
+    const parallel_tests = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/unit-test-parallel.ts" });
     parallel_tests.addFileArg(tests.getEmittedBin());
     if (test_filter) |filter| {
         parallel_tests.setEnvironmentVariable("UNIT_TEST_FILTER", filter);
@@ -1250,6 +1251,7 @@ pub fn build(b: *std.Build) void {
     }
     parallel_tests.has_side_effects = true;
     const parallel_test_step = b.step("test-parallel", "Run zig-js unit tests as parallel shards");
+    parallel_test_step.dependOn(&parallel_driver_test.step);
     parallel_test_step.dependOn(&parallel_tests.step);
 
     // Small production JIT test root for tight development loops. It uses the
