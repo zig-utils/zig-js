@@ -1693,7 +1693,7 @@ pub fn build(b: *std.Build) void {
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
-    const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
+    const object_churn_gc_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/object-churn-gc-profile.ts", "--self-test" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
     const shared_object_churn_ab_test = b.addSystemCommand(&.{ "python3", "tools/test_shared_object_churn_ab.py" });
     const optimizer_release_inventory_check = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/optimizer-release-inventory.ts" });

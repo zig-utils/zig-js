@@ -215,7 +215,7 @@ the per-object contention counters or alter normal benchmark output:
 
 ```sh
 zig build benchmark-comparison-bin
-python3 tools/object-churn-gc-profile.py zig-out/bin/bench-comparison-zig-js \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/object-churn-gc-profile.ts zig-out/bin/bench-comparison-zig-js \
   --raw-out /tmp/object-churn-gc.tsv \
   --markdown-out /tmp/object-churn-gc.md
 ```
