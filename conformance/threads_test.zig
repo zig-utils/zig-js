@@ -877,6 +877,14 @@ fn printOptimizerEvidence(ctx: *js.Context, out_publications: *u64, out_invalida
         "        optimizer: publications={d} invalidations={d} collections={d} retired={d} reclaimed={d}\n",
         .{ publications, invalidations, collections, stats.retired_artifacts, stats.reclaimed_artifacts },
     );
+    if (stats.shape_invalidation_events != 0) std.debug.print(
+        "        optimizer: shape-stops={d} shape-retired={d} survivors={d} retired-bytes={d}\n",
+        .{ stats.shape_invalidation_events, stats.shape_retired_artifacts, stats.shape_survivor_artifacts, stats.shape_retired_bytes },
+    );
+    if (stats.full_invalidation_events != 0 or stats.shape_fallback_events != 0) std.debug.print(
+        "        optimizer: full-stops={d} unknown-shape={d} shape-fallbacks={d}\n",
+        .{ stats.full_invalidation_events, stats.unknown_shape_invalidation_events, stats.shape_fallback_events },
+    );
     // Call linking is a separate premise from artifact lifetime: a case can
     // publish and retire plenty of code while every call still goes through
     // canonical dispatch, which is precisely the distinction the writer/writer

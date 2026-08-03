@@ -6020,12 +6020,12 @@ pub const Context = struct {
         _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
     }
 
-    fn clearJitCodeFromInterpreter(raw_context: *anyopaque, machine: *interp.Interpreter) void {
+    fn clearJitCodeFromInterpreter(raw_context: *anyopaque, machine: *interp.Interpreter, shape_token: usize) void {
         const self: *Context = @ptrCast(@alignCast(raw_context));
         self.enterJitGcConductorFromInterpreter(machine);
         defer self.leaveJitGcConductor();
-        (self.shared_jit_owner orelse &self.jit_owner).clear();
-        _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
+        if ((self.shared_jit_owner orelse &self.jit_owner).clearShape(shape_token))
+            _ = self.jitGcConductor().class_a_stops.fetchAdd(1, .monotonic);
     }
 
     /// Run a precise mark-sweep over the GC heap (Phase 7). Single-threaded, this
@@ -16772,7 +16772,7 @@ test "parallel_js: a block-scoped binding survives concurrent collection" {
     try std.testing.expectEqualStrings("ok", result.asStr());
 }
 
-test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
+test "parallel_js: targeted Class-A invalidation preserves unrelated artifact" {
     if (builtin.single_threaded) return error.SkipZigTest;
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
@@ -16788,12 +16788,29 @@ test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
         \\globalThis.watchedProto = { y: 1 };
         \\globalThis.watchedObject = Object.create(watchedProto);
         \\globalThis.unrelated = { a: 1, b: 2, c: 3 };
+        \\globalThis.survivorObject = { survivor: 7, distinct: 8 };
         \\function watchedRead(o) { return o.y; }
-        \\for (let warm = 0; warm < 64; warm = warm + 1) watchedRead(watchedObject);
+        \\function survivorRead(o) { return o.survivor; }
+        \\for (let warm = 0; warm < 64; warm = warm + 1) {
+        \\  watchedRead(watchedObject);
+        \\  survivorRead(survivorObject);
+        \\}
     );
     const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
     try std.testing.expect(owner.hasPublishedArtifacts());
     const generation_before = owner.invalidation_generation.load(.acquire);
+    const watched_raw = ctx.global_object.getOwn("watchedRead").?.asObj().jsFunction() orelse
+        return error.TestUnexpectedResult;
+    const watched_function: *interp.Function = @ptrCast(@alignCast(watched_raw));
+    const watched_chunk = watched_function.chunk orelse return error.TestUnexpectedResult;
+    const watched_artifact = watched_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
+    const survivor_raw = ctx.global_object.getOwn("survivorRead").?.asObj().jsFunction() orelse
+        return error.TestUnexpectedResult;
+    const survivor_function: *interp.Function = @ptrCast(@alignCast(survivor_raw));
+    const survivor_chunk = survivor_function.chunk orelse return error.TestUnexpectedResult;
+    const survivor_artifact = survivor_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+        return error.TestUnexpectedResult;
 
     // No published artifact speculates on `unrelated`'s shape, so mutating it
     // must not jettison the warmed tier (#457).
@@ -16805,7 +16822,15 @@ test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
     // compile/link Class-A boundary. Value-only stores above do not.
     _ = try ctx.evaluate("watchedProto.extra = 4;");
     try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
+    try std.testing.expect(watched_chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expectEqual(survivor_artifact, survivor_chunk.optimizer_tier.loadArtifact(jit.CompiledCode).?);
+    try std.testing.expect(watched_artifact != survivor_artifact);
     try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("watchedRead(watchedObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 7), (try ctx.evaluate("survivorRead(survivorObject)")).asNum());
+    const stats = owner.stats();
+    try std.testing.expectEqual(@as(u64, 1), stats.shape_invalidation_events);
+    try std.testing.expectEqual(@as(u64, 1), stats.shape_retired_artifacts);
+    try std.testing.expect(stats.shape_survivor_artifacts >= 1);
 }
 
 test "inherited value mutation preserves optimized artifacts" {

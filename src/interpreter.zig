@@ -1233,7 +1233,7 @@ pub const Interpreter = struct {
     /// Parallel-realm heap mutations conservatively fire the Context's Class-A
     /// invalidation bridge once native code has published heap assumptions.
     jit_invalidation_ctx: ?*anyopaque = null,
-    jit_invalidation_fn: ?*const fn (*anyopaque, *Interpreter) void = null,
+    jit_invalidation_fn: ?*const fn (*anyopaque, *Interpreter, usize) void = null,
     /// Prefer a whole-activation baseline artifact over compiling the same
     /// managed loop into a slower generic optimizer region. Unit-test
     /// interpreters default this off so optimizer-specific tests exercise that
@@ -1796,8 +1796,8 @@ pub const Interpreter = struct {
     /// `obj` must be passed
     /// *before* the store: adding a property transitions the object to a new
     /// shape, while the assumption any optimized code guards on is the one it
-    /// still has here. A null `obj` (or a shapeless one) keeps the conservative
-    /// unconditional stop.
+    /// still has here. A shapeless receiver uses the optimizer's explicit
+    /// empty-receiver token; only a null `obj` keeps the conservative stop.
     pub fn invalidateJitHeapFactsFor(self: *Interpreter, obj: ?*const value.Object) void {
         const owner = self.jit_owner orelse return;
         if (!owner.hasPublishedArtifacts()) return;
@@ -1809,11 +1809,14 @@ pub const Interpreter = struct {
             // the writer or consulting a torn/stale pointer.
             o.lockProperties();
             defer o.unlockProperties();
-            break :token if (o.shape) |shape| @intFromPtr(shape) else 0;
+            break :token if (o.shape) |shape|
+                @intFromPtr(shape)
+            else
+                jit.NativePropertyCache.empty_receiver_shape_token;
         } else 0;
         if (!owner.shapeMayInvalidate(shape_token)) return;
         if (self.jit_invalidation_fn) |invalidate|
-            invalidate(self.jit_invalidation_ctx.?, self);
+            invalidate(self.jit_invalidation_ctx.?, self, shape_token);
     }
 
     /// Mutation site with no object in hand: always conservative.

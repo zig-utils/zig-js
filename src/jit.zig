@@ -842,6 +842,12 @@ pub const OsrMetadata = struct {
 pub const CompiledCode = struct {
     memory: CodeMemory,
     entry: NativeEntry,
+    /// Per-artifact invalidation cell. Generated code compares this value with
+    /// the immutable expected generation in its NativeFrame, so retiring one
+    /// shape-dependent artifact does not force unrelated native code to exit.
+    artifact_generation: std.atomic.Value(u64) = .init(0),
+    baseline_tier: ?*Tier = null,
+    optimizer_tier: ?*OptimizerTier = null,
     kind: CodeKind = .baseline,
     /// Fixed dispatch count for leaf entries, or the maximum managed quantum
     /// required before a side-exit/OSR region may begin native work.
@@ -895,12 +901,20 @@ pub const OwnerStats = struct {
     retired_bytes: usize,
     reclaimed_artifacts: usize,
     reclaimed_bytes: usize,
+    shape_invalidation_events: u64,
+    shape_retired_artifacts: u64,
+    shape_survivor_artifacts: u64,
+    shape_retired_bytes: u64,
+    full_invalidation_events: u64,
+    unknown_shape_invalidation_events: u64,
+    shape_fallback_events: u64,
 };
 
 /// Context-owned lifetime registry for immutable compiled mappings. Adoption is
 /// serialized because different shared-realm chunks can tier concurrently.
 /// Invalidation rotates the execution epoch and retires the prior generation;
-/// its final reader reclaims it without waiting for later-generation readers.
+/// exact retirement preserves unrelated artifacts across rotations, so retired
+/// mappings wait for the older-reader frontier whenever survivors crossed it.
 pub const Owner = struct {
     allocator: ?std.mem.Allocator = null,
     lock: std.atomic.Mutex = .unlocked,
@@ -911,6 +925,10 @@ pub const Owner = struct {
     current_execution_epoch: std.atomic.Value(usize) = .init(0),
     initial_execution_epoch: ExecutionEpoch = .{},
     execution_epochs: std.ArrayListUnmanaged(*ExecutionEpoch) = .empty,
+    /// Protected by `lock`. Once an artifact survives an epoch rotation, any
+    /// later retirement of that artifact must wait for every older epoch that
+    /// could still have entered it, not merely the epoch receiving its mapping.
+    retirement_requires_global_quiescence: bool = false,
     invalidating: std.atomic.Value(bool) = .init(false),
     invalidation_generation: std.atomic.Value(u64) = .init(0),
     live_artifacts: std.atomic.Value(usize) = .init(0),
@@ -919,6 +937,14 @@ pub const Owner = struct {
     retired_bytes: std.atomic.Value(usize) = .init(0),
     reclaimed_artifacts: std.atomic.Value(usize) = .init(0),
     reclaimed_bytes: std.atomic.Value(usize) = .init(0),
+    /// Lifetime attribution for precise shape-scoped retirement (#471).
+    shape_invalidation_events: std.atomic.Value(u64) = .init(0),
+    shape_retired_artifacts: std.atomic.Value(u64) = .init(0),
+    shape_survivor_artifacts: std.atomic.Value(u64) = .init(0),
+    shape_retired_bytes: std.atomic.Value(u64) = .init(0),
+    full_invalidation_events: std.atomic.Value(u64) = .init(0),
+    unknown_shape_invalidation_events: std.atomic.Value(u64) = .init(0),
+    shape_fallback_events: std.atomic.Value(u64) = .init(0),
     /// Lifetime count of optimizing-tier publications, kept apart from
     /// `live_artifacts` (which also counts baseline code) and never reset by
     /// `clear`. Promotion evidence for a PR-249 case has to show the optimizing
@@ -973,8 +999,8 @@ pub const Owner = struct {
     }
 
     /// Whether mutating an object with this shape could invalidate a published
-    /// assumption. An absent shape reports true: a shapeless object cannot be
-    /// matched against the filter, so it must keep the conservative behavior.
+    /// assumption. Zero means no object was available and remains conservative;
+    /// shapeless receivers use `NativePropertyCache.empty_receiver_shape_token`.
     pub fn shapeMayInvalidate(self: *const Owner, token: usize) bool {
         if (token == 0) return true;
         const bit = shapeFilterBit(token);
@@ -1043,8 +1069,11 @@ pub const Owner = struct {
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
-        owned.invalidation_generation = &self.invalidation_generation;
-        owned.expected_invalidation_generation = self.invalidation_generation.load(.acquire);
+        owned.artifact_generation.store(0, .monotonic);
+        owned.baseline_tier = tier;
+        owned.optimizer_tier = null;
+        owned.invalidation_generation = &owned.artifact_generation;
+        owned.expected_invalidation_generation = 0;
         self.codes.appendAssumeCapacity(owned);
         self.tiers.appendAssumeCapacity(tier);
         tier.publishReady(owned);
@@ -1074,8 +1103,11 @@ pub const Owner = struct {
         try self.codes.ensureUnusedCapacity(allocator, 1);
         try self.optimizer_tiers.ensureUnusedCapacity(allocator, 1);
         owned.* = compiled;
-        owned.invalidation_generation = &self.invalidation_generation;
-        owned.expected_invalidation_generation = self.invalidation_generation.load(.acquire);
+        owned.artifact_generation.store(0, .monotonic);
+        owned.baseline_tier = null;
+        owned.optimizer_tier = tier;
+        owned.invalidation_generation = &owned.artifact_generation;
+        owned.expected_invalidation_generation = 0;
         if (!tier.publishReady(claim, owned)) return error.Invalidated;
         self.codes.appendAssumeCapacity(owned);
         self.optimizer_tiers.appendAssumeCapacity(tier);
@@ -1157,26 +1189,100 @@ pub const Owner = struct {
             self.clearAfterReadersRetire();
             return;
         };
-        for (self.tiers.items) |tier| tier.invalidate();
-        self.tiers.clearRetainingCapacity();
-        for (self.optimizer_tiers.items) |tier| tier.invalidate();
-        self.optimizer_tiers.clearRetainingCapacity();
-        // Nothing speculates on any shape once every tier is jettisoned, so the
-        // filter starts empty again instead of carrying retired dependencies.
+        self.rotateAllLocked(old_epoch, new_epoch);
+        self.lock.unlock();
+        self.invalidating.store(false, .release);
+        self.reclaimRetiredEpochs();
+    }
+
+    /// Retire only artifacts whose immutable property-cache metadata names the
+    /// exact pre-transition shape. The saturating owner filter remains the
+    /// cheap mutation-path precheck; this locked scan removes its false
+    /// positives and partitions executable lifetime by artifact (#471).
+    /// Mutations without an object token retain the conservative full-owner
+    /// stop; shapeless receivers use the explicit empty-receiver token.
+    pub fn clearShape(self: *Owner, shape_token: usize) bool {
+        if (shape_token == 0) {
+            const had_artifacts = self.hasPublishedArtifacts();
+            if (had_artifacts) {
+                _ = self.unknown_shape_invalidation_events.fetchAdd(1, .monotonic);
+                self.clear();
+            }
+            return had_artifacts;
+        }
+        const allocator = self.allocator orelse return false;
+        self.beginInvalidation();
+        while (self.active_compilations.load(.acquire) != 0) std.Thread.yield() catch {};
+
+        self.acquireLock();
+        var affected_count: usize = 0;
+        for (self.codes.items) |code| if (codeWatchesShape(code, shape_token)) {
+            affected_count += 1;
+        };
+        if (affected_count == 0) {
+            self.lock.unlock();
+            self.invalidating.store(false, .release);
+            return false;
+        }
+
+        const old_epoch = self.currentExecutionEpochLocked();
+        const new_epoch = self.createExecutionEpochLocked() catch {
+            self.lock.unlock();
+            _ = self.shape_fallback_events.fetchAdd(1, .monotonic);
+            // Keep publication and native entry closed across the fallback.
+            // Reopening before a second `clear` could execute the exact stale
+            // shape assumption whose targeted retirement failed to allocate.
+            self.clearAfterReadersRetire();
+            return true;
+        };
+        std.debug.assert(!old_epoch.retired and old_epoch.codes.items.len == 0);
+        var retired_codes: std.ArrayListUnmanaged(*CompiledCode) = .empty;
+        retired_codes.ensureTotalCapacity(allocator, affected_count) catch {
+            _ = self.shape_fallback_events.fetchAdd(1, .monotonic);
+            self.rotateAllLocked(old_epoch, new_epoch);
+            self.lock.unlock();
+            self.invalidating.store(false, .release);
+            self.reclaimRetiredEpochs();
+            return true;
+        };
+
+        var survivor_count: usize = 0;
+        for (self.codes.items) |code| {
+            if (codeWatchesShape(code, shape_token)) {
+                _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+                if (code.baseline_tier) |tier| tier.invalidate();
+                if (code.optimizer_tier) |tier| tier.invalidate();
+                retired_codes.appendAssumeCapacity(code);
+            } else {
+                self.codes.items[survivor_count] = code;
+                survivor_count += 1;
+            }
+        }
+        self.codes.items.len = survivor_count;
+        compactReadyTiers(&self.tiers);
+        compactReadyOptimizerTiers(&self.optimizer_tiers);
         self.clearWatchedShapes();
-        old_epoch.codes = self.codes;
+        for (self.codes.items) |code| self.watchPublishedShapes(code);
+
+        old_epoch.codes = retired_codes;
         old_epoch.retired = true;
-        self.codes = .empty;
-        const retired_count = old_epoch.codes.items.len;
         const retired_size = codeListBytes(old_epoch.codes.items);
-        _ = self.live_artifacts.fetchSub(retired_count, .monotonic);
+        _ = self.live_artifacts.fetchSub(affected_count, .monotonic);
         _ = self.live_bytes.fetchSub(retired_size, .monotonic);
-        _ = self.retired_artifacts.fetchAdd(retired_count, .monotonic);
+        _ = self.retired_artifacts.fetchAdd(affected_count, .monotonic);
         _ = self.retired_bytes.fetchAdd(retired_size, .monotonic);
+        _ = self.shape_invalidation_events.fetchAdd(1, .monotonic);
+        _ = self.shape_retired_artifacts.fetchAdd(affected_count, .monotonic);
+        _ = self.shape_survivor_artifacts.fetchAdd(survivor_count, .monotonic);
+        _ = self.shape_retired_bytes.fetchAdd(retired_size, .monotonic);
+        self.retirement_requires_global_quiescence =
+            self.retirement_requires_global_quiescence or survivor_count != 0;
+        self.recordInvalidation();
         self.current_execution_epoch.store(@intFromPtr(new_epoch), .release);
         self.lock.unlock();
         self.invalidating.store(false, .release);
         self.reclaimRetiredEpochs();
+        return true;
     }
 
     pub fn deinit(self: *Owner) void {
@@ -1209,6 +1315,13 @@ pub const Owner = struct {
             .retired_bytes = self.retired_bytes.load(.acquire),
             .reclaimed_artifacts = self.reclaimed_artifacts.load(.acquire),
             .reclaimed_bytes = self.reclaimed_bytes.load(.acquire),
+            .shape_invalidation_events = self.shape_invalidation_events.load(.acquire),
+            .shape_retired_artifacts = self.shape_retired_artifacts.load(.acquire),
+            .shape_survivor_artifacts = self.shape_survivor_artifacts.load(.acquire),
+            .shape_retired_bytes = self.shape_retired_bytes.load(.acquire),
+            .full_invalidation_events = self.full_invalidation_events.load(.acquire),
+            .unknown_shape_invalidation_events = self.unknown_shape_invalidation_events.load(.acquire),
+            .shape_fallback_events = self.shape_fallback_events.load(.acquire),
         };
     }
 
@@ -1254,13 +1367,43 @@ pub const Owner = struct {
         return true;
     }
 
+    fn rotateAllLocked(self: *Owner, old_epoch: *ExecutionEpoch, new_epoch: *ExecutionEpoch) void {
+        std.debug.assert(!old_epoch.retired and old_epoch.codes.items.len == 0);
+        self.recordInvalidation();
+        _ = self.full_invalidation_events.fetchAdd(1, .monotonic);
+        for (self.codes.items) |code| _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+        for (self.tiers.items) |tier| tier.invalidate();
+        self.tiers.clearRetainingCapacity();
+        for (self.optimizer_tiers.items) |tier| tier.invalidate();
+        self.optimizer_tiers.clearRetainingCapacity();
+        // Nothing speculates on any shape once every tier is jettisoned, so the
+        // filter starts empty again instead of carrying retired dependencies.
+        self.clearWatchedShapes();
+        old_epoch.codes = self.codes;
+        old_epoch.retired = true;
+        self.codes = .empty;
+        const retired_count = old_epoch.codes.items.len;
+        const retired_size = codeListBytes(old_epoch.codes.items);
+        _ = self.live_artifacts.fetchSub(retired_count, .monotonic);
+        _ = self.live_bytes.fetchSub(retired_size, .monotonic);
+        _ = self.retired_artifacts.fetchAdd(retired_count, .monotonic);
+        _ = self.retired_bytes.fetchAdd(retired_size, .monotonic);
+        self.current_execution_epoch.store(@intFromPtr(new_epoch), .release);
+    }
+
     fn clearAfterReadersRetire(self: *Owner) void {
+        self.acquireLock();
+        self.recordInvalidation();
+        _ = self.full_invalidation_events.fetchAdd(1, .monotonic);
+        for (self.codes.items) |code| _ = code.artifact_generation.fetchAdd(1, .acq_rel);
+        self.lock.unlock();
         while (!self.allExecutionEpochsIdle()) std.Thread.yield() catch {};
         self.acquireLock();
         for (self.tiers.items) |tier| tier.invalidate();
         self.tiers.clearRetainingCapacity();
         for (self.optimizer_tiers.items) |tier| tier.invalidate();
         self.optimizer_tiers.clearRetainingCapacity();
+        self.clearWatchedShapes();
         self.destroyCodeListLocked(&self.codes, false);
         self.lock.unlock();
         self.invalidating.store(false, .release);
@@ -1271,6 +1414,17 @@ pub const Owner = struct {
         if (self.allocator == null) return;
         self.acquireLock();
         defer self.lock.unlock();
+        const current = self.current_execution_epoch.load(.monotonic);
+        if (self.retirement_requires_global_quiescence) {
+            if (@intFromPtr(&self.initial_execution_epoch) != current and
+                self.initial_execution_epoch.active.load(.acquire) != 0)
+                return;
+            for (self.execution_epochs.items) |epoch|
+                if (@intFromPtr(epoch) != current and epoch.active.load(.acquire) != 0) return;
+            // No reader can newly enter a non-current epoch. All artifacts that
+            // crossed an earlier rotation are therefore behind the frontier.
+            self.retirement_requires_global_quiescence = false;
+        }
         if (self.initial_execution_epoch.retired and
             self.initial_execution_epoch.active.load(.acquire) == 0)
         {
@@ -1278,7 +1432,6 @@ pub const Owner = struct {
             self.initial_execution_epoch.retired = false;
         }
         const allocator = self.allocator.?;
-        const current = self.current_execution_epoch.load(.monotonic);
         var index: usize = 0;
         while (index < self.execution_epochs.items.len) {
             const epoch = self.execution_epochs.items[index];
@@ -1352,8 +1505,7 @@ pub const Owner = struct {
         const operations = code.native_operations orelse return;
         for (operations.property_caches) |cache| {
             for (cache.shape_tokens) |token| self.watchShapeToken(token);
-            if (cache.inherited_receiver_shape_token != NativePropertyCache.empty_receiver_shape_token)
-                self.watchShapeToken(cache.inherited_receiver_shape_token);
+            self.watchShapeToken(cache.inherited_receiver_shape_token);
             self.watchShapeToken(cache.inherited_holder_shape_token);
         }
     }
@@ -1362,9 +1514,41 @@ pub const Owner = struct {
         while (self.invalidating.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
             while (self.invalidating.load(.acquire)) std.Thread.yield() catch {};
         }
+    }
+
+    fn recordInvalidation(self: *Owner) void {
         _ = self.invalidation_generation.fetchAdd(1, .acq_rel);
     }
 };
+
+fn codeWatchesShape(code: *const CompiledCode, shape_token: usize) bool {
+    const operations = code.native_operations orelse return false;
+    for (operations.property_caches) |cache| {
+        for (cache.shape_tokens) |token| if (token == shape_token) return true;
+        if (cache.inherited_receiver_shape_token == shape_token or
+            cache.inherited_holder_shape_token == shape_token)
+            return true;
+    }
+    return false;
+}
+
+fn compactReadyTiers(tiers: *std.ArrayListUnmanaged(*Tier)) void {
+    var survivor_count: usize = 0;
+    for (tiers.items) |tier| if (tier.loadState() == .ready) {
+        tiers.items[survivor_count] = tier;
+        survivor_count += 1;
+    };
+    tiers.items.len = survivor_count;
+}
+
+fn compactReadyOptimizerTiers(tiers: *std.ArrayListUnmanaged(*OptimizerTier)) void {
+    var survivor_count: usize = 0;
+    for (tiers.items) |tier| if (tier.state.load(.acquire) == .ready) {
+        tiers.items[survivor_count] = tier;
+        survivor_count += 1;
+    };
+    tiers.items.len = survivor_count;
+}
 
 fn codeListBytes(codes: []const *CompiledCode) usize {
     var total: usize = 0;
@@ -1810,6 +1994,99 @@ test "Owner adopts and invalidates optimizer artifacts under one lease" {
     try std.testing.expect(tier.loadArtifact(CompiledCode) == null);
     try std.testing.expectEqual(@as(usize, 0), owner.codes.items.len);
     try std.testing.expectEqual(@as(usize, 0), owner.optimizer_tiers.items.len);
+}
+
+test "Owner shape invalidation retires affected artifact and preserves survivor" {
+    if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const Helper = struct {
+        fn compileWithShape(shape_token: usize, result: u64) !CompiledCode {
+            var compiled = try compileConstantEntry(result);
+            errdefer compiled.deinit();
+            const descriptors = [_]NativeOperationDescriptor{.{
+                .bytecode_op = 0,
+                .first_input = 0,
+                .input_count = 0,
+                .deopt_index = 0,
+                .step_delta = 0,
+                .origin = 0,
+            }};
+            var cache = NativePropertyCache{};
+            cache.shape_tokens[0] = shape_token;
+            compiled.native_operations = try NativeOperationMetadata.createWithNamesAndPropertyCaches(
+                std.testing.allocator,
+                &descriptors,
+                &.{},
+                &.{},
+                &.{cache},
+            );
+            compiled.kind = .optimizer;
+            return compiled;
+        }
+    };
+
+    var owner = Owner.init(std.testing.allocator);
+    defer owner.deinit();
+    var first_profile = OptimizerProfile{};
+    first_profile.observeEntry();
+    var first_tier = OptimizerTier{};
+    var first_compilation = owner.claimOptimizerCompilation(&first_tier, &first_profile, 1) orelse
+        return error.TestUnexpectedResult;
+    const first = try owner.adoptOptimizerAndPublish(
+        &first_tier,
+        first_compilation.claim,
+        try Helper.compileWithShape(0x1000, 0x1111),
+    );
+    first_compilation.release();
+
+    var second_profile = OptimizerProfile{};
+    second_profile.observeEntry();
+    var second_tier = OptimizerTier{};
+    var second_compilation = owner.claimOptimizerCompilation(&second_tier, &second_profile, 1) orelse
+        return error.TestUnexpectedResult;
+    const second = try owner.adoptOptimizerAndPublish(
+        &second_tier,
+        second_compilation.claim,
+        try Helper.compileWithShape(0x2000, 0x2222),
+    );
+    second_compilation.release();
+
+    var old_execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(owner.clearShape(0x1000));
+    try std.testing.expect(first_tier.loadArtifact(CompiledCode) == null);
+    try std.testing.expectEqual(second, second_tier.loadArtifact(CompiledCode).?);
+    try std.testing.expectEqual(@as(u64, 1), first.artifact_generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), second.artifact_generation.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), owner.codes.items.len);
+    try std.testing.expectEqual(@as(usize, 1), owner.optimizer_tiers.items.len);
+
+    var stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 1), stats.live_artifacts);
+    try std.testing.expectEqual(@as(usize, 1), stats.retired_artifacts);
+    try std.testing.expectEqual(@as(u64, 1), stats.shape_invalidation_events);
+    try std.testing.expectEqual(@as(u64, 1), stats.shape_retired_artifacts);
+    try std.testing.expectEqual(@as(u64, 1), stats.shape_survivor_artifacts);
+    try std.testing.expect(stats.shape_retired_bytes >= std.heap.page_size_min);
+
+    var new_execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+    var frame = NativeFrame{};
+    try std.testing.expectEqual(ExitStatus.complete, second.run(&frame));
+    try std.testing.expectEqual(@as(u64, 0x2222), frame.result_bits);
+    new_execution.release();
+
+    // The survivor crossed the first epoch boundary. Retiring it into the next
+    // epoch must not reclaim its mapping while the older execution can still
+    // be inside that same artifact.
+    try std.testing.expect(owner.clearShape(0x2000));
+    stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.live_artifacts);
+    try std.testing.expectEqual(@as(usize, 2), stats.retired_artifacts);
+    try std.testing.expectEqual(@as(usize, 0), stats.reclaimed_artifacts);
+
+    old_execution.release();
+    stats = owner.stats();
+    try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
+    try std.testing.expectEqual(@as(usize, 2), stats.reclaimed_artifacts);
 }
 
 test "Owner rejects a compiler publishing across an epoch rotation" {
