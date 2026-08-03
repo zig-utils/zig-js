@@ -1695,7 +1695,7 @@ pub fn build(b: *std.Build) void {
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/object-churn-gc-profile.ts", "--self-test" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
-    const shared_object_churn_ab_test = b.addSystemCommand(&.{ "python3", "tools/test_shared_object_churn_ab.py" });
+    const shared_object_churn_ab_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/shared-object-churn-ab.ts", "--self-test" });
     const optimizer_release_inventory_check = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/optimizer-release-inventory.ts" });
     const comparison_harness_test_step = b.step("benchmark-comparison-test", "Test benchmark matrix validation without running benchmarks");
     comparison_harness_test_step.dependOn(&comparison_harness_test.step);
