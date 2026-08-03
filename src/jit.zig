@@ -2128,6 +2128,49 @@ test "Owner rejects a compiler publishing across an epoch rotation" {
     try std.testing.expectEqual(@as(usize, 0), stats.retired_artifacts);
 }
 
+test "Owner teardown waits for active compilation and execution" {
+    if (!supported or builtin.cpu.arch != .aarch64 or builtin.single_threaded) return error.SkipZigTest;
+
+    var owner = Owner.init(std.testing.allocator);
+    var published_tier = Tier{};
+    var publication = owner.claimCompilation(&published_tier, 1) orelse
+        return error.TestUnexpectedResult;
+    _ = try owner.adoptAndPublish(&published_tier, try compileConstantEntry(0x7123));
+    publication.release();
+    var execution = owner.enterExecution() orelse return error.TestUnexpectedResult;
+
+    var compiling_tier = Tier{};
+    var compilation = owner.claimCompilation(&compiling_tier, 1) orelse
+        return error.TestUnexpectedResult;
+    const Shared = struct {
+        owner: *Owner,
+        started: std.atomic.Value(bool) = .init(false),
+        finished: std.atomic.Value(bool) = .init(false),
+
+        fn teardown(shared: *@This()) void {
+            shared.started.store(true, .release);
+            shared.owner.deinit();
+            shared.finished.store(true, .release);
+        }
+    };
+    var shared = Shared{ .owner = &owner };
+    var thread = try std.Thread.spawn(.{}, Shared.teardown, .{&shared});
+    while (!shared.started.load(.acquire)) std.atomic.spinLoopHint();
+    while (owner.executionPermitted()) std.atomic.spinLoopHint();
+    try std.testing.expect(!shared.finished.load(.acquire));
+
+    compilation.release();
+    std.Thread.yield() catch {};
+    try std.testing.expect(!shared.finished.load(.acquire));
+    execution.release();
+    thread.join();
+
+    try std.testing.expect(shared.finished.load(.acquire));
+    try std.testing.expect(owner.allocator == null);
+    try std.testing.expectEqual(TierState.cold, published_tier.loadState());
+    try std.testing.expect(published_tier.loadCode() == null);
+}
+
 test "Owner retires invalidated artifacts by execution epoch" {
     if (!supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
