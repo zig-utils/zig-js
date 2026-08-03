@@ -1406,8 +1406,10 @@ pub fn build(b: *std.Build) void {
     release_compatibility_step.dependOn(&release_compatibility_cmd.step);
 
     const gc_relocation_inventory_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/gc-relocation-inventory.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/gc-relocation-inventory.ts",
     });
     const gc_relocation_inventory_step = b.step(
         "gc-relocation-inventory-check",
