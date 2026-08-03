@@ -16833,6 +16833,106 @@ test "parallel_js: targeted Class-A invalidation preserves unrelated artifact" {
     try std.testing.expect(stats.shape_survivor_artifacts >= 1);
 }
 
+test "parallel_js: delete and descriptor changes retire only affected artifacts" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.deletedObject = { doomed: 1, deleteShape: 2 };
+        \\globalThis.redefinedObject = { value: 3, redefineShape: 4 };
+        \\globalThis.valueOnlyObject = { stable: 5, valueShape: 6 };
+        \\globalThis.lockedObject = {};
+        \\Object.defineProperty(lockedObject, "locked", { value: 8, configurable: false });
+        \\globalThis.survivorObject = { survivor: 7, survivorShape: 8 };
+        \\function deletedRead(o) { return o.doomed; }
+        \\function redefinedRead(o) { return o.value; }
+        \\function valueOnlyRead(o) { return o.stable; }
+        \\function lockedRead(o) { return o.locked; }
+        \\function survivorRead(o) { return o.survivor; }
+        \\for (let warm = 0; warm < 64; warm = warm + 1) {
+        \\  deletedRead(deletedObject);
+        \\  redefinedRead(redefinedObject);
+        \\  valueOnlyRead(valueOnlyObject);
+        \\  lockedRead(lockedObject);
+        \\  survivorRead(survivorObject);
+        \\}
+    );
+
+    const ArtifactRef = struct {
+        chunk: *bc.Chunk,
+        artifact: *const jit.CompiledCode,
+
+        fn fromGlobal(context: *Context, name: []const u8) !@This() {
+            const raw = context.global_object.getOwn(name).?.asObj().jsFunction() orelse
+                return error.TestUnexpectedResult;
+            const function: *interp.Function = @ptrCast(@alignCast(raw));
+            const chunk = function.chunk orelse return error.TestUnexpectedResult;
+            return .{
+                .chunk = chunk,
+                .artifact = chunk.optimizer_tier.loadArtifact(jit.CompiledCode) orelse
+                    return error.TestUnexpectedResult,
+            };
+        }
+
+        fn remainsPublished(self: @This()) bool {
+            return self.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == self.artifact;
+        }
+    };
+
+    const deleted = try ArtifactRef.fromGlobal(ctx, "deletedRead");
+    const redefined = try ArtifactRef.fromGlobal(ctx, "redefinedRead");
+    const value_only = try ArtifactRef.fromGlobal(ctx, "valueOnlyRead");
+    const locked = try ArtifactRef.fromGlobal(ctx, "lockedRead");
+    const survivor = try ArtifactRef.fromGlobal(ctx, "survivorRead");
+    const owner = ctx.shared_jit_owner orelse &ctx.jit_owner;
+    const generation_before = owner.invalidation_generation.load(.acquire);
+
+    // A value-only DefineOwnProperty preserves the live data slot and does not
+    // materialize an attributes sidecar. An empty descriptor and a failed
+    // non-configurable delete are also representation no-ops.
+    try std.testing.expectEqual(@as(f64, 9), (try ctx.evaluate(
+        \\Object.defineProperty(valueOnlyObject, "stable", { value: 9 });
+        \\Object.defineProperty(valueOnlyObject, "stable", {});
+        \\Reflect.deleteProperty(lockedObject, "locked");
+        \\valueOnlyRead(valueOnlyObject);
+    )).asNum());
+    try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
+    try std.testing.expect(value_only.remainsPublished());
+    try std.testing.expect(locked.remainsPublished());
+
+    try std.testing.expect((try ctx.evaluate("delete deletedObject.doomed;")).toBoolean());
+    try std.testing.expect(deleted.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expect(redefined.remainsPublished());
+    try std.testing.expect(value_only.remainsPublished());
+    try std.testing.expect(locked.remainsPublished());
+    try std.testing.expect(survivor.remainsPublished());
+
+    try std.testing.expectEqual(@as(f64, 11), (try ctx.evaluate(
+        \\Object.defineProperty(redefinedObject, "value", {
+        \\  get() { return 11; }, configurable: true
+        \\});
+        \\redefinedRead(redefinedObject);
+    )).asNum());
+    try std.testing.expect(redefined.chunk.optimizer_tier.loadArtifact(jit.CompiledCode) == null);
+    try std.testing.expect(value_only.remainsPublished());
+    try std.testing.expect(locked.remainsPublished());
+    try std.testing.expect(survivor.remainsPublished());
+
+    const stats = owner.stats();
+    try std.testing.expectEqual(generation_before + 2, owner.invalidation_generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), stats.shape_invalidation_events);
+    try std.testing.expectEqual(@as(u64, 2), stats.shape_retired_artifacts);
+    try std.testing.expect(stats.shape_survivor_artifacts >= 7);
+}
+
 test "inherited value mutation preserves optimized artifacts" {
     try verifyInheritedValueMutation(.{
         .enable_gc = true,

@@ -12463,6 +12463,15 @@ pub const Interpreter = struct {
                 .accepted => |accepted| return accepted,
             }
         };
+        // Deletion rebuilds the named-data shape or changes the accessor
+        // representation. Close code guarding the exact pre-delete shape
+        // before either mutation; a missing/non-configurable property performs
+        // no mutation and must not manufacture a Class-A stop (#471).
+        var ordinary_delete_invalidated = false;
+        if ((o.getAccessor(key) != null or o.getOwn(key) != null) and o.getAttr(key).configurable) {
+            self.invalidateJitHeapFactsFor(o);
+            ordinary_delete_invalidated = true;
+        }
         const indexed_locked = value.canonicalIndex(key) != null;
         if (indexed_locked) o.lockIndexedProperty();
         defer if (indexed_locked) o.unlockIndexedProperty();
@@ -12493,6 +12502,10 @@ pub const Interpreter = struct {
         }
         if (std.mem.eql(u8, key, "prototype") and o.jsFunction() != null and o.getOwn("prototype") == null and o.getAccessor("prototype") == null)
             _ = try self.getProperty(Value.obj(o), key);
+        // A function's lazy own `prototype` may have materialized after the
+        // initial ordinary-property probe above.
+        if (!ordinary_delete_invalidated and o.getOwn(key) != null and o.getAttr(key).configurable)
+            self.invalidateJitHeapFactsFor(o);
         return try o.deleteNamedDataOwn(self.arena, self.root_shape, key);
     }
 

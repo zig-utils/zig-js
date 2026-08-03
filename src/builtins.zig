@@ -1781,6 +1781,7 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     const cur_data = target.getOwn(key) orelse (if (dense_elem_index) |i| target.denseElement(i) else null);
     const cur_acc = target.getAccessor(key);
     const exists = cur_data != null or cur_acc != null;
+    const has_data_field = d.getOwn("value") != null or d.getOwn("writable") != null;
     // ValidateAndApplyPropertyDescriptor: reject (TypeError) any change that the
     // current state forbids — adding to a non-extensible object, or altering a
     // non-configurable property in an incompatible way.
@@ -1789,12 +1790,31 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     } else if (!target.getAttr(key).configurable) {
         if (!try compatibleRedefine(target.getAttr(key), cur_data, cur_acc, d)) return false;
     }
+    const has_attribute_field = d.getOwn("writable") != null or
+        d.getOwn("enumerable") != null or d.getOwn("configurable") != null;
+    const has_descriptor_effect = get != null or set != null or has_data_field or has_attribute_field;
+    if (exists and !has_descriptor_effect) return true;
+
+    // Existing data-slot value replacement preserves the live shape/slot pair
+    // and needs no invalidation. Every other ordinary definition either changes
+    // shape, changes data/accessor representation, or publishes attributes that
+    // optimized direct property paths exclude. Retire only artifacts guarding
+    // this exact pre-definition shape before making that change (#471).
+    const changes_heap_assumption = !exists or get != null or set != null or
+        (cur_acc != null and has_data_field) or has_attribute_field;
+    if (changes_heap_assumption) {
+        // Never wait for the Class-A conductor while holding the indexed-name
+        // exclusion: a peer parked on that lock may need to reach its safepoint.
+        if (indexed_locked) target.unlockIndexedProperty();
+        self.invalidateJitHeapFactsFor(target);
+        if (indexed_locked) target.lockIndexedProperty();
+    }
+
     // Redefining keeps the current attributes for any omitted field; a new
     // property defaults omitted fields to false.
     var attr: value.PropAttr = if (exists) target.getAttr(key) else .{ .writable = false, .enumerable = false, .configurable = false };
     if (d.getOwn("enumerable")) |e| attr.enumerable = e.toBoolean();
     if (d.getOwn("configurable")) |c| attr.configurable = c.toBoolean();
-    const has_data_field = d.getOwn("value") != null or d.getOwn("writable") != null;
     if (get != null or set != null) {
         // (Partial) accessor definition: an omitted get/set keeps the existing
         // accessor's corresponding half (a redefine like `{get: g}` must not wipe
@@ -1829,7 +1849,11 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     }
     // else: a generic descriptor on an existing accessor keeps the accessor as-is;
     // only enumerable/configurable (in `attr`) change.
-    try target.setAttr(self.arena, key, attr);
+    // A value-only redefine of an existing data property must not materialize
+    // an attributes sidecar: besides wasted storage that representation change
+    // would invalidate an otherwise-live direct property artifact.
+    if (!exists or has_attribute_field or (cur_acc != null and has_data_field))
+        try target.setAttr(self.arena, key, attr);
     // Defining an own property at an array index at or past the current length
     // extends the array's length (so iteration sees it).
     if (target.is_array) {
