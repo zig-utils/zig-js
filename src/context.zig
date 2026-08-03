@@ -18771,6 +18771,38 @@ test "forced tier differential covers catch, class, and method home-object scope
     , "superTrace.join('|')");
 }
 
+test "required bytecode reads live configurable globals across realms" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    try std.testing.expect((try ctx.evaluate(
+        \\var other = $262.createRealm().global;
+        \\other.eval(`
+        \\  var receiver = {};
+        \\  var observed = false;
+        \\  var target = {
+        \\    set value(input) {
+        \\      "use strict";
+        \\      Math.abs(input);
+        \\      observed = this === receiver;
+        \\    }
+        \\  };
+        \\`);
+        \\Reflect.set(other.target, "value", 1, other.receiver);
+        \\var replacement = {};
+        \\other.receiver = replacement;
+        \\Reflect.set(other.target, "value", 2, replacement);
+        \\other.observed;
+    )).asBool());
+
+    const inventory = ctx.bytecodeAdmissionSnapshot();
+    try std.testing.expect(inventory.count(.plain_compiled) > 0);
+    try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+}
+
 test "bytecode admission inventory merges concurrent realm records" {
     if (builtin.single_threaded) return error.SkipZigTest;
     var inventory = interp.BytecodeAdmissionInventory{};

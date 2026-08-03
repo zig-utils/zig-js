@@ -1523,39 +1523,34 @@ fn recordQuickGlobalBinding(chunk: *Chunk, instruction: usize, vm: *Interpreter,
     };
 
     const start = vm.env;
-    if (start.parent == null and start.with_object == null) object: {
-        start.lockBindings();
-        const is_live_global_data = start.aliases.get(name) == null and
-            start.vars.contains(name) and
-            !start.consts.contains(name) and
-            !start.lexicals.contains(name) and
-            !start.deletable.contains(name);
-        start.unlockBindings();
-        if (!is_live_global_data) break :object;
-        const object = vm.global_object orelse break :object;
-        if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) break :object;
-        const shape = object.shape orelse break :object;
-        const slot = shape.lookup(name) orelse break :object;
-        if (slot >= object.slotsItems().len) break :object;
-        cache.* = .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
-        return;
-    }
-
     // Evaluated scripts may put a transparent declarative environment between
     // a function closure and the realm root. Cache the exact environment record
-    // rather than assuming root-object storage. `getLocal` keeps the value live
-    // under the binding lock; deletion makes the cache miss. `with` and module
-    // aliases retain full identifier resolution because they can run user code
-    // or redirect to another environment.
+    // rather than assuming root-object storage. When the walk reaches a root
+    // global `var`, including a configurable eval-script binding, the global
+    // property's live slot is authoritative; its exact shape guard misses after
+    // deletion or descriptor replacement. `with` and module aliases retain full
+    // identifier resolution because they can run user code or redirect to
+    // another environment.
     var cursor: ?*Environment = start;
     while (cursor) |env| : (cursor = env.parent) {
         if (env.with_object != null) return;
         env.lockBindings();
         const alias = env.aliases.contains(name);
         const found = env.vars.contains(name);
+        const root_global_data = found and env.parent == null and
+            !env.consts.contains(name) and !env.lexicals.contains(name);
         env.unlockBindings();
         if (alias) return;
         if (found) {
+            if (root_global_data) {
+                const object = vm.global_object orelse return;
+                if (object.proxyHandler() != null or object.proxy_revoked or object.getAccessor(name) != null) return;
+                const shape = object.shape orelse return;
+                const slot = shape.lookup(name) orelse return;
+                if (slot >= object.slotsItems().len) return;
+                cache.* = .{ .object = .{ .env = start, .object = object, .shape = shape, .slot = slot } };
+                return;
+            }
             cache.* = .{ .environment = .{ .start = start, .binding = env, .name = name } };
             return;
         }
