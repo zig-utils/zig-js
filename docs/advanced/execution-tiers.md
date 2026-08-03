@@ -48,9 +48,11 @@ local/captured loads. Proven initialized hot loops keep the ordinary opcodes,
 while checked stores preserve `const` immutability. Forward lexical reads
 therefore execute with the same exception semantics in the VM and tree-walker.
 
-What remains unbuilt is fresh captured cells for each lexical loop iteration.
-Those loops retain the exact tree-walker path until the VM models per-iteration
-environments explicitly.
+Captured simple bindings in classic `for` and `for-of` heads use fresh
+per-iteration declarative environments; uncaptured heads keep the slot fast path.
+Captured destructuring heads, captured lexicals declared inside a repeated loop
+body, and labeled jumps that cross more than one such environment retain the
+exact tree-walker path until their environment-unwind metadata is explicit.
 
 ## The practical consequence: divergence
 

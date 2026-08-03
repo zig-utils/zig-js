@@ -1736,6 +1736,8 @@ pub fn traceGenerator(g: *vm.Generator, v: anytype) void {
     v.mark(g.env);
     for (g.exec.stack.items) |s| markValue(v, s);
     markValue(v, g.exec.acc);
+    for (g.exec.handlers.items) |handler|
+        if (handler.environment) |environment| markManaged(v, environment);
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent)
         for (current.slots) |slot| markValue(v, slot);
@@ -1759,6 +1761,8 @@ pub fn relocateGenerator(g: *vm.Generator, v: anytype) void {
     gc_relocation.rewriteRequiredSlot(v, Environment, &g.env);
     for (g.exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
     gc_relocation.rewriteValueSlot(v, &g.exec.acc);
+    for (g.exec.handlers.items) |*handler|
+        gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
     var frame = g.exec.frame;
     while (frame) |current| : (frame = current.parent)
         for (current.slots) |*slot| gc_relocation.rewriteValueSlot(v, slot);
@@ -1836,6 +1840,11 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     var child_frame_slots = [_]Value{Value.obj(&old_objects[4])};
     var parent_frame = vm.Frame{ .slots = &parent_frame_slots, .parent = null };
     var child_frame = vm.Frame{ .slots = &child_frame_slots, .parent = &parent_frame };
+    var handlers = [_]vm.Handler{.{
+        .catch_pc = 1,
+        .stack_depth = 0,
+        .environment = &old_environment,
+    }};
     var import_meta = interp.ImportMetaSlot{ .obj = &old_objects[8] };
     var requests = [_]vm.AsyncGenRequest{
         .{ .kind = .send, .value = Value.obj(&old_objects[10]), .result = &old_objects[11] },
@@ -1847,6 +1856,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
             .stack = .{ .items = &stack, .capacity = stack.len },
             .acc = Value.obj(&old_objects[2]),
             .frame = &child_frame,
+            .handlers = .{ .items = &handlers, .capacity = handlers.len },
         },
         .env = &old_environment,
         .this_value = Value.obj(&old_objects[5]),
@@ -1919,6 +1929,7 @@ test "Generator and IteratorHelper marking and relocation cover every managed sl
     relocateIterHelper(&helper, &plan);
 
     try std.testing.expectEqual(&new_environment, generator.env);
+    try std.testing.expectEqual(&new_environment, generator.exec.handlers.items[0].environment.?);
     try std.testing.expectEqual(&new_objects[0], stack[0].asObj());
     try std.testing.expectEqual(&new_objects[1], stack[1].asObj());
     try std.testing.expectEqual(&new_objects[2], generator.exec.acc.asObj());
@@ -2236,6 +2247,8 @@ pub fn traceInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| traceChunk(chunk, v);
         for (exec.stack.items) |s| markValue(v, s);
         markValue(v, exec.acc);
+        for (exec.handlers.items) |handler|
+            if (handler.environment) |environment| markManaged(v, environment);
         v.mark(exec.saved_home_object);
         v.mark(exec.saved_super_ctor);
         // The activation's frame slots (and its captured-frame parent chain for
@@ -2346,6 +2359,8 @@ pub fn relocateInterpreterRoots(machine: *interp.Interpreter, v: anytype) void {
         if (exec.chunk) |chunk| relocateChunk(chunk, v);
         for (exec.stack.items) |*slot| gc_relocation.rewriteValueSlot(v, slot);
         gc_relocation.rewriteValueSlot(v, &exec.acc);
+        for (exec.handlers.items) |*handler|
+            gc_relocation.rewriteOptionalSlot(v, interp.Environment, &handler.environment);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_home_object);
         gc_relocation.rewriteOptionalSlot(v, Object, &exec.saved_super_ctor);
         var frame = exec.frame;

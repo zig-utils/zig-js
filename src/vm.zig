@@ -213,9 +213,24 @@ pub const Handler = struct {
     catch_pc: u32,
     finally_pc: u32 = none,
     stack_depth: u32,
+    /// Lexical environment active when the try handler was installed. Abrupt
+    /// completion restores it before entering catch/finally, unwinding any
+    /// block or per-iteration environments crossed by the throw/return.
+    environment: ?*interp.Environment = null,
 
     pub const none: u32 = std.math.maxInt(u32);
 };
+
+fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, handler: Handler) void {
+    if (handler.environment) |environment| {
+        vm.env = environment;
+        if (gen) |activation| activation.env = environment;
+    }
+}
+
+fn restoreSuspendedGeneratorHandlerEnvironment(generator: *Generator, handler: Handler) void {
+    if (handler.environment) |environment| generator.env = environment;
+}
 
 /// A finally block's completion kind (the `kind` half of the record left on the
 /// stack for `end_finally`): fall through, re-throw, or return.
@@ -243,6 +258,7 @@ fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value,
     const stack_alloc = generatorStackAllocator(vm, gen);
     while (exec.handlers.items.len > 0) {
         const h = exec.handlers.pop().?;
+        restoreHandlerEnvironment(vm, gen, h);
         if (h.finally_pc != Handler.none) {
             exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try exec.stack.append(stack_alloc, cval);
@@ -4577,6 +4593,7 @@ fn resumeNativeFinallyDispatch(
             vm.exception = completion_value;
             if (exec.handlers.items.len > 0) {
                 const handler = exec.handlers.pop().?;
+                restoreHandlerEnvironment(vm, null, handler);
                 exec.stack.shrinkRetainingCapacity(handler.stack_depth);
                 if (handler.catch_pc != Handler.none) {
                     try exec.stack.append(vm.arena, completion_value);
@@ -5677,6 +5694,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             if (abrupt == error.Throw and exec.handlers.items.len > 0) {
                 const stack_alloc = generatorStackAllocator(vm, gen);
                 const h = exec.handlers.pop().?;
+                restoreHandlerEnvironment(vm, gen, h);
                 exec.stack.shrinkRetainingCapacity(h.stack_depth);
                 if (h.catch_pc != Handler.none) {
                     try exec.stack.append(stack_alloc, vm.exception); // bind target for the catch
@@ -5837,7 +5855,9 @@ fn runChunk(
             },
             .def_lex => {
                 const name = chunk.names.items[inst.a];
-                try vm.defineLexicalVM(name, stack.pop().?, inst.b == 2);
+                const placeholder = stack.pop().?;
+                const value_ = if (inst.b >= 3) Value.obj(vm.tdz_marker.?) else placeholder;
+                try vm.defineLexicalVM(name, value_, inst.b == 2 or inst.b == 4);
             },
             .bind_pattern => {
                 // Reuse the tree-walker's destructuring over the live env (a=pattern
@@ -6858,6 +6878,7 @@ fn runChunk(
                 .catch_pc = inst.a,
                 .finally_pc = inst.b,
                 .stack_depth = @intCast(stack.items.len),
+                .environment = vm.env,
             }),
             .pop_handler => _ = exec.handlers.pop(),
             .push_completion => {
@@ -7125,6 +7146,7 @@ fn genResume(vm: *Interpreter, gen_obj: *value.Object, kind: ResumeKind, val: Va
                 var fin: ?u32 = null;
                 while (g.exec.handlers.items.len > 0) {
                     const h = g.exec.handlers.pop().?;
+                    restoreSuspendedGeneratorHandlerEnvironment(g, h);
                     if (h.finally_pc != Handler.none) {
                         g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
                         fin = h.finally_pc;
@@ -7249,6 +7271,7 @@ pub fn genThrow(vm: *Interpreter, gen_obj: *value.Object, e: Value) EvalError!Va
 fn injectThrowAt(vm: *Interpreter, g: *Generator, e: Value) EvalError!bool {
     if (g.exec.handlers.items.len == 0) return false;
     const h = g.exec.handlers.pop().?;
+    restoreSuspendedGeneratorHandlerEnvironment(g, h);
     g.exec.stack.shrinkRetainingCapacity(h.stack_depth);
     if (h.catch_pc != Handler.none) {
         try g.exec.stack.append(g.stackAllocator(vm.arena), e); // catch binding
@@ -7720,6 +7743,7 @@ fn agResume(vm: *Interpreter, g: *Generator, kind: ResumeKind, val: Value) EvalE
                     }
                 }
                 if (fin) |fpc| {
+                    restoreSuspendedGeneratorHandlerEnvironment(g, g.exec.handlers.items[keep_handlers]);
                     g.exec.handlers.shrinkRetainingCapacity(keep_handlers);
                     g.exec.stack.shrinkRetainingCapacity(stack_depth);
                     try g.exec.stack.append(g.stackAllocator(vm.arena), val);
@@ -8556,6 +8580,7 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
         const cur = acts.items[acts.items.len - 1];
         if (cur.exec.handlers.items.len > 0) {
             const h = cur.exec.handlers.pop().?;
+            restoreHandlerEnvironment(vm, null, h);
             cur.exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try cur.exec.stack.append(vm.arena, vm.exception); // bind target for the catch
             if (h.catch_pc != Handler.none) {

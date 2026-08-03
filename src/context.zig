@@ -9962,9 +9962,9 @@ test "for-of / for-in with destructuring + member targets" {
 test "per-iteration lexical bindings survive closure capture (VM lowering)" {
     // A `let`/`const` loop variable captured by a body closure must get a FRESH
     // binding each iteration (CreatePerIterationEnvironment). The bytecode VM
-    // lowers such loops to one reused frame slot; `compileFor`/`compileForOf` bail
-    // captured loops to the tree-walker so the captures stay distinct. Each case
-    // runs inside an IIFE to force the frame-slot (function-scope) VM path.
+    // keeps uncaptured heads in frame slots, but lowers captured simple heads to
+    // fresh declarative Environment Records. Each case runs inside an IIFE to
+    // exercise the function-scope VM path.
 
     // classic for: each closure sees its own `i`, not the final value.
     try expectEvalStr("0,1,2,3",
@@ -9998,6 +9998,26 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\  return L.map(function (f) { return f(); }).join(",");
         \\})()
     );
+    // Generator bodies are environment-mode bytecode. Their suspend/resume
+    // state retains the active iteration environment across each yield, then
+    // renews it before the update/next iterator result.
+    try expectEvalStr("0,1,2|3,4",
+        \\(function () {
+        \\  function* classic() {
+        \\    var reads = [];
+        \\    for (let i = 0; i < 3; i++) { reads.push(function () { return i; }); yield i; }
+        \\    return reads.map(function (read) { return read(); }).join(",");
+        \\  }
+        \\  function* values() {
+        \\    var reads = [];
+        \\    for (const value of [3, 4]) { reads.push(function () { return value; }); yield value; }
+        \\    return reads.map(function (read) { return read(); }).join(",");
+        \\  }
+        \\  var a = classic(); a.next(); a.next(); a.next(); var ar = a.next().value;
+        \\  var b = values(); b.next(); b.next(); var br = b.next().value;
+        \\  return ar + "|" + br;
+        \\})()
+    );
 
     // Uncaptured loops keep the fast frame-slot VM path (the closures below never
     // reference the loop variable, so no bail happens) and still compute correctly.
@@ -10015,6 +10035,50 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\  return s;
         \\})()
     )).asNum());
+}
+
+test "generator handler unwind preserves the caller lexical environment" {
+    try std.testing.expect((try evalIn(
+        \\(function () {
+        \\  function* values() { yield 1; try { yield 2; } catch (error) { yield error; } }
+        \\  var iterator = values();
+        \\  iterator.next();
+        \\  iterator.next();
+        \\  let exception = {};
+        \\  return iterator.throw(exception).value === exception && exception !== undefined;
+        \\})()
+    )).asBool());
+}
+
+test "async VM loop-head captures survive suspension" {
+    const ctx = try Context.create(std.testing.allocator);
+    defer ctx.destroy();
+    _ = try ctx.evaluate(
+        \\globalThis.asyncIterationResult = "pending";
+        \\async function collect() {
+        \\  var classic = [];
+        \\  for (let i = 0; i < 3; i++) { classic.push(function () { return i; }); await 0; }
+        \\  var values = [];
+        \\  for (const value of [4, 5]) { values.push(function () { return value; }); await 0; }
+        \\  return classic.map(function (read) { return read(); }).join(",") + "|" +
+        \\         values.map(function (read) { return read(); }).join(",");
+        \\}
+        \\async function* generate() {
+        \\  var reads = [];
+        \\  for (let i = 6; i < 8; i++) { reads.push(function () { return i; }); yield i; await 0; }
+        \\  return reads.map(function (read) { return read(); }).join(",");
+        \\}
+        \\async function run() {
+        \\  var collected = await collect();
+        \\  var iterator = generate();
+        \\  await iterator.next();
+        \\  await iterator.next();
+        \\  var generated = (await iterator.next()).value;
+        \\  asyncIterationResult = collected + "|" + generated;
+        \\}
+        \\run();
+    );
+    try std.testing.expectEqualStrings("0,1,2|4,5|6,7", (try ctx.evaluate("asyncIterationResult")).asStr());
 }
 
 test "empty statements + class-declaration sequencing" {
@@ -18892,6 +18956,87 @@ test "forced tree-walker and required bytecode preserve lexical binding identity
         \\}
         \\scopedHeads(9);
     , "scopeTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.iterationTrace = [];
+        \\function capturedLoopHeads() {
+        \\  "use strict";
+        \\  var classic = [];
+        \\  for (let i = 0; i < 4; i++) classic.push(function () { return i; });
+        \\  iterationTrace.push(classic.map(function (read) { return read(); }).join(","));
+        \\  var multiple = [];
+        \\  for (let i = 0, j = 10; i < 3; i++, j--) multiple.push(function () { return i + ":" + j; });
+        \\  iterationTrace.push(multiple.map(function (read) { return read(); }).join(","));
+        \\  var values = [];
+        \\  for (const value of [2, 4, 6]) values.push(function () { return value; });
+        \\  iterationTrace.push(values.map(function (read) { return read(); }).join(","));
+        \\  var shared = [];
+        \\  for (let value = 0; value < 4; value++) {
+        \\    let bump = function () { value = value + 1; return value; };
+        \\    shared.push(bump());
+        \\  }
+        \\  iterationTrace.push(shared.join(","));
+        \\  var abrupt = [];
+        \\  for (let value = 0; value < 5; value++) {
+        \\    abrupt.push(function () { return value; });
+        \\    if (value === 0) continue;
+        \\    if (value === 2) break;
+        \\  }
+        \\  iterationTrace.push(abrupt.map(function (read) { return read(); }).join(","));
+        \\  var thrown = [];
+        \\  try {
+        \\    for (let value = 0; value < 3; value++) {
+        \\      thrown.push(function () { return value; });
+        \\      if (value === 1) throw "stop";
+        \\    }
+        \\  } catch (error) { iterationTrace.push("throw:" + error); }
+        \\  iterationTrace.push(thrown.map(function (read) { return read(); }).join(","));
+        \\  var ofBreak = [];
+        \\  for (const value of [7, 8, 9]) {
+        \\    ofBreak.push(function () { return value; });
+        \\    if (value === 8) break;
+        \\  }
+        \\  iterationTrace.push(ofBreak.map(function (read) { return read(); }).join(","));
+        \\  var classes = [];
+        \\  for (let value = 0; value < 3; value++) {
+        \\    class Box { read() { return value; } }
+        \\    classes.push(new Box());
+        \\  }
+        \\  iterationTrace.push(classes.map(function (box) { return box.read(); }).join(","));
+        \\}
+        \\function returnCapturedLoopHead() {
+        \\  for (let value = 11; value < 12; value++) return function () { return value; };
+        \\}
+        \\capturedLoopHeads();
+        \\iterationTrace.push("return:" + returnCapturedLoopHead()());
+    , "iterationTrace.join('|')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.iterationTdzTrace = [];
+        \\function capturedLoopHeadTdz() {
+        \\  "use strict";
+        \\  let value = 9;
+        \\  try {
+        \\    for (let value = value; value < 1; value++) { (function () { return value; }); }
+        \\  } catch (error) { iterationTdzTrace.push("classic:" + error.name); }
+        \\  iterationTdzTrace.push("outer:" + value);
+        \\  let item = [1];
+        \\  try {
+        \\    for (let item of item) { (function () { return item; }); }
+        \\  } catch (error) { iterationTdzTrace.push("of:" + error.name); }
+        \\  iterationTdzTrace.push("outer-of:" + item[0]);
+        \\  var fromInit, fromSiblingInit, fromCondition, fromUpdate;
+        \\  for (let head = (fromInit = function () { return head; }, 0); head < 1; head++) {}
+        \\  for (let left = 0, right = (fromSiblingInit = function () { return left; }, 0); left < 1; left++) {}
+        \\  for (let head = 0; (fromCondition = function () { return head; }, head < 1); head++) {}
+        \\  for (let head = 0; head < 1; (fromUpdate = function () { return head; }, head++)) {}
+        \\  iterationTdzTrace.push("head:" + fromInit() + "," + fromSiblingInit() + "," + fromCondition() + "," + fromUpdate());
+        \\  var fromRhs;
+        \\  for (let head of [(fromRhs = function () { return head; }, 1)]) {}
+        \\  try { fromRhs(); } catch (error) { iterationTdzTrace.push("rhs:" + error.name); }
+        \\}
+        \\capturedLoopHeadTdz();
+    , "iterationTdzTrace.join('|')");
 }
 
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {

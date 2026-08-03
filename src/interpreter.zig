@@ -4290,6 +4290,11 @@ pub const Interpreter = struct {
                 self.initEnvironment(le, outer, false);
                 self.env = le;
                 loop_env = le;
+                // ForDeclarationBindingInstantiation creates every head binding
+                // before evaluating any initializer. Reads and assignments from
+                // an initializer therefore observe the new binding's TDZ rather
+                // than a same-named outer binding.
+                if (self.tdz_marker != null) try self.predeclareForLexicals(ini);
             }
             // A later initializer in the head can throw after an earlier `using`
             // resource was registered (`for (using a = x, b = throws(); …)`); the
@@ -4418,6 +4423,43 @@ pub const Interpreter = struct {
                 collectPatternNames(d.pattern, out, arena);
             },
             .decl_group => |group| for (group) |n| collectForLexNames(n, out, arena),
+            else => {},
+        }
+    }
+
+    fn predeclareForLexicals(self: *Interpreter, node: *Node) EvalError!void {
+        switch (node.*) {
+            .var_decl => |decl| if (decl.kind != .@"var") {
+                if (decl.kind == .@"const")
+                    try self.env.putConst(decl.name, self.tdzVal())
+                else
+                    try self.env.put(decl.name, self.tdzVal());
+            },
+            .destructure_decl => |decl| if (decl.kind != .@"var") {
+                try self.predeclareForLexicalPattern(decl.pattern, decl.kind == .@"const");
+            },
+            .decl_group => |group| for (group) |decl| try self.predeclareForLexicals(decl),
+            else => {},
+        }
+    }
+
+    fn predeclareForLexicalPattern(self: *Interpreter, target: *Node, immutable: bool) EvalError!void {
+        switch (target.*) {
+            .identifier => |name| {
+                if (immutable)
+                    try self.env.putConst(name, self.tdzVal())
+                else
+                    try self.env.put(name, self.tdzVal());
+            },
+            .obj_pattern => |pattern| {
+                for (pattern.props) |property| try self.predeclareForLexicalPattern(property.target, immutable);
+                if (pattern.rest) |rest| try self.predeclareForLexicalPattern(rest, immutable);
+            },
+            .arr_pattern => |pattern| {
+                for (pattern.elems) |element| if (element.target) |element_target|
+                    try self.predeclareForLexicalPattern(element_target, immutable);
+                if (pattern.rest) |rest| try self.predeclareForLexicalPattern(rest, immutable);
+            },
             else => {},
         }
     }
@@ -12015,6 +12057,11 @@ pub const Interpreter = struct {
             if (!still and self.strict) return self.throwError("ReferenceError", name);
             return self.setMember(Value.obj(o), name, v);
         }
+        // SetMutableBinding observes an uninitialized declarative binding before
+        // its mutability. In particular `const x = (x = 1)` is a ReferenceError,
+        // not the TypeError used for assignment after initialization.
+        if (self.env.get(name)) |current|
+            if (self.isTdz(current)) return self.throwError("ReferenceError", name);
         if (self.env.isAlias(name)) return self.throwError("TypeError", "Assignment to constant variable.");
         if (self.env.isConst(name)) |c| {
             if (c) return self.throwError("TypeError", "Assignment to constant variable.");

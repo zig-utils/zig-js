@@ -14,7 +14,8 @@
 //! Environment. Top-level program variables are globals (they persist across
 //! `evaluate` calls, like a real global object). Lexical slots carry explicit
 //! TDZ/immutability checks; compile-time lexical scopes assign distinct slots to
-//! same-named block bindings in the shared activation frame.
+//! same-named block bindings in the shared activation frame, while captured loop
+//! heads use per-iteration declarative environments.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -53,6 +54,11 @@ const SlotBinding = struct {
     lexical: bool = false,
     immutable: bool = false,
     tdz_checked: bool = false,
+    /// Captured loop-head lexicals live in a real declarative Environment
+    /// Record so CreatePerIterationEnvironment can give closures fresh cells.
+    /// They still participate in static name resolution, but emit name-based
+    /// environment operations instead of frame-slot operations.
+    environment: bool = false,
 };
 
 /// A function's local namespace: name → frame slot. Lexical bindings retain
@@ -97,6 +103,18 @@ const FnScope = struct {
         const bindings = self.lexical_scopes.getLast().?;
         if (bindings.get(name)) |binding| return binding.slot;
         return self.addBinding(arena, bindings, name, true, immutable);
+    }
+
+    fn addEnvironmentLexical(self: *FnScope, arena: std.mem.Allocator, name: []const u8, immutable: bool) CompileError!void {
+        const bindings = self.lexical_scopes.getLast().?;
+        if (bindings.contains(name)) return;
+        try bindings.put(arena, name, .{
+            .slot = 0,
+            .lexical = true,
+            .immutable = immutable,
+            .tdz_checked = true,
+            .environment = true,
+        });
     }
 
     fn get(self: *const FnScope, name: []const u8) ?SlotBinding {
@@ -182,8 +200,9 @@ fn nodeHasYield(node: *const ast.Node) bool {
     };
 }
 
-/// Does a `let`/`const` for-loop's `body` capture one of the loop's per-iteration
-/// binding names inside a nested closure? Such loops need a fresh binding created
+/// Does a `let`/`const` for-loop capture one of the loop's per-iteration binding
+/// names inside a nested closure in its head, test, update, or body? Such loops
+/// need a fresh binding created
 /// per iteration (CreatePerIterationEnvironment); the frame-slot VM lowering in
 /// `compileFor` reuses ONE slot across iterations, so every captured closure would
 /// see the final value (`var` semantics). When this returns true `compileFor`
@@ -224,13 +243,44 @@ fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
     };
 }
 
-fn forLoopCapturesLexical(init_node: *const ast.Node, body: *const ast.Node) bool {
-    return switch (init_node.*) {
-        .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
-        .destructure_decl => |d| d.kind != .@"var" and patternNameCaptured(d.pattern, body),
+fn forLoopCapturesLexical(init_node: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) bool {
+    return forLoopBindingCaptured(init_node, init_node, cond, update, body);
+}
+
+fn forLoopBindingCaptured(binding_node: *const ast.Node, whole_head: *const ast.Node, cond: ?*const ast.Node, update: ?*const ast.Node, body: *const ast.Node) bool {
+    return switch (binding_node.*) {
+        .var_decl => |d| d.kind != .@"var" and
+            (nameRefInClosure(whole_head, d.name, false) or
+                (if (cond) |condition| nameRefInClosure(condition, d.name, false) else false) or
+                (if (update) |increment| nameRefInClosure(increment, d.name, false) else false) or
+                nameRefInClosure(body, d.name, false)),
+        .destructure_decl => |d| d.kind != .@"var" and
+            (patternNameCaptured(d.pattern, whole_head) or
+                (if (cond) |condition| patternNameCaptured(d.pattern, condition) else false) or
+                (if (update) |increment| patternNameCaptured(d.pattern, increment) else false) or
+                patternNameCaptured(d.pattern, body)),
         // `let a = 0, b = 0` — a group of declarators; any captured name bails.
         .decl_group => |group| blk: {
-            for (group) |n| if (forLoopCapturesLexical(n, body)) break :blk true;
+            for (group) |declaration| if (forLoopBindingCaptured(declaration, whole_head, cond, update, body)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+fn patternNameCapturedInForOf(target: *const ast.Node, var_init: ?*const ast.Node, iterable: *const ast.Node, body: *const ast.Node) bool {
+    return switch (target.*) {
+        .identifier => |name| (if (var_init) |initializer| nameRefInClosure(initializer, name, false) else false) or
+            nameRefInClosure(iterable, name, false) or nameRefInClosure(body, name, false),
+        .obj_pattern => |pattern| blk: {
+            for (pattern.props) |property| if (patternNameCapturedInForOf(property.target, var_init, iterable, body)) break :blk true;
+            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, var_init, iterable, body)) break :blk true;
+            break :blk false;
+        },
+        .arr_pattern => |pattern| blk: {
+            for (pattern.elems) |element| if (element.target) |element_target|
+                if (patternNameCapturedInForOf(element_target, var_init, iterable, body)) break :blk true;
+            if (pattern.rest) |rest| if (patternNameCapturedInForOf(rest, var_init, iterable, body)) break :blk true;
             break :blk false;
         },
         else => false,
@@ -456,6 +506,40 @@ fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
     };
 }
 
+/// A labeled jump can cross more than one environment-owning loop. The current
+/// jump patch records only a target PC, not the number of lexical environments
+/// to unwind, so captured-head loops containing one retain the exact fallback.
+/// Unlabeled break/continue, return, throw, and suspend points have dedicated
+/// local/handler/function unwind paths and do not need this barrier.
+fn stmtHasLabeledJump(node: *const ast.Node) bool {
+    return switch (node.*) {
+        .break_stmt => |label| label != null,
+        .continue_stmt => |label| label != null,
+        .function, .func_decl => false,
+        .block, .decl_group => |statements| blk: {
+            for (statements) |statement| if (stmtHasLabeledJump(statement)) break :blk true;
+            break :blk false;
+        },
+        .if_stmt => |statement| stmtHasLabeledJump(statement.consequent) or
+            (if (statement.alternate) |alternate| stmtHasLabeledJump(alternate) else false),
+        .while_stmt => |statement| stmtHasLabeledJump(statement.body),
+        .do_while_stmt => |statement| stmtHasLabeledJump(statement.body),
+        .for_stmt => |statement| stmtHasLabeledJump(statement.body),
+        .for_in => |statement| stmtHasLabeledJump(statement.body),
+        .with_stmt => |statement| stmtHasLabeledJump(statement.body),
+        .labeled_stmt => |statement| stmtHasLabeledJump(statement.body),
+        .try_stmt => |statement| stmtHasLabeledJump(statement.block) or
+            (if (statement.catch_block) |catch_block| stmtHasLabeledJump(catch_block) else false) or
+            (if (statement.finally_block) |finally_block| stmtHasLabeledJump(finally_block) else false),
+        .switch_stmt => |statement| blk: {
+            for (statement.cases) |case| for (case.body) |case_statement|
+                if (stmtHasLabeledJump(case_statement)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
 fn stmtContainsFuncDecl(node: *const ast.Node) bool {
     return switch (node.*) {
         .func_decl => true,
@@ -514,6 +598,16 @@ fn classDeferredBodiesCaptureFrame(scope: *const FnScope, members: []const ast.C
         var names = frame_scope.names.keyIterator();
         while (names.next()) |name| {
             if (classDeferredBodiesCaptureName(members, name.*)) return true;
+        }
+        for (frame_scope.lexical_scopes.items) |bindings| {
+            var lexical = bindings.iterator();
+            while (lexical.next()) |entry| {
+                // Environment-backed bindings are exactly what eval_class can
+                // capture through its live Environment chain. Only a real frame
+                // slot remains unavailable to deferred class member evaluation.
+                if (!entry.value_ptr.environment and classDeferredBodiesCaptureName(members, entry.key_ptr.*))
+                    return true;
+            }
         }
     }
     return false;
@@ -608,6 +702,7 @@ fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
 const Resolved = union(enum) {
     local: SlotBinding, // slot in the current frame
     upval: struct { depth: u32, binding: SlotBinding }, // an enclosing function's frame
+    environment: SlotBinding, // statically known declarative Environment binding
     global, // by name, against the Environment
 };
 
@@ -1072,6 +1167,7 @@ pub const Compiler = struct {
         var scope = self.scope;
         while (scope) |sc| {
             if (sc.get(name)) |binding| {
+                if (binding.environment) return .{ .environment = binding };
                 return if (depth == 0) .{ .local = binding } else .{ .upval = .{ .depth = depth, .binding = binding } };
             }
             depth += 1;
@@ -1087,7 +1183,7 @@ pub const Compiler = struct {
         switch (self.resolve(name)) {
             .local => |binding| _ = try self.chunk.emit(if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
-            .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
+            .environment, .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
         }
     }
 
@@ -1096,7 +1192,7 @@ pub const Compiler = struct {
         switch (self.resolve(name)) {
             .local => |binding| _ = try self.chunk.emitAB(if (binding.tdz_checked or binding.immutable) .store_local_lexical else .store_local, binding.slot, @intFromBool(binding.immutable)),
             .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked or u.binding.immutable) .store_upval_lexical else .store_upval, u.depth, u.binding.slot | (if (u.binding.immutable) @as(u32, 1) << 31 else 0)),
-            .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
+            .environment, .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
         }
     }
 
@@ -1116,6 +1212,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
+            .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
             .global => _ = try self.chunk.emitAB(.def_var, try self.chunk.addName(name), 2),
         }
     }
@@ -1134,6 +1231,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
+            .environment => |binding| _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (binding.immutable) 2 else 1),
             .global => {
                 const ni = try self.chunk.addName(name);
                 // In env-mode (program / generator / async body) a `let`/`const`
@@ -1163,6 +1261,7 @@ pub const Compiler = struct {
                 if (!binding.tdz_checked) return;
                 _ = try self.chunk.emit(.init_local_lexical, binding.slot);
             },
+            .environment => {}, // its Environment Record is predeclared below
             else => return error.Unsupported,
         }
     }
@@ -1195,6 +1294,100 @@ pub const Compiler = struct {
     fn predeclareLexicalList(self: *Compiler, stmts: []*Node) CompileError!void {
         if (self.scope == null) return;
         for (stmts) |stmt| try self.predeclareLexicalNode(stmt);
+    }
+
+    fn loopHeadSupportsEnvironment(node: *const Node) bool {
+        return switch (node.*) {
+            .var_decl => |decl| decl.kind != .@"var",
+            .decl_group => |decls| blk: {
+                if (decls.len == 0) break :blk false;
+                for (decls) |decl| if (!loopHeadSupportsEnvironment(decl)) break :blk false;
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
+    fn markEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        const scope = self.scope orelse return;
+        switch (node.*) {
+            .var_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                try scope.addEnvironmentLexical(self.arena, decl.name, decl.kind == .@"const");
+            },
+            .decl_group => |decls| for (decls) |decl| try self.markEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    /// Create the loop-head DeclarativeEnvironmentRecord with every binding in
+    /// its TDZ before any initializer/RHS evaluation. def_lex modes 3/4 consume
+    /// the placeholder and install the realm TDZ marker as let/const.
+    fn emitDeclareEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                _ = try self.chunk.emit(.load_undefined, 0);
+                _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(decl.name), if (decl.kind == .@"const") 4 else 3);
+            },
+            .decl_group => |decls| for (decls) |decl| try self.emitDeclareEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitLoadEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                _ = try self.chunk.emit(.load_var, try self.chunk.addName(decl.name));
+            },
+            .decl_group => |decls| for (decls) |decl| try self.emitLoadEnvironmentLexicalNode(decl),
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitDefineEnvironmentLexicalNodeReverse(self: *Compiler, node: *const Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |decl| {
+                if (decl.kind == .@"var") return error.Unsupported;
+                _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(decl.name), if (decl.kind == .@"const") 2 else 1);
+            },
+            .decl_group => |decls| {
+                var index = decls.len;
+                while (index > 0) {
+                    index -= 1;
+                    try self.emitDefineEnvironmentLexicalNodeReverse(decls[index]);
+                }
+            },
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitEnterEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitDeclareEnvironmentLexicalNode(node);
+    }
+
+    fn emitDeclareEnvironmentLexicalName(self: *Compiler, name: []const u8, immutable: bool) CompileError!void {
+        _ = try self.chunk.emit(.load_undefined, 0);
+        _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(name), if (immutable) 4 else 3);
+    }
+
+    fn emitFreshEnvironmentLexicalName(self: *Compiler, name: []const u8, immutable: bool) CompileError!void {
+        _ = try self.chunk.emit(.exit_block, 0);
+        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitDeclareEnvironmentLexicalName(name, immutable);
+    }
+
+    /// CreatePerIterationEnvironment for a classic for-head: snapshot the old
+    /// bindings on the operand stack, replace the current Environment Record by
+    /// a fresh child of the same outer environment, then initialize the fresh
+    /// bindings in reverse stack order.
+    fn emitRenewEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
+        try self.emitLoadEnvironmentLexicalNode(node);
+        _ = try self.chunk.emit(.exit_block, 0);
+        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitDefineEnvironmentLexicalNodeReverse(node);
     }
 
     fn nodeDeclaresLexical(node: *const Node) bool {
@@ -1597,18 +1790,23 @@ pub const Compiler = struct {
     }
 
     fn compileFor(self: *Compiler, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) CompileError!void {
-        // A `let`/`const` loop variable captured by a body closure needs a fresh
-        // per-iteration binding (CreatePerIterationEnvironment). The frame-slot
-        // lowering below reuses one slot, so bail such loops to the tree-walker,
-        // which binds per iteration. Uncaptured lexical (and all `var`) loops keep
-        // the fast VM path.
+        // A captured lexical head uses a real declarative Environment Record:
+        // closures capture that record, and the update edge replaces it with a
+        // value-copied record per CreatePerIterationEnvironment. Uncaptured heads
+        // retain O(1) frame slots. Destructuring heads and labeled cross-loop
+        // jumps stay on the exact fallback until their unwind metadata lands.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
-        if (init_node) |ini| if (forLoopCapturesLexical(ini, body)) return error.Unsupported;
+        const captured_head = if (init_node) |ini| forLoopCapturesLexical(ini, cond, update, body) else false;
+        if (captured_head and (!loopHeadSupportsEnvironment(init_node.?) or stmtHasLabeledJump(body)))
+            return error.Unsupported;
         if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
-            try self.predeclareLexicalNode(init_node.?);
+            if (captured_head)
+                try self.markEnvironmentLexicalNode(init_node.?)
+            else
+                try self.predeclareLexicalNode(init_node.?);
         }
         defer if (lexical_scope) self.popLexicalScope();
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
@@ -1616,8 +1814,9 @@ pub const Compiler = struct {
             if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
             _ = try self.chunk.emit(.enter_block, 0);
         }
+        if (captured_head) try self.emitEnterEnvironmentLexicalNode(init_node.?);
         if (init_node) |ini| {
-            try self.emitLexicalInitializersForNode(ini);
+            if (!captured_head) try self.emitLexicalInitializersForNode(ini);
             // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
             if (ini.* == .var_decl or ini.* == .block or ini.* == .decl_group) {
@@ -1636,6 +1835,7 @@ pub const Compiler = struct {
         }
         try self.compileStmt(body);
         const update_at = self.chunk.here();
+        if (captured_head) try self.emitRenewEnvironmentLexicalNode(init_node.?);
         if (update) |u| {
             try self.compileExpr(u);
             _ = try self.chunk.emit(.pop, 0);
@@ -1646,6 +1846,7 @@ pub const Compiler = struct {
         for (loop.continues.items) |j| self.chunk.patchTo(j, update_at);
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
+        if (captured_head) _ = try self.chunk.emit(.exit_block, 0);
         if (disposable_scope) {
             _ = try self.chunk.emit(.dispose_scope, 0);
             if (self.in_async and init_node != null and stmtHasAwaitUsingDecl(init_node.?)) {
@@ -1664,10 +1865,12 @@ pub const Compiler = struct {
     /// Bind the current loop value (on the stack) to a loop target — an
     /// identifier (fast path) or a destructuring pattern / member target (via
     /// `bind_pattern`, reusing the tree-walker's destructuring).
-    fn compileLoopBind(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node) CompileError!void {
+    fn compileLoopBind(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, force_environment: bool) CompileError!void {
         if (target.* == .identifier) {
             if (decl_kind != null) {
-                try self.emitDefine(target.identifier);
+                if (force_environment) {
+                    _ = try self.chunk.emitAB(.def_lex, try self.chunk.addName(target.identifier), if (decl_kind.? == .@"const") 2 else 1);
+                } else try self.emitDefine(target.identifier);
             } else {
                 try self.emitStore(target.identifier);
                 _ = try self.chunk.emit(.pop, 0);
@@ -1701,19 +1904,23 @@ pub const Compiler = struct {
     }
 
     fn compileForOf(self: *Compiler, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, keys_first: bool, await_each: bool) CompileError!void {
-        // A `let`/`const` loop binding captured by a body closure needs a fresh
-        // per-iteration binding (ForIn/OfBodyEvaluation, like `compileFor`); the
-        // single loop-target slot bound below is reused across iterations, so bail
-        // to the tree-walker (which binds per iteration). Only when a fallback
-        // exists — a generator body can't tree-walk, so its (rare) captured for-of
-        // keeps the pre-existing behavior rather than failing to compile at all.
-        if (!self.in_generator) if (decl_kind) |k| if (k != .@"var") {
-            if (patternNameCaptured(target, body)) return error.Unsupported;
-        };
+        // A captured simple lexical target uses a fresh declarative Environment
+        // Record for every iterator result. That is the ForIn/OfBodyEvaluation
+        // binding cell the closure captures; an uncaptured identifier stays in a
+        // frame slot. Destructuring targets and labeled cross-loop jumps retain
+        // the exact fallback until their environment-unwind lowering is complete.
+        const captured_binding = if (decl_kind) |kind|
+            kind != .@"var" and patternNameCapturedInForOf(target, var_init, iterable, body)
+        else
+            false;
+        if (captured_binding and (target.* != .identifier or stmtHasLabeledJump(body))) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind| kind != .@"var" and target.* == .identifier else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
-            _ = try self.scope.?.addLexical(self.arena, target.identifier, decl_kind.? == .@"const");
+            if (captured_binding)
+                try self.scope.?.addEnvironmentLexical(self.arena, target.identifier, decl_kind.? == .@"const")
+            else
+                _ = try self.scope.?.addLexical(self.arena, target.identifier, decl_kind.? == .@"const");
         }
         defer if (lexical_scope) self.popLexicalScope();
         const it_name = try self.freshTemp();
@@ -1721,12 +1928,16 @@ pub const Compiler = struct {
 
         // ForIn/OfHeadEvaluation creates lexical head bindings before evaluating
         // the RHS, so `for (let x of x)` observes x's TDZ rather than an outer x.
-        if (decl_kind) |kind| if (kind != .@"var" and target.* == .identifier)
-            try self.emitLexicalInitializer(target.identifier);
+        if (decl_kind) |kind| if (kind != .@"var" and target.* == .identifier) {
+            if (captured_binding) {
+                _ = try self.chunk.emit(.enter_block, 0);
+                try self.emitDeclareEnvironmentLexicalName(target.identifier, kind == .@"const");
+            } else try self.emitLexicalInitializer(target.identifier);
+        };
 
         if (var_init) |ini| {
             try self.compileExpr(ini);
-            try self.compileLoopBind(decl_kind, target);
+            try self.compileLoopBind(decl_kind, target, captured_binding);
         }
         try self.compileExpr(iterable);
         if (keys_first) _ = try self.chunk.emit(.enum_keys, 0); // for-in: iterate the key array
@@ -1776,10 +1987,12 @@ pub const Compiler = struct {
         _ = try self.chunk.emit(.load_false, 0);
         try self.emitStore(done_name);
         _ = try self.chunk.emit(.pop, 0);
+        if (captured_binding)
+            try self.emitFreshEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const");
         // bind r.value to the loop target (identifier or destructuring pattern)
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
-        try self.compileLoopBind(decl_kind, target);
+        try self.compileLoopBind(decl_kind, target, captured_binding);
         try self.compileStmt(body);
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
@@ -1819,6 +2032,7 @@ pub const Compiler = struct {
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
         self.chunk.patchToHere(after_finally);
+        if (captured_binding) _ = try self.chunk.emit(.exit_block, 0);
     }
 
     fn emitAsyncIteratorClose(self: *Compiler, completion_aware: bool) CompileError!void {

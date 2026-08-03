@@ -307,7 +307,7 @@ pub const Op = enum(u8) {
     load_var_or_undef, // operand a: name index; push value, or undefined if unbound (for `typeof`)
     store_var, // operand a: name index; assign global, leave value on stack
     def_var, // operand a: name index, b: 0 bare `var x;`, 1 `var x = init`, 2 force define/function/internal temp; pop value, define global
-    def_lex, // operand a: name index, b: 1 let / 2 const; pop value, define lexical binding
+    def_lex, // operand a: name index, b: 1 let / 2 const / 3 let-TDZ / 4 const-TDZ; pop value, define lexical binding
     bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
 
     // --- locals & upvalues (resolved to frame slots at compile time) ---
