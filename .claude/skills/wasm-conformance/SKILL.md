@@ -57,7 +57,7 @@ zig build wasm-core-3                 # pinned Core 3 profile
 zig build wasm-core-main-shadow       # non-blocking upstream-main drift
 zig build wasm-feature-profiles       # feature-gate matrix
 zig build wasm-feature-profiles-check # CI form
-python3 tools/wasm-conformance-matrix.py   # regenerate docs/.data/wasm-conformance-matrix.json
+~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts --write
 python3 tools/wasm-core3-drift.py          # report Core 3 upstream drift
 python3 -m unittest tools/test_wasm_spec.py
 ```
@@ -85,7 +85,8 @@ diagnostic rather than silently degrading.
 2. Add the feature flag and its dependency rule in `src/wasm/types.zig`.
 3. Run the matching upstream profile with `--inventory` and check in the
    inventory JSON under `docs/.data/`.
-4. Regenerate the ten-profile matrix (`tools/wasm-conformance-matrix.py`) and,
+4. Regenerate the ten-profile matrix (`tools/wasm-conformance-matrix.ts`) with
+   Home's native tool runner and,
    if the headline changes, the README status block via
    `python3 tools/release-compatibility.py --update-readme`.
 5. Add the smoke filter to the CI matrix leg so the profile stays gated.

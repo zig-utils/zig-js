@@ -254,7 +254,7 @@ with 2,862 explicit N/A and zero failures or runner errors. It records each
 inventory, proposal pin, converter, execution-mode counts, host requirements,
 and architecture-independent interpreter scope. The same CI command above
 rejects matrix drift; regenerate intentional inventory changes with
-`python3 tools/wasm-conformance-matrix.py --write`.
+`~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts --write`.
 
 CI also rebuilds exact proposal checkouts and converters for every profile.
 Bounded smoke slices cover every post-MVP family; the deliberate complete

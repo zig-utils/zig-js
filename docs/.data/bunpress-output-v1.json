@@ -40,8 +40,8 @@
     },
     {
       "path": "advanced/verification/index.html",
-      "bytes": 161915,
-      "sha256": "c1ada6f04adf7236217f40ff58cf8f7dae3e6fb77d82e77ab6e26e6c4f49da24"
+      "bytes": 161929,
+      "sha256": "706140a6262e7c6e845924b606a7913e585ce2fa830561d7a2913e2af96b0a3a"
     },
     {
       "path": "api/index.html",
@@ -260,9 +260,9 @@
     },
     {
       "path": "wasm/index.html",
-      "bytes": 279817,
-      "sha256": "036254fd0141573e60c6a927672b5dbf853a640eaa5d1dbbe9a7bd74c9ad6783"
+      "bytes": 279852,
+      "sha256": "65ee46ba189f9930ca0f5703ca14c0aa4429a154eefbdae71dc8344fa9b93230"
     }
   ],
-  "tree_sha256": "8b46ca249662b56f686f001dcb9fde5aa78d6965da2d53f8d7664e7e49485bf5"
+  "tree_sha256": "5b7f3bca134e0a0f3dba4a1dcfe9226259681d96c25efc8d49a09d38fc6ccb70"
 }

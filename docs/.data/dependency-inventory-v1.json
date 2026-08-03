@@ -46,6 +46,17 @@
       "runtime_semantics": "Implements precise tracing allocation and collection."
     },
     {
+      "id": "home-tool-runtime",
+      "class": "owner_maintained_local",
+      "status": "allowed",
+      "scope": "repository TypeScript and JavaScript tooling",
+      "locator": "$HOME/Code/Home/lang/zig-out/bin/home-tool or -Dhome-tool/HOME_TOOL override",
+      "pin": "Home-owned runner contract tracked by home-lang/home#170; local checkout is selected explicitly",
+      "license": "MIT",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Home compiles TypeScript and executes the emitted JavaScript with zig-js by default; the runner is never linked into libzig-js."
+    },
+    {
       "id": "platform-c-cxx-runtime",
       "class": "standard_platform_interface",
       "status": "allowed",
@@ -200,14 +211,15 @@
     ],
     "system_commands": [
       { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
-      { "name": "python3", "count": 36, "edge": "python-tooling" },
+      { "name": "python3", "count": 35, "edge": "python-tooling" },
+      { "name": "/usr/bin/env", "count": 1, "edge": "home-tool-runtime" },
       { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 59, "edge": "python-tooling" },
+      { "extension": ".py", "count": 58, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 8, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 1, "edge": "javascript-shell-tooling" },
+      { "extension": ".ts", "count": 2, "edge": "javascript-shell-tooling" },
       { "extension": ".sh", "count": 3, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [

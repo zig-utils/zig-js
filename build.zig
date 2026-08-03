@@ -1376,9 +1376,16 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/wasm-feature-profiles.py",
     });
+    const home_tool = b.option([]const u8, "home-tool", "Path to Home's native JS/TS repository-tool runner") orelse
+        b.graph.environ_map.get("HOME_TOOL") orelse blk: {
+        const home_dir = b.graph.environ_map.get("HOME") orelse break :blk "home-tool";
+        break :blk b.pathJoin(&.{ home_dir, "Code", "Home", "lang", "zig-out", "bin", "home-tool" });
+    };
     const wasm_conformance_matrix_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/wasm-conformance-matrix.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/wasm-conformance-matrix.ts",
     });
     const wasm_feature_profiles_step = b.step(
         "wasm-feature-profiles-check",

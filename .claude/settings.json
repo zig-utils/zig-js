@@ -35,7 +35,7 @@
       "Bash(zig build docs-link-check*)",
       "Bash(python3 tools/release-compatibility.py*)",
       "Bash(python3 tools/platform-release-matrix.py*)",
-      "Bash(python3 tools/wasm-conformance-matrix.py*)",
+      "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts*)",
       "Bash(python3 tools/threads-reference-audit.py*)",
       "Bash(python3 tools/verify-c-api.py*)",
       "Bash(python3 tools/verify-objc-api.py*)",
