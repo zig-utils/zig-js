@@ -32,15 +32,15 @@ historical object-churn A/B TSV layouts. It retains every original column and
 the input SHA-256 while mapping fields whose scope is already known:
 
 ```sh
-python3 tools/performance-attribution.py
-python3 tools/performance-attribution.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/performance-attribution.ts
+~/Code/Home/lang/zig-out/bin/home-tool run tools/performance-attribution.ts \
   --migrate-legacy docs/.data/object-churn-independent-id-block-ab-2026-07-29.tsv \
   --output /tmp/object-churn-independent-attribution-v1.json
-python3 tools/performance-attribution.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/performance-attribution.ts \
   --artifact /tmp/object-churn-independent-attribution-v1.json
 ```
 
-For new causal experiments, `tools/exact-parent-regression.py` verifies that
+For new causal experiments, `tools/exact-parent-regression.ts` verifies that
 the named parent is exactly the candidate commit's first parent, records hashes
 of both binaries and the workload source, alternates parent/candidate process
 order within every pair, enforces the exact expected checksum, and preserves
@@ -49,7 +49,7 @@ Metrics not connected yet remain explicitly unavailable. The tool refuses a
 dirty tracked zig-js, zig-gc, or zig-regex worktree.
 
 ```sh
-python3 tools/exact-parent-regression.py /path/to/parent-runner /path/to/candidate-runner \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/exact-parent-regression.ts /path/to/parent-runner /path/to/candidate-runner \
   --parent-revision HEAD^ --candidate-revision HEAD \
   --source bench/representative_comparison.js \
   --mode single --workload representative_json --jobs 2200 --lanes 1 \

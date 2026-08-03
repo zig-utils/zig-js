@@ -1684,14 +1684,14 @@ pub fn build(b: *std.Build) void {
 
     // Reproducible engine comparison against the system JavaScriptCore. The
     // runners are deliberately separate executables so zig-js's JSC-shaped C
-    // exports cannot interpose on the real framework symbols. The Python driver
+    // exports cannot interpose on the real framework symbols. Home TypeScript
     // only orchestrates runs, validates checksums, and renders raw/report data.
     const comparison_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_comparison.py" });
     const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
     const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
     const representative_benchmark_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_benchmark.py" });
-    const performance_attribution_test = b.addSystemCommand(&.{ "python3", "tools/test_performance_attribution.py" });
-    const exact_parent_regression_test = b.addSystemCommand(&.{ "python3", "tools/test_exact_parent_regression.py" });
+    const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
+    const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_object_churn_gc_profile.py" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "python3", "tools/test_independent_object_churn_profile.py" });
