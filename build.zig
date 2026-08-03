@@ -1309,7 +1309,7 @@ pub fn build(b: *std.Build) void {
     const conformance_step = b.step("conformance", "Run the JS conformance suite");
     conformance_step.dependOn(&run_conformance.step);
 
-    // Upstream WebAssembly wg-1.0 corpus evaluator. `tools/wasm-spec.py`
+    // Upstream WebAssembly wg-1.0 corpus evaluator. `tools/wasm-spec.ts`
     // converts each pinned WAST file with the revision-matched WABT tool and
     // invokes this executable in an isolated Context. Keeping conversion in the
     // orchestrator makes every command and non-applicable text-format assertion
@@ -1362,8 +1362,10 @@ pub fn build(b: *std.Build) void {
     wasm_spec_bin_step.dependOn(&wasm_spec_install.step);
 
     const wasm_core_3_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/wasm-spec.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/wasm-spec.ts",
         "--profile",
         "core-3",
         "--converter",
@@ -1383,8 +1385,10 @@ pub fn build(b: *std.Build) void {
     wasm_core_3_step.dependOn(&wasm_core_3_cmd.step);
 
     const wasm_core_main_shadow_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/wasm-spec.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/wasm-spec.ts",
         "--profile",
         "core-main-shadow",
         "--spec-root",

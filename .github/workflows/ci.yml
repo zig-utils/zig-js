@@ -79,22 +79,11 @@ jobs:
           # artifact is a deliberate hours-long reproduction; this keeps the
           # tooling that produces it from rotting silently, on every push.
           - name: threads-execution-inventory-witness
+            home_tool: true
             cmd: |
               zig build threads-test -Dthreads-case=smoke.js,jit/int-gate-epoch-reclaim.js -Dthreads-inventory="$RUNNER_TEMP/pr249-exec.json"
-              python3 - "$RUNNER_TEMP/pr249-exec.json" <<'PY'
-              import json, sys
-              d = json.load(open(sys.argv[1]))
-              assert d["schema_version"] == 2, d
-              assert d["build_mode"] == "Debug", d
-              assert d["summary"]["cases"] == 2, d
-              assert d["summary"]["failed"] == 0, d
-              assert d["mode"] == "serialized", d
-              for c in d["cases"]:
-                  for key in ("case", "mode", "ms", "result", "optimizer_publications", "optimizer_invalidations"):
-                      assert key in c, (key, c)
-              print("execution inventory witness ok:", d["summary"])
-              PY
-              python3 tools/pr249-terminal-execution.py --check
+              jq -e '.schema_version == 2 and .build_mode == "Debug" and .summary.cases == 2 and .summary.failed == 0 and .mode == "serialized" and all(.cases[]; has("case") and has("mode") and has("ms") and has("result") and has("optimizer_publications") and has("optimizer_invalidations"))' "$RUNNER_TEMP/pr249-exec.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/pr249-terminal-execution.ts --check
           - name: benchmark-comparison-harness
             cmd: zig build benchmark-comparison-test
           - name: dependency-audit
@@ -115,47 +104,51 @@ jobs:
           # without adding its multi-minute memory_copy case to every push.
           - name: wasm-core-2-structural-smoke
             wasm_core2: true
+            home_tool: true
             cmd: |
               zig build wasm-spec-eval
-              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter imports.wast --inventory "$RUNNER_TEMP/wasm-core-2-imports.json"
-              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory_init.wast --inventory "$RUNNER_TEMP/wasm-core-2-memory-init.json"
-              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter ref_func.wast --inventory "$RUNNER_TEMP/wasm-core-2-ref-func.json"
-              python3 tools/wasm-spec.py --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter unreached-valid.wast --inventory "$RUNNER_TEMP/wasm-core-2-unreached-valid.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter imports.wast --inventory "$RUNNER_TEMP/wasm-core-2-imports.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory_init.wast --inventory "$RUNNER_TEMP/wasm-core-2-memory-init.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter ref_func.wast --inventory "$RUNNER_TEMP/wasm-core-2-ref-func.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-2-structural --spec-root "$RUNNER_TEMP/wasm-core-2" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter unreached-valid.wast --inventory "$RUNNER_TEMP/wasm-core-2-unreached-valid.json"
           # Exact proposal/tool pins plus one bounded witness from each terminal
           # SIMD execution family. The documented complete command owns all 56
           # files and 25,976 commands without imposing that runtime on each push.
           - name: wasm-simd-smoke
             wasm_simd: true
+            home_tool: true
             cmd: |
               zig build wasm-spec-eval
-              python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_i32x4_arith2.wast --inventory "$RUNNER_TEMP/wasm-simd-integer.json"
-              python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_f32x4_rounding.wast --inventory "$RUNNER_TEMP/wasm-simd-float.json"
-              python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_lane.wast --inventory "$RUNNER_TEMP/wasm-simd-lane.json"
-              python3 tools/wasm-spec.py --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_load.wast --inventory "$RUNNER_TEMP/wasm-simd-memory.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_i32x4_arith2.wast --inventory "$RUNNER_TEMP/wasm-simd-integer.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_f32x4_rounding.wast --inventory "$RUNNER_TEMP/wasm-simd-float.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_lane.wast --inventory "$RUNNER_TEMP/wasm-simd-lane.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile simd --spec-root "$RUNNER_TEMP/wasm-simd" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simd_load.wast --inventory "$RUNNER_TEMP/wasm-simd-memory.json"
           # Proposal script parsing stays unit-gated, while exact-pin runtime
           # witnesses cover ordinary, recursively nested, and wait/notify
           # thread directives without running the complete corpus on each push.
           - name: wasm-threads-smoke
             wasm_threads: true
+            home_tool: true
             cmd: |
-              python3 -m unittest tools/test_wasm_spec.py
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --self-test
               zig build wasm-spec-eval
-              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simple.wast --inventory "$RUNNER_TEMP/wasm-threads-simple.json"
-              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter deeply_nested.wast --inventory "$RUNNER_TEMP/wasm-threads-nested.json"
-              python3 tools/wasm-spec.py --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter wait_notify.wast --inventory "$RUNNER_TEMP/wasm-threads-wait.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter simple.wast --inventory "$RUNNER_TEMP/wasm-threads-simple.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter deeply_nested.wast --inventory "$RUNNER_TEMP/wasm-threads-nested.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile threads --spec-root "$RUNNER_TEMP/wasm-threads" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter wait_notify.wast --inventory "$RUNNER_TEMP/wasm-threads-wait.json"
           # Exact proposal pins and bounded runtime witnesses for every WABT
           # post-MVP terminal profile. Complete inventories remain deliberate
           # commands; CI covers control, exception, and multi-memory families.
           - name: wasm-post-mvp-smoke
             wasm_post_mvp: true
+            home_tool: true
             cmd: |
               zig build wasm-spec-eval
-              python3 tools/wasm-spec.py --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call.wast --inventory "$RUNNER_TEMP/wasm-tail-call-direct.json"
-              python3 tools/wasm-spec.py --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call_indirect.wast --inventory "$RUNNER_TEMP/wasm-tail-call-indirect.json"
-              python3 tools/wasm-spec.py --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter throw_ref.wast --inventory "$RUNNER_TEMP/wasm-exception-throw-ref.json"
-              python3 tools/wasm-spec.py --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter try_table.wast --inventory "$RUNNER_TEMP/wasm-exception-try-table.json"
-              python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory-multi.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-core.json"
-              python3 tools/wasm-spec.py --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter linking3.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-linking.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call.wast --inventory "$RUNNER_TEMP/wasm-tail-call-direct.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile tail-calls --spec-root "$RUNNER_TEMP/wasm-tail-call" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter return_call_indirect.wast --inventory "$RUNNER_TEMP/wasm-tail-call-indirect.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter throw_ref.wast --inventory "$RUNNER_TEMP/wasm-exception-throw-ref.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile exception-handling --spec-root "$RUNNER_TEMP/wasm-exception-handling" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter try_table.wast --inventory "$RUNNER_TEMP/wasm-exception-try-table.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter memory-multi.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-core.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile multi-memory --spec-root "$RUNNER_TEMP/wasm-multi-memory" --wast2json "$RUNNER_TEMP/wabt-1.0.39/bin/wast2json" --filter linking3.wast --inventory "$RUNNER_TEMP/wasm-multi-memory-linking.json"
           # wasm-tools-backed proposals use their exact release binary and
           # source pins. These files cover Core 3 typed function calls,
           # 64-bit memory/table execution, GC packed aggregates, i31
@@ -165,23 +158,23 @@ jobs:
             home_tool: true
             cmd: |
               zig build wasm-spec-eval
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-call-ref.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/return_call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-return-call-ref.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/exceptions/ --inventory "$RUNNER_TEMP/wasm-core-3-exceptions.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/ref_null.wast --inventory "$RUNNER_TEMP/wasm-core-3-ref-null.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/relaxed-simd/ --inventory "$RUNNER_TEMP/wasm-core-3-relaxed-simd.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/data.wast --inventory "$RUNNER_TEMP/wasm-core-3-data.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/global.wast --inventory "$RUNNER_TEMP/wasm-core-3-global.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/br_on_non_null.wast --inventory "$RUNNER_TEMP/wasm-core-3-br-on-non-null.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-ref.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/elem.wast --inventory "$RUNNER_TEMP/wasm-core-3-elem.json"
-              python3 tools/wasm-spec.py --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/linking.wast --inventory "$RUNNER_TEMP/wasm-core-3-linking.json"
-              python3 tools/wasm-spec.py --profile core-main-shadow --spec-root "$RUNNER_TEMP/wasm-core-main-shadow" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --changed-only --filter test/core/binary-leb128.wast --inventory "$RUNNER_TEMP/wasm-core-main-shadow-binary-leb128.json"
-              python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter address64.wast --inventory "$RUNNER_TEMP/wasm-memory64-address.json"
-              python3 tools/wasm-spec.py --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter table_copy_mixed.wast --inventory "$RUNNER_TEMP/wasm-memory64-table.json"
-              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter array_copy.wast --inventory "$RUNNER_TEMP/wasm-gc-array.json"
-              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter i31.wast --inventory "$RUNNER_TEMP/wasm-gc-i31.json"
-              python3 tools/wasm-spec.py --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter br_on_cast.wast --inventory "$RUNNER_TEMP/wasm-gc-casts.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-call-ref.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/return_call_ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-return-call-ref.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/exceptions/ --inventory "$RUNNER_TEMP/wasm-core-3-exceptions.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/ref_null.wast --inventory "$RUNNER_TEMP/wasm-core-3-ref-null.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/relaxed-simd/ --inventory "$RUNNER_TEMP/wasm-core-3-relaxed-simd.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/data.wast --inventory "$RUNNER_TEMP/wasm-core-3-data.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/global.wast --inventory "$RUNNER_TEMP/wasm-core-3-global.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/br_on_non_null.wast --inventory "$RUNNER_TEMP/wasm-core-3-br-on-non-null.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/ref.wast --inventory "$RUNNER_TEMP/wasm-core-3-ref.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/elem.wast --inventory "$RUNNER_TEMP/wasm-core-3-elem.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-3 --spec-root wasm-spec-wg3 --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter test/core/linking.wast --inventory "$RUNNER_TEMP/wasm-core-3-linking.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile core-main-shadow --spec-root "$RUNNER_TEMP/wasm-core-main-shadow" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --changed-only --filter test/core/binary-leb128.wast --inventory "$RUNNER_TEMP/wasm-core-main-shadow-binary-leb128.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter address64.wast --inventory "$RUNNER_TEMP/wasm-memory64-address.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile memory64 --spec-root "$RUNNER_TEMP/wasm-memory64" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter table_copy_mixed.wast --inventory "$RUNNER_TEMP/wasm-memory64-table.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter array_copy.wast --inventory "$RUNNER_TEMP/wasm-gc-array.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter i31.wast --inventory "$RUNNER_TEMP/wasm-gc-i31.json"
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-spec.ts --profile gc --spec-root "$RUNNER_TEMP/wasm-gc" --converter "$RUNNER_TEMP/wasm-tools-1.253.0-x86_64-linux/wasm-tools" --filter br_on_cast.wast --inventory "$RUNNER_TEMP/wasm-gc-casts.json"
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
@@ -192,7 +185,7 @@ jobs:
           - name: private-abi-boundary
             home_tool: true
             cmd: |
-              python3 -m unittest tools/test_home_private_abi.py
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi.ts --self-test
               "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi-tsan.ts
               zig build c-api-audit home-private-abi-audit test-home-private-abi
               zig build test-home-private-abi -Doptimize=ReleaseSafe

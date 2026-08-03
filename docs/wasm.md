@@ -115,7 +115,7 @@ MVP-only default `--spec-root`, not a checkout of upstream `main`):
 
 ```sh
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py --profile mvp \
+home-tool run tools/wasm-spec.ts --profile mvp \
   --spec-root /path/to/WebAssembly-spec \
   --wast2json /path/to/wabt-1.0.12/wast2json
 ```
@@ -165,7 +165,7 @@ git clone https://github.com/WebAssembly/spec.git /tmp/wasm-core-2
 git -C /tmp/wasm-core-2 checkout fffc6e12fa454e475455a7b58d3b5dc343980c10
 # Install/build WABT 1.0.39 commit ad75c5edcdff96d73c245b57fbc07607aaca9f95.
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py \
+home-tool run tools/wasm-spec.ts \
   --profile core-2-structural \
   --spec-root /tmp/wasm-core-2 \
   --wast2json /path/to/wabt-1.0.39/wast2json
@@ -456,9 +456,9 @@ revisions named above, and these deliberate full-run commands:
 
 ```sh
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py --profile tail-calls \
+home-tool run tools/wasm-spec.ts --profile tail-calls \
   --spec-root /path/to/tail-call --wast2json /path/to/wast2json
-python3 tools/wasm-spec.py --profile exception-handling \
+home-tool run tools/wasm-spec.ts --profile exception-handling \
   --spec-root /path/to/exception-handling --wast2json /path/to/wast2json
 zig build wasm-feature-profiles-check
 ```
@@ -489,7 +489,7 @@ Reproduce the score with pinned WABT 1.0.39:
 
 ```sh
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py --profile multi-memory \
+home-tool run tools/wasm-spec.ts --profile multi-memory \
   --spec-root /path/to/multi-memory \
   --wast2json /path/to/wabt-1.0.39/wast2json \
   --engine zig-out/bin/wasm-spec-eval
@@ -566,7 +566,7 @@ zig build test -Dtest-filter=memory64
 zig build test -Dtsan=true -Dtest-filter=memory64
 zig build test -Dtest-filter=wasm.decode
 zig build test -Dtest-filter=wasm.validate
-python3 tools/wasm-spec.py --profile memory64 \
+home-tool run tools/wasm-spec.ts --profile memory64 \
   --spec-root /path/to/memory64 \
   --converter /path/to/wasm-tools \
   --engine zig-out/bin/wasm-spec-eval --command-shards 8
@@ -644,7 +644,7 @@ named above:
 
 ```sh
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py --profile gc \
+home-tool run tools/wasm-spec.ts --profile gc \
   --spec-root /path/to/gc \
   --converter /path/to/wasm-tools \
   --engine zig-out/bin/wasm-spec-eval
@@ -676,7 +676,7 @@ Reproduce the terminal score with:
 
 ```sh
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py \
+home-tool run tools/wasm-spec.ts \
   --profile simd-movement \
   --spec-root /path/to/WebAssembly-simd-a78b98a \
   --wast2json /path/to/wabt-1.0.39/wast2json \
@@ -719,7 +719,7 @@ Reproduce the complete score with the exact proposal checkout and WABT 1.0.39:
 
 ```sh
 zig build wasm-spec-eval -Doptimize=ReleaseFast
-python3 tools/wasm-spec.py \
+home-tool run tools/wasm-spec.ts \
   --profile simd \
   --spec-root /path/to/WebAssembly-simd-a78b98a \
   --wast2json /path/to/wabt-1.0.39/wast2json \
@@ -850,7 +850,7 @@ git clone https://github.com/WebAssembly/threads.git /tmp/wasm-threads
 git -C /tmp/wasm-threads checkout 979d0fcb994439423d63b2f0a8a7332d6285dd84
 # Install/build WABT 1.0.39 commit ad75c5edcdff96d73c245b57fbc07607aaca9f95.
 zig build wasm-spec-eval
-python3 tools/wasm-spec.py \
+home-tool run tools/wasm-spec.ts \
   --profile threads \
   --spec-root /tmp/wasm-threads \
   --wast2json /path/to/wabt-1.0.39/wast2json \

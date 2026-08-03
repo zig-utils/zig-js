@@ -3,7 +3,7 @@
 This document describes the self-contained upstream spec runner
 (`zig build wasm-spec`) and its checked-in artifacts. A second, complementary
 harness — the live-WABT corpus evaluator (`zig build wasm-spec-eval` +
-`tools/wasm-spec.py`) — is documented in [wasm.md](wasm.md). Both pin the same
+`tools/wasm-spec.ts`) — is documented in [wasm.md](wasm.md). Both pin the same
 upstream corpus; they differ in how NaN-boundary assertions are scored (see
 below).
 

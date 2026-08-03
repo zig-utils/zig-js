@@ -17,7 +17,7 @@ corpora.
 | Harness | What it is |
 | --- | --- |
 | `zig build wasm-spec` | Self-contained packed runner over the checked-in wg-1.0 artifacts. Documented in [`docs/wasm-spec.md`](../../../docs/wasm-spec.md). |
-| `zig build wasm-spec-eval` + `tools/wasm-spec.py` | Live corpus evaluator against a real upstream checkout, converted with WABT `wast2json` or `wasm-tools`. |
+| `zig build wasm-spec-eval` + `tools/wasm-spec.ts` | Live corpus evaluator against a real upstream checkout, converted with WABT `wast2json` or `wasm-tools`. |
 
 Both pin the same upstream corpus; they differ in how NaN-boundary assertions
 are scored. Do not treat one's number as the other's.
@@ -32,7 +32,7 @@ zig build wasm-spec-eval                                # build the live evaluat
 ## 2. Driving the live evaluator
 
 ```bash
-python3 tools/wasm-spec.py \
+home-tool run tools/wasm-spec.ts \
   --profile <profile> \
   --spec-root <upstream checkout> \
   --wast2json <path>            # WABT-converted profiles
@@ -59,7 +59,7 @@ zig build wasm-feature-profiles       # feature-gate matrix
 zig build wasm-feature-profiles-check # CI form
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts --write
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-core3-drift.ts
-python3 -m unittest tools/test_wasm_spec.py
+home-tool run tools/wasm-spec.ts --self-test
 ```
 
 ## 3. Feature gates

@@ -159,7 +159,7 @@ than going through the build system per case.
 
 ```bash
 zig build wasm-spec              # packed wg-1.0 runner
-zig build wasm-spec-eval         # live corpus evaluator (driven by tools/wasm-spec.py)
+zig build wasm-spec-eval         # live corpus evaluator (driven by tools/wasm-spec.ts)
 zig build wasm-feature-profiles
 ```
 
