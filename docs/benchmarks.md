@@ -196,7 +196,7 @@ zig-js/JavaScriptCore matrix.
 Reproduce an exact-parent pair with:
 
 ```sh
-python3 tools/independent-object-churn-profile.py /path/to/parent-runner \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/independent-object-churn-profile.ts /path/to/parent-runner \
   /path/to/candidate-runner \
   --parent-sample /tmp/parent.sample.txt \
   --candidate-sample /tmp/candidate.sample.txt \
