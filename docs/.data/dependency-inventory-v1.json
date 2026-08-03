@@ -51,7 +51,7 @@
       "status": "allowed",
       "scope": "repository TypeScript and JavaScript tooling",
       "locator": "$HOME/Code/Home/lang/zig-out/bin/home-tool or -Dhome-tool/HOME_TOOL override",
-      "pin": "home-lang/home@351dc2c59f80effa286bffc00d3b0d1743c10230; local checkout may be selected explicitly",
+      "pin": "home-lang/home@351dc2c59e80d077fab44247e86a893bdb262777; local checkout may be selected explicitly",
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Home compiles TypeScript and executes the emitted JavaScript with zig-js by default; the runner is never linked into libzig-js."
@@ -180,6 +180,18 @@
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Owner-maintained, immutable CI bootstrap for Zig and BunPress tooling; never part of libzig-js."
+    },
+    {
+      "id": "pantry-release-bootstrap",
+      "class": "owner_maintained_pinned_tooling",
+      "status": "migration_required",
+      "scope": "release publication bootstrap",
+      "locator": "home-lang/pantry/packages/action",
+      "pin": "mutable main; immutable revision migration remains required",
+      "license": "MIT",
+      "affects_runtime_semantics": false,
+      "runtime_semantics": "Owner-maintained release publication only; never part of libzig-js.",
+      "migration_issue": 497
     }
   ],
   "boundaries": {
@@ -188,9 +200,9 @@
       "../zig-gc"
     ],
     "owned_sibling_checkouts": [
-      { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 6, "edge": "zig-regex" },
-      { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 6, "edge": "zig-gc" },
-      { "repository": "home-lang/home", "path": "Home/lang", "revision": "351dc2c59f80effa286bffc00d3b0d1743c10230", "occurrences": 1, "edge": "home-tool-runtime" },
+      { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 7, "edge": "zig-regex" },
+      { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 7, "edge": "zig-gc" },
+      { "repository": "home-lang/home", "path": "Home/lang", "revision": "351dc2c59e80d077fab44247e86a893bdb262777", "occurrences": 2, "edge": "home-tool-runtime" },
       { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 1, "edge": "zig-gc" },
       { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "1262895355142cb57ae7850dec7bf31cc5f5999d", "occurrences": 1, "edge": "bunpress-docs-toolchain" },
@@ -242,8 +254,11 @@
       { "manifest": "package.json", "name": "docs:data", "command": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts", "edge": "home-tool-runtime" }
     ],
     "ci_actions": [
-      { "name": "actions/checkout@v6", "count": 25, "edge": "ci-bootstrap-actions" },
-      { "name": "pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7", "count": 7, "edge": "pantry-docs-bootstrap" }
+      { "name": "actions/checkout@v6", "count": 30, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/upload-artifact@v4", "count": 1, "edge": "ci-bootstrap-actions" },
+      { "name": "stacksjs/action-releaser@v1.2.9", "count": 1, "edge": "ci-bootstrap-actions" },
+      { "name": "pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7", "count": 8, "edge": "pantry-docs-bootstrap" },
+      { "name": "home-lang/pantry/packages/action@main", "count": 1, "edge": "pantry-release-bootstrap" }
     ],
     "pinned_downloads": [
       { "url": "https://github.com/WebAssembly/wabt/releases/download/1.0.12/wabt-1.0.12-linux.tar.gz", "sha256": "540632382afd3e658761f2abb742e0504b4986ffcd127cef250fc843e46d9271", "occurrences": 1, "edge": "pinned-wasm-converters" },

@@ -44,6 +44,14 @@ revisions are recorded in the inventory. CI uses the same `Libraries/` plus
 before rendering. Missing behavior is fixed in the owning repository and then
 consumed here; zig-js does not carry substitutes.
 
+Home's repository-tool runtime is bootstrapped without a dependency cycle.
+`zig build home-tool-bootstrap` installs the unbridged public C archive that
+Home links for its zig-js engine; once that pinned Home runtime exists, the
+normal macOS `zig build` uses it to append the Objective-C bridge objects and
+produce the complete installed archive. The bootstrap target is not a reduced
+public product and does not replace the normal install—it is the exact producer
+boundary needed before the owned packaging tool exists.
+
 The macOS Objective-C bridge may use the Xcode SDK and Foundation as the
 platform interface it implements. System JavaScriptCore is isolated to the
 explicit differential and benchmark executables; it never links into

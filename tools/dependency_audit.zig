@@ -134,6 +134,12 @@ fn count(haystack: []const u8, needle: []const u8) usize {
     return total;
 }
 
+fn countSources(sources: []const []const u8, needle: []const u8) usize {
+    var total: usize = 0;
+    for (sources) |source| total += count(source, needle);
+    return total;
+}
+
 fn read(gpa: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_source_bytes));
 }
@@ -666,8 +672,19 @@ fn auditGitIndex(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void
 }
 
 fn auditCi(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
-    const source = try read(gpa, io, ".github/workflows/ci.yml");
-    defer gpa.free(source);
+    const workflow_paths = [_][]const u8{
+        ".github/workflows/ci.yml",
+        ".github/workflows/performance.yml",
+        ".github/workflows/release.yml",
+    };
+    var sources: [workflow_paths.len][]u8 = undefined;
+    var loaded: usize = 0;
+    defer for (sources[0..loaded]) |source| gpa.free(source);
+    for (&sources, workflow_paths) |*source, path| {
+        source.* = try read(gpa, io, path);
+        loaded += 1;
+    }
+
     var sibling_occurrences: usize = 0;
     for (inventory.boundaries.owned_sibling_checkouts) |item| {
         const fragment = try std.fmt.allocPrint(
@@ -676,52 +693,55 @@ fn auditCi(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {
             .{ item.repository, item.path, item.revision },
         );
         defer gpa.free(fragment);
-        const actual = count(source, fragment);
+        const actual = countSources(&sources, fragment);
         if (actual != item.occurrences)
             return fail("owned sibling {s}@{s} occurs {d} times, expected {d}", .{ item.repository, item.revision, actual, item.occurrences });
         sibling_occurrences += item.occurrences;
     }
-    if (count(source, "repository: ") != sibling_occurrences)
-        return fail("CI contains an unclassified owned sibling checkout", .{});
+    if (countSources(&sources, "repository: ") != sibling_occurrences)
+        return fail("workflow set contains an unclassified owned sibling checkout", .{});
 
     var action_occurrences: usize = 0;
     for (inventory.boundaries.ci_actions) |item| {
         const fragment = try std.fmt.allocPrint(gpa, "uses: {s}", .{item.name});
         defer gpa.free(fragment);
-        const actual = count(source, fragment);
-        if (actual != item.count) return fail("CI action '{s}' occurs {d} times, expected {d}", .{ item.name, actual, item.count });
+        const actual = countSources(&sources, fragment);
+        if (actual != item.count) return fail("workflow action '{s}' occurs {d} times, expected {d}", .{ item.name, actual, item.count });
         action_occurrences += item.count;
     }
-    if (count(source, "uses: ") != action_occurrences) return fail("CI contains an unclassified action", .{});
+    if (countSources(&sources, "uses: ") != action_occurrences) return fail("workflow set contains an unclassified action", .{});
 
     var download_occurrences: usize = 0;
     for (inventory.boundaries.pinned_downloads) |item| {
-        const urls = count(source, item.url);
-        const hashes = count(source, item.sha256);
+        const urls = countSources(&sources, item.url);
+        const hashes = countSources(&sources, item.sha256);
         if (urls != item.occurrences or hashes != item.occurrences)
             return fail("download pin '{s}' occurs URL/hash {d}/{d}, expected {d}/{d}", .{ item.url, urls, hashes, item.occurrences, item.occurrences });
         download_occurrences += item.occurrences;
     }
-    if (count(source, "releases/download/") != download_occurrences)
-        return fail("CI contains an unclassified release download", .{});
+    if (countSources(&sources, "releases/download/") != download_occurrences)
+        return fail("workflow set contains an unclassified release download", .{});
 
     for (inventory.boundaries.pinned_ci_corpora) |item| {
         const remote = try std.fmt.allocPrint(gpa, "remote add origin {s}", .{item.url});
         defer gpa.free(remote);
-        var rest = source;
         var matched = false;
-        while (std.mem.indexOf(u8, rest, remote)) |at| {
-            const end = @min(rest.len, at + remote.len + 500);
-            if (std.mem.indexOf(u8, rest[at..end], item.revision) != null) {
-                matched = true;
-                break;
+        for (sources) |source| {
+            var rest = source;
+            while (std.mem.indexOf(u8, rest, remote)) |at| {
+                const end = @min(rest.len, at + remote.len + 500);
+                if (std.mem.indexOf(u8, rest[at..end], item.revision) != null) {
+                    matched = true;
+                    break;
+                }
+                rest = rest[at + remote.len ..];
             }
-            rest = rest[at + remote.len ..];
+            if (matched) break;
         }
         if (!matched) return fail("CI corpus {s}@{s} is not pinned beside its remote", .{ item.url, item.revision });
     }
-    if (count(source, "remote add origin https://github.com/WebAssembly/") != inventory.boundaries.pinned_ci_corpora.len)
-        return fail("CI contains an unclassified WebAssembly corpus checkout", .{});
+    if (countSources(&sources, "remote add origin https://github.com/WebAssembly/") != inventory.boundaries.pinned_ci_corpora.len)
+        return fail("workflow set contains an unclassified WebAssembly corpus checkout", .{});
 }
 
 fn auditProductionSources(gpa: std.mem.Allocator, io: std.Io, inventory: Inventory) !void {

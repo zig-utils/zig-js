@@ -125,6 +125,18 @@ pub fn build(b: *std.Build) void {
     fixture_private_lib.root_module.addOptions("private_abi_options", fixture_private_abi_options);
     const home_private_lib = if (private_abi_is_bun) fixture_private_lib else lib;
     const bun_private_lib = if (private_abi_is_bun) lib else fixture_private_lib;
+
+    // Home's repository-tool runtime links this public archive, while the full
+    // macOS install uses that runtime to append the Objective-C bridge objects.
+    // Keep the raw C archive as an explicit bootstrap producer so a clean host
+    // can build Home without requiring Home to have already packaged zig-js.
+    const install_home_tool_bootstrap_lib = b.addInstallArtifact(lib, .{});
+    const home_tool_bootstrap_step = b.step(
+        "home-tool-bootstrap",
+        "Install the unbridged public C archive needed to build Home's repository tool",
+    );
+    home_tool_bootstrap_step.dependOn(&install_home_tool_bootstrap_lib.step);
+
     var installed_library: ?std.Build.LazyPath = null;
     var objc_bridge_object: ?std.Build.LazyPath = null;
     var objc_dispatch_object: ?*std.Build.Step.Compile = null;

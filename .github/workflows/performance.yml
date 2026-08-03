@@ -47,17 +47,37 @@ jobs:
         with:
           repository: zig-utils/zig-regex
           path: zig-regex
+          ref: 2de46683b948ec895e5fa9a9e7e4c384aceccdfe
       - uses: actions/checkout@v6
         with:
           repository: zig-utils/zig-gc
           path: zig-gc
+          ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+      # benchmark-comparison-test includes the representative-matrix contract,
+      # which is a durable TypeScript tool executed by the owned Home runtime.
+      # Keep this producer chain identical to the main CI job: zig-js first
+      # supplies the public C archive, then the pinned Home checkout links its
+      # repository-tool runner against that archive.
+      - uses: actions/checkout@v6
+        with:
+          repository: home-lang/home
+          path: Home/lang
+          ref: 351dc2c59e80d077fab44247e86a893bdb262777
       - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev
 
+      - name: Build zig-js public C API for Home
+        working-directory: zig-js
+        run: zig build home-tool-bootstrap
+
+      - name: Build pinned Home repository-tool runtime
+        working-directory: Home/lang
+        run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
+
       - name: Validate comparison harness
         working-directory: zig-js
-        run: zig build benchmark-comparison-test
+        run: zig build benchmark-comparison-test -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
 
       - name: Run full symmetric matrix
         working-directory: zig-js

@@ -65,8 +65,8 @@
     },
     {
       "path": "c-api/README/index.html",
-      "bytes": 145574,
-      "sha256": "110f49b12bb770b76f04c3d938401e7bb700944b31c8b956c5986bbe2c85eb87"
+      "bytes": 145588,
+      "sha256": "3727ce2c5dc46a50c72c31a19c6e66876c960587a58fdbcb733bc08d15008196"
     },
     {
       "path": "conformance/index.html",
@@ -75,8 +75,8 @@
     },
     {
       "path": "dependencies/index.html",
-      "bytes": 159317,
-      "sha256": "4b441f459da737d7d62c9bb546464eb5726ac1abec2c20960316e870d44b8852"
+      "bytes": 159868,
+      "sha256": "d63857d96ec4d3e64347d72ddb3b0adb1e5ea1889b4b9e03e0eefa40ea8f0d1e"
     },
     {
       "path": "dev-cache/index.html",
@@ -264,5 +264,5 @@
       "sha256": "65ee46ba189f9930ca0f5703ca14c0aa4429a154eefbdae71dc8344fa9b93230"
     }
   ],
-  "tree_sha256": "3a19d785b119da88e218d0e3e068d36a93fa506f224846979c4ee7c118071c67"
+  "tree_sha256": "5eb6cadaaf470d6e143f98fdabd80dda41ba27be4188998081994f2445e203ce"
 }
