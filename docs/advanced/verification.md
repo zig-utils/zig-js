@@ -19,7 +19,7 @@ tools, and gated in CI.
 | Thread corpus coverage | `pr249-reference-inventory.json`, `pr249-execution-nogil.json` | `tools/threads-reference-audit.py`, `tools/nogil-corpus-gate.py` |
 | Public / private ABI | the JSON inventories under `docs/c-api/`, `docs/objc-api/`, `docs/abi/` | the `*-audit` build steps |
 | GC relocation coverage | `gc-relocation-inventory.json` | `zig build gc-relocation-inventory-check` |
-| Performance | dated `.md` report **plus** its raw `.tsv` samples | `benchmark-comparison`, `tools/benchmark-publication.py` |
+| Performance | dated `.md` report **plus** its raw `.tsv` samples | `benchmark-comparison`, `tools/benchmark-publication.ts` |
 | Platform support | `docs/platforms.md` | `tools/platform-release-matrix.ts` |
 | Release readiness | `release-compatibility-matrix.json` | `zig build release-compatibility` |
 

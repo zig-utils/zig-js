@@ -46,6 +46,8 @@ README_OVERVIEW_START = "<!-- release-compatibility:overview:start -->"
 README_OVERVIEW_END = "<!-- release-compatibility:overview:end -->"
 README_QUICKSTART_START = "<!-- release-compatibility:quickstart:start -->"
 README_QUICKSTART_END = "<!-- release-compatibility:quickstart:end -->"
+README_BENCHMARK_START = "<!-- benchmark-comparison:start -->"
+README_BENCHMARK_END = "<!-- benchmark-comparison:end -->"
 README_NOTICE_GATE_LABELS = {
     "platform_matrix": "supported platform correctness/sanitizer/performance matrix publication",
     "moving_gc": "automatic-compaction concurrency and fault coverage",
@@ -278,23 +280,27 @@ def generated_readme_benchmark_comparison(summary: dict[str, object], readme_pat
     require(isinstance(report_relative, str) and report_relative, "benchmark comparison report path is required")
     raw_path = artifact_path(raw_relative)
     report_path = artifact_path(report_relative)
-    publication = load_python_module("tools/benchmark-publication.py", "benchmark_publication_release")
-    rows = publication.read_rows(raw_path)
-    metadata = publication.parse_metadata(report_path)
-    publication.ensure_report_matches(rows, metadata, raw_path, report_path)
-    require(summary.get("samples") == len(rows), "benchmark comparison sample-count drift")
+    sample_count = len(raw_path.read_text().splitlines()) - 1
+    require(summary.get("samples") == sample_count, "benchmark comparison sample-count drift")
     report_link = report_path.relative_to(readme_path.parent).as_posix()
     raw_link = raw_path.relative_to(readme_path.parent).as_posix()
-    generated = publication.readme_scorecard(rows, metadata, report_link, raw_link)
-    return f"{publication.README_START}\n{generated.rstrip()}\n{publication.README_END}"
+    home_tool = os.environ.get("HOME_TOOL", str(Path.home() / "Code/Home/lang/zig-out/bin/home-tool"))
+    completed = subprocess.run(
+        [home_tool, "run", "tools/benchmark-publication.ts", "--current-raw", raw_link,
+         "--current-report", report_link, "--scorecard"],
+        check=True, text=True, capture_output=True, cwd=ROOT,
+    )
+    return f"{README_BENCHMARK_START}\n{completed.stdout.rstrip()}\n{README_BENCHMARK_END}"
 
 
 def replace_readme_benchmark_comparison(readme: str, generated: str) -> str:
-    publication = load_python_module("tools/benchmark-publication.py", "benchmark_publication_update")
-    require(generated.startswith(publication.README_START + "\n"), "generated benchmark scorecard missing start marker")
-    require(generated.endswith("\n" + publication.README_END), "generated benchmark scorecard missing end marker")
-    inner = generated.removeprefix(publication.README_START + "\n").removesuffix("\n" + publication.README_END)
-    return publication.replace_readme_block(readme, inner)
+    require(generated.startswith(README_BENCHMARK_START + "\n"), "generated benchmark scorecard missing start marker")
+    require(generated.endswith("\n" + README_BENCHMARK_END), "generated benchmark scorecard missing end marker")
+    require(readme.count(README_BENCHMARK_START) == 1 and readme.count(README_BENCHMARK_END) == 1,
+            "README must contain exactly one ordered benchmark-comparison marker pair")
+    before, remainder = readme.split(README_BENCHMARK_START, 1)
+    _, after = remainder.split(README_BENCHMARK_END, 1)
+    return before + generated + after
 
 
 def generated_readme_build_test() -> str:

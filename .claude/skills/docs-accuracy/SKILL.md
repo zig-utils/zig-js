@@ -45,7 +45,7 @@ is how to apply it.
 | Marker | Generator |
 | --- | --- |
 | `<!-- release-compatibility:<section>:start/end -->` (overview, quickstart, status, use, build-test, notice, wasm-performance, gc-compaction) | `python3 tools/release-compatibility.py --update-readme` |
-| `<!-- benchmark-comparison:start/end -->` | `python3 tools/benchmark-publication.py …` |
+| `<!-- benchmark-comparison:start/end -->` | `home-tool run tools/benchmark-publication.ts …` |
 | `<!-- gc-generation:start/end -->` | `zig build gc-generation-benchmark -Dgc-generation-benchmark-update-readme=true` |
 | whole file: `docs/platforms.md` | `home-tool run tools/platform-release-matrix.ts` |
 

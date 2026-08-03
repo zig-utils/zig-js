@@ -9,8 +9,8 @@
     "matrix_id": "benchmark-comparison-v1",
     "source": "bench/comparison.js",
     "source_sha256": "9e161be3808cf93ea251650327b2ee0481e4c0d6b38994258aa68577af79253c",
-    "driver": "tools/benchmark-comparison.py",
-    "driver_sha256": "7f03a74a1f050f186d89a051fc061d0a1f0963e5ea114b7e2bbbb7d0b24cb779",
+    "driver": "tools/benchmark-comparison.ts",
+    "driver_sha256": "8d353d8c9664e94298d7f3d875a79ddd35a0da15321e5d04636ba138171121f5",
     "policy": "The original ten-kernel matrix remains a separately collected permanent non-regression panel."
   },
   "engines": ["zig-js", "JavaScriptCore"],

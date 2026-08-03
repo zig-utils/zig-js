@@ -310,13 +310,13 @@ zig build benchmark-comparison-bin
 zig build benchmark-comparison-test
 
 # Regenerate the marker-delimited README scorecard from an accepted pair.
-python3 tools/benchmark-publication.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/benchmark-publication.ts \
   --current-raw docs/.data/benchmark-comparison-YYYY-MM-DD.tsv \
   --current-report docs/.data/benchmark-comparison-YYYY-MM-DD.md \
   --readme README.md
 
 # Compare two controlled, like-for-like pairs and retain every row's delta.
-python3 tools/benchmark-publication.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/benchmark-publication.ts \
   --current-raw docs/.data/benchmark-comparison-current.tsv \
   --current-report docs/.data/benchmark-comparison-current.md \
   --baseline-raw docs/.data/benchmark-comparison-baseline.tsv \

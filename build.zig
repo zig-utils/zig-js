@@ -1686,10 +1686,10 @@ pub fn build(b: *std.Build) void {
     // runners are deliberately separate executables so zig-js's JSC-shaped C
     // exports cannot interpose on the real framework symbols. Home TypeScript
     // only orchestrates runs, validates checksums, and renders raw/report data.
-    const comparison_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_comparison.py" });
-    const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
+    const comparison_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-comparison.ts", "--self-test" });
+    const comparison_publication_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-publication.ts", "--self-test" });
     const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
-    const representative_benchmark_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_benchmark.py" });
+    const representative_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts", "--self-test" });
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_gc_generation_benchmark.py" });
@@ -1736,7 +1736,7 @@ pub fn build(b: *std.Build) void {
         });
         comparison_jsc.root_module.linkFramework("JavaScriptCore", .{});
 
-        const run_comparison = b.addSystemCommand(&.{ "python3", "tools/benchmark-comparison.py" });
+        const run_comparison = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/benchmark-comparison.ts" });
         run_comparison.addArtifactArg(comparison_zig_js);
         run_comparison.addArtifactArg(comparison_jsc);
         if (b.option(usize, "benchmark-comparison-samples", "Full comparison samples per matrix row")) |samples| {
@@ -1755,7 +1755,7 @@ pub fn build(b: *std.Build) void {
         }
         comparison_step.dependOn(&run_comparison.step);
 
-        const run_representative = b.addSystemCommand(&.{ "python3", "tools/representative-benchmark.py" });
+        const run_representative = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/representative-benchmark.ts" });
         run_representative.addArtifactArg(comparison_zig_js);
         run_representative.addArtifactArg(comparison_jsc);
         if (b.option(usize, "representative-benchmark-samples", "Full representative samples per matrix row")) |samples| {

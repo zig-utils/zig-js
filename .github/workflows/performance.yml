@@ -96,7 +96,7 @@ jobs:
         working-directory: zig-js
         run: |
           cp README.md benchmark-results/README.generated.md
-          python3 tools/benchmark-publication.py \
+          "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/benchmark-publication.ts \
             --current-raw="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
             --current-report="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md" \
             --readme=benchmark-results/README.generated.md
@@ -108,7 +108,7 @@ jobs:
           BASELINE_RAW: ${{ inputs.baseline_raw }}
           BASELINE_REPORT: ${{ inputs.baseline_report }}
         run: |
-          python3 tools/benchmark-publication.py \
+          "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/benchmark-publication.ts \
             --current-raw="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.tsv" \
             --current-report="benchmark-results/benchmark-comparison-${GITHUB_RUN_ID}.md" \
             --baseline-raw="$BASELINE_RAW" \

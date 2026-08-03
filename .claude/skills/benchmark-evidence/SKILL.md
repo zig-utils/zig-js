@@ -60,7 +60,7 @@ evidence from a dirty tracked worktree.
 ## 3. Publishing
 
 ```bash
-python3 tools/benchmark-publication.py \
+home-tool run tools/benchmark-publication.ts \
   --current-raw docs/.data/benchmark-comparison-YYYY-MM-DD.tsv \
   --current-report docs/.data/benchmark-comparison-YYYY-MM-DD.md \
   --readme README.md
@@ -74,7 +74,7 @@ idempotently. **Never hand-edit inside those markers.**
 For a controlled before/after, pass both pairs and get a per-row history:
 
 ```bash
-python3 tools/benchmark-publication.py \
+home-tool run tools/benchmark-publication.ts \
   --current-raw  docs/.data/benchmark-comparison-current.tsv \
   --current-report docs/.data/benchmark-comparison-current.md \
   --baseline-raw docs/.data/benchmark-comparison-baseline.tsv \
