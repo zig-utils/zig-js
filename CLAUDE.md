@@ -44,7 +44,8 @@ differential and benchmark targets, never by the library itself.
 - **Submodules** for corpora: `test262`, `wasm-spec-wg1`, `wasm-spec-wg3`. A
   missing corpus is skipped cleanly rather than failing, which means a run can
   silently score **zero** files — always sanity-check the denominator.
-- **`python3`** for the `tools/*.py` gates, **`bun`** for the docs site.
+- **Home `home-tool`** from `~/Code/Home/lang` for all repository TypeScript
+  tools, and **`bun`** for the docs site.
 
 ---
 

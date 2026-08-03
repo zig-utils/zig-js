@@ -123,7 +123,7 @@ The gate compares against `docs/.data/pr249-execution-nogil.json`:
 Build mode is part of the expectation; Debug and ReleaseSafe have different
 timing profiles.
 
-`tools/threads-reference-audit.py` keeps the unpromoted set honest: every
+`tools/threads-reference-audit.ts` keeps the unpromoted set honest: every
 non-helper JS file outside the promoted allowlists must carry either an
 implementation blocker or a structured terminal disposition. A blocked case that
 happens to pass a probe is **not** promoted — probe each case in its *declared*

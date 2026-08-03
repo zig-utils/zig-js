@@ -36,7 +36,7 @@
       "Bash(*home-tool run tools/release-compatibility.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/platform-release-matrix.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts*)",
-      "Bash(python3 tools/threads-reference-audit.py*)",
+      "Bash(home-tool run tools/threads-reference-audit.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-objc-api.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-abi-profile.ts*)",

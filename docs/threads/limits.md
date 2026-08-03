@@ -737,7 +737,7 @@ Issue #1 remains the umbrella status page.
   optimizing-tier blockers owned by #429, and 6 terminal JSC-private or
   intentionally incompatible premises. Run
   `zig build threads-reference-audit threads-reference-probes`; use
-  `python3 tools/threads-reference-audit.py --format json` for automation or
+  `home-tool run tools/threads-reference-audit.ts --format json` for automation or
   `--scan-unpromoted` for a deliberate full tail audit.
 - **TC39 structs tracking.** Keep `proposal-structs` tracking in
   [P8-structs.md](./P8-structs.md) and this issue; do not split it into a

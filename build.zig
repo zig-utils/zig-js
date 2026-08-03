@@ -1561,8 +1561,10 @@ pub fn build(b: *std.Build) void {
     threads_test_bin_step.dependOn(&threads_test_install.step);
 
     const threads_reference_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/threads-reference-audit.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/threads-reference-audit.ts",
         "--fail-on-uncategorized",
         "--check-inventory",
         "--self-test-inventory",
@@ -1571,8 +1573,10 @@ pub fn build(b: *std.Build) void {
     threads_reference_audit_step.dependOn(&threads_reference_audit_cmd.step);
 
     const threads_reference_probes_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/threads-reference-audit.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/threads-reference-audit.ts",
         "--fail-on-uncategorized",
         "--run-disposition-probes",
         "--expect-terminal-dispositions",

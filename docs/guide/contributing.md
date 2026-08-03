@@ -20,7 +20,7 @@ rest of the site.
 3. **Corpora**: `git submodule update --init test262 wasm-spec-wg1 wasm-spec-wg3`.
    A missing corpus is skipped cleanly rather than failed, so a run can score
    zero and still exit 0 — check the denominator.
-4. `python3` for the tool gates, `bun` for this site.
+4. Home `home-tool` from `~/Code/Home/lang` for tool gates, and `bun` for this site.
 
 Detail: [Building & Running](/guide/building).
 

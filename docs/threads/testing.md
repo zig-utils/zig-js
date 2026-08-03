@@ -299,7 +299,7 @@ tier was never reached, and that silence is the verdict — it is how
 `cve/mc-code-calllink-writer-writer.js` is known to pass without ever compiling
 its per-round call site.
 
-`tools/threads-reference-audit.py --scan-unpromoted` treats that
+`tools/threads-reference-audit.ts --scan-unpromoted` treats that
 pass-without-publication shape as still blocked for cases whose inventory
 dependency includes `optimizing-jit`; the same case becomes disposition drift
 once it prints an optimizer publication and should then be promoted or
@@ -310,7 +310,7 @@ The release README cites the checked-in unpromoted scan at
 Refresh it with:
 
 ```sh
-python3 tools/threads-reference-audit.py --format json --scan-unpromoted --output docs/.data/pr249-unpromoted-scan-2026-07-28.json
+home-tool run tools/threads-reference-audit.ts --format json --scan-unpromoted --output docs/.data/pr249-unpromoted-scan-2026-07-28.json
 ```
 
 `zig build release-compatibility-check` rejects the artifact if the blocked
@@ -1059,9 +1059,9 @@ reason, required hook, owner issue, and expected default/no-GIL outcome; the
 
 ```sh
 zig build threads-reference-audit threads-reference-probes
-python3 tools/threads-reference-audit.py --format json
-python3 tools/threads-reference-audit.py --print-disposition-probes
-python3 tools/threads-reference-audit.py --scan-unpromoted --probe-timeout 60
+home-tool run tools/threads-reference-audit.ts --format json
+home-tool run tools/threads-reference-audit.ts --print-disposition-probes
+home-tool run tools/threads-reference-audit.ts --scan-unpromoted --probe-timeout 60
 ```
 
 `threads-reference-probes` builds the runner once, then verifies the bounded
