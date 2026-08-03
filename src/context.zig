@@ -16691,16 +16691,16 @@ test "JIT Class-A invalidation waits for the shared GC conductor" {
     try std.testing.expect(ctx.jitGcConductor().wait_iterations.load(.acquire) != 0);
 }
 
-/// A warmed *inherited* named read must publish an optimizer artifact, and a
-/// mutation of the holder — not the receiver — must fire Class-A invalidation
-/// and jettison it before the next read observes the new value (#457).
+/// A warmed *inherited* named read publishes only shape/slot assumptions. A
+/// value-only mutation of the holder must therefore preserve the artifact and
+/// the next read must load the new value from the guarded slot (#471).
 ///
 /// The read feeds arithmetic, matching the PR-249 witnesses' own shape. A
 /// property node is typed `.other`, so the `add` has no Number-specialized
 /// form and lowers through the runtime operation ABI while the rest of the
 /// function stays native — which is only possible because the graph now gives
 /// that binary an effect frame state to stage a descriptor against.
-fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_class_a_stop: bool) !void {
+fn verifyInheritedValueMutation(options: Context.TestingOptions) !void {
     if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
 
     const ctx = try Context.createWithTestingOptions(std.testing.allocator, options);
@@ -16718,16 +16718,9 @@ fn verifyInheritedClassAInvalidation(options: Context.TestingOptions, expect_cla
     try std.testing.expectEqual(@as(f64, 2), (try ctx.evaluate("classARead(classAObject)")).asNum());
     _ = try ctx.evaluate("classAProto.y = 4");
 
-    if (expect_class_a_stop) {
-        try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
-        try std.testing.expectEqual(@as(u64, 1), ctx.jitGcConductor().class_a_stops.load(.acquire));
-    } else {
-        // Mutation-driven invalidation is wired through the shared conductor, so
-        // a serialized realm publishes no stop. The published assumption is a
-        // shape+slot pair, never a cached value, so the holder's new value is
-        // still what the next read observes.
-        try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
-    }
+    try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 0), ctx.jitGcConductor().class_a_stops.load(.acquire));
+    try std.testing.expect(owner.hasPublishedArtifacts());
     try std.testing.expectEqual(@as(f64, 5), (try ctx.evaluate("classARead(classAObject)")).asNum());
 }
 
@@ -16808,29 +16801,30 @@ test "parallel_js: an unrelated shape's mutation fires no Class-A stop" {
     try std.testing.expectEqual(generation_before, owner.invalidation_generation.load(.acquire));
     try std.testing.expect(owner.hasPublishedArtifacts());
 
-    // The watched holder still fires, so narrowing did not weaken the contract.
-    _ = try ctx.evaluate("watchedProto.y = 4;");
+    // Adding a key changes the watched holder's shape and retains the current
+    // compile/link Class-A boundary. Value-only stores above do not.
+    _ = try ctx.evaluate("watchedProto.extra = 4;");
     try std.testing.expectEqual(generation_before + 1, owner.invalidation_generation.load(.acquire));
-    try std.testing.expectEqual(@as(f64, 4), (try ctx.evaluate("watchedRead(watchedObject)")).asNum());
+    try std.testing.expectEqual(@as(f64, 1), (try ctx.evaluate("watchedRead(watchedObject)")).asNum());
 }
 
-test "inherited named property assumption survives a holder mutation" {
-    try verifyInheritedClassAInvalidation(.{
+test "inherited value mutation preserves optimized artifacts" {
+    try verifyInheritedValueMutation(.{
         .enable_gc = true,
         .enable_jit = true,
-    }, false);
+    });
 }
 
-test "parallel_js named property mutation fires Class-A invalidation" {
+test "parallel_js inherited value mutation preserves optimized artifacts" {
     if (builtin.single_threaded) return error.SkipZigTest;
 
-    try verifyInheritedClassAInvalidation(.{
+    try verifyInheritedValueMutation(.{
         .enable_threads = true,
         .enable_gc = true,
         .enable_jit = true,
         .parallel_gc = true,
         .parallel_js = true,
-    }, true);
+    });
 }
 
 fn verifySeededOptimizerDifferential(options: Context.TestingOptions, seed_count: usize) !void {

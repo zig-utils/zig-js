@@ -6385,7 +6385,6 @@ fn runChunk(
                     // slow path ([[Set]] honors setters + non-writable).
                     if (obj.isObject()) {
                         const o = obj.asObj();
-                        vm.invalidateJitHeapFactsFor(o);
                         if (parallel_sync) o.lockProperties();
                         defer if (parallel_sync) o.unlockProperties();
                         if (!o.is_array and o.accessorsMap() == null and o.attrsMap() == null) {

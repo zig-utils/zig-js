@@ -1791,8 +1791,9 @@ pub const Interpreter = struct {
 
     // ---- exception helpers ------------------------------------------------
 
-    /// Fire a Class-A stop for a named-property mutation of `obj`, unless no
-    /// published artifact speculates on its shape (#457). `obj` must be passed
+    /// Fire a Class-A stop for a shape-changing named-property mutation of
+    /// `obj`, unless no published artifact speculates on its shape (#457).
+    /// `obj` must be passed
     /// *before* the store: adding a property transitions the object to a new
     /// shape, while the assumption any optimized code guards on is the one it
     /// still has here. A null `obj` (or a shapeless one) keeps the conservative
@@ -1821,7 +1822,13 @@ pub const Interpreter = struct {
     }
 
     pub fn setProp(self: *Interpreter, obj: *value.Object, key: []const u8, v: Value) EvalError!void {
-        self.invalidateJitHeapFactsFor(obj);
+        // Existing data-property writes preserve the receiver's immutable
+        // shape/slot pair. Optimized own and inherited reads guard that live
+        // shape and load the slot value on every execution, so a value update
+        // invalidates no heap fact. Keep Class-A for an absent key: that path
+        // transitions the receiver and remains the compile/link watchpoint
+        // boundary until #471's per-artifact transition policy replaces it.
+        if (obj.getOwn(key) == null) self.invalidateJitHeapFactsFor(obj);
         try obj.setOwn(self.arena, self.root_shape, key, v);
     }
 
