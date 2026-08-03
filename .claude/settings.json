@@ -6,7 +6,7 @@
     "",
     "Deliberately NOT allowed, so they always prompt: git commit/push/checkout/",
     "reset, rm, and the corpus gates that spawn and reap process groups",
-    "(tools/nogil-corpus-gate.py, threadfuzz) — those are long, mutually",
+    "(tools/nogil-corpus-gate.ts, threadfuzz) — those are long, mutually",
     "exclusive jobs that should be started deliberately. Personal additions",
     "belong in .claude/settings.local.json, which is gitignored."
   ],

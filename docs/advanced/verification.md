@@ -16,7 +16,7 @@ tools, and gated in CI.
 | --- | --- | --- |
 | ECMAScript conformance | `docs/.data/test262.json` | `bun run docs:data -- --from run.txt` |
 | WebAssembly conformance | per-profile inventories + `wasm-conformance-matrix.json` | `home-tool run tools/wasm-conformance-matrix.ts` |
-| Thread corpus coverage | `pr249-reference-inventory.json`, `pr249-execution-nogil.json` | `tools/threads-reference-audit.py`, `tools/nogil-corpus-gate.py` |
+| Thread corpus coverage | `pr249-reference-inventory.json`, `pr249-execution-nogil.json` | `tools/threads-reference-audit.py`, `tools/nogil-corpus-gate.ts` |
 | Public / private ABI | the JSON inventories under `docs/c-api/`, `docs/objc-api/`, `docs/abi/` | the `*-audit` build steps |
 | GC relocation coverage | `gc-relocation-inventory.json` | `zig build gc-relocation-inventory-check` |
 | Performance | dated `.md` report **plus** its raw `.tsv` samples | `benchmark-comparison`, `tools/benchmark-publication.ts` |

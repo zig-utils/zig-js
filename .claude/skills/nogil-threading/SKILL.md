@@ -107,9 +107,9 @@ off, so "it passes in GIL mode" is not promotion evidence — promoting such a
 case breaks CI.
 
 ```bash
-python3 tools/nogil-corpus-gate.py                       # full functional gate
-python3 tools/nogil-corpus-gate.py --shard 0 --shards 4
-python3 tools/nogil-corpus-gate.py --deadline 600 --build-mode releasesafe
+home-tool run tools/nogil-corpus-gate.ts                       # full functional gate
+home-tool run tools/nogil-corpus-gate.ts --shard 0 --shards 4
+home-tool run tools/nogil-corpus-gate.ts --deadline 600 --build-mode releasesafe
 ```
 
 The gate compares against `docs/.data/pr249-execution-nogil.json`:
@@ -133,8 +133,8 @@ mode.
 
 - **Never run two corpus jobs at once.** Some drivers reap survivors with
   `pkill -f zig-out/bin/threads-test` and will kill the other run's cases, which
-  are then recorded as failures or timeouts. `tools/nogil-corpus-gate.py` reaps
-  only its own process group; ad-hoc scripts usually do not. Check
+  are then recorded as failures or timeouts. `tools/nogil-corpus-gate.ts` uses
+  Home's scoped process watchdog; ad-hoc scripts usually do not. Check
   `pgrep -f 'zig-out/bin/threads-test'` is empty first.
 - Do not run corpus cases beside the unit suite — the suite starves and looks
   hung.
@@ -150,7 +150,7 @@ zig build threads-reference-audit threads-reference-probes
 zig build test -Dtsan=true -Dtest-filter=parallel_js
 zig build threadfuzz -Dfuzz-iters=400
 zig build threadfuzz -Dfuzz-verify=true -Dfuzz-iters=300
-python3 tools/nogil-corpus-gate.py
+home-tool run tools/nogil-corpus-gate.ts
 ```
 
 [`docs/threads/testing.md`](../../../docs/threads/testing.md) holds the complete

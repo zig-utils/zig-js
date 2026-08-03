@@ -5,11 +5,22 @@ declare const Home: {
   readFileHex(path: string): string;
   writeFileHex(path: string, contents: string): void;
   fileExists(path: string): boolean;
-  spawnSync(argv: string[]): {
+  spawnSync(
+    argv: string[],
+    options?: RunOptions,
+  ): {
     exitCode: number | null;
     stdout: string;
     stderr: string;
+    timedOut: boolean;
   };
+};
+
+export type RunOptions = {
+  cwd?: string;
+  timeoutMs?: number;
+  env?: Record<string, string>;
+  inheritEnv?: boolean;
 };
 
 export function readText(path: string): string {
@@ -32,12 +43,16 @@ export function writeHex(path: string, contents: string): void {
   Home.writeFileHex(path, contents);
 }
 
-export function run(argv: string[]): {
+export function run(
+  argv: string[],
+  options?: RunOptions,
+): {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  timedOut: boolean;
 } {
-  return Home.spawnSync(argv);
+  return Home.spawnSync(argv, options);
 }
 
 export function checked(argv: string[], phase: string): string {

@@ -202,7 +202,7 @@
     "owned_sibling_checkouts": [
       { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 7, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 7, "edge": "zig-gc" },
-      { "repository": "home-lang/home", "path": "Home/lang", "revision": "2e5791e7415b85689ab2f88cbcc789881e9eb6ee", "occurrences": 2, "edge": "home-tool-runtime" },
+      { "repository": "home-lang/home", "path": "Home/lang", "revision": "2e5791e7415b85689ab2f88cbcc789881e9eb6ee", "occurrences": 4, "edge": "home-tool-runtime" },
       { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 1, "edge": "zig-gc" },
       { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "1262895355142cb57ae7850dec7bf31cc5f5999d", "occurrences": 1, "edge": "bunpress-docs-toolchain" },
@@ -230,9 +230,9 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 10, "edge": "python-tooling" },
+      { "extension": ".py", "count": 9, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 0, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 52, "edge": "home-tool-runtime" },
+      { "extension": ".ts", "count": 53, "edge": "home-tool-runtime" },
       { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [
@@ -254,7 +254,7 @@
       { "manifest": "package.json", "name": "docs:data", "command": "~/Code/Home/lang/zig-out/bin/home-tool run scripts/gen-test262-data.ts", "edge": "home-tool-runtime" }
     ],
     "ci_actions": [
-      { "name": "actions/checkout@v6", "count": 30, "edge": "ci-bootstrap-actions" },
+      { "name": "actions/checkout@v6", "count": 32, "edge": "ci-bootstrap-actions" },
       { "name": "actions/upload-artifact@v4", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "stacksjs/action-releaser@v1.2.9", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9", "count": 8, "edge": "pantry-docs-bootstrap" },

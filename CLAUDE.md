@@ -159,7 +159,7 @@ zig build wasm-spec                 # packed wg-1.0 runner
 zig build wasm-spec-eval            # live-WABT corpus evaluator (driven by tools/wasm-spec.py)
 zig build benchmark-comparison      # zig-js vs system JSC (macOS)
 zig build release-compatibility     # validate the #134 release matrix
-python3 tools/nogil-corpus-gate.py  # functional no-GIL corpus gate vs the published baseline
+home-tool run tools/nogil-corpus-gate.ts  # functional no-GIL corpus gate vs the published baseline
 ```
 
 ### Docs

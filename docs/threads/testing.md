@@ -137,10 +137,10 @@ The `nogil-corpus-functional` leg supplies that half. It runs the same corpus
 sharded four ways without TSan, so timings are meaningful, and diffs every case
 against the checked-in
 [no-GIL execution inventory](../.data/pr249-execution-nogil.json) via
-`tools/nogil-corpus-gate.py`:
+`tools/nogil-corpus-gate.ts`:
 
 ```sh
-python3 tools/nogil-corpus-gate.py --shard 0 --shards 4 --deadline 600
+home-tool run tools/nogil-corpus-gate.ts --shard 0 --shards 4 --deadline 600
 ```
 
 That leg runs at the default Debug. A second leg, `nogil-corpus-releasesafe`,

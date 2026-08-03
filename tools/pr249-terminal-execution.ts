@@ -406,13 +406,4 @@ function main(): void {
     console.log("PR-249 terminal execution artifact verified");
   }
 }
-if (process.argv[1] === __filename) {
-  try {
-    main();
-  } catch (error) {
-    console.error(
-      `pr249-terminal-execution: ${String(error).replace(/^Error: /, "")}`,
-    );
-    process.exitCode = 1;
-  }
-}
+if (process.argv[1] === __filename) main();

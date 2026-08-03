@@ -148,7 +148,7 @@ zig build threads-test -Dthreads-case=<relpath>           # one case
 zig build threads-test -Dthreads-parallel-js=true -Dthreads-case=<relpath>
 zig build threads-reference-audit threads-reference-probes
 zig build threadfuzz -Dfuzz-iters=400
-python3 tools/nogil-corpus-gate.py
+home-tool run tools/nogil-corpus-gate.ts
 ```
 
 `zig build threads-test-bin` (~40 s) plus

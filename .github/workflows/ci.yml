@@ -567,15 +567,23 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+      - uses: actions/checkout@v6
+        with:
+          repository: home-lang/home
+          path: Home/lang
+          ref: 2e5791e7415b85689ab2f88cbcc789881e9eb6ee
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@0.17.0-dev
       - name: Build the threads-test binary
         working-directory: zig-js
         run: zig build threads-test-bin
+      - name: Build Home repository-tool runtime
+        working-directory: Home/lang
+        run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode debug
+        run: "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode debug
 
   nogil-corpus-releasesafe:
     name: nogil-corpus-releasesafe (shard ${{ matrix.shard }}/4)
@@ -611,15 +619,23 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+      - uses: actions/checkout@v6
+        with:
+          repository: home-lang/home
+          path: Home/lang
+          ref: 2e5791e7415b85689ab2f88cbcc789881e9eb6ee
       - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
           packages: zig@0.17.0-dev
       - name: Build the threads-test binary (ReleaseSafe)
         working-directory: zig-js
         run: zig build threads-test-bin -Doptimize=ReleaseSafe
+      - name: Build Home repository-tool runtime
+        working-directory: Home/lang
+        run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: python3 tools/nogil-corpus-gate.py --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode releasesafe
+        run: "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode releasesafe
 
   nightly-threadfuzz-tsan:
     name: nightly-threadfuzz-tsan (${{ matrix.name }})
