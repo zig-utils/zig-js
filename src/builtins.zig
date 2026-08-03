@@ -1835,7 +1835,19 @@ pub fn defineOneResult(self: *Interpreter, target: *value.Object, key: []const u
     } else if (has_data_field or cur_acc == null) {
         // A data property: either explicit data fields, or a generic descriptor on
         // a non-accessor (brand-new / existing data property).
-        if (cur_acc != null) _ = try self.deleteOwn(target, key);
+        if (cur_acc != null) {
+            // ValidateAndApplyPropertyDescriptor has already proved that this
+            // accessor can become a data property, and the canonical-index
+            // exclusion is already held above. Calling [[Delete]] here would try
+            // to acquire that non-reentrant lock a second time. Remove only the
+            // accessor representation; the shape invalidation ran before the
+            // mutation and setOwn below installs the replacement data value.
+            switch (try target.deleteAccessorOwn(self.arena, key)) {
+                .deleted, .removed_continue => {},
+                .blocked => return false,
+                .absent => unreachable,
+            }
+        }
         if (d.getOwn("writable")) |w| {
             attr.writable = w.toBoolean();
         } else if (cur_acc != null) {

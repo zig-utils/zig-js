@@ -13699,6 +13699,22 @@ test "defineProperty descriptor validation (accessor+data mix, non-callable get/
     )).asBool());
 }
 
+test "defineProperty converts an indexed accessor to data under one exclusion" {
+    try std.testing.expect((try evalIn(
+        \\var object = {};
+        \\Object.defineProperty(object, "2", {
+        \\  get: function () { return 11; },
+        \\  configurable: true
+        \\});
+        \\Object.defineProperty(object, "2", {
+        \\  value: "20",
+        \\  configurable: true
+        \\});
+        \\var descriptor = Object.getOwnPropertyDescriptor(object, "2");
+        \\object[2] === "20" && descriptor.value === "20" && descriptor.get === undefined
+    )).asBool());
+}
+
 test "array index property attributes (defineProperty honors writable/enumerable)" {
     // Default array element descriptor is all-true.
     try std.testing.expect((try evalIn(
