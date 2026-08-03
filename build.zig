@@ -261,8 +261,10 @@ pub fn build(b: *std.Build) void {
     private_jstype_abi_audit_step.dependOn(&private_jstype_abi_audit_cmd.step);
 
     const objc_api_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/verify-objc-api.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/verify-objc-api.ts",
     });
     const objc_api_audit_step = b.step("objc-api-audit", "Verify the pinned Objective-C JSC inventory");
     objc_api_audit_step.dependOn(&objc_api_audit_cmd.step);
@@ -406,7 +408,7 @@ pub fn build(b: *std.Build) void {
         const objc_fault_step = b.step("test-objc-api-faults", "Inject Objective-C bridge allocation and registration failures");
         objc_fault_step.dependOn(&run_objc_fault_injection.step);
 
-        const objc_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/objc-api-jsc-diff.py" });
+        const objc_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/objc-api-jsc-diff.ts" });
         objc_jsc_diff_cmd.addFileArg(installed_library.?);
         const objc_jsc_diff_step = b.step("objc-api-jsc-diff", "Compare Objective-C bridge behavior with pinned system JSC");
         objc_jsc_diff_step.dependOn(&objc_jsc_diff_cmd.step);

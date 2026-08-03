@@ -89,7 +89,7 @@ with 0 leaked bytes.
 Compare the pin against an installed SDK explicitly:
 
 ```sh
-python3 tools/verify-objc-api.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-objc-api.ts \
   --sdk-root "$(xcrun --sdk macosx --show-sdk-path)"
 ```
 
