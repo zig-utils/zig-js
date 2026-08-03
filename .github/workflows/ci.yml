@@ -461,6 +461,8 @@ jobs:
           "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/wasm-core3-drift.ts --upstream-ref origin/main --output "$RUNNER_TEMP/wasm-core-3-upstream-drift.json"
       - name: ${{ matrix.name }}
         working-directory: zig-js
+        env:
+          HOME_TOOL: ${{ github.workspace }}/Home/lang/zig-out/bin/home-tool
         run: ${{ matrix.cmd }}
 
   # Whole-corpus no-GIL ThreadSanitizer sweep — the issue #1 GIL-drop gate
