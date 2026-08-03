@@ -12,8 +12,9 @@
 //! captured names become `(depth, slot)` **upvalues**, and anything not found in
 //! an enclosing function is a **global** resolved by name against the
 //! Environment. Top-level program variables are globals (they persist across
-//! `evaluate` calls, like a real global object). This mirrors the tree-walker's
-//! block-transparent scoping exactly.
+//! `evaluate` calls, like a real global object). Lexical slots carry explicit
+//! TDZ/immutability checks; same-named block bindings remain an admission barrier
+//! until the frame layout assigns distinct scope identities.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -47,18 +48,30 @@ const Loop = struct {
     finally_depth: u32 = 0,
 };
 
-/// A function's local namespace: name → frame slot. Built once, up front, from
-/// the parameters and the function-scoped declarations (var/let/const/function),
-/// matching the engine's block-transparent scoping.
+const SlotBinding = struct {
+    slot: u32,
+    lexical: bool = false,
+    immutable: bool = false,
+    tdz_checked: bool = false,
+};
+
+/// A function's local namespace: name → frame slot. Lexical bindings retain
+/// their TDZ/immutability kind so identifier loads and assignments select the
+/// checked opcodes; declarations themselves still use the unchecked store that
+/// performs InitializeBinding.
 const FnScope = struct {
     parent: ?*FnScope,
-    names: std.StringHashMapUnmanaged(u32) = .{},
+    names: std.StringHashMapUnmanaged(SlotBinding) = .{},
     count: u32 = 0,
+    lexical_slots: std.ArrayListUnmanaged(u32) = .empty,
+    tdz_checks: bool = false,
 
-    fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8) CompileError!u32 {
-        if (self.names.get(name)) |slot| return slot;
+    fn addLocal(self: *FnScope, arena: std.mem.Allocator, name: []const u8, lexical: bool, immutable: bool) CompileError!u32 {
+        if (self.names.get(name)) |binding| return binding.slot;
         const slot = self.count;
-        try self.names.put(arena, name, slot);
+        const tdz_checked = lexical and self.tdz_checks;
+        try self.names.put(arena, name, .{ .slot = slot, .lexical = lexical, .immutable = immutable, .tdz_checked = tdz_checked });
+        if (tdz_checked) try self.lexical_slots.append(arena, slot);
         self.count += 1;
         return slot;
     }
@@ -68,7 +81,7 @@ fn retainDebugLocalNames(arena: std.mem.Allocator, chunk: *Chunk, scope: *const 
     const names = try arena.alloc([]const u8, scope.count);
     @memset(names, "");
     var iterator = scope.names.iterator();
-    while (iterator.next()) |entry| names[entry.value_ptr.*] = entry.key_ptr.*;
+    while (iterator.next()) |entry| names[entry.value_ptr.slot] = entry.key_ptr.*;
     chunk.debug_local_names = names;
 }
 
@@ -565,8 +578,8 @@ fn stmtListCanEscapeAbruptly(stmts: []*Node) bool {
 
 /// Where a referenced name lives.
 const Resolved = union(enum) {
-    local: u32, // slot in the current frame
-    upval: struct { depth: u32, slot: u32 }, // an enclosing function's frame
+    local: SlotBinding, // slot in the current frame
+    upval: struct { depth: u32, binding: SlotBinding }, // an enclosing function's frame
     global, // by name, against the Environment
 };
 
@@ -821,7 +834,7 @@ pub const Compiler = struct {
     /// block-transparent slots), so two DIFFERENT bindings that share a name —
     /// nested `let` shadowing, a catch param shadowing an outer binding, a `let`
     /// shadowing a `var`/param — would collapse onto one slot and clobber each
-    /// other (and there is no TDZ). Detect any name introduced by a lexical
+    /// other. Detect any name introduced by a lexical
     /// binding that also appears as another binding, and keep such a function on
     /// the tree-walker, which scopes blocks correctly. Conservative: also bails
     /// harmless same-name sibling blocks, which only forgoes tiering.
@@ -849,20 +862,15 @@ pub const Compiler = struct {
         }
     }
 
-    /// Does `node` reference (as an identifier) any lexical name from `m` that has
-    /// not been declared yet? Such a read would hit the Temporal Dead Zone.
     fn tdzRefsPending(node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *const std.StringHashMapUnmanaged(void)) bool {
         var it = m.iterator();
-        while (it.next()) |e| {
-            if (!e.value_ptr.lexical) continue;
-            if (declared.contains(e.key_ptr.*)) continue;
-            if (nameRefInClosure(node, e.key_ptr.*, true)) return true;
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.lexical or declared.contains(entry.key_ptr.*)) continue;
+            if (nameRefInClosure(node, entry.key_ptr.*, true)) return true;
         }
         return false;
     }
 
-    /// Walk statements in source order, growing `declared` as each lexical binding
-    /// is reached, and report a read of a still-undeclared lexical (a TDZ hazard).
     fn tdzScanStmt(arena: std.mem.Allocator, node: *Node, m: *const std.StringHashMapUnmanaged(ShadowBind), declared: *std.StringHashMapUnmanaged(void)) CompileError!bool {
         switch (node.*) {
             .var_decl => |d| {
@@ -873,83 +881,70 @@ pub const Compiler = struct {
                 if (tdzRefsPending(d.init, m, declared)) return true;
                 if (d.kind != .@"var") try tdzDeclarePattern(arena, declared, d.pattern);
             },
-            .expr_stmt => |e| return tdzRefsPending(e, m, declared),
-            .return_stmt => |mb| {
-                if (mb) |e| return tdzRefsPending(e, m, declared);
+            .expr_stmt => |expr| return tdzRefsPending(expr, m, declared),
+            .return_stmt => |maybe| if (maybe) |expr| return tdzRefsPending(expr, m, declared),
+            .throw_stmt => |expr| return tdzRefsPending(expr, m, declared),
+            .if_stmt => |stmt| {
+                if (tdzRefsPending(stmt.cond, m, declared)) return true;
+                if (try tdzScanStmt(arena, stmt.consequent, m, declared)) return true;
+                if (stmt.alternate) |alternate| if (try tdzScanStmt(arena, alternate, m, declared)) return true;
             },
-            .throw_stmt => |e| return tdzRefsPending(e, m, declared),
-            .if_stmt => |s| {
-                if (tdzRefsPending(s.cond, m, declared)) return true;
-                if (try tdzScanStmt(arena, s.consequent, m, declared)) return true;
-                if (s.alternate) |a| if (try tdzScanStmt(arena, a, m, declared)) return true;
+            .while_stmt => |stmt| {
+                if (tdzRefsPending(stmt.cond, m, declared)) return true;
+                return tdzScanStmt(arena, stmt.body, m, declared);
             },
-            .while_stmt => |s| {
-                if (tdzRefsPending(s.cond, m, declared)) return true;
-                return tdzScanStmt(arena, s.body, m, declared);
+            .do_while_stmt => |stmt| {
+                if (try tdzScanStmt(arena, stmt.body, m, declared)) return true;
+                return tdzRefsPending(stmt.cond, m, declared);
             },
-            .do_while_stmt => |s| {
-                if (try tdzScanStmt(arena, s.body, m, declared)) return true;
-                return tdzRefsPending(s.cond, m, declared);
+            .for_stmt => |stmt| {
+                if (stmt.init) |init| if (try tdzScanStmt(arena, init, m, declared)) return true;
+                if (stmt.cond) |cond| if (tdzRefsPending(cond, m, declared)) return true;
+                if (stmt.update) |update| if (tdzRefsPending(update, m, declared)) return true;
+                return tdzScanStmt(arena, stmt.body, m, declared);
             },
-            .for_stmt => |f| {
-                if (f.init) |i| if (try tdzScanStmt(arena, i, m, declared)) return true;
-                if (f.cond) |c| if (tdzRefsPending(c, m, declared)) return true;
-                if (f.update) |u| if (tdzRefsPending(u, m, declared)) return true;
-                return tdzScanStmt(arena, f.body, m, declared);
+            .for_in => |stmt| {
+                if (tdzRefsPending(stmt.iterable, m, declared)) return true;
+                if (stmt.decl_kind) |kind| if (kind != .@"var") try tdzDeclarePattern(arena, declared, stmt.target);
+                return tdzScanStmt(arena, stmt.body, m, declared);
             },
-            .for_in => |f| {
-                if (tdzRefsPending(f.iterable, m, declared)) return true;
-                if (f.decl_kind) |k| if (k != .@"var") try tdzDeclarePattern(arena, declared, f.target);
-                return tdzScanStmt(arena, f.body, m, declared);
+            .block => |stmts| for (stmts) |stmt| {
+                if (try tdzScanStmt(arena, stmt, m, declared)) return true;
             },
-            .block => |stmts| for (stmts) |s| {
-                if (try tdzScanStmt(arena, s, m, declared)) return true;
+            .decl_group => |stmts| for (stmts) |stmt| {
+                if (try tdzScanStmt(arena, stmt, m, declared)) return true;
             },
-            .decl_group => |stmts| for (stmts) |s| {
-                if (try tdzScanStmt(arena, s, m, declared)) return true;
-            },
-            .switch_stmt => |sw| {
-                if (tdzRefsPending(sw.disc, m, declared)) return true;
-                for (sw.cases) |c| {
-                    if (c.@"test") |t| if (tdzRefsPending(t, m, declared)) return true;
-                    for (c.body) |st| if (try tdzScanStmt(arena, st, m, declared)) return true;
+            .switch_stmt => |stmt| {
+                if (tdzRefsPending(stmt.disc, m, declared)) return true;
+                for (stmt.cases) |case| {
+                    if (case.@"test") |test_node| if (tdzRefsPending(test_node, m, declared)) return true;
+                    for (case.body) |body_stmt| if (try tdzScanStmt(arena, body_stmt, m, declared)) return true;
                 }
             },
-            .labeled_stmt => |s| return tdzScanStmt(arena, s.body, m, declared),
-            .try_stmt => |t| {
-                if (try tdzScanStmt(arena, t.block, m, declared)) return true;
-                if (t.catch_param) |p| try tdzDeclarePattern(arena, declared, p);
-                if (t.catch_block) |cb| if (try tdzScanStmt(arena, cb, m, declared)) return true;
-                if (t.finally_block) |fb| if (try tdzScanStmt(arena, fb, m, declared)) return true;
+            .labeled_stmt => |stmt| return tdzScanStmt(arena, stmt.body, m, declared),
+            .try_stmt => |stmt| {
+                if (try tdzScanStmt(arena, stmt.block, m, declared)) return true;
+                if (stmt.catch_param) |param| try tdzDeclarePattern(arena, declared, param);
+                if (stmt.catch_block) |catch_block| if (try tdzScanStmt(arena, catch_block, m, declared)) return true;
+                if (stmt.finally_block) |finally_block| if (try tdzScanStmt(arena, finally_block, m, declared)) return true;
             },
-            .func_decl => |fnode| {
-                // Function declarations are hoisted, so the declaration itself
-                // is not a read site, but the function can be called before a
-                // later lexical declaration initializes. The slot VM has no TDZ
-                // sentinel for captured locals, so keep that enclosing function
-                // on the tree-walker when a hoisted function body closes over a
-                // still-pending lexical.
-                if (tdzRefsPending(fnode.body, m, declared)) return true;
-            },
-            else => return tdzRefsPending(node, m, declared), // unknown node: sound fallback
+            .func_decl => |function_node| if (tdzRefsPending(function_node.body, m, declared)) return true,
+            else => return tdzRefsPending(node, m, declared),
         }
         return false;
     }
 
-    /// The VM has no Temporal Dead Zone: an uninitialized `let`/`const` slot reads
-    /// as `undefined` instead of throwing ReferenceError. Detecting a read of a
-    /// lexical before its declaration would need a per-load check on the hot path,
-    /// so instead keep any function that could hit its TDZ on the tree-walker,
-    /// which enforces it. Runs after the shadowing check, so lexical names are
-    /// unique here. Conservative (a captured forward reference also bails).
+    /// Classify functions that need runtime TDZ checks. The conservative scan is
+    /// retained as a code-shape decision: only these chunks receive checked
+    /// lexical opcodes, so ordinary initialized `let` loops keep their existing
+    /// native-tier and quickening eligibility.
     fn functionHasTdzHazard(arena: std.mem.Allocator, fnode: *const ast.FunctionNode) CompileError!bool {
         if (fnode.is_expr_body) return false;
-        var m: std.StringHashMapUnmanaged(ShadowBind) = .empty;
-        for (fnode.params) |p| try shadowAdd(arena, &m, p.name, false);
-        try shadowScanStmt(arena, &m, fnode.body);
-        // With no lexical bindings collected, tdzRefsPending never fires.
+        var bindings: std.StringHashMapUnmanaged(ShadowBind) = .empty;
+        for (fnode.params) |param| try shadowAdd(arena, &bindings, param.name, false);
+        try shadowScanStmt(arena, &bindings, fnode.body);
         var declared: std.StringHashMapUnmanaged(void) = .empty;
-        return tdzScanStmt(arena, fnode.body, &m, &declared);
+        return tdzScanStmt(arena, fnode.body, &bindings, &declared);
     }
 
     pub const PlainFunctionCode = struct {
@@ -1020,16 +1015,13 @@ pub const Compiler = struct {
         // same-named binding; keep those on the tree-walker (correct block scopes).
         if (try functionHasShadowableLexical(arena, fnode))
             return rejectPlainFunction(rejection, .lexical_shadowing);
-        // The VM has no TDZ; keep functions that could read a lexical before its
-        // declaration on the tree-walker, which throws ReferenceError.
-        if (try functionHasTdzHazard(arena, fnode))
-            return rejectPlainFunction(rejection, .temporal_dead_zone);
+        const tdz_checks = try functionHasTdzHazard(arena, fnode);
         const scope = try arena.create(FnScope);
-        scope.* = .{ .parent = null };
+        scope.* = .{ .parent = null, .tdz_checks = tdz_checks };
         for (fnode.params) |p| {
             if (p.default != null or p.is_rest or p.pattern != null)
                 return rejectPlainFunction(rejection, .parameter_prologue);
-            _ = try scope.addLocal(arena, p.name);
+            _ = try scope.addLocal(arena, p.name, false, false);
         }
         if (!fnode.is_expr_body) try collectLocals(arena, scope, fnode.body);
 
@@ -1037,6 +1029,7 @@ pub const Compiler = struct {
         chunk.* = Chunk.init(arena);
         chunk.param_count = @intCast(fnode.params.len);
         chunk.local_count = scope.count;
+        chunk.lexical_slots = scope.lexical_slots.items;
         try retainDebugLocalNames(arena, chunk, scope);
         var c = Compiler{ .arena = arena, .chunk = chunk, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = true };
         if (fnode.is_expr_body) {
@@ -1055,8 +1048,8 @@ pub const Compiler = struct {
         var depth: u32 = 0;
         var scope = self.scope;
         while (scope) |sc| {
-            if (sc.names.get(name)) |slot| {
-                return if (depth == 0) .{ .local = slot } else .{ .upval = .{ .depth = depth, .slot = slot } };
+            if (sc.names.get(name)) |binding| {
+                return if (depth == 0) .{ .local = binding } else .{ .upval = .{ .depth = depth, .binding = binding } };
             }
             depth += 1;
             scope = sc.parent;
@@ -1069,8 +1062,8 @@ pub const Compiler = struct {
         // `arguments` inside a function is bound by the tree-walker only.
         if (self.scope != null and std.mem.eql(u8, name, "arguments")) return error.Unsupported;
         switch (self.resolve(name)) {
-            .local => |slot| _ = try self.chunk.emit(.load_local, slot),
-            .upval => |u| _ = try self.chunk.emitAB(.load_upval, u.depth, u.slot),
+            .local => |binding| _ = try self.chunk.emit(if (binding.tdz_checked) .load_local_lexical else .load_local, binding.slot),
+            .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked) .load_upval_lexical else .load_upval, u.depth, u.binding.slot),
             .global => _ = try self.chunk.emit(.load_var, try self.chunk.addName(name)),
         }
     }
@@ -1078,8 +1071,8 @@ pub const Compiler = struct {
     /// Emit a store to `name` (assignment); leaves the value on the stack.
     fn emitStore(self: *Compiler, name: []const u8) CompileError!void {
         switch (self.resolve(name)) {
-            .local => |slot| _ = try self.chunk.emit(.store_local, slot),
-            .upval => |u| _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot),
+            .local => |binding| _ = try self.chunk.emitAB(if (binding.tdz_checked or binding.immutable) .store_local_lexical else .store_local, binding.slot, @intFromBool(binding.immutable)),
+            .upval => |u| _ = try self.chunk.emitAB(if (u.binding.tdz_checked or u.binding.immutable) .store_upval_lexical else .store_upval, u.depth, u.binding.slot | (if (u.binding.immutable) @as(u32, 1) << 31 else 0)),
             .global => _ = try self.chunk.emit(.store_var, try self.chunk.addName(name)),
         }
     }
@@ -1092,12 +1085,12 @@ pub const Compiler = struct {
 
     fn emitDefineForce(self: *Compiler, name: []const u8) CompileError!void {
         switch (self.resolve(name)) {
-            .local => |slot| {
-                _ = try self.chunk.emit(.store_local, slot);
+            .local => |binding| {
+                _ = try self.chunk.emit(.store_local, binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .upval => |u| {
-                _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot);
+                _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .global => _ = try self.chunk.emitAB(.def_var, try self.chunk.addName(name), 2),
@@ -1110,12 +1103,12 @@ pub const Compiler = struct {
     /// touches the `with` object.
     fn emitDefineKind(self: *Compiler, name: []const u8, kind: ast.DeclKind, has_init: bool) CompileError!void {
         switch (self.resolve(name)) {
-            .local => |slot| {
-                _ = try self.chunk.emit(.store_local, slot);
+            .local => |binding| {
+                _ = try self.chunk.emit(.store_local, binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .upval => |u| {
-                _ = try self.chunk.emitAB(.store_upval, u.depth, u.slot);
+                _ = try self.chunk.emitAB(.store_upval, u.depth, u.binding.slot);
                 _ = try self.chunk.emit(.pop, 0);
             },
             .global => {
@@ -1133,6 +1126,35 @@ pub const Compiler = struct {
                     _ = try self.chunk.emitAB(.def_var, ni, if (has_init and kind == .@"var") 1 else 0);
             },
         }
+    }
+
+    /// DeclarativeEnvironmentRecord creation happens before a block's first
+    /// statement. Frame-mode bytecode models that by resetting every directly
+    /// declared lexical slot to the realm's unique TDZ marker on each entry.
+    /// The opcode is internal bookkeeping; the declaration's ordinary store is
+    /// InitializeBinding, while later identifier assignments use checked stores.
+    fn emitLexicalInitializer(self: *Compiler, name: []const u8) CompileError!void {
+        if (self.scope == null) return;
+        switch (self.resolve(name)) {
+            .local => |binding| {
+                if (!binding.tdz_checked) return;
+                _ = try self.chunk.emit(.init_local_lexical, binding.slot);
+            },
+            else => return error.Unsupported,
+        }
+    }
+
+    fn emitLexicalInitializersForNode(self: *Compiler, node: *Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |d| if (d.kind != .@"var") try self.emitLexicalInitializer(d.name),
+            .decl_group => |decls| for (decls) |decl| try self.emitLexicalInitializersForNode(decl),
+            else => {},
+        }
+    }
+
+    fn emitLexicalInitializersForList(self: *Compiler, stmts: []*Node) CompileError!void {
+        if (self.scope == null) return;
+        for (stmts) |stmt| try self.emitLexicalInitializersForNode(stmt);
     }
 
     // ---- statements -------------------------------------------------------
@@ -1261,6 +1283,7 @@ pub const Compiler = struct {
                     if (stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
                     _ = try self.chunk.emit(.enter_block, 0);
                 }
+                try self.emitLexicalInitializersForList(stmts);
                 try self.compileStmtList(stmts);
                 if (disposable_scope) {
                     const await_using_count = if (self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
@@ -1416,6 +1439,10 @@ pub const Compiler = struct {
         const d = try self.freshTemp();
         try self.emitDefine(d); // d = the discriminant value
 
+        // The whole CaseBlock is one lexical scope. Its bindings enter the TDZ
+        // after discriminant evaluation but before any case-test evaluation.
+        if (self.scope != null) for (cases) |case| try self.emitLexicalInitializersForList(case.body);
+
         const sw = try self.pushLoop();
         sw.is_switch = true;
         const body_jumps = try self.arena.alloc(usize, cases.len);
@@ -1507,6 +1534,7 @@ pub const Compiler = struct {
             _ = try self.chunk.emit(.enter_block, 0);
         }
         if (init_node) |ini| {
+            try self.emitLexicalInitializersForNode(ini);
             // The init clause is a declaration statement (var_decl, or a group of
             // them for multiple declarators) or a bare expression.
             if (ini.* == .var_decl or ini.* == .block or ini.* == .decl_group) {
@@ -1601,6 +1629,11 @@ pub const Compiler = struct {
         };
         const it_name = try self.freshTemp();
         const r_name = try self.freshTemp();
+
+        // ForIn/OfHeadEvaluation creates lexical head bindings before evaluating
+        // the RHS, so `for (let x of x)` observes x's TDZ rather than an outer x.
+        if (decl_kind) |kind| if (kind != .@"var" and target.* == .identifier)
+            try self.emitLexicalInitializer(target.identifier);
 
         if (var_init) |ini| {
             try self.compileExpr(ini);
@@ -2801,18 +2834,18 @@ pub const Compiler = struct {
         if (!fnode.is_generator and stmtHasDisposableDecl(fnode.body)) return error.Unsupported;
         if (!fnode.is_generator and functionHasBlockNestedFuncDecl(fnode)) return error.Unsupported;
         // The flat slot model can't represent a lexical binding shadowing another
-        // same-named binding (incl. a param shadowed by a block `let`), and it has
-        // no TDZ. These gates are also applied in compilePlainFunction; a NESTED
-        // function needs them too, else a tiered parent lowers it to a bytecode
-        // sub-chunk that runs those hazards incorrectly (shadow leaks / no
-        // ReferenceError). Keep such functions on the tree-walker.
+        // same-named binding (incl. a param shadowed by a block `let`). This gate
+        // is also applied in compilePlainFunction; a nested function needs it too,
+        // else a tiered parent lowers it to a sub-chunk whose slots shadow-leak.
         if (!fnode.is_generator and try functionHasShadowableLexical(self.arena, fnode)) return error.Unsupported;
-        if (!fnode.is_generator and try functionHasTdzHazard(self.arena, fnode)) return error.Unsupported;
         // Build this function's slot namespace: parameters first, then every
         // function-scoped declaration in the body (not descending into nested
         // functions). The scope chains to the enclosing function for upvalues.
         const scope = try self.arena.create(FnScope);
-        scope.* = .{ .parent = self.scope };
+        scope.* = .{
+            .parent = self.scope,
+            .tdz_checks = if (!fnode.is_generator) try functionHasTdzHazard(self.arena, fnode) else false,
+        };
 
         var template_admission: bc.FnTemplateAdmission = undefined;
         const sub: ?*Chunk = if (fnode.is_generator) blk: {
@@ -2836,12 +2869,13 @@ pub const Compiler = struct {
                     }
                     return error.Unsupported;
                 }
-                _ = try scope.addLocal(self.arena, p.name);
+                _ = try scope.addLocal(self.arena, p.name, false, false);
             }
             if (!fnode.is_expr_body) try collectLocals(self.arena, scope, fnode.body);
 
             compiled.param_count = @intCast(fnode.params.len);
             compiled.local_count = scope.count;
+            compiled.lexical_slots = scope.lexical_slots.items;
             try retainDebugLocalNames(self.arena, compiled, scope);
 
             var sub_c = Compiler{ .arena = self.arena, .chunk = compiled, .mode = .function, .scope = scope, .is_strict = fnode.is_strict, .debug_checkpoints = self.debug_checkpoints };
@@ -2875,7 +2909,7 @@ pub const Compiler = struct {
             break :blk compiled;
         };
         if (fnode.is_generator) {
-            for (fnode.params) |p| _ = try scope.addLocal(self.arena, p.name);
+            for (fnode.params) |p| _ = try scope.addLocal(self.arena, p.name, false, false);
         }
         const tmpl = try self.arena.create(bc.FnTemplate);
         tmpl.* = .{
@@ -2954,12 +2988,12 @@ pub const Compiler = struct {
 /// Collect a function's slot-allocated declarations: every `var`/`let`/`const`
 /// and nested `function` name reachable in the body, *without* descending into
 /// nested function/arrow bodies (those names belong to those functions). Blocks
-/// are transparent — matching the engine's function-level scoping — so a name
-/// gets one slot regardless of how deeply it's nested in `if`/`for`/`while`.
+/// are traversed up front so scope-entry TDZ initialization can address every
+/// lexical slot. Same-named block bindings are rejected before this pass.
 fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) CompileError!void {
     switch (node.*) {
-        .var_decl => |d| _ = try scope.addLocal(arena, d.name),
-        .func_decl => |f| _ = try scope.addLocal(arena, f.name),
+        .var_decl => |d| _ = try scope.addLocal(arena, d.name, d.kind != .@"var", d.kind == .@"const"),
+        .func_decl => |f| _ = try scope.addLocal(arena, f.name, false, false),
         .block => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
         .decl_group => |stmts| for (stmts) |s| try collectLocals(arena, scope, s),
         .if_stmt => |s| {
@@ -2973,11 +3007,12 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
             try collectLocals(arena, scope, f.body);
         },
         .for_in => |f| {
-            // `for (var x of/in …)` hoists x as a function-scoped local (a
-            // destructuring `var` target bails to the tree-walker elsewhere).
+            // Identifier loop targets need slots in frame mode. Lexical targets
+            // are checked for TDZ/immutability like ordinary declarations; the
+            // captured per-iteration case remains an explicit compiler barrier.
             if (f.decl_kind) |k| {
-                if (k == .@"var" and f.target.* == .identifier)
-                    _ = try scope.addLocal(arena, f.target.identifier);
+                if (f.target.* == .identifier)
+                    _ = try scope.addLocal(arena, f.target.identifier, k != .@"var", k == .@"const");
             }
             try collectLocals(arena, scope, f.body);
         },
@@ -2990,7 +3025,7 @@ fn collectLocals(arena: std.mem.Allocator, scope: *FnScope, node: *Node) Compile
             // def_var leaks the caught value out of the catch block (into the
             // closure/global scope). A destructuring catch param bails elsewhere.
             if (t.catch_param) |p| {
-                if (p.* == .identifier) _ = try scope.addLocal(arena, p.identifier);
+                if (p.* == .identifier) _ = try scope.addLocal(arena, p.identifier, true, false);
             }
             if (t.catch_block) |cb| try collectLocals(arena, scope, cb);
             if (t.finally_block) |fb| try collectLocals(arena, scope, fb);
@@ -3019,7 +3054,7 @@ test "compiler preserves a first-statement debugger checkpoint" {
     try std.testing.expect(chunk.debug_nodes[0].?.* == .debugger_stmt);
 }
 
-test "compiler rejects hoisted function closure over later lexical TDZ" {
+test "compiler checks hoisted function closure over later lexical TDZ" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
@@ -3030,7 +3065,19 @@ test "compiler rejects hoisted function closure over later lexical TDZ" {
     const program = try parser.parseProgram();
     const outer = program.program[0].func_decl;
 
-    try std.testing.expectError(error.Unsupported, Compiler.compilePlainFunction(arena.allocator(), outer));
+    const compiled = try Compiler.compilePlainFunction(arena.allocator(), outer);
+    var saw_init = false;
+    var saw_captured_check = false;
+    for (compiled.chunk.code.items) |inst| {
+        if (inst.op == .init_local_lexical) saw_init = true;
+    }
+    for (compiled.chunk.fns.items) |template| if (template.chunk) |chunk| {
+        for (chunk.code.items) |inst| {
+            if (inst.op == .load_upval_lexical) saw_captured_check = true;
+        }
+    };
+    try std.testing.expect(saw_init);
+    try std.testing.expect(saw_captured_check);
 }
 
 test "compiler reports stable plain-function admission reasons" {
@@ -3042,7 +3089,6 @@ test "compiler reports stable plain-function admission reasons" {
         .{ .source = "function f(){ using resource = source; }", .expected = .function_scope_disposal },
         .{ .source = "function f(){ { function nested(){} } }", .expected = .block_nested_function_declaration },
         .{ .source = "function f(value){ { let value; } }", .expected = .lexical_shadowing },
-        .{ .source = "function f(){ return value; let value; }", .expected = .temporal_dead_zone },
         .{ .source = "function f(value = 1){}", .expected = .parameter_prologue },
         .{ .source = "function f(){ return arguments; }", .expected = .unsupported_lowering },
     };
@@ -3068,6 +3114,40 @@ test "compiler reports stable plain-function admission reasons" {
         .compiled => |compiled| try std.testing.expect(compiled.chunk.code.items.len != 0),
         .rejected => return error.TestUnexpectedResult,
     }
+
+    var tdz_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tdz_arena.deinit();
+    var tdz_parser = try @import("parser.zig").Parser.init(
+        tdz_arena.allocator(),
+        "function f(){ function read(){ return value; } read(); let value = 1; value = 2; const fixed = 3; fixed = 4; }",
+    );
+    const tdz_program = try tdz_parser.parseProgram();
+    const tdz_admission = try Compiler.admitPlainFunction(tdz_arena.allocator(), tdz_program.program[0].func_decl);
+    const tdz_chunk = switch (tdz_admission) {
+        .compiled => |compiled| compiled.chunk,
+        .rejected => return error.TestUnexpectedResult,
+    };
+    var saw_init = false;
+    var saw_checked_local_store = false;
+    for (tdz_chunk.code.items) |inst| {
+        if (inst.op == .init_local_lexical) saw_init = true;
+        if (inst.op == .store_local_lexical) saw_checked_local_store = true;
+    }
+    try std.testing.expect(saw_init);
+    try std.testing.expect(saw_checked_local_store);
+
+    var hot_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer hot_arena.deinit();
+    var hot_parser = try @import("parser.zig").Parser.init(
+        hot_arena.allocator(),
+        "function hot(limit){ let total = 0; for (let i = 0; i < limit; i = i + 1) total = total + i; return total; }",
+    );
+    const hot_program = try hot_parser.parseProgram();
+    const hot_compiled = try Compiler.compilePlainFunction(hot_arena.allocator(), hot_program.program[0].func_decl);
+    for (hot_compiled.chunk.code.items) |inst| switch (inst.op) {
+        .init_local_lexical, .load_local_lexical, .load_upval_lexical, .store_local_lexical, .store_upval_lexical => return error.TestUnexpectedResult,
+        else => {},
+    };
 }
 
 test "compiler admits global-only class members and rejects frame captures" {

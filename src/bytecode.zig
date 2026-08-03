@@ -311,10 +311,15 @@ pub const Op = enum(u8) {
     bind_pattern, // operand a: pattern index, b: mode (0 var, 1 let, 2 const, 3 assign); pop value, destructure into the pattern
 
     // --- locals & upvalues (resolved to frame slots at compile time) ---
+    init_local_lexical, // operand a: slot; reset binding to TDZ on scope entry
     load_local, // operand a: slot in the current frame
+    load_local_lexical, // operand a: slot; ReferenceError while in TDZ
     store_local, // operand a: slot; assign, leave value on stack
+    store_local_lexical, // operand a: slot, b: immutable; checked assignment, leave value
     load_upval, // operand a: parent depth, b: slot
+    load_upval_lexical, // operand a: parent depth, b: slot; TDZ-checked
     store_upval, // operand a: parent depth, b: slot; leave value on stack
+    store_upval_lexical, // operand a: depth, b: slot | immutable high bit; checked assignment
 
     // --- unary ---
     neg,
@@ -604,6 +609,10 @@ pub const Chunk = struct {
     /// `Function` object's private layout.
     param_count: u32 = 0,
     local_count: u32 = 0,
+    /// Frame slots in chunks whose control flow can observe a lexical TDZ.
+    /// Activations initialize these before the first debugger checkpoint;
+    /// block-entry opcodes reset them when a lexical scope is re-entered.
+    lexical_slots: []const u32 = &.{},
     /// Stable source names for frame slots. Empty for program/env-mode chunks.
     /// The VM consults this only while an inspector hook is active.
     debug_local_names: []const []const u8 = &.{},

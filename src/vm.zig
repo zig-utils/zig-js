@@ -5549,6 +5549,9 @@ fn tryRunNativeDirectCall(vm: *Interpreter, func: *Function, args: []const Value
     if (!nativeExecutionPermitted(vm, owner)) return null;
     if (func.is_class_constructor or func.uses_arguments) return null;
     const chunk = func.chunk orelse return null;
+    // Lexical initialization and TDZ/const checks are observable bytecode
+    // operations; the direct native leaf path cannot elide them.
+    if (chunk.lexical_slots.len != 0) return null;
     const slot_count: usize = @intCast(chunk.local_count);
     if (slot_count != func.local_count or slot_count > 64) return null;
 
@@ -5797,12 +5800,17 @@ fn runChunk(
                     }
                 }
                 const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse return vm.throwError("ReferenceError", name);
+                if (vm.isTdz(v)) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
                 if (!parallel_sync) recordQuickGlobalBinding(chunk, ip - 1, vm, name);
                 try stack.append(stack_alloc, v);
             },
             .load_var_or_undef => {
                 const name = chunk.names.items[inst.a];
-                try stack.append(stack_alloc, (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse Value.undef());
+                const v = (try vm.lookupIdent(name)) orelse (try vm.globalProp(name)) orelse Value.undef();
+                // `typeof` suppresses only an unresolvable reference; a lexical
+                // binding that exists but remains uninitialized still throws.
+                if (vm.isTdz(v)) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                try stack.append(stack_alloc, v);
             },
             .store_var => {
                 const name = chunk.names.items[inst.a];
@@ -5839,6 +5847,12 @@ fn runChunk(
                 try vm.bindPatternVM(pat, v, inst.b);
             },
 
+            .init_local_lexical => {
+                const cf = frame.?;
+                const held = cf.lockSlots(parallel_sync);
+                cf.slots[inst.a] = Value.obj(vm.tdz_marker.?);
+                cf.unlockSlots(held);
+            },
             .load_local => {
                 const cf = frame.?;
                 const start = ip - 1;
@@ -5963,12 +5977,31 @@ fn runChunk(
                 cf.unlockSlots(held);
                 try stack.append(stack_alloc, v);
             },
+            .load_local_lexical => {
+                const cf = frame.?;
+                const held = cf.lockSlots(parallel_sync);
+                const v = cf.slots[inst.a];
+                const in_tdz = vm.isTdz(v);
+                cf.unlockSlots(held);
+                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                try stack.append(stack_alloc, v);
+            },
             .store_local => {
                 const cf = frame.?;
                 const v = stack.items[stack.items.len - 1]; // leaves value on the stack
                 const held = cf.lockSlots(parallel_sync);
                 cf.slots[inst.a] = v;
                 cf.unlockSlots(held);
+            },
+            .store_local_lexical => {
+                const cf = frame.?;
+                const v = stack.items[stack.items.len - 1]; // assignment leaves its value
+                const held = cf.lockSlots(parallel_sync);
+                const in_tdz = vm.isTdz(cf.slots[inst.a]);
+                if (!in_tdz and inst.b == 0) cf.slots[inst.a] = v;
+                cf.unlockSlots(held);
+                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                if (inst.b != 0) return vm.throwError("TypeError", "Assignment to constant variable");
             },
             .load_upval => {
                 var f = frame.?;
@@ -5979,6 +6012,17 @@ fn runChunk(
                 f.unlockSlots(held);
                 try stack.append(stack_alloc, v);
             },
+            .load_upval_lexical => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                const held = f.lockSlots(parallel_sync);
+                const v = f.slots[inst.b];
+                const in_tdz = vm.isTdz(v);
+                f.unlockSlots(held);
+                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                try stack.append(stack_alloc, v);
+            },
             .store_upval => {
                 var f = frame.?;
                 var d = inst.a;
@@ -5987,6 +6031,21 @@ fn runChunk(
                 const held = f.lockSlots(parallel_sync);
                 f.slots[inst.b] = v;
                 f.unlockSlots(held);
+            },
+            .store_upval_lexical => {
+                var f = frame.?;
+                var d = inst.a;
+                while (d > 0) : (d -= 1) f = f.parent.?;
+                const immutable_mask: u32 = @as(u32, 1) << 31;
+                const slot = inst.b & ~immutable_mask;
+                const immutable = (inst.b & immutable_mask) != 0;
+                const v = stack.items[stack.items.len - 1]; // assignment leaves its value
+                const held = f.lockSlots(parallel_sync);
+                const in_tdz = vm.isTdz(f.slots[slot]);
+                if (!in_tdz and !immutable) f.slots[slot] = v;
+                f.unlockSlots(held);
+                if (in_tdz) return vm.throwError("ReferenceError", "Cannot access uninitialized binding");
+                if (immutable) return vm.throwError("TypeError", "Assignment to constant variable");
             },
 
             .neg, .pos, .not, .typeof_op, .bit_not, .void_op, .to_string => {
@@ -8297,6 +8356,10 @@ fn buildActivation(vm: *Interpreter, func: *Function, fchunk: *Chunk, args: []co
     for (func.params, 0..) |_, i| {
         if (i < args.len) slots[i] = args[i];
     }
+    // FunctionDeclarationInstantiation creates every lexical binding in its TDZ
+    // before the first statement/debugger checkpoint. Scope-entry bytecodes
+    // repeat this reset for blocks that can execute more than once.
+    for (fchunk.lexical_slots) |slot| slots[slot] = Value.obj(vm.tdz_marker.?);
     act.* = .{
         .exec = exec,
         .chunk = fchunk,

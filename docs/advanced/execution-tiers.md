@@ -36,18 +36,20 @@ So tiering into the VM is deliberately narrow
 - everything else, including top-level code and any function using a construct
   the compiler does not lower, tree-walks.
 
-### The slot model, and why block scoping keeps functions on the tree-walker
+### The slot model and remaining block-scope boundary
 
-A compiled function gets one **flat, block-transparent slot array**: locals are
-frame slots indexed in O(1), and closures capture the defining frame. That is
-fast, but it does not model per-block lexical scope. So the compiler keeps a
-function on the tree-walker whenever correct block scoping would be observable —
-a `let`/`const` shadowing another binding, a TDZ read, or a `for (let …)` head
-captured per-iteration by a body closure. The tree-walker's `Environment` chain
-gets those right.
+A compiled function gets one **flat slot array**: locals are frame slots indexed
+in O(1), and closures capture the defining frame. Lexical bindings retain their
+TDZ and const/let kind. A control-flow scan marks chunks that can observe a
+forward reference; only those chunks install the TDZ marker and use checked
+local/captured loads. Proven initialized hot loops keep the ordinary opcodes,
+while checked stores preserve `const` immutability. Forward lexical reads
+therefore execute with the same exception semantics in the VM and tree-walker.
 
-Proper per-block slot scoping on the VM is possible but unbuilt. It is only
-worth doing if the VM becomes a genuine performance tier.
+What remains unbuilt is per-block lifetime and visibility, distinct slot identity
+for same-named block bindings, and fresh captured cells for each lexical loop
+iteration. Those functions retain the exact tree-walker path until the VM models
+those identities explicitly.
 
 ## The practical consequence: divergence
 

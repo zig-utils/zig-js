@@ -18685,6 +18685,157 @@ test "forced tree-walker and required bytecode preserve exception and side effec
     try std.testing.expectEqual(side_effects[0], side_effects[1]);
 }
 
+test "forced tree-walker and required bytecode preserve lexical TDZ and const semantics" {
+    const cases = [_]struct {
+        source: []const u8,
+        exception_name: []const u8,
+        state: []const u8,
+    }{
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function directTdz() { "use strict"; lexicalTrace.push("before"); return value; let value = 1; }
+            \\directTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "before",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function capturedTdz() {
+            \\  "use strict";
+            \\  function read() { return value; }
+            \\  lexicalTrace.push("captured");
+            \\  read();
+            \\  let value = 1;
+            \\}
+            \\capturedTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "captured",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function capturedConstTdz() {
+            \\  "use strict";
+            \\  function write() { fixed = 4; }
+            \\  lexicalTrace.push("captured-const-tdz");
+            \\  write();
+            \\  const fixed = 3;
+            \\}
+            \\capturedConstTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "captured-const-tdz",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function assignmentTdz() { "use strict"; lexicalTrace.push("assign"); let value = (value = 1); }
+            \\assignmentTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "assign",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function typeofTdz() { "use strict"; lexicalTrace.push("typeof"); return typeof value; let value = 1; }
+            \\typeofTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "typeof",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function forOfHeadTdz() {
+            \\  "use strict";
+            \\  lexicalTrace.push("for-of-head");
+            \\  for (let value of value) {}
+            \\}
+            \\forOfHeadTdz();
+            ,
+            .exception_name = "ReferenceError",
+            .state = "for-of-head",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function constWrite() { "use strict"; const fixed = 3; lexicalTrace.push("initialized"); fixed = 4; }
+            \\constWrite();
+            ,
+            .exception_name = "TypeError",
+            .state = "initialized",
+        },
+        .{
+            .source =
+            \\globalThis.lexicalTrace = [];
+            \\function capturedConstWrite() {
+            \\  "use strict";
+            \\  const fixed = 3;
+            \\  function write() { fixed = 4; }
+            \\  lexicalTrace.push("captured-const");
+            \\  write();
+            \\}
+            \\capturedConstWrite();
+            ,
+            .exception_name = "TypeError",
+            .state = "captured-const",
+        },
+    };
+
+    for (cases) |case| {
+        const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
+        for (modes) |mode| {
+            const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+                .enable_jit = false,
+                .bytecode_execution_mode = mode,
+            });
+            defer ctx.destroy();
+
+            try std.testing.expectError(error.Throw, ctx.evaluate(case.source));
+            const exception = ctx.exception orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqualStrings(case.exception_name, exception.asObj().errorName());
+            try std.testing.expectEqualStrings(case.state, (try ctx.evaluate("lexicalTrace.join(',')")).asStr());
+            if (mode == .required) {
+                const inventory = ctx.bytecodeAdmissionSnapshot();
+                try std.testing.expect(inventory.count(.template_plain_compiled) > 0);
+                try std.testing.expectEqual(@as(u64, 0), inventory.count(.template_plain_fallback));
+            }
+        }
+    }
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.lexicalTrace = [];
+        \\function repeatedTdz() {
+        \\  "use strict";
+        \\  for (var i = 0; i < 2; i = i + 1) {
+        \\    try { lexicalTrace.push(typeof value); }
+        \\    catch (error) { lexicalTrace.push(error.name); }
+        \\    let value = i;
+        \\  }
+        \\  return lexicalTrace.length;
+        \\}
+        \\repeatedTdz();
+    , "lexicalTrace.join(',')");
+
+    try verifyForcedPlainDifferential(
+        \\globalThis.lexicalTrace = [];
+        \\function mutableAfterTdz() {
+        \\  "use strict";
+        \\  try { value; } catch (error) { lexicalTrace.push(error.name); }
+        \\  let value = 1;
+        \\  value = 2;
+        \\  lexicalTrace.push(value);
+        \\  return value;
+        \\}
+        \\mutableAfterTdz();
+    , "lexicalTrace.join(',')");
+}
+
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {
     const modes = [_]interp.BytecodeExecutionMode{ .tree_walker, .required };
     var results: [modes.len]u64 = undefined;

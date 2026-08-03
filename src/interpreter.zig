@@ -2166,7 +2166,7 @@ pub const Interpreter = struct {
     }
 
     /// Whether `v` is the TDZ sentinel (an uninitialized let/const binding).
-    fn isTdz(self: *Interpreter, v: Value) bool {
+    pub fn isTdz(self: *Interpreter, v: Value) bool {
         return v.isObject() and self.tdz_marker != null and v.asObj() == self.tdz_marker.?;
     }
 
