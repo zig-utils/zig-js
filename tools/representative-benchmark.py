@@ -6,15 +6,18 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import pathlib
 import statistics
+import subprocess
 import sys
 from collections import defaultdict
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 COMPARISON_DRIVER = pathlib.Path(__file__).with_name("benchmark-comparison.py")
-MATRIX_TOOL = pathlib.Path(__file__).with_name("representative-matrix.py")
+MATRIX_TOOL = pathlib.Path(__file__).with_name("representative-matrix.ts")
+HOME_TOOL = os.environ.get("HOME_TOOL", str(pathlib.Path.home() / "Code/Home/lang/zig-out/bin/home-tool"))
 DEFAULT_MANIFEST = ROOT / "docs/.data/representative-benchmark-matrix-v1.json"
 
 
@@ -29,7 +32,6 @@ def load_module(name: str, path: pathlib.Path):
 
 
 comparison = load_module("representative_comparison_driver", COMPARISON_DRIVER)
-matrix_contract = load_module("representative_matrix_contract", MATRIX_TOOL)
 Row = comparison.Row
 
 
@@ -256,7 +258,7 @@ def main() -> int:
     parser.add_argument("--markdown-out", type=pathlib.Path)
     args = parser.parse_args()
     manifest = json.loads(args.manifest.read_text())
-    matrix_contract.validate(manifest)
+    subprocess.run([HOME_TOOL, "run", str(MATRIX_TOOL), "--manifest", str(args.manifest)], check=True)
     lanes = sorted({int(value) for value in args.lanes.split(",") if value})
     if not lanes or any(value not in manifest["lanes"] or value == 1 for value in lanes):
         parser.error("lanes must be a non-empty subset of the manifest lanes above one")

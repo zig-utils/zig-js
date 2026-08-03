@@ -1666,7 +1666,7 @@ pub fn build(b: *std.Build) void {
     // only orchestrates runs, validates checksums, and renders raw/report data.
     const comparison_harness_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_comparison.py" });
     const comparison_publication_test = b.addSystemCommand(&.{ "python3", "tools/test_benchmark_publication.py" });
-    const representative_matrix_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_matrix.py" });
+    const representative_matrix_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/test_representative_matrix.ts" });
     const representative_benchmark_test = b.addSystemCommand(&.{ "python3", "tools/test_representative_benchmark.py" });
     const performance_attribution_test = b.addSystemCommand(&.{ "python3", "tools/test_performance_attribution.py" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "python3", "tools/test_exact_parent_regression.py" });

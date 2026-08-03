@@ -212,15 +212,15 @@
     ],
     "system_commands": [
       { "name": "xcrun", "count": 4, "edge": "macos-sdk-foundation" },
-      { "name": "python3", "count": 34, "edge": "python-tooling" },
-      { "name": "/usr/bin/env", "count": 2, "edge": "home-tool-runtime" },
+      { "name": "python3", "count": 33, "edge": "python-tooling" },
+      { "name": "/usr/bin/env", "count": 3, "edge": "home-tool-runtime" },
       { "name": "env", "count": 2, "edge": "macos-sdk-foundation" },
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 48, "edge": "python-tooling" },
+      { "extension": ".py", "count": 46, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 2, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 22, "edge": "home-tool-runtime" },
+      { "extension": ".ts", "count": 24, "edge": "home-tool-runtime" },
       { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [
