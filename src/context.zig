@@ -3073,6 +3073,11 @@ pub const Context = struct {
     /// cleared while idle without reusing an old generation.
     gc_par_request: std.atomic.Value(u64) = .init(0),
     gc_par_next_request: std.atomic.Value(u64) = .init(1),
+    /// The stop generation is acknowledged only at whole-statement or declared
+    /// native boundaries (see Interpreter.serviceMutatorStopSafepoint).
+    mutator_stop_request: std.atomic.Value(u64) = .init(0),
+    mutator_stop_next_request: std.atomic.Value(u64) = .init(1),
+    mutator_stop_owner: std.atomic.Value(?*interp.Interpreter) = .init(null),
     /// Count of mid-script parallel collections that reached a *finishing* sweep
     /// (not aborted). Tests assert this is non-zero to prove the collector
     /// actually reclaimed while peers ran, rather than always falling back to
@@ -3746,6 +3751,10 @@ pub const Context = struct {
 
     pub const JitGcConductor = struct {
         lock: std.atomic.Mutex = .unlocked,
+        /// Prevent a shared-heap GC publication window and a realm-exclusive
+        /// mutator operation from opening together. This belongs to the shared
+        /// conductor rather than one Context because sibling realms share GC.
+        exclusive_phase: std.atomic.Value(u8) = .init(0),
         class_a_stops: std.atomic.Value(u64) = .init(0),
         /// Threads that have observed `lock` held and are actively waiting to
         /// enter. This is a live gauge, unlike the cumulative iteration counts.
@@ -4363,6 +4372,9 @@ pub const Context = struct {
             // arena engine pays nothing (the VM/tree-walker skip on a null fn).
             .gc_safepoint_ctx = if (self.gc != null) self else null,
             .gc_safepoint_fn = if (self.gc != null) collectMidScript else null,
+            .mutator_stop_request = if (self.parallel_js) &self.mutator_stop_request else null,
+            .mutator_stop_ctx = if (self.parallel_js) self else null,
+            .mutator_stop_fn = if (self.parallel_js) joinMutatorStop else null,
             .parallel_worker_count = if (self.parallel_js) &self.parallel_worker_count else null,
             .private_name_serial = &self.private_name_serial,
             .wasm_store_ctx = self,
@@ -5827,6 +5839,100 @@ pub const Context = struct {
         }
     }
 
+    const exclusive_phase_idle: u8 = 0;
+    const exclusive_phase_gc: u8 = 1;
+    const exclusive_phase_mutator_stop: u8 = 2;
+
+    pub const MutatorStop = struct {
+        context: *Context,
+
+        pub fn end(self: *MutatorStop) void {
+            const context = self.context;
+            context.mutator_stop_request.store(0, .release);
+            context.mutator_stop_owner.store(null, .release);
+            context.jitGcConductor().exclusive_phase.store(exclusive_phase_idle, .release);
+        }
+    };
+
+    fn mintMutatorStopGeneration(self: *Context) u64 {
+        var current = self.mutator_stop_next_request.load(.monotonic);
+        while (true) {
+            const generation = if (current == 0) 1 else current;
+            const next = if (generation == std.math.maxInt(u64)) 1 else generation + 1;
+            if (self.mutator_stop_next_request.cmpxchgWeak(current, next, .monotonic, .monotonic)) |observed| {
+                current = observed;
+                continue;
+            }
+            return generation;
+        }
+    }
+
+    fn allMutatorsStoppedAtBoundary(self: *Context, request: u64, owner: *interp.Interpreter) bool {
+        self.lockActiveInterpreters();
+        defer self.unlockActiveInterpreters();
+        for (self.active_interpreters.items) |machine| {
+            if (machine == owner) continue;
+            if (machine.mutator_stop_published_gen.load(.acquire) != request) return false;
+        }
+        return true;
+    }
+
+    fn joinMutatorStop(raw_context: *anyopaque, raw_machine: *anyopaque) void {
+        const self: *Context = @ptrCast(@alignCast(raw_context));
+        const machine: *interp.Interpreter = @ptrCast(@alignCast(raw_machine));
+        if (self.mutator_stop_owner.load(.acquire) == machine) return;
+        const request = self.mutator_stop_request.load(.acquire);
+        if (request == 0) return;
+
+        stack_scan.beginPark();
+        defer stack_scan.endPark();
+        machine.mutator_stop_published_gen.store(request, .release);
+        var spins: usize = 0;
+        while (self.mutator_stop_request.load(.acquire) == request) : (spins += 1) {
+            if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
+    }
+
+    /// Stop every peer mutator at a whole-statement/native boundary. The
+    /// conductor is held only while publishing the phase, so unrelated JIT
+    /// invalidation can proceed while peers are parked. A contending mutator
+    /// remains a participant in any GC or earlier operation stop instead of
+    /// blocking at an opaque mutex and deadlocking its current owner.
+    pub fn beginMutatorStop(self: *Context, machine: *interp.Interpreter) MutatorStop {
+        std.debug.assert(self.parallel_js);
+        while (true) {
+            self.enterJitGcConductorFromInterpreter(machine);
+            if (self.jitGcConductor().exclusive_phase.cmpxchgStrong(
+                exclusive_phase_idle,
+                exclusive_phase_mutator_stop,
+                .acq_rel,
+                .acquire,
+            ) == null) {
+                self.mutator_stop_owner.store(machine, .release);
+                const request = self.mintMutatorStopGeneration();
+                self.mutator_stop_request.store(request, .release);
+                self.leaveJitGcConductor();
+
+                var spins: usize = 0;
+                while (!self.allMutatorsStoppedAtBoundary(request, machine)) : (spins += 1) {
+                    if ((spins & 0xff) == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+                }
+                return .{ .context = self };
+            }
+            self.leaveJitGcConductor();
+
+            if (self.mutator_stop_request.load(.acquire) != 0) {
+                machine.serviceMutatorStopSafepoint();
+            } else if (self.gc_cooperative_enabled and self.gc_par_request.load(.acquire) != 0) {
+                self.joinCooperativeGcRequest(machine);
+            } else if (self.gc_par_collector.load(.acquire) != null) {
+                self.publishParallelRoots(machine);
+            } else {
+                std.Thread.yield() catch {};
+            }
+        }
+    }
+
     fn jitGcConductor(self: *Context) *JitGcConductor {
         return if (self.gc_state) |state| &state.conductor else &self.local_jit_gc_conductor;
     }
@@ -6479,6 +6585,13 @@ pub const Context = struct {
             return;
         }
         defer self.leaveJitGcConductor();
+        if (self.jitGcConductor().exclusive_phase.cmpxchgStrong(
+            exclusive_phase_idle,
+            exclusive_phase_gc,
+            .acq_rel,
+            .acquire,
+        ) != null) return;
+        defer self.jitGcConductor().exclusive_phase.store(exclusive_phase_idle, .release);
         if (self.gc_par_collector.load(.acquire) != null) return;
         if (self.gc_par_collector.cmpxchgStrong(null, machine, .acq_rel, .acquire) != null) {
             if (self.gc_par_request.load(.acquire) != 0) self.joinCooperativeGcRequest(machine);
@@ -6692,6 +6805,13 @@ pub const Context = struct {
         if (!h.shouldCollect()) return;
         if (!self.tryEnterJitGcConductor()) return;
         defer self.leaveJitGcConductor();
+        if (self.jitGcConductor().exclusive_phase.cmpxchgStrong(
+            exclusive_phase_idle,
+            exclusive_phase_gc,
+            .acq_rel,
+            .acquire,
+        ) != null) return;
+        defer self.jitGcConductor().exclusive_phase.store(exclusive_phase_idle, .release);
         if (self.gc_par_collector.load(.acquire)) |collector| {
             if (collector != machine) self.publishParallelRoots(machine);
             return;
@@ -7319,7 +7439,10 @@ pub const Context = struct {
                     // host publication/drive point before observing the join
                     // state, otherwise fast exits can skip the safepoint that the
                     // slower parked path below provides.
-                    if (self.hasRunningJsThreads()) machine.serviceGcSafepoint();
+                    if (self.hasRunningJsThreads()) {
+                        machine.serviceMutatorStopSafepoint();
+                        machine.serviceGcSafepoint();
+                    }
                     rec.join_mutex.lockUncancelable(io);
                     while (!rec.exited) {
                         // Parked keepalive still serves run-loop tasks: a waiting
@@ -7337,6 +7460,7 @@ pub const Context = struct {
                         // termination (threadfuzz-midgc "did not finish a parallel
                         // collection"). The host stack is stable across the park, so
                         // the published set stays current. No-op when the GC is off.
+                        machine.serviceMutatorStopSafepoint();
                         machine.serviceGcSafepoint();
                         rec.join_mutex.lockUncancelable(io);
                         if (rec.exited) break;
@@ -7353,7 +7477,10 @@ pub const Context = struct {
                     // pump/safepoint but before the host parks, leaving no next
                     // loop iteration to publish roots for a collector elected by
                     // another still-running peer.
-                    if (self.hasRunningJsThreads()) machine.serviceGcSafepoint();
+                    if (self.hasRunningJsThreads()) {
+                        machine.serviceMutatorStopSafepoint();
+                        machine.serviceGcSafepoint();
+                    }
                 } else {
                     while (!threadRecordExited(rec)) {
                         // Parked keepalive still serves run-loop tasks: a waiting

@@ -1436,6 +1436,15 @@ pub const Interpreter = struct {
     /// See `stack_scan.zig` and docs/threads/P7-gc-design.md.
     gc_safepoint_ctx: ?*anyopaque = null,
     gc_safepoint_fn: ?*const fn (ctx: *anyopaque, machine: *anyopaque) void = null,
+    /// Realm-level exclusive-operation rendezvous. Unlike the ordinary
+    /// 1024-step GC checkpoint, this is serviced only at a complete JavaScript
+    /// statement (or an explicitly declared native-operation boundary), so an
+    /// operation such as unshared WebAssembly.Memory growth cannot detach a
+    /// buffer between `memory.buffer` and its consuming TypedArray constructor.
+    mutator_stop_request: ?*const std.atomic.Value(u64) = null,
+    mutator_stop_ctx: ?*anyopaque = null,
+    mutator_stop_fn: ?*const fn (ctx: *anyopaque, machine: *anyopaque) void = null,
+    mutator_stop_published_gen: std.atomic.Value(u64) = .init(0),
     /// True only while a specialized VM path services a checkpoint after
     /// materializing every live managed value into registered Exec/frame roots.
     /// The Context may then skip conservative native-stack scanning for that
@@ -3771,24 +3780,26 @@ pub const Interpreter = struct {
     }
 
     pub fn serviceDebugStatement(self: *Interpreter, node: *const Node) EvalError!void {
+        const location = self.debugStatementLocation(node);
+        if (location != null) self.serviceMutatorStopSafepoint();
         if (self.host_statement_hook) |hook| hook(self.host_statement_ctx.?, self);
-        if (self.debugStatementLocation(node)) |location| {
-            self.debug_current_location = location;
-            if (self.stack_trace_call_frame) |frame| frame.location = location;
+        if (location) |statement_location| {
+            self.debug_current_location = statement_location;
+            if (self.stack_trace_call_frame) |frame| frame.location = statement_location;
             if (self.debug_statement_hook) |hook| {
                 if (self.debug_call_frame) |frame| {
                     if (!frame.environment_is_vm_activation) frame.environment = self.env;
                     frame.this_value = self.this_value;
-                    frame.location = location;
+                    frame.location = statement_location;
                 } else {
-                    self.debug_top_level_location = location;
+                    self.debug_top_level_location = statement_location;
                     self.debug_top_level_environment = self.env;
                     self.debug_top_level_strict = self.strict;
                 }
-                try hook(self.debug_statement_ctx.?, self, location);
+                try hook(self.debug_statement_ctx.?, self, statement_location);
             }
             if (self.profile_statement_hook) |hook|
-                hook(self.profile_statement_ctx.?, self, location);
+                hook(self.profile_statement_ctx.?, self, statement_location);
         }
     }
 
@@ -7939,6 +7950,17 @@ pub const Interpreter = struct {
     pub fn serviceGcSafepoint(self: *Interpreter) void {
         const f = self.gc_safepoint_fn orelse return;
         const ctx = self.gc_safepoint_ctx orelse return;
+        f(ctx, self);
+    }
+
+    /// Join a realm-exclusive operation only from a boundary that contains no
+    /// partially evaluated JavaScript expression. The request load is the hot
+    /// no-op; the callback is entered only while another mutator owns a stop.
+    pub fn serviceMutatorStopSafepoint(self: *Interpreter) void {
+        const request = self.mutator_stop_request orelse return;
+        if (request.load(.acquire) == 0) return;
+        const f = self.mutator_stop_fn orelse return;
+        const ctx = self.mutator_stop_ctx orelse return;
         f(ctx, self);
     }
 

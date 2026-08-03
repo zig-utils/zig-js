@@ -728,6 +728,7 @@ fn acquireGilForTeardown(self: *Interpreter, g: *gil_mod.Gil) void {
         // open collector generation is safe. Back off briefly rather than
         // yield-spinning so the GIL holder and the collector keep a core under
         // the oversubscription that makes this path flake in CI.
+        self.serviceMutatorStopSafepoint();
         self.serviceGcSafepoint();
         std.Io.sleep(agent.engineIo(), .fromMilliseconds(1), .awake) catch {};
     }
@@ -2061,6 +2062,7 @@ fn acquireLock(self: *Interpreter, rec: *LockRecord, timeout_ns: ?u64, err_name:
             // No waiter/lock state is held here. Under the experimental
             // parallel mid-script collector, service any root-publication
             // request before this waiter re-enters its bounded native park.
+            self.serviceMutatorStopSafepoint();
             self.serviceGcSafepoint();
             pumpTasks(self);
             const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
@@ -2321,6 +2323,7 @@ fn condWaitCore(self: *Interpreter, rec: *CondRecord, lock: *LockRecord, timeout
         // is not a frozen parked peer; it periodically runs tasks, so it must
         // cooperate with the parallel collector instead of being traced as
         // parked.
+        self.serviceMutatorStopSafepoint();
         self.serviceGcSafepoint();
         pumpTasks(self);
         const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
@@ -3516,6 +3519,7 @@ pub fn propWait(self: *Interpreter, args: []const Value, timeout_ns: ?u64) value
         // Property waiters pump between short parks; service the safepoint hook
         // while the waiter table is unlocked so a concurrent collector can get
         // this interpreter's roots without racing the waiter table.
+        self.serviceMutatorStopSafepoint();
         self.serviceGcSafepoint();
         pumpTasks(self);
         const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
@@ -3964,6 +3968,7 @@ fn parkPumpThreadJoin(self: *Interpreter, rec: *ThreadRecord) value.HostError!vo
     // publication. Service an open request while the record mutex is released:
     // the collector traces Thread records under this mutex, and the exact
     // generation handshake keeps the waiter frozen through sweep.
+    self.serviceMutatorStopSafepoint();
     self.serviceGcSafepoint();
     const stopped = if (self.stop_flag) |sf| sf.load(.monotonic) else false;
     rec.join_mutex.lockUncancelable(io);

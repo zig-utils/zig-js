@@ -2439,6 +2439,7 @@ fn advanceQuickSteps(vm: *Interpreter, requested: u64) EvalError!void {
                 return vm.throwError("Error", "worker terminated");
             try vm.serviceVmTraps();
             if (vm.use_thread_gil) if (vm.gil) |gil| gil.yieldIfContended();
+            vm.serviceMutatorStopSafepoint();
             if (vm.gc_safepoint_fn != null) vm.serviceGcSafepoint();
         }
     }
@@ -3733,6 +3734,10 @@ fn nativeCheckpoint(frame: *jit.NativeFrame) callconv(.c) u32 {
         return @backingInt(if (abrupt == error.Throw) jit.ExitStatus.throw else jit.ExitStatus.stop);
     };
     if (vm.use_thread_gil) if (vm.gil) |g| g.yieldIfContended();
+    // Native numeric checkpoints have no partially evaluated managed
+    // operation: every live slot is canonical in `frame`, so they are valid
+    // realm-exclusive-operation boundaries as well as GC safepoints.
+    vm.serviceMutatorStopSafepoint();
     if (vm.gc_safepoint_fn != null) {
         // The compiler checkpoint island has published canonical frame slots,
         // spilled every live operand, and retains only numeric managed state in
@@ -5741,6 +5746,7 @@ fn runChunk(
 
     while (ip < code.len) {
         if (location_execution) if (chunk.debug_nodes[ip]) |node| {
+            vm.serviceMutatorStopSafepoint();
             if (debug_execution)
                 try serviceVmDebugStatement(vm, node, chunk, frame)
             else

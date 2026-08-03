@@ -178,6 +178,10 @@ fn leaveExecutionRoots(raw: *anyopaque, roots: *value.WasmExecutionRoots) void {
 fn checkpointExecutionRoots(raw: *anyopaque, _: *value.WasmExecutionRoots) void {
     _ = raw;
     const machine: *Interpreter = @ptrCast(@alignCast(active_wasm_interp orelse return));
+    // The Wasm executor invokes this only between complete instructions with
+    // its managed roots published, so an unshared-memory relocation may safely
+    // freeze this mutator here as well as at a JavaScript statement boundary.
+    machine.serviceMutatorStopSafepoint();
     machine.serviceGcSafepoint();
     if (machine.use_thread_gil) if (machine.gil) |g| g.yieldIfContended();
 }
@@ -881,6 +885,16 @@ fn memoryGrow(ctx: *anyopaque, this: Value, args: []const Value) value.HostError
     const previous = active_wasm_interp;
     active_wasm_interp = @ptrCast(self);
     defer active_wasm_interp = previous;
+    // Shared growth keeps historical SAB wrappers live. Ordinary growth must
+    // detach its historical ArrayBuffer, so stop peer mutators at complete
+    // statement/native boundaries before changing the exposed mapping. This is
+    // deliberately realm-scoped rather than a hidden execution GIL: unrelated
+    // JavaScript continues normally except during the relocating operation.
+    var mutator_stop: ?context.Context.MutatorStop = if (delta != 0 and !owner.mem.isShared() and self.mutator_stop_request != null)
+        owner.store.beginMutatorStop(self)
+    else
+        null;
+    defer if (mutator_stop) |*stop| stop.end();
     const result = exec.memoryGrowAddressed(owner.mem, delta) orelse
         return self.throwError("RangeError", "WebAssembly.Memory could not grow");
     return addressValueFromU64(self, owner.mem.address, result);
@@ -4201,6 +4215,61 @@ test "wasm api shared Memory publishes grow buffers under no-GIL contention" {
         \\memory.buffer.byteLength === 65 * 65536 && readers.every(reader => reader.join() > 0);
     );
     try std.testing.expect(result.isBoolean() and result.asBool());
+}
+
+test "wasm api unshared Memory relocation stops no-GIL readers at operation boundaries" {
+    const store = try context.Context.createWith(std.testing.allocator, .{
+        .enable_threads = true,
+    });
+    defer store.destroy();
+    const result = try store.evaluate(
+        \\if ($vm.useThreadGIL() !== false) throw new Error('expected no-GIL execution');
+        \\const memory = new WebAssembly.Memory({ initial: 1 });
+        \\const sentinel = 0x5a5a5a5a;
+        \\const gate = { ready: 0, go: 0, done: 0 };
+        \\function stampedView() {
+        \\  const view = new Int32Array(memory.buffer);
+        \\  view.fill(sentinel);
+        \\  return view;
+        \\}
+        \\let current = stampedView();
+        \\const readers = [];
+        \\for (let lane = 0; lane < 4; lane++) readers.push(new Thread(() => {
+        \\  Atomics.add(gate, 'ready', 1);
+        \\  Atomics.notify(gate, 'ready');
+        \\  while (Atomics.load(gate, 'go') === 0)
+        \\    Atomics.wait(gate, 'go', 0, 100);
+        \\  let observations = 0;
+        \\  while (Atomics.load(gate, 'done') === 0) {
+        \\    const captured = current;
+        \\    const length = captured.length;
+        \\    for (let i = 0; i < length; i += 64) {
+        \\      const word = captured[i];
+        \\      if (word !== sentinel && word !== undefined) return -1;
+        \\    }
+        \\    // This single expression is the publication contract: relocation
+        \\    // cannot detach the getter result before the constructor consumes it.
+        \\    new Int32Array(memory.buffer);
+        \\    observations++;
+        \\  }
+        \\  return observations;
+        \\}));
+        \\while (Atomics.load(gate, 'ready') !== readers.length)
+        \\  Atomics.wait(gate, 'ready', Atomics.load(gate, 'ready'), 100);
+        \\Atomics.store(gate, 'go', 1);
+        \\Atomics.notify(gate, 'go', readers.length);
+        \\for (let page = 1; page <= 12; page++) {
+        \\  if (memory.grow(1) !== page) throw new Error('bad previous page count');
+        \\  current = stampedView();
+        \\}
+        \\Atomics.store(gate, 'done', 1);
+        \\Atomics.notify(gate, 'done', readers.length);
+        \\const joined = readers.map(reader => reader.join());
+        \\if (memory.buffer.byteLength !== 13 * 65536) -9999;
+        \\else joined.reduce((code, value, lane) =>
+        \\  code + (value < 0 ? (lane + 1) * 100 - value : 0), 0);
+    );
+    try std.testing.expectEqual(@as(f64, 0), result.asNum());
 }
 
 test "wasm api atomic exports scale across no-GIL Threads and wake waiters" {
