@@ -1409,8 +1409,10 @@ pub fn build(b: *std.Build) void {
     wasm_core_main_shadow_step.dependOn(&wasm_core_main_shadow_cmd.step);
 
     const wasm_feature_profiles_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/wasm-feature-profiles.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/wasm-feature-profiles.ts",
     });
     const wasm_conformance_matrix_cmd = b.addSystemCommand(&.{
         "/usr/bin/env",
