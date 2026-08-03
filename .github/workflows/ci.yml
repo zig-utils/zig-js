@@ -100,7 +100,8 @@ jobs:
           - name: dependency-audit
             cmd: zig build dependency-audit
           - name: wasm-feature-profiles
-            cmd: zig build wasm-feature-profiles-check
+            home_tool: true
+            cmd: zig build wasm-feature-profiles-check -Dhome-tool="$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool"
           # Revision drift, converter compatibility, and the densest MVP
           # linking/store path stay gated without putting the multi-minute
           # complete 73-file inventory on every CI run.
@@ -341,12 +342,22 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
+      - uses: actions/checkout@v6
+        if: matrix.home_tool == true
+        with:
+          repository: home-lang/home
+          path: Home/lang
+          ref: cb632c80348c984203203176308b5829ba2326a2
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
           packages: zig@0.17.0-dev
       - name: Ensure Zig is available
         run: python3 zig-js/tools/ensure-zig-ci.py
+      - name: Build pinned Home repository-tool runtime
+        if: matrix.home_tool == true
+        working-directory: Home/lang
+        run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
       - name: Install pinned WebAssembly corpus tools
         if: matrix.wasm_spec == true
         working-directory: zig-js
