@@ -217,8 +217,12 @@ pub fn build(b: *std.Build) void {
     home_public_abi_audit_step.dependOn(&home_public_abi_audit_cmd.step);
 
     const home_private_abi_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/home-private-abi.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/private-abi.ts",
+        "--consumer",
+        "home",
         "--profile",
         b.option([]const u8, "home-private-abi-profile", "Exact supported Home private ABI profile ID") orelse "home-private-7ed99c02",
     });
@@ -230,8 +234,12 @@ pub fn build(b: *std.Build) void {
     home_private_abi_audit_step.dependOn(&home_private_abi_audit_cmd.step);
 
     const bun_private_abi_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/bun-private-abi.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/private-abi.ts",
+        "--consumer",
+        "bun",
     });
     const bun_source_root = b.option([]const u8, "bun-source-root", "Optional pinned Bun checkout to verify");
     if (bun_source_root) |root| {
@@ -242,6 +250,10 @@ pub fn build(b: *std.Build) void {
         "Verify the pinned Bun core private extern-fn inventory",
     );
     bun_private_abi_audit_step.dependOn(&bun_private_abi_audit_cmd.step);
+
+    const private_abi_scanner_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/private-abi.ts", "--self-test" });
+    home_private_abi_audit_step.dependOn(&private_abi_scanner_test.step);
+    bun_private_abi_audit_step.dependOn(&private_abi_scanner_test.step);
 
     const private_jstype_abi_audit_cmd = b.addSystemCommand(&.{
         "/usr/bin/env",
