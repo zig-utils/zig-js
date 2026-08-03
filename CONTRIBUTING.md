@@ -239,7 +239,7 @@ Public claims are backed by checked-in evidence.
 | `<!-- release-compatibility:*:start/end -->` | `python3 tools/release-compatibility.py --update-readme` |
 | `<!-- benchmark-comparison:start/end -->` | `python3 tools/benchmark-publication.py …` |
 | `<!-- gc-generation:start/end -->` | `zig build gc-generation-benchmark -Dgc-generation-benchmark-update-readme=true` |
-| all of `docs/platforms.md` | `python3 tools/platform-release-matrix.py` |
+| all of `docs/platforms.md` | `home-tool run tools/platform-release-matrix.ts` |
 
 New docs pages must be added to `markdown.sidebar` in
 [`docs.config.ts`](docs.config.ts) — otherwise they are unreachable.

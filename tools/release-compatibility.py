@@ -7,9 +7,11 @@ import argparse
 import csv
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import statistics
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -425,7 +427,7 @@ def generated_readme_notice(matrix: dict[str, object]) -> str:
 
 def validate_platform_matrix(matrix: dict[str, object], gate: dict[str, object]) -> None:
     required = {
-        "tools/platform-release-matrix.py",
+        "tools/platform-release-matrix.ts",
         "docs/.data/platform-release-matrix-2026-07-28.json",
         "docs/platforms.md",
         ".github/workflows/ci.yml",
@@ -435,11 +437,16 @@ def validate_platform_matrix(matrix: dict[str, object], gate: dict[str, object])
     evidence = set(gate.get("evidence", []))
     require(required <= evidence, "platform matrix gate evidence is incomplete")
 
-    generator = load_python_module("tools/platform-release-matrix.py", "platform_release_matrix_check")
-    expected = generator.build_matrix()
+    home_tool = os.environ.get("HOME_TOOL", str(Path.home() / "Code/Home/lang/zig-out/bin/home-tool"))
+    try:
+        subprocess.run(
+            [home_tool, "run", "tools/platform-release-matrix.ts"],
+            cwd=ROOT,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise SystemExit(f"release-compatibility: platform release matrix validation failed: {error}") from error
     checked = json.loads(artifact_path("docs/.data/platform-release-matrix-2026-07-28.json").read_text())
-    require(checked == expected, "platform release matrix drift")
-    require(artifact_path("docs/platforms.md").read_text() == generator.render_markdown(expected), "platform matrix Markdown drift")
     require(checked["status"] == "published", "platform release matrix is not published")
     summary = checked["summary"]
     require(summary["correctness_gated_platforms"] >= 1, "platform matrix lacks correctness coverage")

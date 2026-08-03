@@ -218,7 +218,7 @@ binding guardrail. In short:
 
 They are written by `tools/release-compatibility.py --update-readme`,
 `tools/benchmark-publication.py`, `tools/gc-generation-benchmark.py`, and
-`tools/platform-release-matrix.py` (which owns `docs/platforms.md` wholesale).
+`tools/platform-release-matrix.ts` (which owns `docs/platforms.md` wholesale).
 Change the evidence and re-run the generator; editing the rendered text by hand
 will be reverted by the next run and can silently desync a release gate.
 

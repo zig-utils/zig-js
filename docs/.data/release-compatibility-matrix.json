@@ -44,7 +44,7 @@
       "issue": 147,
       "status": "green",
       "evidence": [
-        "tools/platform-release-matrix.py",
+        "tools/platform-release-matrix.ts",
         "docs/.data/platform-release-matrix-2026-07-28.json",
         "docs/platforms.md",
         ".github/workflows/ci.yml",

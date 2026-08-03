@@ -47,7 +47,7 @@ is how to apply it.
 | `<!-- release-compatibility:<section>:start/end -->` (overview, quickstart, status, use, build-test, notice, wasm-performance, gc-compaction) | `python3 tools/release-compatibility.py --update-readme` |
 | `<!-- benchmark-comparison:start/end -->` | `python3 tools/benchmark-publication.py …` |
 | `<!-- gc-generation:start/end -->` | `zig build gc-generation-benchmark -Dgc-generation-benchmark-update-readme=true` |
-| whole file: `docs/platforms.md` | `python3 tools/platform-release-matrix.py` |
+| whole file: `docs/platforms.md` | `home-tool run tools/platform-release-matrix.ts` |
 
 Change the evidence, then re-run the generator. Hand-edited text inside a marker
 is reverted by the next run and can silently desync a release gate.
@@ -62,7 +62,7 @@ bun run docs:data -- --from /tmp/run.txt
 # 2. Release matrix + generated README sections
 zig build release-compatibility
 python3 tools/release-compatibility.py --update-readme
-python3 tools/platform-release-matrix.py
+~/Code/Home/lang/zig-out/bin/home-tool run tools/platform-release-matrix.ts
 
 # 3. Hunt stale claims
 rg -n 'drop-in|WebKit test262|partial|unimplemented|[0-9]{2,}/[0-9]{2,}' README.md docs
