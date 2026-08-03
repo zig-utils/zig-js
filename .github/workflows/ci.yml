@@ -189,9 +189,10 @@ jobs:
           # exported-but-uninventoried shims, stale statuses, and broken Home
           # runtime linkage all fail this bounded leg.
           - name: private-abi-boundary
+            home_tool: true
             cmd: |
               python3 -m unittest tools/test_home_private_abi.py
-              python3 tools/private-abi-tsan.py
+              "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/private-abi-tsan.ts
               zig build c-api-audit home-private-abi-audit test-home-private-abi
               zig build test-home-private-abi -Doptimize=ReleaseSafe
               zig build test-home-private-abi -Dtsan=true
@@ -347,7 +348,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: 0caa72d79fc78ccfb08bf262bf55da37a8d8a99d
+          ref: dc257693afc9ed674dd757e9cfa6ea0b942487e5
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
