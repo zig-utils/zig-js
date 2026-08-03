@@ -746,13 +746,16 @@ def main() -> int:
         inventory = json.loads(artifact_path(gate_by_id[gate_id]["evidence"][0]).read_text())
         require(statuses(inventory) == {"implemented"}, f"{gate_id}: inventory is not fully implemented")
     validate_pr249_tail(gate_by_id["shell_and_reference_hooks"])
-    terminal_execution = load_python_module(
-        "tools/pr249-terminal-execution.py",
-        "pr249_terminal_execution",
-    )
+    home_tool = os.environ.get("HOME_TOOL", str(Path.home() / "Code/Home/lang/zig-out/bin/home-tool"))
     try:
-        terminal_execution.validate_checked()
-    except Exception as exc:
+        subprocess.run(
+            [home_tool, "run", "tools/pr249-terminal-execution.ts", "--check"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
         require(False, f"PR-249 terminal execution artifact failed verification: {exc}")
 
     private_pending = 0
