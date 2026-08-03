@@ -2,6 +2,8 @@ declare const Home: {
   readonly engine: "zig-js" | "jsc";
   readTextFile(path: string): string;
   writeTextFile(path: string, contents: string): void;
+  readFileHex(path: string): string;
+  writeFileHex(path: string, contents: string): void;
   fileExists(path: string): boolean;
   spawnSync(argv: string[]): { exitCode: number | null; stdout: string; stderr: string };
 };
@@ -12,6 +14,14 @@ export function readText(path: string): string {
 
 export function writeText(path: string, contents: string): void {
   Home.writeTextFile(path, contents);
+}
+
+export function readHex(path: string): string {
+  return Home.readFileHex(path);
+}
+
+export function writeHex(path: string, contents: string): void {
+  Home.writeFileHex(path, contents);
 }
 
 export function run(argv: string[]): { exitCode: number | null; stdout: string; stderr: string } {

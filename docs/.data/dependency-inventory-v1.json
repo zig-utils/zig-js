@@ -218,9 +218,9 @@
       { "name": "leaks", "count": 1, "edge": "macos-sdk-foundation" }
     ],
     "script_extensions": [
-      { "extension": ".py", "count": 50, "edge": "python-tooling" },
+      { "extension": ".py", "count": 49, "edge": "python-tooling" },
       { "extension": ".mjs", "count": 2, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 20, "edge": "home-tool-runtime" },
+      { "extension": ".ts", "count": 21, "edge": "home-tool-runtime" },
       { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [

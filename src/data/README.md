@@ -7,7 +7,7 @@ tables in Home's pinned WebKit fork at revision
 The generator verifies the exact SHA-256 digest of each input before writing:
 
 ```sh
-python3 tools/generate-text-codec-tables.py \
+~/Code/Home/lang/zig-out/bin/home-tool run tools/generate-text-codec-tables.ts \
   EncodingTables.cpp TextCodecSingleByte.cpp TextCodecCJK.cpp \
   src/data/text_codec_indexes.bin
 ```

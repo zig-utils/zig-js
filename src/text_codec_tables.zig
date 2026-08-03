@@ -1,7 +1,7 @@
 //! Compact decoder tables generated from Home's revision-pinned WebKit fork.
 //!
 //! Source revision: 7ed99c02e50034f869d0db6d487115bb44332fe4
-//! Generator: tools/generate-text-codec-tables.py
+//! Generator: tools/generate-text-codec-tables.ts (executed by Home)
 //! Packed SHA-256: dfed3a7d3da43b7b003a7241dd6a911d5a4da4c64a00df86aba41e1a15d215ae
 
 const data = @embedFile("data/text_codec_indexes.bin");
