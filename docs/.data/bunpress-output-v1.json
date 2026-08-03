@@ -45,8 +45,8 @@
     },
     {
       "path": "api/index.html",
-      "bytes": 228558,
-      "sha256": "a0cdca2fcba7e04c50022c79739cc1a9d4cfb0db409d89038b6810ab731a5028"
+      "bytes": 229409,
+      "sha256": "56c47a51c9edbd8a64680b834d415be9327b7a2a55208cbb46e19f56e33bd1a5"
     },
     {
       "path": "architecture/index.html",
@@ -76,7 +76,7 @@
     {
       "path": "dependencies/index.html",
       "bytes": 159868,
-      "sha256": "d63857d96ec4d3e64347d72ddb3b0adb1e5ea1889b4b9e03e0eefa40ea8f0d1e"
+      "sha256": "61126fbddb13591b7bcbc45ff2a33169fc9a360f8518e5a1c891479c69888146"
     },
     {
       "path": "dev-cache/index.html",
@@ -155,8 +155,8 @@
     },
     {
       "path": "objc-api/README/index.html",
-      "bytes": 157595,
-      "sha256": "ed715e8ac888920f986be5082ad7d63a2a96fc1cf84c1137d4c0edf02a328e3c"
+      "bytes": 158446,
+      "sha256": "a9a1d147fb466bb5c95bb3962e896a47823e2b1af9fc593588caa02f14d67463"
     },
     {
       "path": "optimizing-jit/index.html",
@@ -264,5 +264,5 @@
       "sha256": "65ee46ba189f9930ca0f5703ca14c0aa4429a154eefbdae71dc8344fa9b93230"
     }
   ],
-  "tree_sha256": "5eb6cadaaf470d6e143f98fdabd80dda41ba27be4188998081994f2445e203ce"
+  "tree_sha256": "587a92b95b087afdb945feae5513a93321a673d033b999efa14434a74c530258"
 }

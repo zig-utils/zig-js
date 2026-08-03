@@ -63,7 +63,7 @@ jobs:
           repository: home-lang/home
           path: Home/lang
           ref: 351dc2c59e80d077fab44247e86a893bdb262777
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
 

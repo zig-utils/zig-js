@@ -350,7 +350,7 @@ jobs:
           repository: home-lang/home
           path: Home/lang
           ref: 351dc2c59e80d077fab44247e86a893bdb262777
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: Build zig-js public C API for Home
@@ -502,7 +502,7 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: Build the TSan-instrumented threads-test binary
@@ -567,7 +567,7 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: Build the threads-test binary
@@ -611,7 +611,7 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: Build the threads-test binary (ReleaseSafe)
@@ -652,7 +652,7 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: ${{ matrix.name }}
@@ -696,7 +696,7 @@ jobs:
           repository: zig-utils/zig-gc
           path: zig-gc
           ref: 98edfaa4aa1b2676680d95801d14118f8ed84156
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           packages: zig@0.17.0-dev
       - name: Parallel test262 introduces no new failures
@@ -758,7 +758,7 @@ jobs:
           repository: stacksjs/ts-syntax-highlighter
           path: Libraries/ts-syntax-highlighter
           ref: 38ea140aa4b5c404f5b4e8450a04eb8195293271
-      - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
+      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
         with:
           version: 0.11.12
           packages: bun.sh@1.3.14
