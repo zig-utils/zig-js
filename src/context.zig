@@ -10012,7 +10012,7 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
     // Generator bodies are environment-mode bytecode. Their suspend/resume
     // state retains the active iteration environment across each yield, then
     // renews it before the update/next iterator result.
-    try expectEvalStr("0,1,2|3,4|5:6,7:8",
+    try expectEvalStr("0,1,2|3,4|5:6,7:8|9,10",
         \\(function () {
         \\  function* classic() {
         \\    var reads = [];
@@ -10032,10 +10032,20 @@ test "per-iteration lexical bindings survive closure capture (VM lowering)" {
         \\    }
         \\    return reads.map(function (read) { return read(); }).join(",");
         \\  }
+        \\  function* bodyBindings() {
+        \\    var reads = [];
+        \\    for (var i = 9; i < 11; i++) {
+        \\      let snapshot = i;
+        \\      reads.push(function () { return snapshot; });
+        \\      yield snapshot;
+        \\    }
+        \\    return reads.map(function (read) { return read(); }).join(",");
+        \\  }
         \\  var a = classic(); a.next(); a.next(); a.next(); var ar = a.next().value;
         \\  var b = values(); b.next(); b.next(); var br = b.next().value;
         \\  var c = pairs(); c.next(); c.next(); var cr = c.next().value;
-        \\  return ar + "|" + br + "|" + cr;
+        \\  var d = bodyBindings(); d.next(); d.next(); var dr = d.next().value;
+        \\  return ar + "|" + br + "|" + cr + "|" + dr;
         \\})()
     );
 
@@ -10085,9 +10095,16 @@ test "async VM loop-head captures survive suspension" {
         \\    pairs.push(function () { return left + right; });
         \\    await 0;
         \\  }
+        \\  var bodyBindings = [];
+        \\  for (var index = 10; index < 12; index++) {
+        \\    let snapshot = index;
+        \\    bodyBindings.push(function () { return snapshot; });
+        \\    await 0;
+        \\  }
         \\  return classic.map(function (read) { return read(); }).join(",") + "|" +
         \\         values.map(function (read) { return read(); }).join(",") + "|" +
-        \\         pairs.map(function (read) { return read(); }).join(",");
+        \\         pairs.map(function (read) { return read(); }).join(",") + "|" +
+        \\         bodyBindings.map(function (read) { return read(); }).join(",");
         \\}
         \\async function* generate() {
         \\  var reads = [];
@@ -10104,7 +10121,7 @@ test "async VM loop-head captures survive suspension" {
         \\}
         \\run();
     );
-    try std.testing.expectEqualStrings("0,1,2|4,5|13,17|6,7", (try ctx.evaluate("asyncIterationResult")).asStr());
+    try std.testing.expectEqualStrings("0,1,2|4,5|13,17|10,11|6,7", (try ctx.evaluate("asyncIterationResult")).asStr());
 }
 
 test "empty statements + class-declaration sequencing" {
@@ -19115,6 +19132,199 @@ test "forced bytecode preserves captured destructuring loop heads" {
         \\}
         \\patternTdz();
     , "patternTrace.join('|')");
+}
+
+test "forced bytecode preserves repeated body lexical identity and abrupt unwind" {
+    try verifyForcedPlainDifferential(
+        \\globalThis.bodyTrace = [];
+        \\function repeatedBodyBindings() {
+        \\  var classic = [];
+        \\  for (var i = 0; i < 3; i++) {
+        \\    let snapshot = i;
+        \\    classic.push(function () { return snapshot; });
+        \\  }
+        \\  bodyTrace.push("for:" + classic.map(function (read) { return read(); }).join(","));
+        \\  var whileReads = [], w = 0;
+        \\  while (w < 5) {
+        \\    let snapshot = w++;
+        \\    whileReads.push(function () { return snapshot; });
+        \\    if (snapshot === 0) continue;
+        \\    if (snapshot === 2) break;
+        \\  }
+        \\  bodyTrace.push("while:" + whileReads.map(function (read) { return read(); }).join(","));
+        \\  var doReads = [], d = 0;
+        \\  do {
+        \\    const snapshot = d++;
+        \\    doReads.push(function () { return snapshot; });
+        \\  } while (d < 2);
+        \\  bodyTrace.push("do:" + doReads.map(function (read) { return read(); }).join(","));
+        \\  var ofReads = [];
+        \\  for (var value of [3, 4]) {
+        \\    let doubled = value * 2;
+        \\    ofReads.push(function () { return doubled; });
+        \\  }
+        \\  bodyTrace.push("of:" + ofReads.map(function (read) { return read(); }).join(","));
+        \\  var finalReads = [];
+        \\  for (var f = 0; f < 4; f++) {
+        \\    let snapshot = f;
+        \\    try {
+        \\      finalReads.push(function () { return snapshot; });
+        \\      if (snapshot === 0) continue;
+        \\      if (snapshot === 2) break;
+        \\    } finally { bodyTrace.push("finally:" + snapshot); }
+        \\  }
+        \\  bodyTrace.push("abrupt:" + finalReads.map(function (read) { return read(); }).join(","));
+        \\  var combined = [];
+        \\  for (let head = 0; head < 4; head++) {
+        \\    const body = head * 10;
+        \\    combined.push(function () { return head + ":" + body; });
+        \\    if (head === 0) continue;
+        \\    if (head === 2) break;
+        \\  }
+        \\  bodyTrace.push("combined:" + combined.map(function (read) { return read(); }).join(","));
+        \\  var combinedOf = [];
+        \\  for (const head of [5, 6]) {
+        \\    let body = head + 10;
+        \\    combinedOf.push(function () { return head + ":" + body; });
+        \\  }
+        \\  bodyTrace.push("combined-of:" + combinedOf.map(function (read) { return read(); }).join(","));
+        \\  var nested = [];
+        \\  for (var n = 0; n < 4; n++) {
+        \\    if (true) {
+        \\      let snapshot = n;
+        \\      nested.push(function () { return snapshot; });
+        \\      if (snapshot === 0) continue;
+        \\      if (snapshot === 2) break;
+        \\    }
+        \\  }
+        \\  bodyTrace.push("nested:" + nested.map(function (read) { return read(); }).join(","));
+        \\  var caught = [];
+        \\  for (var c = 0; c < 2; c++) {
+        \\    try { throw c; }
+        \\    catch (error) { caught.push(function () { return error; }); }
+        \\  }
+        \\  bodyTrace.push("catch:" + caught.map(function (read) { return read(); }).join(","));
+        \\  var caughtFinally = [];
+        \\  for (var cf = 0; cf < 4; cf++) {
+        \\    try { throw cf; }
+        \\    catch (error) {
+        \\      caughtFinally.push(function () { return error; });
+        \\      if (error === 0) continue;
+        \\      if (error === 2) break;
+        \\    } finally { bodyTrace.push("catch-finally:" + cf); }
+        \\  }
+        \\  bodyTrace.push("caught-finally:" + caughtFinally.map(function (read) { return read(); }).join(","));
+        \\  var switched = [];
+        \\  for (var s = 0; s < 2; s++) {
+        \\    switch (s) {
+        \\      case 0:
+        \\      case 1:
+        \\        let snapshot = s;
+        \\        switched.push(function () { return snapshot; });
+        \\        break;
+        \\    }
+        \\  }
+        \\  bodyTrace.push("switch:" + switched.map(function (read) { return read(); }).join(","));
+        \\  var destructured = [];
+        \\  for (var p = 0; p < 2; p++) {
+        \\    const [left, right] = [p, p + 10];
+        \\    destructured.push(function () { return left + ":" + right; });
+        \\  }
+        \\  bodyTrace.push("destructured:" + destructured.map(function (read) { return read(); }).join(","));
+        \\  var nestedObjects = [];
+        \\  for (var o = 0; o < 2; o++) {
+        \\    if (true) {
+        \\      let {value, ...rest} = {value: o, tail: o + 20};
+        \\      nestedObjects.push(function () { return value + ":" + rest.tail; });
+        \\    }
+        \\  }
+        \\  bodyTrace.push("objects:" + nestedObjects.map(function (read) { return read(); }).join(","));
+        \\  var labeled = [];
+        \\  outer: for (let head = 0; head < 4; head++) {
+        \\    let body = head + 30;
+        \\    labeled.push(function () { return head + ":" + body; });
+        \\    if (head === 0) continue outer;
+        \\    if (head === 2) break outer;
+        \\  }
+        \\  bodyTrace.push("labeled:" + labeled.map(function (read) { return read(); }).join(","));
+        \\  var doubleLabeled = [];
+        \\  first: second: for (let head = 0; head < 3; head++) {
+        \\    const body = head + 40;
+        \\    doubleLabeled.push(function () { return head + ":" + body; });
+        \\    if (head < 2) continue first;
+        \\    break second;
+        \\  }
+        \\  bodyTrace.push("double-label:" + doubleLabeled.map(function (read) { return read(); }).join(","));
+        \\  var labeledFinally = [];
+        \\  finalOuter: for (let head = 0; head < 4; head++) {
+        \\    const body = head + 50;
+        \\    try {
+        \\      labeledFinally.push(function () { return head + ":" + body; });
+        \\      if (head === 0) continue finalOuter;
+        \\      if (head === 2) break finalOuter;
+        \\    } finally { bodyTrace.push("labeled-finally:" + head); }
+        \\  }
+        \\  bodyTrace.push("labeled-abrupt:" + labeledFinally.map(function (read) { return read(); }).join(","));
+        \\  var iteratorTrace = [], labeledOf = [];
+        \\  var iterable = {
+        \\    [Symbol.iterator]: function () {
+        \\      var value = 0;
+        \\      return {
+        \\        next: function () { return {value: value++, done: false}; },
+        \\        return: function () { iteratorTrace.push("close"); return {}; }
+        \\      };
+        \\    }
+        \\  };
+        \\  ofOuter: for (const head of iterable) {
+        \\    let body = head + 60;
+        \\    labeledOf.push(function () { return head + ":" + body; });
+        \\    if (head === 0) continue ofOuter;
+        \\    if (head === 2) break ofOuter;
+        \\  }
+        \\  bodyTrace.push("labeled-of:" + labeledOf.map(function (read) { return read(); }).join(",") + ":" + iteratorTrace.join(","));
+        \\  try {
+        \\    for (var t = 0; t < 1; t++) {
+        \\      let thrown = "body";
+        \\      (function () { return thrown; });
+        \\      throw thrown;
+        \\    }
+        \\  } catch (error) { bodyTrace.push("throw:" + error); }
+        \\}
+        \\function returnBodyBinding() {
+        \\  for (var i = 0; i < 1; i++) {
+        \\    const snapshot = 12;
+        \\    return function () { return snapshot; };
+        \\  }
+        \\}
+        \\repeatedBodyBindings();
+        \\bodyTrace.push("return:" + returnBodyBinding()());
+    , "bodyTrace.join('|')");
+}
+
+test "moving GC preserves required-bytecode repeated body environments" {
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_gc = true,
+        .enable_jit = false,
+        .bytecode_execution_mode = .required,
+    });
+    defer ctx.destroy();
+
+    const before = try ctx.evaluate(
+        \\globalThis.bodyReads = [];
+        \\function makeBodyReads() {
+        \\  for (var index = 0; index < 20; index++) {
+        \\    let payload = { value: index };
+        \\    bodyReads.push(function () { return payload.value; });
+        \\    if (index % 3 === 0) gc();
+        \\  }
+        \\}
+        \\makeBodyReads();
+        \\bodyReads.map(function (read) { return read(); }).join(",");
+    );
+    try std.testing.expectEqualStrings("0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19", before.asStr());
+    ctx.collectGarbage();
+    const after = try ctx.evaluate("bodyReads.map(function (read) { return read(); }).join(',')");
+    try std.testing.expectEqualStrings("0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19", after.asStr());
 }
 
 fn verifyForcedPlainDifferential(source: []const u8, state_expression: []const u8) !void {

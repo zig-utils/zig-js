@@ -41,12 +41,18 @@ const Loop = struct {
     /// A `switch` is breakable but not continuable: `break` targets it, but
     /// `continue` skips past it to the nearest enclosing loop.
     is_switch: bool = false,
+    /// A label wrapper directly labels an iteration statement (possibly through
+    /// more labels), so `continue label` resolves to that statement's loop.
+    labels_iteration: bool = false,
     /// The `finally_depth` in effect where this loop/switch was entered. A
     /// `break`/`continue` targeting it needs an `abrupt_*` unwind only when it
     /// CROSSES a finally — i.e. the current finally_depth is deeper than this one.
     /// A loop that lives entirely inside a finally (same depth) breaks with a
     /// plain jump, so it does not disturb that finally's in-flight completion.
     finally_depth: u32 = 0,
+    /// Activation-local environment depth at the target. A jump from a deeper
+    /// repeated-body/block environment unwinds to this depth before resuming.
+    environment_depth: u32 = 0,
 };
 
 const SlotBinding = struct {
@@ -214,6 +220,49 @@ fn loopBodyCapturesLexical(body: *const ast.Node) bool {
     return bodyStmtCapturesLexical(body, body);
 }
 
+/// Captured declarations can use a declarative environment at the block that
+/// owns them. Yield-free destructuring is exact when its keys/defaults need no
+/// evaluation; nested loops establish their own repeated-body root.
+fn repeatedBodyCapturesSupported(node: *const ast.Node, body: *const ast.Node) bool {
+    return switch (node.*) {
+        .var_decl => true,
+        .decl_group => |declarations| blk: {
+            for (declarations) |declaration|
+                if (!repeatedBodyCapturesSupported(declaration, body)) break :blk false;
+            break :blk true;
+        },
+        .destructure_decl => |declaration| blk: {
+            const captured = declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body);
+            break :blk !captured or (!nodeHasYield(declaration.pattern) and !patternHasEvaluationExpressions(declaration.pattern));
+        },
+        .block => |statements| blk: {
+            for (statements) |statement| if (!repeatedBodyCapturesSupported(statement, body)) break :blk false;
+            break :blk true;
+        },
+        .if_stmt => |statement| repeatedBodyCapturesSupported(statement.consequent, body) and
+            (if (statement.alternate) |alternate| repeatedBodyCapturesSupported(alternate, body) else true),
+        .labeled_stmt => |statement| repeatedBodyCapturesSupported(statement.body, body),
+        .try_stmt => |statement| blk: {
+            const captured_catch = if (statement.catch_param) |catch_param|
+                if (statement.catch_block) |catch_block| patternNameCaptured(catch_param, catch_block) else false
+            else
+                false;
+            if (captured_catch and statement.catch_param.?.* != .identifier) break :blk false;
+            break :blk repeatedBodyCapturesSupported(statement.block, body) and
+                (if (statement.catch_block) |catch_block| repeatedBodyCapturesSupported(catch_block, body) else true) and
+                (if (statement.finally_block) |finally_block| repeatedBodyCapturesSupported(finally_block, body) else true);
+        },
+        .switch_stmt => |statement| blk: {
+            for (statement.cases) |case| for (case.body) |case_statement|
+                if (!repeatedBodyCapturesSupported(case_statement, body)) break :blk false;
+            break :blk true;
+        },
+        // Nested iteration statements compile their own body with a new root.
+        .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
+        else => true,
+    };
+}
+
 fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
     return switch (node.*) {
         .var_decl => |d| d.kind != .@"var" and nameRefInClosure(body, d.name, false),
@@ -230,6 +279,10 @@ fn bodyStmtCapturesLexical(node: *const ast.Node, body: *const ast.Node) bool {
             (if (s.alternate) |a| bodyStmtCapturesLexical(a, body) else false),
         .labeled_stmt => |s| bodyStmtCapturesLexical(s.body, body),
         .try_stmt => |t| bodyStmtCapturesLexical(t.block, body) or
+            (if (t.catch_param) |catch_param|
+                if (t.catch_block) |catch_block| patternNameCaptured(catch_param, catch_block) else false
+            else
+                false) or
             (if (t.catch_block) |cb| bodyStmtCapturesLexical(cb, body) else false) or
             (if (t.finally_block) |fb| bodyStmtCapturesLexical(fb, body) else false),
         .switch_stmt => |s| blk: {
@@ -541,36 +594,10 @@ fn stmtCanEscapeAbruptly(node: *const ast.Node) bool {
     };
 }
 
-/// A labeled jump can cross more than one environment-owning loop. The current
-/// jump patch records only a target PC, not the number of lexical environments
-/// to unwind, so captured-head loops containing one retain the exact fallback.
-/// Unlabeled break/continue, return, throw, and suspend points have dedicated
-/// local/handler/function unwind paths and do not need this barrier.
-fn stmtHasLabeledJump(node: *const ast.Node) bool {
+fn labeledStatementTargetsIteration(node: *const ast.Node) bool {
     return switch (node.*) {
-        .break_stmt => |label| label != null,
-        .continue_stmt => |label| label != null,
-        .function, .func_decl => false,
-        .block, .decl_group => |statements| blk: {
-            for (statements) |statement| if (stmtHasLabeledJump(statement)) break :blk true;
-            break :blk false;
-        },
-        .if_stmt => |statement| stmtHasLabeledJump(statement.consequent) or
-            (if (statement.alternate) |alternate| stmtHasLabeledJump(alternate) else false),
-        .while_stmt => |statement| stmtHasLabeledJump(statement.body),
-        .do_while_stmt => |statement| stmtHasLabeledJump(statement.body),
-        .for_stmt => |statement| stmtHasLabeledJump(statement.body),
-        .for_in => |statement| stmtHasLabeledJump(statement.body),
-        .with_stmt => |statement| stmtHasLabeledJump(statement.body),
-        .labeled_stmt => |statement| stmtHasLabeledJump(statement.body),
-        .try_stmt => |statement| stmtHasLabeledJump(statement.block) or
-            (if (statement.catch_block) |catch_block| stmtHasLabeledJump(catch_block) else false) or
-            (if (statement.finally_block) |finally_block| stmtHasLabeledJump(finally_block) else false),
-        .switch_stmt => |statement| blk: {
-            for (statement.cases) |case| for (case.body) |case_statement|
-                if (stmtHasLabeledJump(case_statement)) break :blk true;
-            break :blk false;
-        },
+        .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
+        .labeled_stmt => |statement| labeledStatementTargetsIteration(statement.body),
         else => false,
     };
 }
@@ -765,6 +792,13 @@ pub const Compiler = struct {
     /// break/continue abrupt-vs-plain accounting (which compares against a loop's
     /// captured `finally_depth`) is unaffected.
     active_finally: u32 = 0,
+    /// Number of runtime declarative/with environments emitted above this
+    /// activation's entry environment.
+    environment_depth: u32 = 0,
+    /// The repeated loop body whose captured lexical declarations are currently
+    /// being lowered. Every nested block compares its direct declarations
+    /// against this root and creates an environment only when capture requires it.
+    repeated_body_root: ?*const Node = null,
     /// >0 while compiling the body of a `try` whose catch handler is still live on
     /// the VM handler stack (the no-finally case). A call in tail position there
     /// must NOT be a tail call: the handler has to survive the call so a throw from
@@ -1331,6 +1365,68 @@ pub const Compiler = struct {
         for (stmts) |stmt| try self.predeclareLexicalNode(stmt);
     }
 
+    fn repeatedBodyBindingCaptured(body: *const Node, name: []const u8) bool {
+        return nameRefInClosure(body, name, false);
+    }
+
+    fn predeclareRepeatedBodyNode(self: *Compiler, node: *Node, body: *const Node) CompileError!void {
+        const scope = self.scope orelse return;
+        switch (node.*) {
+            .var_decl => |declaration| {
+                if (declaration.kind == .@"var") return;
+                if (repeatedBodyBindingCaptured(body, declaration.name))
+                    try scope.addEnvironmentLexical(self.arena, declaration.name, declaration.kind == .@"const")
+                else
+                    _ = try scope.addLexical(self.arena, declaration.name, declaration.kind == .@"const");
+            },
+            .decl_group => |declarations| for (declarations) |declaration|
+                try self.predeclareRepeatedBodyNode(declaration, body),
+            .destructure_decl => |declaration| {
+                if (declaration.kind == .@"var") return;
+                if (!patternNameCaptured(declaration.pattern, body)) return error.Unsupported;
+                try self.markEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const");
+            },
+            else => {},
+        }
+    }
+
+    fn predeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, body: *const Node) CompileError!void {
+        for (stmts) |statement| try self.predeclareRepeatedBodyNode(statement, body);
+    }
+
+    fn emitDeclareRepeatedBodyNode(self: *Compiler, node: *const Node, body: *const Node) CompileError!void {
+        switch (node.*) {
+            .var_decl => |declaration| if (declaration.kind != .@"var" and repeatedBodyBindingCaptured(body, declaration.name))
+                try self.emitDeclareEnvironmentLexicalName(declaration.name, declaration.kind == .@"const"),
+            .destructure_decl => |declaration| if (declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body))
+                try self.emitDeclareEnvironmentLexicalPattern(declaration.pattern, declaration.kind == .@"const"),
+            .decl_group => |declarations| for (declarations) |declaration|
+                try self.emitDeclareRepeatedBodyNode(declaration, body),
+            else => {},
+        }
+    }
+
+    fn emitDeclareRepeatedBodyList(self: *Compiler, stmts: []*Node, body: *const Node) CompileError!void {
+        for (stmts) |statement| try self.emitDeclareRepeatedBodyNode(statement, body);
+    }
+
+    fn repeatedBodyNodeNeedsEnvironment(node: *const Node, body: *const Node) bool {
+        return switch (node.*) {
+            .var_decl => |declaration| declaration.kind != .@"var" and repeatedBodyBindingCaptured(body, declaration.name),
+            .destructure_decl => |declaration| declaration.kind != .@"var" and patternNameCaptured(declaration.pattern, body),
+            .decl_group => |declarations| blk: {
+                for (declarations) |declaration| if (repeatedBodyNodeNeedsEnvironment(declaration, body)) break :blk true;
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn repeatedBodyListNeedsEnvironment(stmts: []*Node, body: *const Node) bool {
+        for (stmts) |statement| if (repeatedBodyNodeNeedsEnvironment(statement, body)) return true;
+        return false;
+    }
+
     fn loopHeadSupportsEnvironment(node: *const Node) bool {
         return switch (node.*) {
             .var_decl => |decl| decl.kind != .@"var",
@@ -1507,7 +1603,7 @@ pub const Compiler = struct {
     }
 
     fn emitEnterEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
-        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitEnterEnvironment();
         try self.emitDeclareEnvironmentLexicalNode(node);
     }
 
@@ -1517,14 +1613,14 @@ pub const Compiler = struct {
     }
 
     fn emitFreshEnvironmentLexicalName(self: *Compiler, name: []const u8, immutable: bool) CompileError!void {
-        _ = try self.chunk.emit(.exit_block, 0);
-        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitExitEnvironment();
+        try self.emitEnterEnvironment();
         try self.emitDeclareEnvironmentLexicalName(name, immutable);
     }
 
     fn emitFreshEnvironmentLexicalPattern(self: *Compiler, pattern: *const Node, immutable: bool) CompileError!void {
-        _ = try self.chunk.emit(.exit_block, 0);
-        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitExitEnvironment();
+        try self.emitEnterEnvironment();
         try self.emitDeclareEnvironmentLexicalPattern(pattern, immutable);
     }
 
@@ -1555,8 +1651,8 @@ pub const Compiler = struct {
     /// bindings in reverse stack order.
     fn emitRenewEnvironmentLexicalNode(self: *Compiler, node: *const Node) CompileError!void {
         try self.emitLoadEnvironmentLexicalNode(node);
-        _ = try self.chunk.emit(.exit_block, 0);
-        _ = try self.chunk.emit(.enter_block, 0);
+        try self.emitExitEnvironment();
+        try self.emitEnterEnvironment();
         try self.emitDefineEnvironmentLexicalNodeReverse(node);
     }
 
@@ -1577,6 +1673,17 @@ pub const Compiler = struct {
 
     fn popLexicalScope(self: *Compiler) void {
         if (self.scope) |scope| scope.popLexicalScope();
+    }
+
+    fn emitEnterEnvironment(self: *Compiler) CompileError!void {
+        _ = try self.chunk.emit(.enter_block, 0);
+        self.environment_depth += 1;
+    }
+
+    fn emitExitEnvironment(self: *Compiler) CompileError!void {
+        std.debug.assert(self.environment_depth > 0);
+        _ = try self.chunk.emit(.exit_block, 0);
+        self.environment_depth -= 1;
     }
 
     // ---- statements -------------------------------------------------------
@@ -1700,17 +1807,30 @@ pub const Compiler = struct {
             .block => |stmts| {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
-                try self.predeclareLexicalList(stmts);
+                const repeated_root = self.repeated_body_root;
+                const captured_environment = if (repeated_root) |root|
+                    repeatedBodyListNeedsEnvironment(stmts, root)
+                else
+                    false;
+                if (repeated_root) |root|
+                    try self.predeclareRepeatedBodyList(stmts, root)
+                else
+                    try self.predeclareLexicalList(stmts);
                 const disposable_scope = self.scope == null and stmtListHasDisposableDecl(stmts);
                 if (disposable_scope) {
                     // This first VM block-disposal slice handles normal completion.
                     // Abrupt exits stay on the tree-walker until they can unwind
                     // block resources like `finally`.
                     if (stmtListCanEscapeAbruptly(stmts)) return error.Unsupported;
-                    _ = try self.chunk.emit(.enter_block, 0);
+                    try self.emitEnterEnvironment();
                 }
+                if (captured_environment and !disposable_scope) {
+                    try self.emitEnterEnvironment();
+                }
+                if (captured_environment) try self.emitDeclareRepeatedBodyList(stmts, repeated_root.?);
                 try self.emitLexicalInitializersForList(stmts);
                 try self.compileStmtList(stmts);
+                if (captured_environment and !disposable_scope) try self.emitExitEnvironment();
                 if (disposable_scope) {
                     const await_using_count = if (self.in_async) stmtListAwaitUsingDeclCount(stmts) else 0;
                     if (await_using_count == 0) {
@@ -1724,7 +1844,7 @@ pub const Compiler = struct {
                         }
                         _ = try self.chunk.emit(.dispose_scope, 0);
                     }
-                    _ = try self.chunk.emit(.exit_block, 0);
+                    try self.emitExitEnvironment();
                 }
             },
             .decl_group => |stmts| try self.compileStmtList(stmts),
@@ -1736,14 +1856,27 @@ pub const Compiler = struct {
                 const loop = self.currentBreakTarget(label) orelse return error.Unsupported;
                 // Across a finally, the finally must run before the jump:
                 // `abrupt_break` unwinds the handler stack running each enclosing
-                // finally, then jumps to the (patched) break target.
-                const j = try self.chunk.emit(if (self.finally_depth > loop.finally_depth) .abrupt_break else .jump, 0);
+                // finally, then jumps to the (patched) break target. A direct jump
+                // crossing a repeated-body environment unwinds to the target's
+                // activation-local environment depth first.
+                const op: bc.Op = if (self.finally_depth > loop.finally_depth)
+                    .abrupt_break
+                else if (self.environment_depth > loop.environment_depth)
+                    .jump_env
+                else
+                    .jump;
+                const j = try self.chunk.emitAB(op, 0, loop.environment_depth);
                 try loop.breaks.append(self.arena, j);
             },
             .continue_stmt => |label| {
-                if (label != null) return error.Unsupported; // labeled continue → tree-walk
-                const loop = self.currentContinueLoop() orelse return error.Unsupported;
-                const j = try self.chunk.emit(if (self.finally_depth > loop.finally_depth) .abrupt_continue else .jump, 0);
+                const loop = self.currentContinueTarget(label) orelse return error.Unsupported;
+                const op: bc.Op = if (self.finally_depth > loop.finally_depth)
+                    .abrupt_continue
+                else if (self.environment_depth > loop.environment_depth)
+                    .jump_env
+                else
+                    .jump;
+                const j = try self.chunk.emitAB(op, 0, loop.environment_depth);
                 try loop.continues.append(self.arena, j);
             },
             .switch_stmt => |sw| try self.compileSwitch(sw.disc, sw.cases),
@@ -1761,7 +1894,7 @@ pub const Compiler = struct {
             },
             .try_stmt => |t| try self.compileTry(t),
             .labeled_stmt => |l| {
-                const target = try self.pushLabel(l.label);
+                const target = try self.pushLabel(l.label, labeledStatementTargetsIteration(l.body));
                 try self.compileStmt(l.body);
                 for (target.breaks.items) |j| self.chunk.patchToHere(j);
                 self.popLoop();
@@ -1776,8 +1909,10 @@ pub const Compiler = struct {
                 if (stmtCanEscapeAbruptly(w.body) or stmtContainsFuncDecl(w.body)) return error.Unsupported;
                 try self.compileExpr(w.obj);
                 _ = try self.chunk.emit(.enter_with, 0);
+                self.environment_depth += 1;
                 try self.compileStmt(w.body);
                 _ = try self.chunk.emit(.exit_with, 0);
+                self.environment_depth -= 1;
             },
             else => return error.Unsupported,
         }
@@ -1805,18 +1940,26 @@ pub const Compiler = struct {
             {
                 try self.pushLexicalScope();
                 defer self.popLexicalScope();
+                const captured_catch = if (self.repeated_body_root) |_| if (t.catch_param) |parameter|
+                    patternNameCaptured(parameter, catch_block)
+                else
+                    false else false;
                 if (t.catch_param) |p| {
-                    if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
+                    if (captured_catch) {
+                        if (self.scope) |scope| try scope.addEnvironmentLexical(self.arena, p.identifier, false);
+                        try self.emitEnterEnvironment();
+                    } else if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
                     try self.emitDefine(p.identifier);
                 } else _ = try self.chunk.emit(.pop, 0);
                 try self.compileStmt(catch_block);
+                if (captured_catch) try self.emitExitEnvironment();
             }
             self.chunk.patchToHere(skip);
             return;
         }
 
-        // A finally is present. Abrupt control flow (return/break/continue) that
-        // would cross the finally isn't lowered yet, so reject it inside.
+        // A finally is present. Abrupt control flow carries both its eventual
+        // target PC and target lexical-environment depth through the handler.
         self.finally_depth += 1;
         defer self.finally_depth -= 1;
 
@@ -1832,6 +1975,10 @@ pub const Compiler = struct {
             try self.pushLexicalScope();
             defer self.popLexicalScope();
             catch_start = self.chunk.here();
+            const captured_catch = if (self.repeated_body_root) |_| if (t.catch_param) |parameter|
+                patternNameCaptured(parameter, cb)
+            else
+                false else false;
             // Consume the thrown exception (bind it, or discard it) BEFORE pushing
             // the finally-only handler, so that handler records the post-binding
             // stack depth. Otherwise a `return` inside the catch unwinds to a depth
@@ -1839,13 +1986,17 @@ pub const Compiler = struct {
             // operand stack. The binding is always a plain identifier (destructuring
             // catch params are rejected above), so it can't throw before the guard.
             if (t.catch_param) |p| {
-                if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
+                if (captured_catch) {
+                    if (self.scope) |scope| try scope.addEnvironmentLexical(self.arena, p.identifier, false);
+                    try self.emitEnterEnvironment();
+                } else if (self.scope) |scope| _ = try scope.addLexical(self.arena, p.identifier, false);
                 try self.emitDefine(p.identifier);
             } else _ = try self.chunk.emit(.pop, 0);
             // A throw inside the catch body must still run the finally.
-            ph2 = try self.chunk.emitAB(.push_handler, none, none);
+            ph2 = try self.chunk.emitAB(if (captured_catch) .push_handler_outer else .push_handler, none, none);
             try self.compileStmt(cb);
             _ = try self.chunk.emit(.pop_handler, 0);
+            if (captured_catch) try self.emitExitEnvironment();
             _ = try self.chunk.emit(.push_completion, 0); // normal completion of the catch body
         }
 
@@ -1879,10 +2030,21 @@ pub const Compiler = struct {
 
         try self.pushLexicalScope();
         defer self.popLexicalScope();
-        for (cases) |case| try self.predeclareLexicalList(case.body);
+        const repeated_root = self.repeated_body_root;
+        var captured_environment = false;
+        for (cases) |case| {
+            if (repeated_root) |root| {
+                try self.predeclareRepeatedBodyList(case.body, root);
+                captured_environment = captured_environment or repeatedBodyListNeedsEnvironment(case.body, root);
+            } else try self.predeclareLexicalList(case.body);
+        }
 
         // The whole CaseBlock is one lexical scope. Its bindings enter the TDZ
         // after discriminant evaluation but before any case-test evaluation.
+        if (captured_environment) {
+            try self.emitEnterEnvironment();
+            for (cases) |case| try self.emitDeclareRepeatedBodyList(case.body, repeated_root.?);
+        }
         if (self.scope != null) for (cases) |case| try self.emitLexicalInitializersForList(case.body);
 
         const sw = try self.pushLoop();
@@ -1915,6 +2077,7 @@ pub const Compiler = struct {
         self.chunk.patchTo(to_default, default_target orelse end);
         for (sw.breaks.items) |j| self.chunk.patchTo(j, end);
         self.popLoop();
+        if (captured_environment) try self.emitExitEnvironment();
     }
 
     fn compileIf(self: *Compiler, cond: *Node, consequent: *Node, alternate: ?*Node) CompileError!void {
@@ -1931,13 +2094,21 @@ pub const Compiler = struct {
         }
     }
 
+    fn compileRepeatedBody(self: *Compiler, body: *Node) CompileError!void {
+        if (!loopBodyCapturesLexical(body)) return self.compileStmt(body);
+        if (!repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
+        const saved_root = self.repeated_body_root;
+        self.repeated_body_root = body;
+        defer self.repeated_body_root = saved_root;
+        try self.compileStmt(body);
+    }
+
     fn compileWhile(self: *Compiler, cond: *Node, body: *Node) CompileError!void {
-        if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const loop = try self.pushLoop();
         const cond_at = self.chunk.here();
         try self.compileExpr(cond);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
-        try self.compileStmt(body);
+        try self.compileRepeatedBody(body);
         _ = try self.chunk.emit(.jump, @intCast(cond_at));
         self.chunk.patchToHere(to_end);
         // `continue` re-tests the condition.
@@ -1947,10 +2118,9 @@ pub const Compiler = struct {
     }
 
     fn compileDoWhile(self: *Compiler, body: *Node, cond: *Node) CompileError!void {
-        if (loopBodyCapturesLexical(body)) return error.Unsupported;
         const loop = try self.pushLoop();
         const top = self.chunk.here();
-        try self.compileStmt(body);
+        try self.compileRepeatedBody(body);
         const cont_at = self.chunk.here(); // `continue` re-tests the condition
         try self.compileExpr(cond);
         const to_end = try self.chunk.emit(.jump_if_false, 0);
@@ -1966,14 +2136,14 @@ pub const Compiler = struct {
         // closures capture that record, and the update edge replaces it with a
         // value-copied record per CreatePerIterationEnvironment. Uncaptured heads
         // retain O(1) frame slots. Destructuring default/computed evaluation,
-        // yield-bearing patterns, and labeled cross-loop jumps stay on the exact
-        // fallback until their lowering/unwind metadata lands.
+        // yield-bearing patterns stay on the exact fallback until their
+        // lowering lands.
         if (init_node) |ini| if (stmtHasDisposableDecl(ini)) return error.Unsupported;
         const captured_head = if (init_node) |ini| forLoopCapturesLexical(ini, cond, update, body) else false;
         if (captured_head and (!loopHeadSupportsEnvironment(init_node.?) or nodeHasYield(init_node.?) or
-            loopHeadPatternHasEvaluationExpressions(init_node.?) or stmtHasLabeledJump(body)))
+            loopHeadPatternHasEvaluationExpressions(init_node.?)))
             return error.Unsupported;
-        if (loopBodyCapturesLexical(body)) return error.Unsupported;
+        if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
         const lexical_scope = if (init_node) |init| nodeDeclaresLexical(init) else false;
         if (lexical_scope) {
             try self.pushLexicalScope();
@@ -1986,7 +2156,7 @@ pub const Compiler = struct {
         const disposable_scope = self.scope == null and init_node != null and stmtHasDisposableDecl(init_node.?);
         if (disposable_scope) {
             if (stmtCanEscapeAbruptly(body)) return error.Unsupported;
-            _ = try self.chunk.emit(.enter_block, 0);
+            try self.emitEnterEnvironment();
         }
         if (captured_head) try self.emitEnterEnvironmentLexicalNode(init_node.?);
         if (init_node) |ini| {
@@ -2007,7 +2177,7 @@ pub const Compiler = struct {
             try self.compileExpr(c);
             to_end = try self.chunk.emit(.jump_if_false, 0);
         }
-        try self.compileStmt(body);
+        try self.compileRepeatedBody(body);
         const update_at = self.chunk.here();
         if (captured_head) try self.emitRenewEnvironmentLexicalNode(init_node.?);
         if (update) |u| {
@@ -2020,7 +2190,7 @@ pub const Compiler = struct {
         for (loop.continues.items) |j| self.chunk.patchTo(j, update_at);
         for (loop.breaks.items) |j| self.chunk.patchToHere(j);
         self.popLoop();
-        if (captured_head) _ = try self.chunk.emit(.exit_block, 0);
+        if (captured_head) try self.emitExitEnvironment();
         if (disposable_scope) {
             _ = try self.chunk.emit(.dispose_scope, 0);
             if (self.in_async and init_node != null and stmtHasAwaitUsingDecl(init_node.?)) {
@@ -2028,7 +2198,7 @@ pub const Compiler = struct {
                 _ = try self.chunk.emit(.await_op, 0);
                 _ = try self.chunk.emit(.pop, 0);
             }
-            _ = try self.chunk.emit(.exit_block, 0);
+            try self.emitExitEnvironment();
         }
     }
 
@@ -2083,14 +2253,14 @@ pub const Compiler = struct {
         // Record for every iterator result. That is the ForIn/OfBodyEvaluation
         // binding cell the closure captures; an uncaptured identifier stays in a
         // frame slot. Destructuring default/computed evaluation, yield-bearing
-        // patterns, and labeled cross-loop jumps retain the exact fallback until
-        // their lowering/unwind metadata is complete.
+        // patterns retain the exact fallback until their lowering is complete.
         const captured_binding = if (decl_kind) |kind|
             kind != .@"var" and forOfCapturesLexical(target, var_init, iterable, body)
         else
             false;
+        if (loopBodyCapturesLexical(body) and !repeatedBodyCapturesSupported(body, body)) return error.Unsupported;
         if (captured_binding and (!patternSupportsEnvironment(target) or nodeHasYield(target) or
-            patternHasEvaluationExpressions(target) or stmtHasLabeledJump(body))) return error.Unsupported;
+            patternHasEvaluationExpressions(target))) return error.Unsupported;
         const lexical_scope = self.scope != null and if (decl_kind) |kind|
             kind != .@"var" and (target.* == .identifier or captured_binding)
         else
@@ -2113,7 +2283,7 @@ pub const Compiler = struct {
         // ForIn/OfHeadEvaluation creates lexical head bindings before evaluating
         // the RHS, so `for (let x of x)` observes x's TDZ rather than an outer x.
         if (captured_binding) {
-            _ = try self.chunk.emit(.enter_block, 0);
+            try self.emitEnterEnvironment();
             if (target.* == .identifier)
                 try self.emitDeclareEnvironmentLexicalName(target.identifier, decl_kind.? == .@"const")
             else
@@ -2184,7 +2354,7 @@ pub const Compiler = struct {
         try self.emitLoad(r_name);
         _ = try self.chunk.emit(.get_prop, try self.chunk.addName("value"));
         try self.compileLoopBind(decl_kind, target, captured_binding);
-        try self.compileStmt(body);
+        try self.compileRepeatedBody(body);
         const continue_target = self.chunk.here();
         _ = try self.chunk.emit(.load_true, 0);
         try self.emitStore(done_name);
@@ -2223,7 +2393,7 @@ pub const Compiler = struct {
         self.chunk.patchToHere(skip_close);
         _ = try self.chunk.emit(.end_finally, 0);
         self.chunk.patchToHere(after_finally);
-        if (captured_binding) _ = try self.chunk.emit(.exit_block, 0);
+        if (captured_binding) try self.emitExitEnvironment();
     }
 
     fn emitAsyncIteratorClose(self: *Compiler, completion_aware: bool) CompileError!void {
@@ -3430,14 +3600,20 @@ pub const Compiler = struct {
 
     fn pushLoop(self: *Compiler) CompileError!*Loop {
         const loop = try self.arena.create(Loop);
-        loop.* = .{ .finally_depth = self.finally_depth };
+        loop.* = .{ .finally_depth = self.finally_depth, .environment_depth = self.environment_depth };
         try self.loops.append(self.arena, loop);
         return loop;
     }
 
-    fn pushLabel(self: *Compiler, label: []const u8) CompileError!*Loop {
+    fn pushLabel(self: *Compiler, label: []const u8, labels_iteration: bool) CompileError!*Loop {
         const target = try self.arena.create(Loop);
-        target.* = .{ .label = label, .is_loop = false, .finally_depth = self.finally_depth };
+        target.* = .{
+            .label = label,
+            .is_loop = false,
+            .labels_iteration = labels_iteration,
+            .finally_depth = self.finally_depth,
+            .environment_depth = self.environment_depth,
+        };
         try self.loops.append(self.arena, target);
         return target;
     }
@@ -3463,9 +3639,29 @@ pub const Compiler = struct {
         return null;
     }
 
-    /// The nearest loop a `continue` applies to — skipping any enclosing
-    /// `switch` (which is breakable but not continuable).
-    fn currentContinueLoop(self: *Compiler) ?*Loop {
+    /// Resolve an unlabeled continue to the nearest iteration statement. A
+    /// labeled continue first finds the label wrapper, verifies that it labels
+    /// an iteration statement, then selects that statement's loop through any
+    /// intervening label wrappers.
+    fn currentContinueTarget(self: *Compiler, label: ?[]const u8) ?*Loop {
+        if (label) |needle| {
+            var label_index = self.loops.items.len;
+            while (label_index > 0) {
+                label_index -= 1;
+                const target = self.loops.items[label_index];
+                if (target.label) |have| if (std.mem.eql(u8, have, needle)) {
+                    if (!target.labels_iteration) return null;
+                    var loop_index = label_index + 1;
+                    while (loop_index < self.loops.items.len) : (loop_index += 1) {
+                        const loop = self.loops.items[loop_index];
+                        if (loop.is_loop and !loop.is_switch) return loop;
+                    }
+                    return null;
+                };
+            }
+            return null;
+        }
+
         var i = self.loops.items.len;
         while (i > 0) {
             i -= 1;

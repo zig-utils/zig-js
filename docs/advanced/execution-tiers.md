@@ -51,10 +51,13 @@ therefore execute with the same exception semantics in the VM and tree-walker.
 Captured identifier bindings and yield-free destructuring bindings without
 default/computed evaluation in classic `for` and `for-of` heads use fresh
 per-iteration declarative environments; uncaptured heads keep the slot fast path.
-Destructuring default/computed evaluation, captured lexicals declared inside a
-repeated loop body, and labeled jumps that cross more than one such environment
-retain the exact tree-walker path until their lowering and environment-unwind
-metadata are explicit.
+Captured lexicals in repeated loop bodies likewise use a fresh environment at
+the nested block, catch, or switch scope that owns them. Yield-free destructuring
+without default/computed evaluation uses the same path. Activation-local
+environment depths make ordinary and labeled break/continue, including jumps
+propagated through `finally`, unwind those records before reaching their target.
+Destructuring default/computed evaluation retains the exact tree-walker path
+until its lowering is explicit.
 
 ## The practical consequence: divergence
 

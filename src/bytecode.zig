@@ -360,6 +360,7 @@ pub const Op = enum(u8) {
 
     // --- control flow (operand: instruction index) ---
     jump,
+    jump_env, // operands a: target PC, b: target activation-local environment depth
     jump_if_false, // pop cond; jump when falsy
     jump_if_true_peek, // peek cond (leave on stack); jump when truthy  [for ||]
     jump_if_false_peek, // peek cond (leave on stack); jump when falsy   [for &&]
@@ -437,11 +438,12 @@ pub const Op = enum(u8) {
 
     // --- exception handling (generator VM) ---
     push_handler, // operand a: catch-block PC (or u32 max = none), b: finally-block PC (or none)
+    push_handler_outer, // same targets; record the parent environment/depth for a captured catch binding
     pop_handler, // discard the topmost handler (on normal exit from a try block)
     push_completion, // operand a: completion kind (0 = normal); push [undefined, kind] for a finally block
     end_finally, // pop a completion [value, kind] left by a finally: rethrow (1) / return (2) / break (3) / continue (4) / fall-through (0)
-    abrupt_break, // operand a: the loop's break target PC (patched like a normal break jump); run enclosing finally(s) first, then jump there
-    abrupt_continue, // operand a: the loop's continue target PC; run enclosing finally(s) first, then jump there
+    abrupt_break, // operands a: break target PC, b: target environment depth; run enclosing finally(s) first
+    abrupt_continue, // operands a: continue target PC, b: target environment depth; run enclosing finally(s) first
 
     halt, // end program; result is the accumulator
 };

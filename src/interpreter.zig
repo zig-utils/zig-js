@@ -1626,8 +1626,11 @@ pub const Interpreter = struct {
     out_of_memory_exception: Value = Value.undef(),
     /// Target label of a pending labeled `break`/`continue` (null = unlabeled).
     signal_label: ?[]const u8 = null,
-    /// Label of the enclosing `labeled_stmt`, handed to the loop it wraps.
-    current_label: ?[]const u8 = null,
+    /// Consecutive labels enclosing the next labeled item. `labels_consumed`
+    /// prevents a nested loop in the labeled iteration's body from inheriting
+    /// them while keeping the slice stable for the outer loop's whole run.
+    current_labels: std.ArrayListUnmanaged([]const u8) = .empty,
+    labels_consumed: usize = 0,
     /// GetTemplateObject's per-realm cache: a tagged template's frozen strings
     /// object is built once per call site (keyed by the template AST node) and
     /// reused on every later evaluation, so `tag`...`` hands the tag the SAME
@@ -2622,7 +2625,7 @@ pub const Interpreter = struct {
         // it — so consume the pending label here, keeping it from being adopted by an
         // inner loop (`L: { do { break L; } while (true); … }` must break the block).
         // The matching break is consumed at the `.labeled_stmt` level.
-        _ = self.takeLabel();
+        _ = self.takeLabels();
         // A block that binds nothing at its own scope needs no environment — run its
         // statements in the current scope, skipping the per-entry GC-cell allocation
         // (common in hot loop bodies like `{ acc += x; }`). A function-body block
@@ -2657,6 +2660,14 @@ pub const Interpreter = struct {
         var n = node;
         while (n.* == .labeled_stmt) n = n.labeled_stmt.body;
         return if (n.* == .func_decl) n else null;
+    }
+
+    fn labeledStatementTargetsIteration(node: *const Node) bool {
+        return switch (node.*) {
+            .while_stmt, .do_while_stmt, .for_stmt, .for_in => true,
+            .labeled_stmt => |statement| labeledStatementTargetsIteration(statement.body),
+            else => false,
+        };
     }
 
     fn hoistStatementFunctionDecl(self: *Interpreter, stmt: *Node, at_fn_top: bool) EvalError!bool {
@@ -3695,7 +3706,13 @@ pub const Interpreter = struct {
                 break :blk Value.undef();
             },
             .labeled_stmt => |l| blk: {
-                self.current_label = l.label; // adopted by the loop it wraps
+                const saved_labels_len = self.current_labels.items.len;
+                const saved_labels_consumed = self.labels_consumed;
+                if (labeledStatementTargetsIteration(l.body)) try self.current_labels.append(self.arena, l.label);
+                defer {
+                    self.current_labels.items.len = saved_labels_len;
+                    self.labels_consumed = saved_labels_consumed;
+                }
                 const result = try self.eval(l.body);
                 // A labeled break that reached here (e.g. on a labeled block) is consumed.
                 if (self.signal == .brk and labelEq(self.signal_label, l.label)) {
@@ -3747,11 +3764,11 @@ pub const Interpreter = struct {
             },
             .while_stmt => |s| try self.evalWhile(s.cond, s.body),
             .do_while_stmt => |s| blk: {
-                const my_label = self.takeLabel();
+                const my_labels = self.takeLabels();
                 var last: Value = Value.undef();
                 while (true) {
                     last = try self.eval(s.body);
-                    if (self.loopSignal(my_label)) |stop| if (stop) break;
+                    if (self.loopSignal(my_labels)) |stop| if (stop) break;
                     if (!(try self.eval(s.cond)).toBoolean()) break;
                 }
                 break :blk last;
@@ -3879,7 +3896,7 @@ pub const Interpreter = struct {
     /// indices of arrays). Each iteration binds the loop variable then runs the
     /// body, honoring break/continue/return.
     fn evalForInOf(self: *Interpreter, decl_kind: ?ast.DeclKind, target: *Node, var_init: ?*Node, iterable: *Node, body: *Node, is_of: bool, is_await: bool, dispose: u8) EvalError!Value {
-        const my_label = self.takeLabel();
+        const my_labels = self.takeLabels();
         // A `let`/`const` loop binding gets a fresh declarative environment per
         // iteration, so a closure created in the head or body captures *that*
         // iteration's binding (`var` is function-scoped, so it doesn't).
@@ -3990,7 +4007,7 @@ pub const Interpreter = struct {
                 // so an error from IteratorClose (a non-callable `return`, or a
                 // `return()` that yields a non-object) PROPAGATES rather than being
                 // swallowed.
-                if (self.loopSignal(my_label)) |stop| if (stop) {
+                if (self.loopSignal(my_labels)) |stop| if (stop) {
                     const ss = self.signal;
                     const sr = self.ret_value;
                     self.signal = .none;
@@ -4024,7 +4041,7 @@ pub const Interpreter = struct {
                         if (lexical) self.env = try self.iterBindingEnv(&ienv, saved_env, true);
                         try self.bindLoopTarget(decl_kind, target, try Value.strAlloc(self.arena, value.decodeStringKey(k)));
                         last = try self.eval(body);
-                        if (self.loopSignal(my_label)) |stop| if (stop) break;
+                        if (self.loopSignal(my_labels)) |stop| if (stop) break;
                     }
                 },
             }
@@ -4255,17 +4272,17 @@ pub const Interpreter = struct {
     }
 
     fn evalWhile(self: *Interpreter, cond: *Node, body: *Node) EvalError!Value {
-        const my_label = self.takeLabel();
+        const my_labels = self.takeLabels();
         var last: Value = Value.undef();
         while ((try self.eval(cond)).toBoolean()) {
             last = try self.eval(body);
-            if (self.loopSignal(my_label)) |stop| if (stop) break;
+            if (self.loopSignal(my_labels)) |stop| if (stop) break;
         }
         return last;
     }
 
     fn evalFor(self: *Interpreter, init_node: ?*Node, cond: ?*Node, update: ?*Node, body: *Node) EvalError!Value {
-        const my_label = self.takeLabel();
+        const my_labels = self.takeLabels();
         // Collect the lexical (`let`/`const`) binding names declared in the init,
         // if any. They get a fresh, value-copied environment each iteration so a
         // closure created in the body captures that iteration's binding.
@@ -4318,7 +4335,7 @@ pub const Interpreter = struct {
             }
         }
 
-        const last = self.runForBody(cond, update, body, my_label, lexical, outer, names.items) catch |e| {
+        const last = self.runForBody(cond, update, body, my_labels, lexical, outer, names.items) catch |e| {
             // DisposeResources runs on an abrupt completion too, threading the error.
             if (loop_env) |le| if (le.disposables.items.len > 0 and e == error.Throw) {
                 const body_err = self.exception;
@@ -4337,14 +4354,14 @@ pub const Interpreter = struct {
 
     /// The `for` loop's iteration, factored out so `evalFor` can run DisposeResources
     /// for a for-head `using` on both normal and abrupt completion.
-    fn runForBody(self: *Interpreter, cond: ?*Node, update: ?*Node, body: *Node, my_label: ?[]const u8, lexical: bool, outer: *Environment, names: []const []const u8) EvalError!Value {
+    fn runForBody(self: *Interpreter, cond: ?*Node, update: ?*Node, body: *Node, my_labels: []const []const u8, lexical: bool, outer: *Environment, names: []const []const u8) EvalError!Value {
         var last: Value = Value.undef();
         while (true) {
             if (cond) |c| {
                 if (!(try self.eval(c)).toBoolean()) break;
             }
             last = try self.eval(body);
-            if (self.loopSignal(my_label)) |stop| if (stop) break;
+            if (self.loopSignal(my_labels)) |stop| if (stop) break;
             // CreatePerIterationEnvironment: per spec each iteration gets a fresh
             // copy of the loop bindings, so a closure created this iteration
             // captures *this* iteration's value. That copy is only observable
@@ -4480,25 +4497,25 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Consume the label of the enclosing `labeled_stmt`, if any. A loop calls
-    /// this at entry so it knows which labeled break/continue target it, and so
-    /// nested loops don't inherit the label.
-    fn takeLabel(self: *Interpreter) ?[]const u8 {
-        const l = self.current_label;
-        self.current_label = null;
-        return l;
+    /// Consume all consecutive labels of the enclosing labeled item. The labels
+    /// remain backed by `current_labels` until their statements return, while
+    /// `labels_consumed` prevents loops nested in the body from inheriting them.
+    fn takeLabels(self: *Interpreter) []const []const u8 {
+        const labels = self.current_labels.items[self.labels_consumed..];
+        self.labels_consumed = self.current_labels.items.len;
+        return labels;
     }
 
     /// Inspect the control-flow signal at a loop boundary, given the loop's own
-    /// label (`my_label`). Returns null (nothing pending), true (break this
+    /// labels (`my_labels`). Returns null (nothing pending), true (break this
     /// loop), or false (continue). A labeled break/continue aimed at an *outer*
     /// loop breaks this loop but leaves the signal set to keep propagating.
-    fn loopSignal(self: *Interpreter, my_label: ?[]const u8) ?bool {
+    fn loopSignal(self: *Interpreter, my_labels: []const []const u8) ?bool {
         switch (self.signal) {
             .none => return null,
             .ret => return true, // leave set; the function unwinds
             .brk => {
-                if (self.signal_label == null or labelEq(self.signal_label, my_label)) {
+                if (self.signal_label == null or labelIn(self.signal_label.?, my_labels)) {
                     self.signal = .none;
                     self.signal_label = null;
                     return true;
@@ -4506,7 +4523,7 @@ pub const Interpreter = struct {
                 return true; // labeled break for an outer loop: exit, keep signal
             },
             .cont => {
-                if (self.signal_label == null or labelEq(self.signal_label, my_label)) {
+                if (self.signal_label == null or labelIn(self.signal_label.?, my_labels)) {
                     self.signal = .none;
                     self.signal_label = null;
                     return false;
@@ -48052,6 +48069,11 @@ fn arg(args: []const Value, i: usize) Value {
 fn labelEq(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null or b == null) return false;
     return std.mem.eql(u8, a.?, b.?);
+}
+
+fn labelIn(needle: []const u8, labels: []const []const u8) bool {
+    for (labels) |label| if (std.mem.eql(u8, needle, label)) return true;
+    return false;
 }
 
 fn relationalNaN(a: Value, b: Value) bool {

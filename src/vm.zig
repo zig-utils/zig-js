@@ -202,6 +202,12 @@ pub const Exec = struct {
     /// Active try/catch handlers, innermost last. Lives in `Exec` so it persists
     /// across a generator's `yield`/resume (a `yield` can sit inside a `try`).
     handlers: std.ArrayListUnmanaged(Handler) = .empty,
+    /// Number of declarative/with environments entered by this activation above
+    /// its call-entry environment. Break/continue targets use this to unwind
+    /// repeated-body environments without disturbing the captured outer chain.
+    environment_depth: u32 = 0,
+    /// Target depth for a break/continue completion travelling through finally.
+    abrupt_environment_depth: u32 = 0,
 };
 
 /// A live try handler: where to resume on a throw and the operand-stack depth
@@ -217,19 +223,31 @@ pub const Handler = struct {
     /// completion restores it before entering catch/finally, unwinding any
     /// block or per-iteration environments crossed by the throw/return.
     environment: ?*interp.Environment = null,
+    environment_depth: u32 = 0,
 
     pub const none: u32 = std.math.maxInt(u32);
 };
 
-fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, handler: Handler) void {
+fn restoreHandlerEnvironment(vm: *Interpreter, gen: ?*Generator, exec: *Exec, handler: Handler) void {
     if (handler.environment) |environment| {
         vm.env = environment;
         if (gen) |activation| activation.env = environment;
     }
+    exec.environment_depth = handler.environment_depth;
 }
 
 fn restoreSuspendedGeneratorHandlerEnvironment(generator: *Generator, handler: Handler) void {
     if (handler.environment) |environment| generator.env = environment;
+    generator.exec.environment_depth = handler.environment_depth;
+}
+
+fn unwindEnvironmentToDepth(vm: *Interpreter, gen: ?*Generator, exec: *Exec, target_depth: u32) void {
+    std.debug.assert(target_depth <= exec.environment_depth);
+    while (exec.environment_depth > target_depth) {
+        vm.env = vm.env.parent.?;
+        exec.environment_depth -= 1;
+    }
+    if (gen) |activation| activation.env = vm.env;
 }
 
 /// A finally block's completion kind (the `kind` half of the record left on the
@@ -258,7 +276,7 @@ fn unwindToFinally(vm: *Interpreter, gen: ?*Generator, exec: *Exec, cval: Value,
     const stack_alloc = generatorStackAllocator(vm, gen);
     while (exec.handlers.items.len > 0) {
         const h = exec.handlers.pop().?;
-        restoreHandlerEnvironment(vm, gen, h);
+        restoreHandlerEnvironment(vm, gen, exec, h);
         if (h.finally_pc != Handler.none) {
             exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try exec.stack.append(stack_alloc, cval);
@@ -4593,7 +4611,7 @@ fn resumeNativeFinallyDispatch(
             vm.exception = completion_value;
             if (exec.handlers.items.len > 0) {
                 const handler = exec.handlers.pop().?;
-                restoreHandlerEnvironment(vm, null, handler);
+                restoreHandlerEnvironment(vm, null, exec, handler);
                 exec.stack.shrinkRetainingCapacity(handler.stack_depth);
                 if (handler.catch_pc != Handler.none) {
                     try exec.stack.append(vm.arena, completion_value);
@@ -4624,6 +4642,7 @@ fn resumeNativeFinallyDispatch(
             if (!std.math.isFinite(target) or @trunc(target) != target or target < 0 or
                 target > @as(f64, @floatFromInt(std.math.maxInt(usize))))
                 return error.OutOfMemory;
+            unwindEnvironmentToDepth(vm, null, exec, exec.abrupt_environment_depth);
             exec.ip = @intFromFloat(target);
             return .deoptimized;
         },
@@ -5694,7 +5713,7 @@ fn execLoop(vm: *Interpreter, exec: *Exec, chunk: *Chunk, frame: ?*Frame, gen: ?
             if (abrupt == error.Throw and exec.handlers.items.len > 0) {
                 const stack_alloc = generatorStackAllocator(vm, gen);
                 const h = exec.handlers.pop().?;
-                restoreHandlerEnvironment(vm, gen, h);
+                restoreHandlerEnvironment(vm, gen, exec, h);
                 exec.stack.shrinkRetainingCapacity(h.stack_depth);
                 if (h.catch_pc != Handler.none) {
                     try exec.stack.append(stack_alloc, vm.exception); // bind target for the catch
@@ -6169,6 +6188,10 @@ fn runChunk(
                     }
                 }
             },
+            .jump_env => {
+                unwindEnvironmentToDepth(vm, gen, exec, inst.b);
+                ip = inst.a;
+            },
             .jump_if_false => {
                 const taken = !stack.pop().?.toBoolean();
                 optimizer_delta.observeBranch(taken);
@@ -6398,10 +6421,13 @@ fn runChunk(
                 vm.initEnvironment(benv, vm.env, false);
                 vm.env = benv;
                 if (gen) |g| g.env = benv;
+                exec.environment_depth += 1;
             },
             .exit_block => {
                 vm.env = vm.env.parent.?;
                 if (gen) |g| g.env = vm.env;
+                std.debug.assert(exec.environment_depth > 0);
+                exec.environment_depth -= 1;
             },
             .dispose_scope => {
                 if (inst.a == 1) {
@@ -6431,10 +6457,13 @@ fn runChunk(
                 wenv.with_object = obj;
                 vm.env = wenv;
                 if (gen) |g| g.env = wenv;
+                exec.environment_depth += 1;
             },
             .exit_with => {
                 vm.env = vm.env.parent.?;
                 if (gen) |g| g.env = vm.env;
+                std.debug.assert(exec.environment_depth > 0);
+                exec.environment_depth -= 1;
             },
             .make_regex => {
                 // A regex literal is a fresh RegExp object on each evaluation.
@@ -6708,6 +6737,7 @@ fn runChunk(
                 // target PC rides through as the completion value.
                 const kind: Completion = if (inst.op == .abrupt_break) .break_ else .continue_;
                 const target: Value = Value.num(@floatFromInt(inst.a));
+                exec.abrupt_environment_depth = inst.b;
                 if (try unwindToFinally(vm, gen, exec, target, kind)) |fpc| {
                     ip = fpc;
                 } else {
@@ -6717,6 +6747,7 @@ fn runChunk(
                     // jumping to the loop/label target.
                     if (stack.items.len >= 2 and looksLikeCompletionKind(stack.items[stack.items.len - 1]))
                         stack.shrinkRetainingCapacity(stack.items.len - 2);
+                    unwindEnvironmentToDepth(vm, gen, exec, exec.abrupt_environment_depth);
                     ip = inst.a;
                 }
             },
@@ -6874,12 +6905,17 @@ fn runChunk(
                 try vm.notifyDebuggerException(false);
                 return error.Throw;
             },
-            .push_handler => try exec.handlers.append(handlers_alloc, .{
-                .catch_pc = inst.a,
-                .finally_pc = inst.b,
-                .stack_depth = @intCast(stack.items.len),
-                .environment = vm.env,
-            }),
+            .push_handler, .push_handler_outer => {
+                const outer = inst.op == .push_handler_outer;
+                if (outer and (exec.environment_depth == 0 or vm.env.parent == null)) return error.OutOfMemory;
+                try exec.handlers.append(handlers_alloc, .{
+                    .catch_pc = inst.a,
+                    .finally_pc = inst.b,
+                    .stack_depth = @intCast(stack.items.len),
+                    .environment = if (outer) vm.env.parent.? else vm.env,
+                    .environment_depth = if (outer) exec.environment_depth - 1 else exec.environment_depth,
+                });
+            },
             .pop_handler => _ = exec.handlers.pop(),
             .push_completion => {
                 // [value, kind] — value is undefined for a normal completion.
@@ -6907,7 +6943,12 @@ fn runChunk(
                         }
                     },
                     .break_, .continue_ => {
-                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc| ip = fpc else ip = @intFromFloat(cval.asNum());
+                        if (try unwindToFinally(vm, gen, exec, cval, kind)) |fpc|
+                            ip = fpc
+                        else {
+                            unwindEnvironmentToDepth(vm, gen, exec, exec.abrupt_environment_depth);
+                            ip = @intFromFloat(cval.asNum());
+                        }
                     },
                 }
             },
@@ -8580,7 +8621,7 @@ fn unwindThrow(vm: *Interpreter, acts: *std.ArrayListUnmanaged(*Activation)) Eva
         const cur = acts.items[acts.items.len - 1];
         if (cur.exec.handlers.items.len > 0) {
             const h = cur.exec.handlers.pop().?;
-            restoreHandlerEnvironment(vm, null, h);
+            restoreHandlerEnvironment(vm, null, &cur.exec, h);
             cur.exec.stack.shrinkRetainingCapacity(h.stack_depth);
             try cur.exec.stack.append(vm.arena, vm.exception); // bind target for the catch
             if (h.catch_pc != Handler.none) {

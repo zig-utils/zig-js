@@ -417,6 +417,10 @@ pub fn build(chunk: *const bc.Chunk, allocator: std.mem.Allocator) BuildError!Pl
     const code = chunk.code.items;
     if (code.len == 0) return error.EmptyChunk;
     if (code.len > std.math.maxInt(u32)) return error.UnsupportedChunk;
+    // Environment-unwinding jumps mutate interpreter-owned lexical state. They
+    // remain exact bytecode exits until native frame states carry that depth.
+    for (code) |instruction| if (instruction.op == .jump_env or instruction.op == .push_handler_outer)
+        return error.UnsupportedChunk;
 
     const starts = try allocator.alloc(bool, code.len);
     defer allocator.free(starts);
@@ -2249,6 +2253,16 @@ test "optimizer rejects unsupported bytecode and invalid control flow" {
     _ = try chunk.emit(.nop, 0);
     _ = try chunk.emit(.ret, 0);
     try std.testing.expectError(error.UnsupportedChunk, build(&chunk, std.testing.allocator));
+
+    var environment_jump = bc.Chunk.init(arena.allocator());
+    _ = try environment_jump.emitAB(.jump_env, 1, 0);
+    _ = try environment_jump.emit(.ret_undef, 0);
+    try std.testing.expectError(error.UnsupportedChunk, build(&environment_jump, std.testing.allocator));
+
+    var outer_handler = bc.Chunk.init(arena.allocator());
+    _ = try outer_handler.emitAB(.push_handler_outer, std.math.maxInt(u32), std.math.maxInt(u32));
+    _ = try outer_handler.emit(.ret_undef, 0);
+    try std.testing.expectError(error.UnsupportedChunk, build(&outer_handler, std.testing.allocator));
 
     var invalid = bc.Chunk.init(arena.allocator());
     _ = try invalid.emit(.jump, 1);
