@@ -17,7 +17,7 @@ Read [`docs/benchmarks.md`](../../../docs/benchmarks.md) for the full method.
 | Did the VM regress against the tree-walker? | `zig build bench` |
 | Did GC compaction change retained bytes / pause? | `zig build gc-compaction-benchmark` |
 | Did generational policy change pause or throughput? | `zig build gc-generation-benchmark` |
-| Wasm SIMD or threads scaling? | `python3 tools/wasm-simd-benchmark.py`, `tools/wasm-threads-benchmark.py` |
+| Wasm SIMD or threads scaling? | `home-tool run tools/wasm-simd-benchmark.ts`, `tools/wasm-threads-benchmark.ts` |
 | Where is no-GIL contention? | `zig build threads-profile` |
 | Mid-script parallel-GC convergence/pauses? | `zig build midgc-profile` |
 | GC allocation and Context lifecycle cost? | `zig build gc-profile` |

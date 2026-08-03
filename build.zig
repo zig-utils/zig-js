@@ -1693,6 +1693,8 @@ pub fn build(b: *std.Build) void {
     const performance_attribution_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/performance-attribution.ts", "--self-test" });
     const exact_parent_regression_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/exact-parent-regression.ts", "--self-test" });
     const generation_harness_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-generation-benchmark.ts", "--self-test" });
+    const wasm_simd_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-simd-benchmark.ts", "--self-test" });
+    const wasm_threads_benchmark_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts", "--self-test" });
     const object_churn_gc_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/object-churn-gc-profile.ts", "--self-test" });
     const independent_object_churn_profile_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/independent-object-churn-profile.ts", "--self-test" });
     const shared_object_churn_ab_test = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/shared-object-churn-ab.ts", "--self-test" });
@@ -1705,6 +1707,8 @@ pub fn build(b: *std.Build) void {
     comparison_harness_test_step.dependOn(&performance_attribution_test.step);
     comparison_harness_test_step.dependOn(&exact_parent_regression_test.step);
     comparison_harness_test_step.dependOn(&generation_harness_test.step);
+    comparison_harness_test_step.dependOn(&wasm_simd_benchmark_test.step);
+    comparison_harness_test_step.dependOn(&wasm_threads_benchmark_test.step);
     comparison_harness_test_step.dependOn(&object_churn_gc_profile_test.step);
     comparison_harness_test_step.dependOn(&independent_object_churn_profile_test.step);
     comparison_harness_test_step.dependOn(&shared_object_churn_ab_test.step);
@@ -1774,7 +1778,7 @@ pub fn build(b: *std.Build) void {
         }
         representative_step.dependOn(&run_representative.step);
 
-        const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "python3", "tools/wasm-threads-benchmark.py" });
+        const run_wasm_threads_benchmark = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-threads-benchmark.ts" });
         run_wasm_threads_benchmark.addArtifactArg(comparison_zig_js);
         run_wasm_threads_benchmark.addArtifactArg(comparison_jsc);
         if (b.option(usize, "wasm-threads-benchmark-samples", "WebAssembly Threads samples per matrix row")) |samples| {

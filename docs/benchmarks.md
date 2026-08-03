@@ -10,7 +10,7 @@ zig-js keeps six benchmark families separate:
 - `zig build bench` compares the bytecode VM with the tree-walking interpreter and prints a small no-shared-state thread-scaling table.
 - `zig build benchmark-comparison` directly compares GC-enabled zig-js and JavaScriptCore in direct single-context, independent-context steady-state, and independent-context cold-lifecycle modes. It reports zig-js shared-realm no-GIL scaling in a separate capability panel.
 - `zig build representative-benchmark` runs the versioned, dependency-free application-surface matrix from `docs/.data/representative-benchmark-matrix-v1.json`. Implemented rows and explicitly deferred families remain visible separately; quick mode is validation only.
-- `python3 tools/wasm-simd-benchmark.py` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
+- `home-tool run tools/wasm-simd-benchmark.ts` compares representative integer, float, shuffle, and memory Wasm SIMD kernels with scalar exports from the same module and with the system JavaScriptCore, at one and eight independent warmed contexts.
 - `zig build gc-compaction-benchmark` compares identical fragmented heaps before and after explicit compaction, preserving retained backing, pause, fixed-point, and post-action checksum evidence.
 - `zig build gc-generation-benchmark` compares moving and non-moving age-one and age-three nursery policies across ephemeral, mixed-survival, high-survival, and shared no-GIL workloads with exact cumulative generation telemetry.
 
@@ -151,7 +151,7 @@ Reproduce the dated matrix on macOS after building the two runners:
 
 ```sh
 zig build benchmark-comparison-bin -Doptimize=ReleaseFast
-python3 tools/wasm-simd-benchmark.py --samples 7 --lanes 8 \
+home-tool run tools/wasm-simd-benchmark.ts --samples 7 --lanes 8 \
   --raw-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.tsv \
   --markdown-out docs/.data/wasm-simd-benchmark-YYYY-MM-DD.md
 ```

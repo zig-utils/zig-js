@@ -99,7 +99,7 @@ diagnostic rather than silently degrading.
   **threaded-context** rather than the portable one.
 - Benchmarks for both live under
   [`docs/benchmarks.md`](../../../docs/benchmarks.md) —
-  `tools/wasm-simd-benchmark.py` and `tools/wasm-threads-benchmark.py` — and
+  `tools/wasm-simd-benchmark.ts` and `tools/wasm-threads-benchmark.ts` — and
   publish through the same evidence rules as every other perf claim.
 
 ## 6. Reporting
