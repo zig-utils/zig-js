@@ -51,8 +51,8 @@ actually selected.
 | Segmentation | `unicode_grapheme_data.zig` |
 
 These are **generated** by the `tools/gen_*` scripts (`gen_cldr_*.ts`,
-`gen_iana_offsets.ts`, `gen_dn.py`, `gen_localeinfo.py`, `gen_units.py`,
-`gen_weekdata.py`, `gen_numbering.ts`, `gen_grapheme.py`). TypeScript generators
+`gen_iana_offsets.ts`, `gen_dn.ts`, `gen_localeinfo.ts`, `gen_units.ts`,
+`gen_weekdata.ts`, `gen_numbering.ts`, `gen_grapheme.py`). TypeScript generators
 run through `~/Code/Home/lang/zig-out/bin/home-tool`. Regenerate the tables from
 an upstream bump — never hand-edit the `.zig` tables.
 

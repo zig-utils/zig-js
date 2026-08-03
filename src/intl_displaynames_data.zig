@@ -1,5 +1,5 @@
 //! GENERATED from CLDR en JSON (cldr-localenames-full + cldr-numbers-full).
-//! Do not edit by hand; see tools/gen_dn.py. English display names for
+//! Do not edit by hand; see tools/gen_dn.ts. English display names for
 //! Intl.DisplayNames (language/region/script/currency), sorted by code.
 
 pub const Entry = struct { code: []const u8, name: []const u8 };

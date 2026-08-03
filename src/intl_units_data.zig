@@ -1,4 +1,4 @@
-//! GENERATED from CLDR en units.json (see tools/gen_units.py). English
+//! GENERATED from CLDR en units.json (see tools/gen_units.ts). English
 //! unit patterns for Intl.NumberFormat style:"unit": the text that follows
 //! the number, per width (long/short/narrow) and plural (one/other), plus
 //! the per-unit denominator suffix for compound X-per-Y composition.

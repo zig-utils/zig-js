@@ -1,4 +1,4 @@
-//! GENERATED from CLDR supplemental weekData.json (tools/gen_weekdata.py).
+//! GENERATED from CLDR supplemental weekData.json (tools/gen_weekdata.ts).
 //! Per-region first day of week and weekend days for Intl.Locale.getWeekInfo.
 
 pub const First = struct { region: []const u8, day: u8 };

@@ -1,5 +1,5 @@
 //! GENERATED from CLDR calendarPreferenceData.json + timeData.json
-//! (tools/gen_localeinfo.py). Region preferences for Intl.Locale
+//! (tools/gen_localeinfo.ts). Region preferences for Intl.Locale
 //! getCalendars (preferred calendar list) and getHourCycles.
 
 pub const Cals = struct { region: []const u8, cals: []const []const u8 };
