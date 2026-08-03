@@ -65,8 +65,8 @@ relabeling them as acceptable:
 Those entries have `migration_required` status. They remain visible and gated,
 but are not permanent exceptions to the owned-dependency target.
 
-The tool migration inventory classifies 70 executable tools: 43 `.py`, 1
-`.mjs`, 26 `.ts`, and no `.sh`; shared TypeScript modules are counted separately
+The tool migration inventory classifies 70 executable tools: 42 `.py`, 1
+`.mjs`, 27 `.ts`, and no `.sh`; shared TypeScript modules are counted separately
 by the dependency gate. The documentation link gate has already moved to
 the tested in-tree `docs-link-check` Zig executable and is no longer part of
 that migration set. Each remaining record identifies its role, inputs, outputs,
@@ -94,3 +94,13 @@ zig build dependency-audit
 
 Adding an edge without a complete classification is intentionally impossible to
 land through the required CI gate.
+
+## Frozen decoder oracle
+
+The single-byte `TextDecoder` tables are generated from
+[`encoding-singlebyte-oracle-v1.json`](.data/encoding-singlebyte-oracle-v1.json).
+That versioned artifact freezes the 26 accepted tables and 183 accepted labels
+that were originally sampled from Node/ICU at source commit `5125308aa`. The
+generator no longer executes a host Node binary or downloads moving WHATWG
+inputs. Changing decoder behavior now requires reviewing a new oracle version
+and its generated Zig diff together.
