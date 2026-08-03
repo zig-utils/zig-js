@@ -1878,7 +1878,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "js", .module = bench_js_mod }},
         }),
     });
-    const run_gc_compaction = b.addSystemCommand(&.{ "python3", "tools/gc-compaction-benchmark.py" });
+    const run_gc_compaction = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/gc-compaction-benchmark.ts" });
     run_gc_compaction.addArtifactArg(gc_compaction_runner);
     if (b.option(usize, "gc-compaction-benchmark-samples", "GC compaction samples per mode")) |samples|
         run_gc_compaction.addArgs(&.{ "--samples", b.fmt("{d}", .{samples}) });
@@ -1892,7 +1892,7 @@ pub fn build(b: *std.Build) void {
     gc_compaction_step.dependOn(&run_gc_compaction.step);
 
     // Reproducible age/trigger-policy evidence for the generational nursery.
-    // The Python driver alternates policy order, validates exact checksums and
+    // The Home TypeScript driver alternates policy order, validates exact checksums and
     // byte conservation, and can preserve the raw TSV plus generated report.
     const gc_generation_runner = b.addExecutable(.{
         .name = "gc-generation-benchmark-runner",

@@ -168,7 +168,7 @@
         "tools/benchmark-comparison.ts",
         "docs/.data/benchmark-comparison-2026-07-22-property-osr.md",
         "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv",
-        "tools/gc-compaction-benchmark.py",
+        "tools/gc-compaction-benchmark.ts",
         "docs/.data/wasm-conformance-matrix.json",
         "docs/.data/wasm-simd-benchmark-2026-07-18.md",
         "docs/.data/wasm-simd-benchmark-2026-07-18.tsv",
