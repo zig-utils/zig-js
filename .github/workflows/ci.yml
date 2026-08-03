@@ -74,6 +74,7 @@ jobs:
           # PR-249 corpus hygiene: reject inventory/disposition drift and verify
           # the bounded terminal-premise probes against the installed runner.
           - name: threads-reference-audit
+            home_tool: true
             cmd: zig build threads-reference-audit threads-reference-probes
           # Bounded witness for the #430 execution inventory. The complete
           # artifact is a deliberate hours-long reproduction; this keeps the
@@ -85,6 +86,7 @@ jobs:
               jq -e '.schema_version == 2 and .build_mode == "Debug" and .summary.cases == 2 and .summary.failed == 0 and .mode == "serialized" and all(.cases[]; has("case") and has("mode") and has("ms") and has("result") and has("optimizer_publications") and has("optimizer_invalidations"))' "$RUNNER_TEMP/pr249-exec.json"
               "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/pr249-terminal-execution.ts --check
           - name: benchmark-comparison-harness
+            home_tool: true
             cmd: zig build benchmark-comparison-test
           - name: dependency-audit
             cmd: zig build dependency-audit
@@ -178,6 +180,7 @@ jobs:
           # Keep the small production-module development roots from silently
           # drifting while the sharded full root suite remains authoritative.
           - name: focused-engine-tests
+            home_tool: true
             cmd: zig build test-jit test-vm test-concurrency gc-relocation-inventory-check optimizer-release-inventory-check
           # The inventories are executable contracts: parser regressions,
           # exported-but-uninventoried shims, stale statuses, and broken Home
