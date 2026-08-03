@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-07-28",
   "inputs": {
-    ".github/workflows/ci.yml": "8160ad7a7827dd4b2ee6cb5d43c7cd63676aa0ce1fdd2475600a02e8263d4017",
+    ".github/workflows/ci.yml": "deecbd4883176c1e0882f3a623b9285436e3a0aa0ddb7a8f54e5ab2fc7648be0",
     "docs/.data/benchmark-comparison-2026-07-22-property-osr.md": "06ce734af1f10dba66e206c47a50b4dc475256a4f2dd4519d7d0f1e82993ff0e",
     "docs/.data/benchmark-comparison-2026-07-22-property-osr.tsv": "291096a97ecf923fb09e244257eca2b5d0a14d4fb117885fed832f25829bae3b"
   },
@@ -15,6 +15,7 @@
         ],
         "jobs": [
           "benchmark-comparison-harness",
+          "dependency-audit",
           "focused-engine-tests",
           "releasesafe-threadfuzz",
           "threadfuzz",
@@ -102,7 +103,7 @@
   "summary": {
     "benchmark_samples": 1540,
     "correctness_gated_platforms": 1,
-    "linux_gate_matrix_entries": 37,
+    "linux_gate_matrix_entries": 38,
     "performance_published_platforms": 1,
     "sanitizer_gated_platforms": 1
   },

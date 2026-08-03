@@ -349,7 +349,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: dc257693afc9ed674dd757e9cfa6ea0b942487e5
+          ref: 351dc2c59f80effa286bffc00d3b0d1743c10230
       - uses: pantry-pm/pantry/packages/action@9f797da1ed073df7839cb6a9a7db6181ba33f0b7
         with:
           packages: zig@0.17.0-dev

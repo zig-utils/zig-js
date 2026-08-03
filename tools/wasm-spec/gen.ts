@@ -1,24 +1,44 @@
-#!/usr/bin/env bun
-//! tools/wasm-spec-gen.mjs — convert the pinned upstream WebAssembly spec
+//! tools/wasm-spec/gen.ts — convert the pinned upstream WebAssembly spec
 //! testsuite (wg-1.0, pure MVP) into the packed artifacts consumed by
 //! conformance/wasm_spec.zig.
 //!
 //! Usage:
-//!   bun tools/wasm-spec-gen.mjs <spec-test-core-dir> <out-dir>
+//!   home-tool run tools/wasm-spec/gen.ts <spec-test-core-dir> <out-dir> <wat2wasm>
 //!
 //! Inputs : <spec-test-core-dir>/*.wast  (from WebAssembly/spec at the pin
 //!          recorded in the manifest; fetch with tools/wasm-spec-fetch.sh)
 //! Outputs: <out-dir>/manifest.json      (directives with binary offsets)
 //!          <out-dir>/modules.bin        (concatenated wasm binaries)
 //!
-//! `wabt` (npm, Emscripten build) is used exactly once per module to turn
+//! The checksum-pinned WABT `wat2wasm` executable is used once per module to turn
 //! WebAssembly text into binary; every semantic decision (which directive,
 //! which bytes, which expected value) is made here and recorded in the
 //! manifest, so the Zig runner needs no text tooling at all.
 
-import { readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, basename } from "node:path";
-import wabtInit from "wabt";
+import { readHex, run, writeHex, writeText } from "../lib/home";
+
+const join = (left, right) => left.replace(/\/$/, "") + "/" + right;
+const basename = (path) => path.slice(path.lastIndexOf("/") + 1);
+const bytesFromHex = (hex) => {
+  const bytes = [];
+  for (let index = 0; index < hex.length; index += 2) bytes.push(Number.parseInt(hex.slice(index, index + 2), 16));
+  return bytes;
+};
+const hexFromBytes = (bytes) => bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+const latin1FromHex = (hex) => bytesFromHex(hex).map((byte) => String.fromCharCode(byte)).join("");
+const utf8String = (bytes) => {
+  let out = "";
+  for (let index = 0; index < bytes.length;) {
+    const first = bytes[index++];
+    let point = first;
+    if ((first & 0xe0) === 0xc0) point = ((first & 0x1f) << 6) | (bytes[index++] & 0x3f);
+    else if ((first & 0xf0) === 0xe0) point = ((first & 0x0f) << 12) | ((bytes[index++] & 0x3f) << 6) | (bytes[index++] & 0x3f);
+    else if ((first & 0xf8) === 0xf0) point = ((first & 7) << 18) | ((bytes[index++] & 0x3f) << 12) | ((bytes[index++] & 0x3f) << 6) | (bytes[index++] & 0x3f);
+    if (point <= 0xffff) out += String.fromCharCode(point);
+    else { point -= 0x10000; out += String.fromCharCode(0xd800 | (point >> 10), 0xdc00 | (point & 0x3ff)); }
+  }
+  return out;
+};
 
 const PIN = {
   repo: "WebAssembly/spec",
@@ -135,7 +155,7 @@ function decodeWastString(raw) {
     else if (e === "'") out.push(0x27);
     else out.push(parseInt(e + raw[++i], 16));
   }
-  return Buffer.from(out);
+  return out;
 }
 
 // Print an s-expr AST back to wat source (strings re-escaped as bytes).
@@ -347,23 +367,24 @@ function parseInvoke(node, file) {
   if (node.list[idx] && node.list[idx].atom && node.list[idx].atom.startsWith("$")) key = node.list[idx++].atom;
   const fieldNode = node.list[idx++];
   if (!fieldNode || fieldNode.str === undefined) throw new Error(`${file}:${node.line}: ${head} needs a field name`);
-  const name = Buffer.from(decodeWastString(fieldNode.str)).toString("utf8");
+  const name = utf8String(decodeWastString(fieldNode.str));
   const args = node.list.slice(idx).map((c) => parseConst(c, file));
   return { kind: head, key, name, args };
 }
 
 // ---------------------------------------------------------------- main
 
-async function main() {
-  const [srcDir, outDir] = process.argv.slice(2);
-  if (!srcDir || !outDir) {
-    console.error("usage: bun tools/wasm-spec-gen.mjs <spec-test-core-dir> <out-dir>");
-    process.exit(2);
+function main() {
+  const [srcDir, outDir, wat2wasm] = process.argv.slice(2);
+  if (!srcDir || !outDir || !wat2wasm) {
+    throw new Error("usage: home-tool run tools/wasm-spec/gen.ts <spec-test-core-dir> <out-dir> <wat2wasm>");
   }
-  const wabt = await wabtInit();
-  mkdirSync(outDir, { recursive: true });
+  const mkdir = run(["mkdir", "-p", outDir]);
+  if (mkdir.exitCode !== 0) throw new Error(`cannot create ${outDir}: ${mkdir.stderr.trim()}`);
 
-  const files = readdirSync(srcDir).filter((f) => f.endsWith(".wast")).sort();
+  const listed = run(["find", srcDir, "-maxdepth", "1", "-type", "f", "-name", "*.wast", "-print"]);
+  if (listed.exitCode !== 0) throw new Error(`cannot list ${srcDir}: ${listed.stderr.trim()}`);
+  const files = listed.stdout.split("\n").filter(Boolean).map(basename).sort();
   const manifest = { format: 1, pin: PIN, modules_bin: "modules.bin", files: [] };
   const binParts = [];
   let binOffset = 0;
@@ -374,6 +395,15 @@ async function main() {
     binParts.push(bytes);
     binOffset += bytes.length;
     return [off, bytes.length];
+  }
+
+  const temporaryWat = join(outDir, ".module.wat");
+  const temporaryWasm = join(outDir, ".module.wasm");
+  function compileWat(file, wat) {
+    writeText(temporaryWat, wat);
+    const converted = run([wat2wasm, temporaryWat, "--no-check", "-o", temporaryWasm]);
+    if (converted.exitCode !== 0) throw new Error(converted.stderr.trim() || converted.stdout.trim() || "wat2wasm failed");
+    return bytesFromHex(readHex(temporaryWasm));
   }
 
   // Compile a module node to bytes, or throw a tagged error.
@@ -392,26 +422,22 @@ async function main() {
         if (s.str === undefined) throw new Error(`${file}:${s.line}: ${kind} needs strings`);
         return decodeWastString(s.str);
       });
-      if (kind === "binary") return { key, bytes: Buffer.concat(parts), wasText: false };
-      const watText = Buffer.concat(parts).toString("utf8");
-      const m = wabt.parseWat(file, watText, { features: {} });
-      m.resolveNames();
-      return { key, bytes: Buffer.from(m.toBinary({ no_check: true }).buffer), wasText: true };
+      const bytes = [].concat(...parts);
+      if (kind === "binary") return { key, bytes, wasText: false };
+      return { key, bytes: compileWat(file, utf8String(bytes)), wasText: true };
     }
     const wat = "(" + rest.map((n) => printWat(n)).join(" ") + ")";
     const full = "(module " + wat.slice(1);
-    let m;
     try {
-      m = wabt.parseWat(file, full, { features: {} });
-      m.resolveNames();
+      return { key, bytes: compileWat(file, full), wasText: true };
     } catch (e) {
-      throw new Error(`${file}:${node.line}: parseWat failed (${e.message.split("\n")[1]?.trim() ?? e.message}) in generated wat: ${full.slice(0, 160)}`);
+      const detail = e.message.split("\n")[0].trim().replace(temporaryWat, file);
+      throw new Error(`${file}:${node.line}: parseWat failed (${detail}) in generated wat: ${full.slice(0, 160)}`);
     }
-    return { key, bytes: Buffer.from(m.toBinary({ no_check: true }).buffer), wasText: true };
   }
 
   for (const file of files) {
-    const src = readFileSync(join(srcDir, file), "latin1");
+    const src = latin1FromHex(readHex(join(srcDir, file)));
     let script = parseScript(src, file);
     // "Inline module" format (inline-module.wast): bare top-level fields
     // with no directives are equivalent to one anonymous (module ...).
@@ -442,7 +468,7 @@ async function main() {
 
       if (head === "register") {
         // (register "name" $mod?)
-        const name = Buffer.from(decodeWastString(d.list[1].str)).toString("utf8");
+        const name = utf8String(decodeWastString(d.list[1].str));
         const key = d.list[2] ? d.list[2].atom : null;
         directives.push({ t: "register", line, name, key });
         continue;
@@ -476,7 +502,7 @@ async function main() {
       if (head === "assert_trap" || head === "assert_exhaustion") {
         const inner = d.list[1];
         const text = d.list[2] && d.list[2].str !== undefined
-          ? Buffer.from(decodeWastString(d.list[2].str)).toString("utf8") : "";
+          ? utf8String(decodeWastString(d.list[2].str)) : "";
         if (inner.list && atomOf(inner.list[0]) === "invoke") {
           directives.push({ t: head, line, invoke: parseInvoke(inner, file), text });
         } else if (inner.list && atomOf(inner.list[0]) === "module") {
@@ -498,7 +524,7 @@ async function main() {
       if (head === "assert_malformed") {
         const inner = d.list[1];
         const text = d.list[2] && d.list[2].str !== undefined
-          ? Buffer.from(decodeWastString(d.list[2].str)).toString("utf8") : "";
+          ? utf8String(decodeWastString(d.list[2].str)) : "";
         if (!inner.list || atomOf(inner.list[0]) !== "module") throw new Error(`${file}:${line}: unsupported assert_malformed payload`);
         const isQuote = inner.list.some((x) => x.atom === "quote");
         try {
@@ -523,7 +549,7 @@ async function main() {
       if (head === "assert_invalid" || head === "assert_unlinkable") {
         const inner = d.list[1];
         const text = d.list[2] && d.list[2].str !== undefined
-          ? Buffer.from(decodeWastString(d.list[2].str)).toString("utf8") : "";
+          ? utf8String(decodeWastString(d.list[2].str)) : "";
         if (!inner.list || atomOf(inner.list[0]) !== "module") throw new Error(`${file}:${line}: unsupported ${head} payload`);
         try {
           const mod = moduleBytes(inner, file);
@@ -541,9 +567,10 @@ async function main() {
     manifest.files.push({ file, directives });
   }
 
-  writeFileSync(join(outDir, "modules.bin"), Buffer.concat(binParts));
-  writeFileSync(join(outDir, "manifest.json"), JSON.stringify(manifest, null, 1) + "\n");
+  writeHex(join(outDir, "modules.bin"), binParts.map(hexFromBytes).join(""));
+  writeText(join(outDir, "manifest.json"), JSON.stringify(manifest, null, 1) + "\n");
+  run(["rm", "-f", temporaryWat, temporaryWasm]);
   console.log(`wasm-spec-gen: ${files.length} files, ${stats.modules} modules, ${stats.asserts} testable assertions, ${stats.malformed_text} wat-text skips, ${stats.gen_skips} generator skips, ${binOffset} binary bytes`);
 }
 
-await main();
+main();

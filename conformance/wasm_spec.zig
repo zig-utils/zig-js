@@ -54,7 +54,7 @@ const max_manifest_bytes: usize = 64 << 20;
 const max_modules_bytes: usize = 64 << 20;
 
 // ---------------------------------------------------------------------------
-// Manifest model (packed artifacts produced by tools/wasm-spec/gen.mjs).
+// Manifest model (packed artifacts produced by tools/wasm-spec/gen.ts).
 // ---------------------------------------------------------------------------
 
 const ConstVal = struct {

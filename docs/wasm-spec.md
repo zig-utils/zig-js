@@ -11,7 +11,8 @@ below).
 
 - Upstream: `WebAssembly/spec` tag `wg-1.0` (pure MVP surface), commit
   `977f97014c962f7bd1291fcc6d28b41a924882bf`.
-- Converter: npm `wabt` via `tools/wasm-spec/gen.mjs` (bun). The generator
+- Converter: checksum-pinned WABT 1.0.39 `wat2wasm` via Home-executed
+  `tools/wasm-spec/gen.ts`. The generator
   normalizes modernized elem/data text forms and packs every binary module
   into `tests/wasm/spec/modules.bin` with a `manifest.json` directive index.
 
@@ -55,7 +56,7 @@ All 479 skips are classified — there are no hidden exclusions:
 | ----: | --- | --- |
 | 430 | `assert_malformed` quote/text modules | The wat text format is outside the binary runtime; a binary-only engine cannot express these. |
 | 40 | NaN payload/sign expectations | `SetToNaN` is implementation-defined at the JS Number boundary; the argument's NaN pattern cannot cross the JS API, so the expectation is unobservable. The eval harness in [wasm.md](wasm.md) scores these exactly through a test-only bit-exact path. |
-| 4 | generator rejects | npm wabt itself cannot parse these generated fragments (`data.wast:315`, `data.wast:323`, `elem.wast:281`, `elem.wast:289`). |
+| 4 | generator rejects | WABT itself cannot parse these generated fragments (`data.wast:315`, `data.wast:323`, `elem.wast:281`, `elem.wast:289`). |
 | 5 | Core 2.0 policy | The engine deliberately implements Core 2.0 semantics (matching V8): transactional-instantiation visibility at `linking.wast:236/248/342/354` and `br_table` polymorphic-bottom typing at `unreached-invalid.wast:538`. Each is locked by a dedicated exec/validate unit test. |
 
 ### Error-text aliases
@@ -74,11 +75,17 @@ directives surface as `RuntimeError`, matching V8.
 Only needed when the pin changes:
 
 ```sh
-~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-spec/fetch.ts /tmp/spec-src
-(cd tools/wasm-spec && bun install)                # install npm wabt
-bun tools/wasm-spec/gen.mjs /tmp/spec-src/test/core tests/wasm/spec
+~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-spec/fetch.ts /tmp/spec-src /tmp/wabt
+~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-spec/gen.ts \
+  /tmp/spec-src/test/core tests/wasm/spec /tmp/wabt/bin/wat2wasm
 zig build wasm-spec -Dwasm-spec-out=tests/wasm/spec/inventory.json
 ```
+
+The fetcher verifies the release SHA-256 before extraction and verifies the
+converter reports version 1.0.39. The upstream macOS archive carries a
+Homebrew OpenSSL install name; on Pantry-managed hosts the fetcher relocates
+that install name to the installed Pantry `libcrypto.3.dylib` before the
+version check.
 
 Commit all three regenerated files (`manifest.json`, `modules.bin`,
 `inventory.json`) together. The checked-in artifacts are the source of truth;

@@ -51,7 +51,7 @@
       "status": "allowed",
       "scope": "repository TypeScript and JavaScript tooling",
       "locator": "$HOME/Code/Home/lang/zig-out/bin/home-tool or -Dhome-tool/HOME_TOOL override",
-      "pin": "home-lang/home@dc257693afc9ed674dd757e9cfa6ea0b942487e5; local checkout may be selected explicitly",
+      "pin": "home-lang/home@351dc2c59f80effa286bffc00d3b0d1743c10230; local checkout may be selected explicitly",
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Home compiles TypeScript and executes the emitted JavaScript with zig-js by default; the runner is never linked into libzig-js."
@@ -190,7 +190,7 @@
     "owned_sibling_checkouts": [
       { "repository": "zig-utils/zig-regex", "path": "zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 6, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 6, "edge": "zig-gc" },
-      { "repository": "home-lang/home", "path": "Home/lang", "revision": "dc257693afc9ed674dd757e9cfa6ea0b942487e5", "occurrences": 1, "edge": "home-tool-runtime" },
+      { "repository": "home-lang/home", "path": "Home/lang", "revision": "351dc2c59f80effa286bffc00d3b0d1743c10230", "occurrences": 1, "edge": "home-tool-runtime" },
       { "repository": "zig-utils/zig-regex", "path": "Libraries/zig-regex", "revision": "2de46683b948ec895e5fa9a9e7e4c384aceccdfe", "occurrences": 1, "edge": "zig-regex" },
       { "repository": "zig-utils/zig-gc", "path": "Libraries/zig-gc", "revision": "98edfaa4aa1b2676680d95801d14118f8ed84156", "occurrences": 1, "edge": "zig-gc" },
       { "repository": "stacksjs/bunpress", "path": "Tools/bunpress", "revision": "1262895355142cb57ae7850dec7bf31cc5f5999d", "occurrences": 1, "edge": "bunpress-docs-toolchain" },
@@ -219,8 +219,8 @@
     ],
     "script_extensions": [
       { "extension": ".py", "count": 42, "edge": "python-tooling" },
-      { "extension": ".mjs", "count": 1, "edge": "javascript-shell-tooling" },
-      { "extension": ".ts", "count": 28, "edge": "home-tool-runtime" },
+      { "extension": ".mjs", "count": 0, "edge": "javascript-shell-tooling" },
+      { "extension": ".ts", "count": 29, "edge": "home-tool-runtime" },
       { "extension": ".sh", "count": 0, "edge": "javascript-shell-tooling" }
     ],
     "network_capable_scripts": [
@@ -232,8 +232,7 @@
       { "path": "wasm-spec-wg3", "url": "https://github.com/WebAssembly/spec.git", "gitlink": "9d36019973201a19f9c9ebb0f10828b2fe2374aa", "edge": "pinned-conformance-corpora" }
     ],
     "package_dependencies": [
-      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:1262895355142cb57ae7850dec7bf31cc5f5999d", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" },
-      { "manifest": "tools/wasm-spec/package.json", "section": "dependencies", "name": "wabt", "version": "^1.0.39", "lockfile": "tools/wasm-spec/bun.lock", "locked_version": "1.0.39", "integrity": "sha512-ba+dRL/75VQQY7RkU/CgriGbkoWAfS8TDyUlJfJhJ8KhtXgMl5dhNvoPNUcQ9IWRhW8u41glMSuZeTvsYq2rRg==", "edge": "pinned-wasm-converters" }
+      { "manifest": "package.json", "section": "devDependencies", "name": "@stacksjs/bunpress", "version": "file:../../Tools/bunpress/packages/bunpress", "lockfile": "bun.lock", "locked_version": "file:../../Tools/bunpress/packages/bunpress", "integrity": "owned-revision:1262895355142cb57ae7850dec7bf31cc5f5999d", "source_repository": "stacksjs/bunpress", "edge": "bunpress-docs-toolchain" }
     ],
     "package_scripts": [
       { "manifest": "package.json", "name": "docs:dev", "command": "bun ../../Tools/bunpress/packages/bunpress/bin/cli.ts dev", "edge": "bunpress-docs-toolchain" },
