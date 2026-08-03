@@ -16933,6 +16933,81 @@ test "parallel_js: delete and descriptor changes retire only affected artifacts"
     try std.testing.expect(stats.shape_survivor_artifacts >= 7);
 }
 
+test "parallel_js: optimized reads race delete redefine and prototype replacement" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    if (!jit.supported or builtin.cpu.arch != .aarch64) return error.SkipZigTest;
+
+    const ctx = try Context.createWithTestingOptions(std.testing.allocator, .{
+        .enable_threads = true,
+        .enable_gc = true,
+        .enable_jit = true,
+        .parallel_gc = true,
+        .parallel_js = true,
+    });
+    defer ctx.destroy();
+
+    const result = ctx.evaluate(
+        \\const deleteTarget = { value: 1, deleteMarker: 0 };
+        \\const redefineTarget = { value: 2, redefineMarker: 0 };
+        \\const protoA = { inherited: 3 };
+        \\const protoB = { inherited: 4 };
+        \\const protoTarget = Object.create(protoA);
+        \\const gate = { ready: 0, stop: 0 };
+        \\function deleteRead(o) { return o.value; }
+        \\function redefineRead(o) { return o.value; }
+        \\function inheritedRead(o) { return o.inherited; }
+        \\function six() { return 6; }
+        \\for (let warm = 0; warm < 64; ++warm) {
+        \\  deleteRead(deleteTarget);
+        \\  redefineRead(redefineTarget);
+        \\  inheritedRead(protoTarget);
+        \\}
+        \\const reader = new Thread(() => {
+        \\  let checks = 0;
+        \\  Atomics.store(gate, "ready", 1);
+        \\  while (Atomics.load(gate, "stop") === 0) {
+        \\    const deleted = deleteRead(deleteTarget);
+        \\    if (deleted !== undefined && deleted !== 1)
+        \\      throw new Error("stale delete read: " + deleted);
+        \\    const redefined = redefineRead(redefineTarget);
+        \\    if (redefined !== undefined && redefined !== 2 && redefined !== 6)
+        \\      throw new Error("stale redefine read: " + redefined);
+        \\    const inherited = inheritedRead(protoTarget);
+        \\    if (inherited !== 3 && inherited !== 4)
+        \\      throw new Error("stale prototype read: " + inherited);
+        \\    ++checks;
+        \\  }
+        \\  return checks;
+        \\});
+        \\while (Atomics.load(gate, "ready") === 0) {}
+        \\for (let round = 0; round < 64; ++round) {
+        \\  delete deleteTarget.value;
+        \\  deleteTarget.value = 1;
+        \\  Object.defineProperty(redefineTarget, "value", {
+        \\    get: six, enumerable: true, configurable: true
+        \\  });
+        \\  Object.defineProperty(redefineTarget, "value", {
+        \\    value: 2, writable: true, enumerable: true, configurable: true
+        \\  });
+        \\  Object.setPrototypeOf(protoTarget, (round & 1) === 0 ? protoB : protoA);
+        \\}
+        \\Atomics.store(gate, "stop", 1);
+        \\reader.join();
+    ) catch |err| {
+        if (ctx.exception) |exception| {
+            if (exception.isObject()) {
+                const message = exception.asObj().getOwn("message") orelse Value.undef();
+                if (message.isString()) std.debug.print("property mutation race: {s}: {s}\n", .{
+                    exception.asObj().errorName(), message.asStr(),
+                });
+            }
+        }
+        return err;
+    };
+    try std.testing.expect(result.isNumber());
+    try std.testing.expect(result.asNum() > 0);
+}
+
 test "inherited value mutation preserves optimized artifacts" {
     try verifyInheritedValueMutation(.{
         .enable_gc = true,
