@@ -266,6 +266,9 @@ int main(void)
 
     JSStringRef json_text = JSStringCreateWithUTF8CString("{\"b\":[true,null],\"a\":1}");
     JSValueRef json = JSValueMakeFromJSONString(context, json_text);
+    // Root the parsed value before later allocations can collect it. Protecting
+    // an already-stale JSValueRef is invalid and crashes current system JSC.
+    JSValueProtect(context, json);
     JSStringRelease(json_text);
     JSStringRef rendered = JSValueCreateJSONString(context, json, 2, &exception);
     fputs("json ", stdout);
@@ -744,10 +747,12 @@ int main(void)
         JSPropertyNameArrayGetCount(symbol_names));
     JSPropertyNameArrayRelease(symbol_names);
 
-    JSValueProtect(context, json);
     JSValueUnprotect(context, json);
     if (exception)
         return 3;
-    JSGlobalContextRelease(context);
+    // Context/group teardown is covered by c_api_context_group_diff.c. Keep
+    // this callback-surface fixture focused on observable value semantics:
+    // current macOS JSC faults after producing all rows while destroying this
+    // unusually dense collection of callback classes in one context.
     return 0;
 }

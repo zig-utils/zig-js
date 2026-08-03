@@ -28,6 +28,26 @@ export function run(argv: string[]): { exitCode: number | null; stdout: string; 
   return Home.spawnSync(argv);
 }
 
+export function checked(argv: string[], phase: string): string {
+  const result = run(argv);
+  if (result.exitCode !== 0) throw new Error(`${phase}: ${result.stderr.trim() || result.stdout.trim() || `exit ${result.exitCode}`}`);
+  return result.stdout;
+}
+
+export function sha256File(path: string): string {
+  return checked(["shasum", "-a", "256", path], `cannot hash ${path}`).trim().split(/\s+/)[0];
+}
+
+export function temporaryDirectory(prefix: string): string {
+  if (!/^[a-z0-9-]+$/.test(prefix)) throw new Error(`invalid temporary-directory prefix: ${prefix}`);
+  return checked(["mktemp", "-d", `/tmp/${prefix}.XXXXXX`], "create temporary directory").trim();
+}
+
+export function removeTemporaryDirectory(path: string): void {
+  if (!path.startsWith("/tmp/zig-js-") || path.includes("..") || path.includes("\n")) throw new Error(`refusing unsafe temporary directory: ${path}`);
+  checked(["rm", "-rf", path], `remove temporary directory ${path}`);
+}
+
 export function utf8Bytes(text: string): number[] {
   const bytes: number[] = [];
   for (let index = 0; index < text.length; index += 1) {

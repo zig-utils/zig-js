@@ -18,7 +18,7 @@ library exports 117 public functions plus 26 zig-js extensions.
 
 Run `zig build c-api-audit` after changing `src/c_api.zig`, the headers, or the
 inventory. On a machine with the pinned SDK, pass its root to
-`tools/verify-c-api.py --sdk-root <path>` to detect upstream header drift.
+`home-tool run tools/verify-c-api.ts --sdk-root <path>` to detect upstream header drift.
 `zig build test-c-api` additionally compiles, links, and runs C and C++ hosts.
 On macOS, `zig build c-api-jsc-diff` verifies those hashes, compiles
 the value/class and context-group fixtures against both zig-js and the system

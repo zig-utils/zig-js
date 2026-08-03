@@ -37,7 +37,7 @@
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/platform-release-matrix.ts*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-conformance-matrix.ts*)",
       "Bash(python3 tools/threads-reference-audit.py*)",
-      "Bash(python3 tools/verify-c-api.py*)",
+      "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts*)",
       "Bash(python3 tools/verify-objc-api.py*)",
       "Bash(python3 tools/verify-abi-profile.py*)",
       "Bash(python3 -m unittest tools/*)",

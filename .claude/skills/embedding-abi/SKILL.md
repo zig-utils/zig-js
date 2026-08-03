@@ -73,7 +73,7 @@ Differential checks against the real system JavaScriptCore (macOS):
 zig build c-api-jsc-diff
 zig build objc-api-jsc-diff
 zig build wasm-exception-jsc-diff
-python3 tools/verify-c-api.py
+~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts
 python3 tools/verify-objc-api.py
 python3 tools/verify-abi-profile.py
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/private-abi-tsan.ts

@@ -173,8 +173,10 @@ pub fn build(b: *std.Build) void {
     // Pinned public-C declaration/export drift gate plus small real-host ABI
     // checks. These stay separate from the world-sized Zig unit-test artifact.
     const c_api_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/verify-c-api.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/verify-c-api.ts",
     });
     const c_api_audit_step = b.step("c-api-audit", "Verify pinned JSC declarations, inventory, and Zig exports");
     c_api_audit_step.dependOn(&c_api_audit_cmd.step);
@@ -1157,7 +1159,7 @@ pub fn build(b: *std.Build) void {
     c_api_context_group_diff.root_module.addCSourceFile(.{ .file = b.path("tests/c_api_context_group_diff.c") });
     c_api_context_group_diff.root_module.addIncludePath(b.path("include"));
     c_api_context_group_diff.root_module.linkLibrary(lib);
-    const c_api_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/c-api-jsc-diff.py" });
+    const c_api_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/c-api-jsc-diff.ts" });
     c_api_jsc_diff_cmd.addArtifactArg(c_api_value_diff);
     c_api_jsc_diff_cmd.addArtifactArg(c_api_context_group_diff);
     const c_api_jsc_diff_step = b.step("c-api-jsc-diff", "Compare the completed value C API against pinned system JSC");
@@ -1170,7 +1172,7 @@ pub fn build(b: *std.Build) void {
     wasm_exception_jsc_diff.root_module.addCSourceFile(.{ .file = b.path("tests/wasm_exception_jsc_diff.c") });
     wasm_exception_jsc_diff.root_module.addIncludePath(b.path("include"));
     wasm_exception_jsc_diff.root_module.linkLibrary(lib);
-    const wasm_exception_jsc_diff_cmd = b.addSystemCommand(&.{ "python3", "tools/wasm-exception-jsc-diff.py" });
+    const wasm_exception_jsc_diff_cmd = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/wasm-exception-jsc-diff.ts" });
     wasm_exception_jsc_diff_cmd.addArtifactArg(wasm_exception_jsc_diff);
     const wasm_exception_jsc_diff_step = b.step(
         "wasm-exception-jsc-diff",
