@@ -576,7 +576,8 @@ jobs:
         run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode debug
+        run: |
+          "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode debug
 
   nogil-corpus-releasesafe:
     name: nogil-corpus-releasesafe (shard ${{ matrix.shard }}/4)
@@ -628,7 +629,8 @@ jobs:
         run: zig build home-tool -Dtool-js-engine=zig-js -Dzig-js-root="$GITHUB_WORKSPACE/zig-js"
       - name: Gate this shard against the published no-GIL baseline
         working-directory: zig-js
-        run: "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode releasesafe
+        run: |
+          "$GITHUB_WORKSPACE/Home/lang/zig-out/bin/home-tool" run tools/nogil-corpus-gate.ts --shard ${{ matrix.shard }} --shards 4 --deadline 600 --build-mode releasesafe
 
   nightly-threadfuzz-tsan:
     name: nightly-threadfuzz-tsan (${{ matrix.name }})
