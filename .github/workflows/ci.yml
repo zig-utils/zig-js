@@ -347,7 +347,7 @@ jobs:
         with:
           repository: home-lang/home
           path: Home/lang
-          ref: cb632c80348c984203203176308b5829ba2326a2
+          ref: 0caa72d79fc78ccfb08bf262bf55da37a8d8a99d
       - uses: pantry-pm/pantry/packages/action@main
         continue-on-error: true
         with:
