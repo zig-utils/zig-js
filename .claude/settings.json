@@ -39,7 +39,7 @@
       "Bash(python3 tools/threads-reference-audit.py*)",
       "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts*)",
       "Bash(python3 tools/verify-objc-api.py*)",
-      "Bash(python3 tools/verify-abi-profile.py*)",
+      "Bash(~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-abi-profile.ts*)",
       "Bash(python3 -m unittest tools/*)",
       "Bash(bun run docs:build*)",
       "Bash(bun run docs:data*)",

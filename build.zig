@@ -187,8 +187,10 @@ pub fn build(b: *std.Build) void {
         "Exact supported Home public C ABI profile ID",
     ) orelse "home-public-c-7ed99c02";
     const home_public_abi_audit_cmd = b.addSystemCommand(&.{
-        "python3",
-        "tools/verify-abi-profile.py",
+        "/usr/bin/env",
+        home_tool,
+        "run",
+        "tools/verify-abi-profile.ts",
         "--profile",
         home_public_abi_profile,
     });

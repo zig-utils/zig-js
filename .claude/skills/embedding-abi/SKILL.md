@@ -75,7 +75,7 @@ zig build objc-api-jsc-diff
 zig build wasm-exception-jsc-diff
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-c-api.ts
 python3 tools/verify-objc-api.py
-python3 tools/verify-abi-profile.py
+~/Code/Home/lang/zig-out/bin/home-tool run tools/verify-abi-profile.ts
 ~/Code/Home/lang/zig-out/bin/home-tool run tools/private-abi-tsan.ts
 python3 -m unittest tools/test_home_private_abi.py
 ```
