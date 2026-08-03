@@ -176,7 +176,7 @@
       "status": "allowed",
       "scope": "CI Zig and documentation bootstrap",
       "locator": "pantry-pm/pantry/packages/action",
-      "pin": "action 9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd; Pantry 0.11.12; Bun 1.3.14",
+      "pin": "action 4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9; Pantry 0.11.12; Bun 1.3.14",
       "license": "MIT",
       "affects_runtime_semantics": false,
       "runtime_semantics": "Owner-maintained, immutable CI bootstrap for Zig and BunPress tooling; never part of libzig-js."
@@ -257,7 +257,7 @@
       { "name": "actions/checkout@v6", "count": 30, "edge": "ci-bootstrap-actions" },
       { "name": "actions/upload-artifact@v4", "count": 1, "edge": "ci-bootstrap-actions" },
       { "name": "stacksjs/action-releaser@v1.2.9", "count": 1, "edge": "ci-bootstrap-actions" },
-      { "name": "pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd", "count": 8, "edge": "pantry-docs-bootstrap" },
+      { "name": "pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9", "count": 8, "edge": "pantry-docs-bootstrap" },
       { "name": "home-lang/pantry/packages/action@main", "count": 1, "edge": "pantry-release-bootstrap" }
     ],
     "pinned_downloads": [

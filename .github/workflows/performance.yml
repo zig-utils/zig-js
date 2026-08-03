@@ -63,9 +63,9 @@ jobs:
           repository: home-lang/home
           path: Home/lang
           ref: 351dc2c59e80d077fab44247e86a893bdb262777
-      - uses: pantry-pm/pantry/packages/action@9b105eaf4b55659b6d3cacc05f6f73aa9edcebbd
+      - uses: pantry-pm/pantry/packages/action@4ad0cc7b728ba6dc295fcccf9b88240f9fe610c9
         with:
-          packages: zig@0.17.0-dev
+          packages: zig@0.17.0-dev.1441+d5181a9c9
 
       - name: Build zig-js public C API for Home
         working-directory: zig-js
