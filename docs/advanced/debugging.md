@@ -116,7 +116,7 @@ All build output lives in two repository-local directories:
 neither ever contains source or user-owned files. Test-name filters are runtime
 selectors and reuse the linked binary; target, optimization, sanitizer, and
 source changes can still grow the cache. Inspection and safe reclamation:
-[Build cache](/dev-cache), or `tools/zig-cache-tool.sh`.
+[Build cache](/dev-cache), or run `tools/zig-cache-tool.ts` through Home.
 
 ## Build-cost expectations
 

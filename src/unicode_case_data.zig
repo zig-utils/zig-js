@@ -1,5 +1,5 @@
 //! GENERATED from Unicode UnicodeData.txt + SpecialCasing.txt. Do not edit.
-//! Regenerate via tools/gen_case.sh. Simple (1:1) and full (1:N,
+//! Regenerate via tools/gen_case.ts. Simple (1:1) and full (1:N,
 //! unconditional) case mappings for String.prototype.to{Upper,Lower}Case.
 //! Every table is sorted ascending by .cp for binary search.
 

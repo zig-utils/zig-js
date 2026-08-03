@@ -74,7 +74,7 @@ directives surface as `RuntimeError`, matching V8.
 Only needed when the pin changes:
 
 ```sh
-sh tools/wasm-spec/fetch.sh /tmp/spec-src          # fetch pinned tarball
+~/Code/Home/lang/zig-out/bin/home-tool run tools/wasm-spec/fetch.ts /tmp/spec-src
 (cd tools/wasm-spec && bun install)                # install npm wabt
 bun tools/wasm-spec/gen.mjs /tmp/spec-src/test/core tests/wasm/spec
 zig build wasm-spec -Dwasm-spec-out=tests/wasm/spec/inventory.json

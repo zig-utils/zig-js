@@ -65,15 +65,15 @@ batched separately.
 ## Inspect
 
 ```sh
-tools/zig-cache-tool.sh report        # (default) sizes, per-subdir breakdown,
+home-tool run tools/zig-cache-tool.ts report # sizes, per-subdir breakdown,
                                       # largest o/ artifacts, reclaimable total
 ```
 
 ## Clean
 
 ```sh
-tools/zig-cache-tool.sh prune --dry-run   # preview exactly what would be removed
-tools/zig-cache-tool.sh prune             # remove .zig-cache and zig-out
+home-tool run tools/zig-cache-tool.ts prune --dry-run # preview removal
+home-tool run tools/zig-cache-tool.ts prune           # remove caches
 ```
 
 `prune` removes the repository-local cache as one coherent unit. Zig 0.17's

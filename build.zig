@@ -4,6 +4,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const tsan = b.option(bool, "tsan", "Build tests with ThreadSanitizer") orelse false;
+    const home_tool = b.option([]const u8, "home-tool", "Path to Home's native JS/TS repository-tool runner") orelse
+        b.graph.environ_map.get("HOME_TOOL") orelse blk: {
+        const home_dir = b.graph.environ_map.get("HOME") orelse break :blk "home-tool";
+        break :blk b.pathJoin(&.{ home_dir, "Code", "Home", "lang", "zig-out", "bin", "home-tool" });
+    };
 
     // Repository dependency policy (#462). The Zig executable reads the checked
     // inventory and audits the working tree without Python, Node, or network
@@ -150,10 +155,7 @@ pub fn build(b: *std.Build) void {
         compile_objc_bridge.addArg("-o");
         objc_bridge_object = compile_objc_bridge.addOutputFileArg("objc_bridge.o");
 
-        const merge_library = b.addSystemCommand(&.{
-            "python3",
-            "tools/merge-static-library.py",
-        });
+        const merge_library = b.addSystemCommand(&.{ "/usr/bin/env", home_tool, "run", "tools/merge-static-library.ts" });
         installed_library = merge_library.addOutputFileArg("libzig-js.a");
         merge_library.addArtifactArg(lib);
         merge_library.addFileArg(objc_bridge_object.?);
@@ -1376,11 +1378,6 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/wasm-feature-profiles.py",
     });
-    const home_tool = b.option([]const u8, "home-tool", "Path to Home's native JS/TS repository-tool runner") orelse
-        b.graph.environ_map.get("HOME_TOOL") orelse blk: {
-        const home_dir = b.graph.environ_map.get("HOME") orelse break :blk "home-tool";
-        break :blk b.pathJoin(&.{ home_dir, "Code", "Home", "lang", "zig-out", "bin", "home-tool" });
-    };
     const wasm_conformance_matrix_cmd = b.addSystemCommand(&.{
         "/usr/bin/env",
         home_tool,

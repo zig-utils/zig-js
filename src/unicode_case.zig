@@ -3,7 +3,7 @@
 //! ECMAScript defines these via the Unicode `SpecialCasing.txt` full mappings
 //! (locale-independent) layered on the simple 1:1 mappings from
 //! `UnicodeData.txt`. The tables in `unicode_case_data.zig` are generated
-//! directly from those files (see tools/gen_case.sh), so coverage is the full
+//! directly from those files (see tools/gen_case.ts), so coverage is the full
 //! Unicode range. The only conditional mapping ECMAScript keeps is Final_Sigma,
 //! which we evaluate from surrounding context here; all other conditional
 //! (locale-specific) SpecialCasing entries are intentionally excluded.
